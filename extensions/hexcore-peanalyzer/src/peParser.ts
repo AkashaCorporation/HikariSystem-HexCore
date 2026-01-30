@@ -711,13 +711,15 @@ function extractSuspiciousStrings(buffer: Buffer): string[] {
 		/password|passwd|secret|token|api[_-]?key/gi, // Sensitive keywords
 	];
 
-	const bufferStr = buffer.toString('binary');
+	// Use latin1 encoding instead of binary for cleaner string extraction
+	const bufferStr = buffer.toString('latin1');
 
 	for (const pattern of patterns) {
 		const matches = bufferStr.match(pattern);
 		if (matches) {
 			for (const match of matches.slice(0, 10)) { // Limit to 10 per pattern
-				if (match.length > 5 && match.length < 200) {
+				// Filter: must be mostly printable ASCII characters
+				if (match.length > 5 && match.length < 200 && isCleanString(match)) {
 					suspicious.push(match);
 				}
 			}
@@ -727,6 +729,22 @@ function extractSuspiciousStrings(buffer: Buffer): string[] {
 	return [...new Set(suspicious)].slice(0, 50); // Dedupe and limit
 }
 
+/**
+ * Check if a string is clean (mostly printable ASCII)
+ */
+function isCleanString(str: string): boolean {
+	let printableCount = 0;
+	for (let i = 0; i < str.length; i++) {
+		const code = str.charCodeAt(i);
+		// Printable ASCII range: 0x20-0x7E
+		if (code >= 0x20 && code <= 0x7E) {
+			printableCount++;
+		}
+	}
+	// At least 80% of characters must be printable
+	return (printableCount / str.length) >= 0.8;
+}
+
 // ============================================================================
 // RICH HEADER PARSER
 // ============================================================================
@@ -734,11 +752,11 @@ function extractSuspiciousStrings(buffer: Buffer): string[] {
 function parseRichHeader(buffer: Buffer): RichHeader {
 	// Rich header is located between DOS stub and PE header
 	// It starts with 'DanS' and ends with 'Rich'
-	
+
 	const result: RichHeader = {
 		valid: false,
 		entries: [],
-	xorKey: 0
+		xorKey: 0
 	};
 
 	try {
@@ -856,7 +874,7 @@ function getRichProductName(prodId: number, buildNumber: number): string {
 		0x0031: 'Utc14_POGO_I_CPP',
 		0x0032: 'CvtPGD',
 	};
-	
+
 	return products[prodId] || `Product_${prodId.toString(16).toUpperCase()}`;
 }
 

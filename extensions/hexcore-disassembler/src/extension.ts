@@ -10,18 +10,28 @@ import { DisassemblerViewProvider } from './disassemblerView';
 import { FunctionTreeProvider } from './functionTree';
 import { StringRefProvider } from './stringRefTree';
 import { DisassemblerEngine } from './disassemblerEngine';
+import { GraphViewProvider } from './graphViewProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
 	const engine = new DisassemblerEngine();
 	const disasmProvider = new DisassemblerViewProvider(context.extensionUri, engine);
 	const functionProvider = new FunctionTreeProvider(engine);
 	const stringRefProvider = new StringRefProvider(engine);
+	const graphViewProvider = new GraphViewProvider(context.extensionUri, engine);
 
-	// Register Webview Provider
+	// Register Webview Providers
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
 			'hexcore.disassembler.view',
 			disasmProvider,
+			{ webviewOptions: { retainContextWhenHidden: true } }
+		)
+	);
+
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(
+			'hexcore.disassembler.graphView',
+			graphViewProvider,
 			{ webviewOptions: { retainContextWhenHidden: true } }
 		)
 	);
@@ -31,6 +41,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.registerTreeDataProvider('hexcore.disassembler.functions', functionProvider),
 		vscode.window.registerTreeDataProvider('hexcore.disassembler.strings', stringRefProvider)
 	);
+
 
 	// Register Commands
 	context.subscriptions.push(
@@ -61,18 +72,38 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.disasm.goToAddress', async () => {
-			const input = await vscode.window.showInputBox({
-				prompt: 'Enter address (hex)',
-				placeHolder: '0x401000',
-				validateInput: (value) => {
-					const addr = parseInt(value.replace(/^0x/, ''), 16);
-					return isNaN(addr) ? 'Invalid hex address' : null;
+		vscode.commands.registerCommand('hexcore.disasm.goToAddress', async (argAddress?: number) => {
+			let addr: number | undefined = argAddress;
+
+			if (addr === undefined) {
+				const input = await vscode.window.showInputBox({
+					prompt: 'Enter address (hex)',
+					placeHolder: '0x401000',
+					validateInput: (value) => {
+						const val = parseInt(value.replace(/^0x/, ''), 16);
+						return isNaN(val) ? 'Invalid hex address' : null;
+					}
+				});
+				if (input) {
+					addr = parseInt(input.replace(/^0x/, ''), 16);
 				}
-			});
-			if (input) {
-				const addr = parseInt(input.replace(/^0x/, ''), 16);
-				disasmProvider.navigateToAddress(addr);
+			}
+
+			if (addr !== undefined) {
+				const targetAddress = addr;
+				disasmProvider.navigateToAddress(targetAddress);
+
+				// Sync Graph View if function exists
+				let func = engine.getFunctionAt(targetAddress);
+				if (!func) {
+					// Try to find containing function
+					const funcs = engine.getFunctions();
+					func = funcs.find(f => targetAddress >= f.address && targetAddress < f.endAddress);
+				}
+
+				if (func) {
+					graphViewProvider.showFunction(func);
+				}
 			}
 		})
 	);
@@ -136,7 +167,16 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showWarningMessage('No function selected');
 				return;
 			}
-			disasmProvider.showControlFlowGraph(addr);
+
+			const func = engine.getFunctionAt(addr);
+			if (func) {
+				// Focus the graph view
+				await vscode.commands.executeCommand('hexcore.disassembler.graphView.focus');
+				// Render the graph
+				graphViewProvider.showFunction(func);
+			} else {
+				vscode.window.showErrorMessage('Function data not found');
+			}
 		})
 	);
 

@@ -130,6 +130,12 @@
 					"icon": "$(debug-disconnect)"
 				},
 				{
+					"type": "webview",
+					"id": "hexcore.disassembler.graphView",
+					"name": "Graph View",
+					"icon": "$(type-hierarchy)"
+				},
+				{
 					"type": "tree",
 					"id": "hexcore.disassembler.functions",
 					"name": "Functions"
@@ -193,7 +199,7 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"dependencies": {
-		"@alexaltea/capstone-js": "^3.0.5"
+		"hexcore-capstone": "file:../hexcore-capstone"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",

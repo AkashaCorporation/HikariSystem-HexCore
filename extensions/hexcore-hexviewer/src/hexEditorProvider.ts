@@ -12,9 +12,28 @@ import { BookmarkManager, Bookmark } from './bookmarkManager';
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<HexDocument> {
 	public static readonly viewType = 'hexcore.hexEditor';
 	private bookmarkManager: BookmarkManager;
+	private static activeWebview?: vscode.Webview;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.bookmarkManager = new BookmarkManager(context);
+	}
+
+	/**
+	 * Get the currently active webview (if any hex editor is open)
+	 */
+	public static getActiveWebview(): vscode.Webview | undefined {
+		return HexEditorProvider.activeWebview;
+	}
+
+	/**
+	 * Send a message to the active webview
+	 */
+	public static postToActiveWebview(message: any): boolean {
+		if (HexEditorProvider.activeWebview) {
+			HexEditorProvider.activeWebview.postMessage(message);
+			return true;
+		}
+		return false;
 	}
 
 	public static register(context: vscode.ExtensionContext): vscode.Disposable {
@@ -48,6 +67,14 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		webviewPanel.webview.options = {
 			enableScripts: true
 		};
+
+		// Track active webview
+		HexEditorProvider.activeWebview = webviewPanel.webview;
+		webviewPanel.onDidDispose(() => {
+			if (HexEditorProvider.activeWebview === webviewPanel.webview) {
+				HexEditorProvider.activeWebview = undefined;
+			}
+		});
 
 		const bookmarks = this.bookmarkManager.getBookmarks(document.uri.fsPath);
 		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document, bookmarks);
@@ -401,9 +428,10 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			flex-shrink: 0;
 			font-size: 11px;
 		}
-		.offset-col.bookmarked::before {
-			content: "🔖";
+	.offset-col.bookmarked::before {
+			content: "[B]";
 			margin-right: 4px;
+			color: var(--vscode-textLink-foreground);
 		}
 
 		.bytes-col {
@@ -590,15 +618,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			<span class="value" id="cursorOffset">0x00000000</span>
 		</div>
 		<div class="divider"></div>
-		<button class="toolbar-btn primary" id="saveBtn" disabled>💾 Save</button>
-		<button class="toolbar-btn" id="editModeBtn">✏️ Edit Mode</button>
+		<button class="toolbar-btn primary" id="saveBtn" disabled>[Save]</button>
+		<button class="toolbar-btn" id="editModeBtn">[Edit Mode]</button>
 		<div class="toolbar-input">
 			<input type="text" id="searchInput" placeholder="Search hex..." />
-			<button class="toolbar-btn" id="searchBtn">🔍</button>
+			<button class="toolbar-btn" id="searchBtn">[Find]</button>
 		</div>
 		<div class="toolbar-input">
 			<input type="text" id="gotoInput" placeholder="Go to..." />
-			<button class="toolbar-btn" id="gotoBtn">➜</button>
+			<button class="toolbar-btn" id="gotoBtn">[Go]</button>
 		</div>
 	</div>
 
@@ -706,7 +734,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 
 		document.getElementById('editModeBtn').addEventListener('click', () => {
 			isEditMode = !isEditMode;
-			document.getElementById('editModeBtn').textContent = isEditMode ? '🔒 Lock' : '✏️ Edit Mode';
+			document.getElementById('editModeBtn').textContent = isEditMode ? '[Lock]' : '[Edit Mode]';
 			document.getElementById('editModeBtn').classList.toggle('modified', isEditMode);
 			renderVisibleRows();
 		});

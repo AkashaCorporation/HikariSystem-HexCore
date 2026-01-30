@@ -166,9 +166,9 @@ export class DisassemblerEngine {
 		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
 		const bytesToDisasm = this.fileBuffer!.subarray(offset, endOffset);
 
-		// Use Capstone if available
+		// Use Capstone if available (async para não bloquear)
 		if (this.capstoneInitialized) {
-			const rawInstructions = this.capstone.disassemble(bytesToDisasm, startAddr, 1000);
+			const rawInstructions = await this.capstone.disassemble(bytesToDisasm, startAddr, 1000);
 			return rawInstructions.map(inst => this.convertCapstoneInstruction(inst));
 		}
 
@@ -640,7 +640,63 @@ export class DisassemblerEngine {
 	}
 
 	private addressToOffset(address: number): number {
-		return address - this.baseAddress;
+		// Convert virtual address to file offset
+		const rva = address - this.baseAddress;
+
+		// For PE files, we need to map RVA to file offset using section headers
+		if (this.isPEFile() && this.fileBuffer) {
+			return this.rvaToFileOffset(rva);
+		}
+
+		// For ELF or raw files, simple subtraction
+		return rva;
+	}
+
+	/**
+	 * Convert RVA to file offset using PE section headers
+	 */
+	private rvaToFileOffset(rva: number): number {
+		if (!this.fileBuffer) return rva;
+
+		try {
+			const peOffset = this.fileBuffer.readUInt32LE(0x3C);
+			if (this.fileBuffer[peOffset] !== 0x50 || this.fileBuffer[peOffset + 1] !== 0x45) {
+				return rva; // Not valid PE
+			}
+
+			const coffHeaderOffset = peOffset + 4;
+			const numberOfSections = this.fileBuffer.readUInt16LE(coffHeaderOffset + 2);
+			const sizeOfOptionalHeader = this.fileBuffer.readUInt16LE(coffHeaderOffset + 16);
+			const sectionTableOffset = peOffset + 24 + sizeOfOptionalHeader;
+
+			// Iterate through sections to find which one contains this RVA
+			for (let i = 0; i < numberOfSections; i++) {
+				const sectionOffset = sectionTableOffset + (i * 40);
+				if (sectionOffset + 40 > this.fileBuffer.length) break;
+
+				const virtualSize = this.fileBuffer.readUInt32LE(sectionOffset + 8);
+				const virtualAddress = this.fileBuffer.readUInt32LE(sectionOffset + 12);
+				const sizeOfRawData = this.fileBuffer.readUInt32LE(sectionOffset + 16);
+				const pointerToRawData = this.fileBuffer.readUInt32LE(sectionOffset + 20);
+
+				// Check if RVA falls within this section
+				const sectionSize = Math.max(virtualSize, sizeOfRawData);
+				if (rva >= virtualAddress && rva < virtualAddress + sectionSize) {
+					// Convert RVA to file offset
+					const offsetWithinSection = rva - virtualAddress;
+					return pointerToRawData + offsetWithinSection;
+				}
+			}
+
+			// RVA not found in any section - might be in headers
+			if (rva < 0x1000) {
+				return rva; // Assume headers are mapped 1:1
+			}
+		} catch {
+			// Fall through on error
+		}
+
+		return rva;
 	}
 
 	private offsetToAddress(offset: number): number {

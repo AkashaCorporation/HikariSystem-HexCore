@@ -33,16 +33,19 @@ export class RuleMatchItem extends vscode.TreeItem {
 }
 
 export class StringMatchItem extends vscode.TreeItem {
-	constructor(public readonly stringMatch: { identifier: string; offset: number; data: string }) {
+	constructor(
+		public readonly filePath: string,
+		public readonly stringMatch: { identifier: string; offset: number; data: string }
+	) {
 		super(`${stringMatch.identifier} @ 0x${stringMatch.offset.toString(16)}`, 
 			vscode.TreeItemCollapsibleState.None);
 		this.tooltip = stringMatch.data;
 		this.description = stringMatch.data.substring(0, 30);
 		this.iconPath = new vscode.ThemeIcon('symbol-string');
 		this.command = {
-			command: 'hexcore.hexViewer.goToOffset',
-			title: 'Go to Offset',
-			arguments: [stringMatch.offset]
+			command: 'hexcore.openHexViewAtOffset',
+			title: 'Open in Hex Viewer',
+			arguments: [vscode.Uri.file(filePath), stringMatch.offset]
 		};
 	}
 }
@@ -88,8 +91,11 @@ export class ResultsTreeProvider implements vscode.TreeDataProvider<FileMatchIte
 
 		if (element instanceof RuleMatchItem) {
 			// Rule level - return string matches
+			// Find the file path for this rule match
+			const fileResult = this.results.find(r => r.matches.includes(element.match));
+			const filePath = fileResult?.file || '';
 			return Promise.resolve(
-				element.match.strings.map(s => new StringMatchItem(s))
+				element.match.strings.map(s => new StringMatchItem(filePath, s))
 			);
 		}
 

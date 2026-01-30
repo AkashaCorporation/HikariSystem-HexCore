@@ -52,7 +52,8 @@
 	},
 	"homepage": "https://github.com/hikarisystem/hexcore-capstone#readme",
 	"engines": {
-		"node": ">=18.0.0"
+		"node": ">=18.0.0",
+		"vscode": "^1.90.0"
 	},
 	"dependencies": {
 		"node-addon-api": "^7.0.0",

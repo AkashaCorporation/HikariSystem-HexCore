@@ -8,10 +8,36 @@ import * as vscode from 'vscode';
 import { HexEditorProvider } from './hexEditorProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
+	// Register internal commands FIRST - before any other extension might need them
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.internal.goToOffset', (offset: number) => {
+			const sent = HexEditorProvider.postToActiveWebview({
+				type: 'jumpToOffset',
+				offset: offset
+			});
+			if (!sent) {
+				console.log('HexCore: No active hex editor to navigate');
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.internal.searchHex', (pattern: string) => {
+			const sent = HexEditorProvider.postToActiveWebview({
+				type: 'search',
+				pattern: pattern
+			});
+			if (!sent) {
+				console.log('HexCore: No active hex editor for search');
+			}
+		})
+	);
+
 	// Register the custom editor provider
 	context.subscriptions.push(
 		HexEditorProvider.register(context)
 	);
+
 
 	// Register commands
 	context.subscriptions.push(
@@ -80,6 +106,22 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (input) {
 				vscode.commands.executeCommand('hexcore.internal.searchHex', input);
 			}
+		})
+	);
+
+	// Command to open file at specific offset (used by YARA, PE Analyzer, etc.)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.openHexViewAtOffset', async (uri: vscode.Uri, offset: number) => {
+			if (!uri) {
+				vscode.window.showErrorMessage('No file specified');
+				return;
+			}
+			// Open with hex editor
+			await vscode.commands.executeCommand('vscode.openWith', uri, 'hexcore.hexEditor');
+			// Navigate to offset after a short delay to allow webview to load
+			setTimeout(() => {
+				vscode.commands.executeCommand('hexcore.internal.goToOffset', offset);
+			}, 500);
 		})
 	);
 

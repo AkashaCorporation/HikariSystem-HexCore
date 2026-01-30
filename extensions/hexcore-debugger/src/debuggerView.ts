@@ -12,7 +12,7 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 
 	constructor(extensionUri: vscode.Uri, engine: DebugEngine) {
 		this.engine = engine;
-		
+
 		engine.onEvent((event, data) => {
 			if (this.view) {
 				this.view.webview.postMessage({ command: event, data });
@@ -56,6 +56,7 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 <html>
 <head>
 	<meta charset="UTF-8">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';">
 	<style>
 		body {
 			font-family: var(--vscode-font-family);
@@ -97,17 +98,17 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
 	<div class="toolbar">
-		<button onclick="sendCmd('stepInto')">Step Into</button>
-		<button onclick="sendCmd('stepOver')">Step Over</button>
-		<button onclick="sendCmd('continue')">Continue</button>
-		<button onclick="sendCmd('breakpoint')">+ Break</button>
+		<button onclick="sendCmd('stepInto')">[Step In]</button>
+		<button onclick="sendCmd('stepOver')">[Step Over]</button>
+		<button onclick="sendCmd('continue')">[Continue]</button>
+		<button onclick="sendCmd('breakpoint')">[+ Break]</button>
 	</div>
 	<div class="output" id="output">Debugger ready. Start a session to see output.</div>
 	<div class="status" id="status">Status: Idle</div>
 
 	<script>
 		const vscode = acquireVsCodeApi();
-		
+
 		function sendCmd(cmd) {
 			vscode.postMessage({ command: cmd });
 		}
