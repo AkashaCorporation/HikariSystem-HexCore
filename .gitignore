@@ -23,3 +23,11 @@ product.overrides.json
 *.tsbuildinfo
 .vscode-test
 vscode-telemetry-docs/
+.claude/settings.local.json
+
+# HexCore Capstone build artifacts
+extensions/hexcore-capstone/deps/
+extensions/hexcore-capstone/build/
+extensions/hexcore-capstone/prebuilds/
+extensions/hexcore-capstone/*.log
+extensions/hexcore-capstone/*.txt

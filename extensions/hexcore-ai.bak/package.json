@@ -1,0 +1,172 @@
+{
+	"name": "hexcore-ai",
+	"displayName": "HexCore AI Assistant",
+	"description": "AI-powered analysis assistant for reverse engineering and malware analysis",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.70.0"
+	},
+	"categories": [
+		"Machine Learning",
+		"Debuggers",
+		"Other"
+	],
+	"keywords": [
+		"ai",
+		"assistant",
+		"reverse engineering",
+		"malware analysis",
+		"exploit",
+		"ctf",
+		"automation"
+	],
+	"activationEvents": [
+		"onCommand:hexcore.ai.ask",
+		"onCommand:hexcore.ai.analyzeFunction",
+		"onCommand:hexcore.ai.explainCode",
+		"onCommand:hexcore.ai.findVulns",
+		"onView:hexcore.ai.chat"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.ai.ask",
+				"title": "Ask Kimi Assistant",
+				"category": "HexCore AI",
+				"icon": "$(comment-discussion)"
+			},
+			{
+				"command": "hexcore.ai.analyzeFunction",
+				"title": "AI: Analyze Current Function",
+				"category": "HexCore AI",
+				"icon": "$(lightbulb)"
+			},
+			{
+				"command": "hexcore.ai.explainCode",
+				"title": "AI: Explain This Code",
+				"category": "HexCore AI"
+			},
+			{
+			"command": "hexcore.ai.findVulns",
+				"title": "AI: Find Vulnerabilities",
+				"category": "HexCore AI",
+				"icon": "$(warning)"
+			},
+			{
+				"command": "hexcore.ai.generateExploit",
+				"title": "AI: Generate Exploit Template",
+				"category": "HexCore AI",
+				"icon": "$(debug-start)"
+			},
+			{
+				"command": "hexcore.ai.ctfHint",
+				"title": "AI: CTF Hint",
+				"category": "HexCore AI",
+				"icon": "$(question)"
+			},
+			{
+				"command": "hexcore.ai.scanBinary",
+				"title": "AI: Full Binary Analysis",
+				"category": "HexCore AI",
+				"icon": "$(search)"
+			},
+			{
+				"command": "hexcore.ai.clearChat",
+				"title": "Clear Chat History",
+				"category": "HexCore AI",
+				"icon": "$(clear-all)"
+			}
+		],
+		"menus": {
+			"editor/context": [
+				{
+					"command": "hexcore.ai.explainCode",
+					"group": "hexcore-ai@1",
+					"when": "activeWebviewPanelId == hexcore.disassembler"
+				},
+				{
+					"command": "hexcore.ai.findVulns",
+					"group": "hexcore-ai@2",
+					"when": "activeWebviewPanelId == hexcore.disassembler"
+				}
+			],
+			"view/title": [
+				{
+					"command": "hexcore.ai.clearChat",
+					"when": "view == hexcore.ai.chat",
+					"group": "navigation"
+				}
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "hexcore-ai",
+					"title": "Kimi AI",
+					"icon": "$(hubot)"
+				}
+			]
+		},
+		"views": {
+			"hexcore-ai": [
+				{
+					"type": "webview",
+					"id": "hexcore.ai.chat",
+					"name": "Chat",
+					"icon": "$(comment-discussion)"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.ai.insights",
+					"name": "AI Insights"
+				}
+			]
+		},
+		"configuration": {
+			"title": "HexCore AI Assistant",
+			"properties": {
+				"hexcore.ai.apiProvider": {
+					"type": "string",
+					"default": "kimi",
+					"enum": ["kimi", "openai", "anthropic", "local"],
+					"description": "AI API provider to use"
+				},
+				"hexcore.ai.apiKey": {
+					"type": "string",
+					"default": "",
+					"description": "API key for the selected provider"
+				},
+				"hexcore.ai.model": {
+					"type": "string",
+					"default": "kimi-k1",
+					"description": "Model to use for analysis"
+				},
+				"hexcore.ai.autoAnalyze": {
+					"type": "boolean",
+					"default": false,
+					"description": "Automatically analyze functions on navigation"
+				},
+				"hexcore.ai.showThinking": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show AI thinking process"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"axios": "^1.6.0"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.70.0",
+		"typescript": "^5.0.0"
+	}
+}

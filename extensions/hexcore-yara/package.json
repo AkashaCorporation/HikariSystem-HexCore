@@ -1,0 +1,107 @@
+{
+	"name": "hexcore-yara",
+	"displayName": "HexCore YARA Scanner",
+	"description": "YARA rule scanner for malware detection and classification",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.70.0"
+	},
+	"categories": [
+		"Other",
+		"Testing"
+	],
+	"keywords": [
+		"yara",
+		"malware",
+		"scanner",
+		"detection",
+		"signatures"
+	],
+	"activationEvents": [
+		"onCommand:hexcore.yara.scan",
+		"onCommand:hexcore.yara.updateRules"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.yara.scan",
+				"title": "YARA: Scan File",
+				"category": "HexCore YARA",
+				"icon": "$(search)"
+			},
+			{
+				"command": "hexcore.yara.scanWorkspace",
+				"title": "YARA: Scan Workspace",
+				"category": "HexCore YARA"
+			},
+			{
+				"command": "hexcore.yara.updateRules",
+				"title": "YARA: Update Rules",
+				"category": "HexCore YARA"
+			},
+			{
+				"command": "hexcore.yara.createRule",
+				"title": "YARA: Create Rule from Selection",
+				"category": "HexCore YARA"
+			}
+		],
+		"menus": {
+			"explorer/context": [
+				{
+					"command": "hexcore.yara.scan",
+					"group": "hexcore@3"
+				}
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "hexcore-yara",
+					"title": "YARA",
+					"icon": "$(shield)"
+				}
+			]
+		},
+		"views": {
+			"hexcore-yara": [
+				{
+					"type": "tree",
+					"id": "hexcore.yara.results",
+					"name": "Scan Results"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.yara.rules",
+					"name": "Rules"
+				}
+			]
+		},
+		"configuration": {
+			"title": "HexCore YARA",
+			"properties": {
+				"hexcore.yara.rulesPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to YARA rules directory"
+				},
+				"hexcore.yara.autoUpdate": {
+					"type": "boolean",
+					"default": true,
+					"description": "Auto-update rules on startup"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.70.0",
+		"typescript": "^5.0.0"
+	}
+}

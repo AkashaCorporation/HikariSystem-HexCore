@@ -1,17 +1,21 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Hex Viewer v1.2.0 - Custom Editor Provider
+ *  HexCore Hex Viewer v2.0 - Custom Editor Provider with Editing & Templates
  *  Copyright (c) HikariSystem. All rights reserved.
  *  Licensed under the MIT License.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
 import * as fs from 'fs';
+import { StructureTemplate, STRUCTURE_TEMPLATES } from './structureTemplates';
+import { BookmarkManager, Bookmark } from './bookmarkManager';
 
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<HexDocument> {
-
 	public static readonly viewType = 'hexcore.hexEditor';
+	private bookmarkManager: BookmarkManager;
 
-	constructor(private readonly context: vscode.ExtensionContext) { }
+	constructor(private readonly context: vscode.ExtensionContext) {
+		this.bookmarkManager = new BookmarkManager(context);
+	}
 
 	public static register(context: vscode.ExtensionContext): vscode.Disposable {
 		const provider = new HexEditorProvider(context);
@@ -33,7 +37,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		_token: vscode.CancellationToken
 	): Promise<HexDocument> {
 		const stat = await vscode.workspace.fs.stat(uri);
-		return new HexDocument(uri, stat.size);
+		return new HexDocument(uri, Number(stat.size));
 	}
 
 	async resolveCustomEditor(
@@ -45,7 +49,12 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			enableScripts: true
 		};
 
-		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document);
+		const bookmarks = this.bookmarkManager.getBookmarks(document.uri.fsPath);
+		webviewPanel.webview.html = this.getHtmlForWebview(webviewPanel.webview, document, bookmarks);
+
+		// Track edit state
+		let editedBytes = new Map<number, number>();
+		let isModified = false;
 
 		webviewPanel.webview.onDidReceiveMessage(async message => {
 			switch (message.type) {
@@ -53,7 +62,8 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					webviewPanel.webview.postMessage({
 						type: 'init',
 						fileSize: document.fileSize,
-						fileName: document.uri.fsPath
+						fileName: document.uri.fsPath,
+						canEdit: true
 					});
 					break;
 
@@ -61,13 +71,47 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					try {
 						const { offset, length } = message;
 						const data = await this.readChunk(document.uri, offset, length);
+						// Apply any pending edits
+						const editedData = new Uint8Array(data);
+						for (let i = 0; i < editedData.length; i++) {
+							const globalOffset = offset + i;
+							if (editedBytes.has(globalOffset)) {
+								editedData[i] = editedBytes.get(globalOffset)!;
+							}
+						}
 						webviewPanel.webview.postMessage({
 							type: 'chunkData',
 							offset: offset,
-							data: Array.from(data)
+							data: Array.from(editedData),
+							editedRanges: Array.from(editedBytes.keys())
+								.filter(k => k >= offset && k < offset + length)
+								.map(k => k - offset)
 						});
 					} catch (e) {
 						vscode.window.showErrorMessage('Failed to read file chunk: ' + e);
+					}
+					break;
+
+				case 'editByte':
+					// Track the edit
+					editedBytes.set(message.offset, message.value);
+					isModified = true;
+					webviewPanel.webview.postMessage({
+						type: 'editConfirmed',
+						offset: message.offset,
+						value: message.value
+					});
+					break;
+
+				case 'save':
+					try {
+						await this.saveDocument(document, editedBytes);
+						editedBytes.clear();
+						isModified = false;
+						webviewPanel.webview.postMessage({ type: 'saved' });
+						vscode.window.showInformationMessage('File saved successfully');
+					} catch (e) {
+						vscode.window.showErrorMessage('Failed to save: ' + e);
 					}
 					break;
 
@@ -94,6 +138,47 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 						offset: message.offset
 					});
 					break;
+
+				case 'addBookmark':
+					const bookmark = this.bookmarkManager.addBookmark(
+						document.uri.fsPath,
+						message.offset,
+						message.name,
+						message.color
+					);
+					webviewPanel.webview.postMessage({
+						type: 'bookmarkAdded',
+						bookmark: bookmark
+					});
+					break;
+
+				case 'removeBookmark':
+					this.bookmarkManager.removeBookmark(document.uri.fsPath, message.offset);
+					break;
+
+				case 'applyTemplate':
+					const template = STRUCTURE_TEMPLATES.find(t => t.name === message.templateName);
+					if (template) {
+						const data = await this.readChunk(document.uri, message.offset, template.size);
+						const parsed = this.parseTemplate(template, data);
+						webviewPanel.webview.postMessage({
+							type: 'templateApplied',
+							parsed: parsed,
+							template: template
+						});
+					}
+					break;
+
+				case 'getTemplates':
+					webviewPanel.webview.postMessage({
+						type: 'templatesList',
+						templates: STRUCTURE_TEMPLATES.map(t => ({
+							name: t.name,
+							size: t.size,
+							description: t.description
+						}))
+					});
+					break;
 			}
 		});
 	}
@@ -115,6 +200,21 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			const allData = await vscode.workspace.fs.readFile(uri);
 			return allData.slice(offset, offset + length);
 		}
+	}
+
+	private async saveDocument(document: HexDocument, edits: Map<number, number>): Promise<void> {
+		if (edits.size === 0) return;
+
+		const buffer = await vscode.workspace.fs.readFile(document.uri);
+		const newBuffer = Buffer.from(buffer);
+
+		for (const [offset, value] of edits) {
+			if (offset < newBuffer.length) {
+				newBuffer[offset] = value;
+			}
+		}
+
+		await vscode.workspace.fs.writeFile(document.uri, newBuffer);
 	}
 
 	private async searchHex(uri: vscode.Uri, fileSize: number, pattern: string): Promise<number[]> {
@@ -159,7 +259,44 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		return results;
 	}
 
-	private getHtmlForWebview(webview: vscode.Webview, document: HexDocument): string {
+	private parseTemplate(template: StructureTemplate, data: Uint8Array): any {
+		const result: any = {};
+		let offset = 0;
+		const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+
+		for (const field of template.fields) {
+			if (offset >= data.length) break;
+
+			switch (field.type) {
+				case 'uint8':
+					result[field.name] = view.getUint8(offset);
+					offset += 1;
+					break;
+				case 'uint16':
+					result[field.name] = view.getUint16(offset, true);
+					offset += 2;
+					break;
+				case 'uint32':
+					result[field.name] = view.getUint32(offset, true);
+					offset += 4;
+					break;
+				case 'uint64':
+					result[field.name] = view.getBigUint64(offset, true).toString();
+					offset += 8;
+					break;
+				case 'ascii':
+					const strLen = field.length || 1;
+					result[field.name] = Buffer.from(data.slice(offset, offset + strLen))
+						.toString('ascii').replace(/\x00/g, '');
+					offset += strLen;
+					break;
+			}
+		}
+
+		return result;
+	}
+
+	private getHtmlForWebview(webview: vscode.Webview, document: HexDocument, bookmarks: Bookmark[]): string {
 		const config = vscode.workspace.getConfiguration('hexcore.hexViewer');
 		const bytesPerRow = config.get<number>('bytesPerRow', 16);
 		const showAscii = config.get<boolean>('showAscii', true);
@@ -171,10 +308,10 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 	<meta charset="UTF-8">
 	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<title>Hex Viewer</title>
+	<title>Hex Editor</title>
 	<style>
 		:root {
-			--font-mono: 'Consolas', 'Courier New', monospace;
+			--font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
 			--row-height: 22px;
 		}
 
@@ -197,27 +334,31 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			padding: 6px 12px;
 			background: var(--vscode-editor-background);
 			border-bottom: 1px solid var(--vscode-panel-border);
-			height: 36px;
+			min-height: 36px;
+			flex-wrap: wrap;
 		}
 
-		.toolbar-item {
-			display: flex;
-			align-items: center;
-			gap: 6px;
-			font-size: 11px;
-		}
-
+		.toolbar-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 		.label { color: var(--vscode-descriptionForeground); }
 		.value { color: var(--vscode-textLink-foreground); font-weight: bold; }
 		.divider { width: 1px; height: 16px; background: var(--vscode-panel-border); }
 
-		/* Search and Go to Offset */
-		.toolbar-input {
-			display: flex;
-			align-items: center;
-			gap: 4px;
+		.toolbar-btn {
+			background: var(--vscode-button-secondaryBackground);
+			color: var(--vscode-button-secondaryForeground);
+			border: none;
+			padding: 4px 10px;
+			font-size: 11px;
+			cursor: pointer;
+			border-radius: 3px;
 		}
+		.toolbar-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+		.toolbar-btn.primary { background: var(--vscode-button-background); }
+		.toolbar-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
+		.toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+		.toolbar-btn.modified { background: var(--vscode-inputValidation-warningBackground); }
 
+		.toolbar-input { display: flex; align-items: center; gap: 4px; }
 		.toolbar-input input {
 			background: var(--vscode-input-background);
 			border: 1px solid var(--vscode-input-border);
@@ -225,35 +366,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			padding: 3px 6px;
 			font-size: 11px;
 			font-family: var(--font-mono);
-			width: 120px;
+			width: 100px;
 			border-radius: 3px;
 		}
-
-		.toolbar-input input:focus {
-			outline: 1px solid var(--vscode-focusBorder);
-		}
-
-		.toolbar-btn {
-			background: var(--vscode-button-secondaryBackground);
-			color: var(--vscode-button-secondaryForeground);
-			border: none;
-			padding: 4px 8px;
-			font-size: 11px;
-			cursor: pointer;
-			border-radius: 3px;
-		}
-
-		.toolbar-btn:hover {
-			background: var(--vscode-button-secondaryHoverBackground);
-		}
+		.toolbar-input input:focus { outline: 1px solid var(--vscode-focusBorder); }
 
 		/* Main Layout */
-		.container {
-			display: flex;
-			height: calc(100vh - 36px);
-		}
+		.container { display: flex; height: calc(100vh - 36px); }
 
-		/* Virtual Scroll Area */
+		/* Hex View */
 		.hex-view-container {
 			flex: 1;
 			position: relative;
@@ -262,21 +383,8 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			outline: none;
 		}
 
-		.phantom-spacer {
-			position: absolute;
-			top: 0;
-			left: 0;
-			width: 1px;
-			visibility: hidden;
-		}
-
-		.content-layer {
-			position: absolute;
-			top: 0;
-			left: 0;
-			width: 100%;
-			will-change: transform;
-		}
+		.phantom-spacer { position: absolute; top: 0; left: 0; width: 1px; visibility: hidden; }
+		.content-layer { position: absolute; top: 0; left: 0; width: 100%; will-change: transform; }
 
 		.hex-row {
 			height: var(--row-height);
@@ -284,15 +392,18 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			align-items: center;
 			padding: 0 10px;
 		}
-
 		.hex-row:hover { background-color: var(--vscode-list-hoverBackground); }
-		.hex-row.highlight { background-color: var(--vscode-editor-findMatchHighlightBackground); }
+		.hex-row.edited { background-color: var(--vscode-gitDecoration-modifiedResourceForeground); opacity: 0.2; }
 
 		.offset-col {
 			color: var(--vscode-editorLineNumber-foreground);
 			width: 80px;
 			flex-shrink: 0;
 			font-size: 11px;
+		}
+		.offset-col.bookmarked::before {
+			content: "🔖";
+			margin-right: 4px;
 		}
 
 		.bytes-col {
@@ -307,13 +418,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			width: 2ch;
 			text-align: center;
 			font-size: 12px;
-			cursor: default;
+			cursor: pointer;
 			border-radius: 2px;
+			outline: none;
 		}
-		.byte.null { color: var(--vscode-descriptionForeground); opacity: 0.4; }
 		.byte:hover { background-color: var(--vscode-editor-selectionBackground); }
 		.byte.selected { background-color: var(--vscode-editor-selectionBackground); color: var(--vscode-editor-selectionForeground); }
+		.byte.edited { color: var(--vscode-gitDecoration-modifiedResourceForeground); font-weight: bold; }
 		.byte.search-match { background-color: var(--vscode-editor-findMatchBackground); color: var(--vscode-editor-findMatchForeground); }
+		.byte.editing { background: var(--vscode-input-background); border: 1px solid var(--vscode-focusBorder); }
 
 		.ascii-col {
 			margin-left: 24px;
@@ -325,13 +438,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		.char {
 			width: 1ch;
 			text-align: center;
+			cursor: pointer;
 		}
+		.char:hover { background-color: var(--vscode-editor-selectionBackground); }
 		.char.selected { background-color: var(--vscode-editor-selectionBackground); color: var(--vscode-editor-selectionForeground); }
 		.char.non-print { color: var(--vscode-descriptionForeground); opacity: 0.4; }
 
 		/* Sidebar */
 		.sidebar {
-			width: 260px;
+			width: 280px;
 			background-color: var(--vscode-sideBar-background);
 			border-left: 1px solid var(--vscode-panel-border);
 			padding: 12px;
@@ -349,15 +464,21 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			border-bottom: 1px solid var(--vscode-panel-border);
 			padding-bottom: 4px;
 			margin-bottom: 6px;
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+		}
+		.section-header button {
+			font-size: 9px;
+			padding: 2px 6px;
 		}
 
 		.data-grid {
 			display: grid;
-			grid-template-columns: 65px 1fr;
+			grid-template-columns: 70px 1fr;
 			gap: 4px;
 			font-size: 11px;
 		}
-
 		.data-label { color: var(--vscode-descriptionForeground); text-align: right; padding-right: 6px; }
 		.data-value {
 			font-family: var(--font-mono);
@@ -368,33 +489,56 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			text-overflow: ellipsis;
 			font-size: 11px;
 		}
-		.data-value.loading { color: var(--vscode-descriptionForeground); font-style: italic; }
 
-		.endian-toggle {
-			display: flex;
-			gap: 4px;
+		/* Templates */
+		.template-select {
+			width: 100%;
+			padding: 4px;
+			font-size: 11px;
+			background: var(--vscode-dropdown-background);
+			color: var(--vscode-dropdown-foreground);
+			border: 1px solid var(--vscode-dropdown-border);
 			margin-bottom: 8px;
 		}
-		.endian-btn {
-			padding: 3px 6px;
-			font-size: 10px;
-			background: var(--vscode-button-secondaryBackground);
-			color: var(--vscode-button-secondaryForeground);
-			border: 1px solid var(--vscode-panel-border);
-			cursor: pointer;
-			border-radius: 2px;
-		}
-		.endian-btn.active {
-			background: var(--vscode-button-background);
-			color: var(--vscode-button-foreground);
-		}
 
-		/* Copy Buttons */
-		.copy-section {
-			display: flex;
-			flex-direction: column;
-			gap: 4px;
+		.template-fields {
+			font-size: 10px;
+			max-height: 150px;
+			overflow-y: auto;
 		}
+		.template-field {
+			display: flex;
+			justify-content: space-between;
+			padding: 2px 0;
+			border-bottom: 1px solid var(--vscode-panel-border);
+		}
+		.template-field-name { color: var(--vscode-descriptionForeground); }
+		.template-field-value { font-family: var(--font-mono); }
+
+		/* Bookmarks */
+		.bookmark-list {
+			max-height: 150px;
+			overflow-y: auto;
+			font-size: 10px;
+		}
+		.bookmark-item {
+			display: flex;
+			justify-content: space-between;
+			align-items: center;
+			padding: 3px 6px;
+			margin-bottom: 2px;
+			background: var(--vscode-list-hoverBackground);
+			border-radius: 3px;
+			cursor: pointer;
+		}
+		.bookmark-item:hover { background: var(--vscode-list-activeSelectionBackground); }
+		.bookmark-color { width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; display: inline-block; }
+		.bookmark-name { flex: 1; overflow: hidden; text-overflow: ellipsis; }
+		.bookmark-offset { color: var(--vscode-descriptionForeground); font-family: var(--font-mono); }
+		.bookmark-delete { color: var(--vscode-errorForeground); cursor: pointer; padding: 0 4px; }
+
+		/* Copy buttons */
+		.copy-section { display: flex; flex-direction: column; gap: 4px; }
 		.copy-btn {
 			padding: 4px 8px;
 			font-size: 10px;
@@ -405,32 +549,27 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			border-radius: 3px;
 			text-align: left;
 		}
-		.copy-btn:hover {
-			background: var(--vscode-button-secondaryHoverBackground);
-		}
-		.copy-btn:disabled {
-			opacity: 0.5;
-			cursor: not-allowed;
-		}
+		.copy-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+		.copy-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 		/* Search Results */
-		.search-results {
-			max-height: 150px;
-			overflow-y: auto;
-			font-size: 10px;
-		}
+		.search-results { max-height: 120px; overflow-y: auto; font-size: 10px; }
 		.search-result-item {
 			padding: 3px 6px;
 			cursor: pointer;
 			border-radius: 2px;
 		}
-		.search-result-item:hover {
-			background: var(--vscode-list-hoverBackground);
-		}
-		.search-info {
+		.search-result-item:hover { background: var(--vscode-list-hoverBackground); }
+		.search-info { font-size: 10px; color: var(--vscode-descriptionForeground); margin-bottom: 4px; }
+
+		/* Edit Mode Indicator */
+		.edit-mode-indicator {
+			background: var(--vscode-inputValidation-warningBackground);
+			color: var(--vscode-inputValidation-warningForeground);
+			padding: 2px 8px;
+			border-radius: 3px;
 			font-size: 10px;
-			color: var(--vscode-descriptionForeground);
-			margin-bottom: 4px;
+			font-weight: bold;
 		}
 	</style>
 </head>
@@ -451,13 +590,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			<span class="value" id="cursorOffset">0x00000000</span>
 		</div>
 		<div class="divider"></div>
+		<button class="toolbar-btn primary" id="saveBtn" disabled>💾 Save</button>
+		<button class="toolbar-btn" id="editModeBtn">✏️ Edit Mode</button>
 		<div class="toolbar-input">
-			<input type="text" id="searchInput" placeholder="Search hex (4D 5A)" />
-			<button class="toolbar-btn" id="searchBtn">Find</button>
+			<input type="text" id="searchInput" placeholder="Search hex..." />
+			<button class="toolbar-btn" id="searchBtn">🔍</button>
 		</div>
 		<div class="toolbar-input">
-			<input type="text" id="gotoInput" placeholder="Go to offset" />
-			<button class="toolbar-btn" id="gotoBtn">Go</button>
+			<input type="text" id="gotoInput" placeholder="Go to..." />
+			<button class="toolbar-btn" id="gotoBtn">➜</button>
 		</div>
 	</div>
 
@@ -470,10 +611,6 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		<div class="sidebar">
 			<div>
 				<div class="section-header">Data Inspector</div>
-				<div class="endian-toggle">
-					<button class="endian-btn active" id="btnLE">LE</button>
-					<button class="endian-btn" id="btnBE">BE</button>
-				</div>
 				<div class="data-grid" id="dataInspector">
 					<div class="data-label">Int8</div><div class="data-value" id="valInt8">-</div>
 					<div class="data-label">UInt8</div><div class="data-value" id="valUInt8">-</div>
@@ -483,11 +620,25 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					<div class="data-label">UInt32</div><div class="data-value" id="valUInt32">-</div>
 					<div class="data-label">Int64</div><div class="data-value" id="valInt64">-</div>
 					<div class="data-label">UInt64</div><div class="data-value" id="valUInt64">-</div>
-					<div class="data-label">Float32</div><div class="data-value" id="valFloat32">-</div>
-					<div class="data-label">Float64</div><div class="data-value" id="valFloat64">-</div>
-					<div class="data-label">Binary</div><div class="data-value" id="valBinary">-</div>
-					<div class="data-label">Unix</div><div class="data-value" id="valUnixTime">-</div>
+					<div class="data-label">Float</div><div class="data-value" id="valFloat32">-</div>
+					<div class="data-label">Double</div><div class="data-value" id="valFloat64">-</div>
 				</div>
+			</div>
+
+			<div>
+				<div class="section-header">Structure Template</div>
+				<select class="template-select" id="templateSelect">
+					<option value="">Select template...</option>
+				</select>
+				<div class="template-fields" id="templateFields"></div>
+			</div>
+
+			<div>
+				<div class="section-header">
+					<span>Bookmarks</span>
+					<button class="toolbar-btn" id="addBookmarkBtn">+ Add</button>
+				</div>
+				<div class="bookmark-list" id="bookmarkList"></div>
 			</div>
 
 			<div>
@@ -500,7 +651,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			</div>
 
 			<div>
-				<div class="section-header">Copy Selection</div>
+				<div class="section-header">Copy</div>
 				<div class="copy-section">
 					<button class="copy-btn" id="copyHex" disabled>Copy as Hex</button>
 					<button class="copy-btn" id="copyCArray" disabled>Copy as C Array</button>
@@ -532,34 +683,61 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		let cachedChunks = new Map();
 		let pendingRequests = new Set();
 		let selection = { start: -1, end: -1 };
-		let littleEndian = true;
 		let isSelecting = false;
 		let searchMatches = [];
-		let inspectorPendingOffset = -1;
+		let editedBytes = new Set();
+		let bookmarks = ${JSON.stringify(bookmarks)};
+		let isEditMode = false;
+		let currentEditOffset = -1;
+		let isModified = false;
 
 		const scrollContainer = document.getElementById('scrollContainer');
 		const phantomSpacer = document.getElementById('phantomSpacer');
 		const contentLayer = document.getElementById('contentLayer');
 
-		// Endian toggle
-		document.getElementById('btnLE').addEventListener('click', () => {
-			littleEndian = true;
-			document.getElementById('btnLE').classList.add('active');
-			document.getElementById('btnBE').classList.remove('active');
-			updateInspector();
+		// Initialize
+		vscode.postMessage({ type: 'ready' });
+		vscode.postMessage({ type: 'getTemplates' });
+
+		// Toolbar handlers
+		document.getElementById('saveBtn').addEventListener('click', () => {
+			vscode.postMessage({ type: 'save' });
 		});
 
-		document.getElementById('btnBE').addEventListener('click', () => {
-			littleEndian = false;
-			document.getElementById('btnBE').classList.add('active');
-			document.getElementById('btnLE').classList.remove('active');
-			updateInspector();
+		document.getElementById('editModeBtn').addEventListener('click', () => {
+			isEditMode = !isEditMode;
+			document.getElementById('editModeBtn').textContent = isEditMode ? '🔒 Lock' : '✏️ Edit Mode';
+			document.getElementById('editModeBtn').classList.toggle('modified', isEditMode);
+			renderVisibleRows();
 		});
 
-		// Search functionality
 		document.getElementById('searchBtn').addEventListener('click', doSearch);
 		document.getElementById('searchInput').addEventListener('keydown', e => {
 			if (e.key === 'Enter') doSearch();
+		});
+
+		document.getElementById('gotoBtn').addEventListener('click', doGoto);
+		document.getElementById('gotoInput').addEventListener('keydown', e => {
+			if (e.key === 'Enter') doGoto();
+		});
+
+		document.getElementById('addBookmarkBtn').addEventListener('click', () => {
+			if (selection.start === -1) {
+				alert('Select a position first');
+				return;
+			}
+			const name = prompt('Bookmark name:', 'Bookmark');
+			if (name) {
+				const colors = ['#ff6b6b', '#4ecdc4', '#45b7d1', '#96ceb4', '#ffeaa7', '#dfe6e9'];
+				const color = colors[bookmarks.length % colors.length];
+				vscode.postMessage({ type: 'addBookmark', offset: selection.start, name, color });
+			}
+		});
+
+		document.getElementById('templateSelect').addEventListener('change', (e) => {
+			if (e.target.value && selection.start !== -1) {
+				vscode.postMessage({ type: 'applyTemplate', templateName: e.target.value, offset: selection.start });
+			}
 		});
 
 		function doSearch() {
@@ -571,20 +749,9 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			}
 		}
 
-		// Go to offset
-		document.getElementById('gotoBtn').addEventListener('click', doGoto);
-		document.getElementById('gotoInput').addEventListener('keydown', e => {
-			if (e.key === 'Enter') doGoto();
-		});
-
 		function doGoto() {
 			const input = document.getElementById('gotoInput').value.trim();
-			let offset = 0;
-			if (input.toLowerCase().startsWith('0x')) {
-				offset = parseInt(input, 16);
-			} else {
-				offset = parseInt(input, 10);
-			}
+			let offset = input.toLowerCase().startsWith('0x') ? parseInt(input, 16) : parseInt(input, 10);
 			if (!isNaN(offset) && offset >= 0 && offset < totalFileSize) {
 				jumpToOffset(offset);
 			}
@@ -597,6 +764,42 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			selection.end = offset;
 			renderVisibleRows();
 			updateInspector();
+		}
+
+		function addBookmarkToUI(bookmark) {
+			bookmarks.push(bookmark);
+			renderBookmarks();
+			renderVisibleRows();
+		}
+
+		function renderBookmarks() {
+			const list = document.getElementById('bookmarkList');
+			list.innerHTML = bookmarks.map(b => \`
+				<div class="bookmark-item" data-offset="\${b.offset}">
+					<span class="bookmark-color" style="background: \${b.color}"></span>
+					<span class="bookmark-name">\${b.name}</span>
+					<span class="bookmark-offset">0x\${b.offset.toString(16).toUpperCase()}</span>
+					<span class="bookmark-delete" data-offset="\${b.offset}">×</span>
+				</div>
+			\`).join('');
+
+			list.querySelectorAll('.bookmark-item').forEach(el => {
+				el.addEventListener('click', (e) => {
+					if (!e.target.classList.contains('bookmark-delete')) {
+						jumpToOffset(parseInt(el.dataset.offset));
+					}
+				});
+			});
+
+			list.querySelectorAll('.bookmark-delete').forEach(el => {
+				el.addEventListener('click', (e) => {
+					e.stopPropagation();
+					const offset = parseInt(el.dataset.offset);
+					bookmarks = bookmarks.filter(b => b.offset !== offset);
+					renderBookmarks();
+					vscode.postMessage({ type: 'removeBookmark', offset });
+				});
+			});
 		}
 
 		// Copy buttons
@@ -638,9 +841,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			return result;
 		}
 
-		// Initialization
-		vscode.postMessage({ type: 'ready' });
-
+		// Message handler
 		window.addEventListener('message', e => {
 			const msg = e.data;
 			switch (msg.type) {
@@ -650,33 +851,62 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					document.getElementById('fileName').textContent = msg.fileName.split(/[\\\\/]/).pop();
 					document.getElementById('fileSize').textContent = formatBytes(totalFileSize);
 					phantomSpacer.style.height = (totalRows * ROW_HEIGHT) + 'px';
+					renderBookmarks();
 					onScroll();
 					break;
 
 				case 'chunkData':
 					cachedChunks.set(msg.offset, new Uint8Array(msg.data));
 					pendingRequests.delete(msg.offset);
-					renderVisibleRows();
-					// Update inspector if we were waiting for this data
-					if (inspectorPendingOffset !== -1) {
-						const chunkStart = Math.floor(inspectorPendingOffset / CHUNK_SIZE) * CHUNK_SIZE;
-						if (chunkStart === msg.offset) {
-							updateInspector();
-						}
+					if (msg.editedRanges) {
+						msg.editedRanges.forEach(r => editedBytes.add(msg.offset + r));
 					}
+					renderVisibleRows();
+					break;
+
+				case 'editConfirmed':
+					editedBytes.add(msg.offset);
+					isModified = true;
+					document.getElementById('saveBtn').disabled = false;
+					document.getElementById('saveBtn').classList.add('modified');
+					renderVisibleRows();
+					break;
+
+				case 'saved':
+					isModified = false;
+					editedBytes.clear();
+					document.getElementById('saveBtn').disabled = true;
+					document.getElementById('saveBtn').classList.remove('modified');
 					break;
 
 				case 'searchResults':
 					searchMatches = msg.results;
-					document.getElementById('searchInfo').textContent = msg.results.length + ' matches found' + (msg.results.length >= 1000 ? ' (limited)' : '');
+					document.getElementById('searchInfo').textContent = msg.results.length + ' matches';
 					const resultsDiv = document.getElementById('searchResults');
-					resultsDiv.innerHTML = msg.results.slice(0, 100).map(offset =>
-						'<div class="search-result-item" data-offset="' + offset + '">0x' + offset.toString(16).toUpperCase().padStart(8, '0') + '</div>'
+					resultsDiv.innerHTML = msg.results.slice(0, 50).map(offset =>
+					\`<div class="search-result-item" data-offset="\${offset}">0x\${offset.toString(16).toUpperCase().padStart(8, '0')}</div>\`
 					).join('');
 					resultsDiv.querySelectorAll('.search-result-item').forEach(el => {
 						el.addEventListener('click', () => jumpToOffset(parseInt(el.dataset.offset)));
 					});
 					renderVisibleRows();
+					break;
+
+				case 'templatesList':
+					const select = document.getElementById('templateSelect');
+					select.innerHTML = '<option value="">Select template...</option>' +
+						msg.templates.map(t => \`<option value="\${t.name}">\${t.name} (\${t.size} bytes)</option>\`).join('');
+					break;
+
+				case 'templateApplied':
+					const fieldsDiv = document.getElementById('templateFields');
+					fieldsDiv.innerHTML = Object.entries(msg.parsed).map(([k, v]) =>
+					\`<div class="template-field"><span class="template-field-name">\${k}:</span><span class="template-field-value">\${v}</span></div>\`
+					).join('');
+					break;
+
+				case 'bookmarkAdded':
+					addBookmarkToUI(msg.bookmark);
 					break;
 
 				case 'jumpToOffset':
@@ -750,6 +980,8 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 				? offset.toString(16).toUpperCase().padStart(8, '0')
 				: offset.toString(16).padStart(8, '0');
 
+			const hasBookmark = bookmarks.some(b => b.offset >= offset && b.offset < offset + BYTES_PER_ROW);
+
 			let hexHtml = '';
 			let asciiHtml = '';
 
@@ -765,17 +997,19 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					currentOffset <= Math.max(selection.start, selection.end);
 
 				const isSearchMatch = searchMatches.includes(currentOffset);
+				const isEdited = editedBytes.has(currentOffset);
 
 				let classes = 'byte';
 				if (byteVal === 0) classes += ' null';
 				if (isSelected) classes += ' selected';
 				if (isSearchMatch) classes += ' search-match';
+				if (isEdited) classes += ' edited';
 
 				if (byteVal !== null) {
 					const hex = UPPERCASE
 						? byteVal.toString(16).toUpperCase().padStart(2, '0')
 						: byteVal.toString(16).padStart(2, '0');
-					hexHtml += '<span class="' + classes + '" data-o="' + currentOffset + '">' + hex + '</span>';
+					hexHtml += \`<span class="\${classes}" data-o="\${currentOffset}">\${hex}</span>\`;
 				} else {
 					hexHtml += '<span class="byte null">..</span>';
 				}
@@ -785,18 +1019,19 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 						const isPrint = byteVal >= 32 && byteVal <= 126;
 						const char = isPrint ? String.fromCharCode(byteVal) : '.';
 						const charClasses = 'char' + (isSelected ? ' selected' : '') + (!isPrint ? ' non-print' : '');
-						asciiHtml += '<span class="' + charClasses + '" data-o="' + currentOffset + '">' + escapeHtml(char) + '</span>';
+						asciiHtml += \`<span class="\${charClasses}" data-o="\${currentOffset}">\${escapeHtml(char)}</span>\`;
 					} else {
 						asciiHtml += '<span class="char non-print">.</span>';
 					}
 				}
 			}
 
-			return '<div class="hex-row">' +
-				'<span class="offset-col">0x' + offsetStr + '</span>' +
-				'<div class="bytes-col">' + hexHtml + '</div>' +
-				(SHOW_ASCII ? '<div class="ascii-col">' + asciiHtml + '</div>' : '') +
-				'</div>';
+			const bookmarkClass = hasBookmark ? ' bookmarked' : '';
+			return \`<div class="hex-row">
+				<span class="offset-col\${bookmarkClass}">0x\${offsetStr}</span>
+				<div class="bytes-col">\${hexHtml}</div>
+				\${SHOW_ASCII ? '<div class="ascii-col">' + asciiHtml + '</div>' : ''}
+			</div>\`;
 		}
 
 		// Selection handling
@@ -813,7 +1048,6 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 				isSelecting = true;
 				renderVisibleRows();
 				updateInspector();
-				updateCopyButtons();
 			}
 		});
 
@@ -821,11 +1055,9 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			if (!isSelecting) return;
 			const target = e.target;
 			if (target.dataset && target.dataset.o) {
-				const offset = parseInt(target.dataset.o, 10);
-				selection.end = offset;
+				selection.end = parseInt(target.dataset.o, 10);
 				renderVisibleRows();
 				updateInspector();
-				updateCopyButtons();
 			}
 		});
 
@@ -833,11 +1065,63 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			isSelecting = false;
 		});
 
-		function updateCopyButtons() {
-			const hasSelection = selection.start !== -1;
-			document.getElementById('copyHex').disabled = !hasSelection;
-			document.getElementById('copyCArray').disabled = !hasSelection;
-			document.getElementById('copyPython').disabled = !hasSelection;
+		// Edit mode
+		scrollContainer.addEventListener('dblclick', e => {
+			if (!isEditMode) return;
+			const target = e.target;
+			if (target.classList.contains('byte') && target.dataset.o) {
+				const offset = parseInt(target.dataset.o, 10);
+				startEditing(offset, target);
+			}
+		});
+
+		function startEditing(offset, element) {
+			if (currentEditOffset !== -1) {
+				finishEditing();
+			}
+
+			currentEditOffset = offset;
+			element.classList.add('editing');
+			element.contentEditable = 'true';
+			element.focus();
+
+			const originalValue = element.textContent;
+			element.textContent = '';
+
+			const onKeyDown = (e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					finishEditing();
+				} else if (e.key === 'Escape') {
+					e.preventDefault();
+					element.textContent = originalValue;
+					finishEditing();
+				}
+			};
+
+			const onBlur = () => {
+				const newValue = element.textContent.trim();
+				if (/^[0-9A-Fa-f]{2}$/.test(newValue)) {
+					const byteValue = parseInt(newValue, 16);
+					vscode.postMessage({ type: 'editByte', offset: currentEditOffset, value: byteValue });
+				} else {
+					element.textContent = originalValue;
+				}
+				finishEditing();
+			};
+
+			element.addEventListener('keydown', onKeyDown);
+			element.addEventListener('blur', onBlur, { once: true });
+		}
+
+		function finishEditing() {
+			if (currentEditOffset === -1) return;
+			const element = document.querySelector(\`.byte[data-o="\${currentEditOffset}"]\`);
+			if (element) {
+				element.classList.remove('editing');
+				element.contentEditable = 'false';
+			}
+			currentEditOffset = -1;
 		}
 
 		function updateInspector() {
@@ -852,24 +1136,13 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			document.getElementById('selLen').textContent = len + ' bytes';
 			document.getElementById('cursorOffset').textContent = '0x' + start.toString(16).toUpperCase().padStart(8, '0');
 
-			// Get 8 bytes starting at selection for inspector
+			document.getElementById('copyHex').disabled = false;
+			document.getElementById('copyCArray').disabled = false;
+			document.getElementById('copyPython').disabled = false;
+
 			const bytes = getBytesRange(start, 8);
+			if (bytes.length === 0) return;
 
-			if (bytes.length === 0) {
-				// Request the chunk if not loaded
-				const chunkStart = Math.floor(start / CHUNK_SIZE) * CHUNK_SIZE;
-				if (!cachedChunks.has(chunkStart) && !pendingRequests.has(chunkStart)) {
-					inspectorPendingOffset = start;
-					pendingRequests.add(chunkStart);
-					vscode.postMessage({ type: 'requestData', offset: chunkStart, length: CHUNK_SIZE });
-					setInspectorLoading();
-				}
-				return;
-			}
-
-			inspectorPendingOffset = -1;
-
-			// Create DataView
 			const buffer = new ArrayBuffer(8);
 			const uint8View = new Uint8Array(buffer);
 			for (let i = 0; i < Math.min(bytes.length, 8); i++) {
@@ -877,61 +1150,22 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			}
 			const view = new DataView(buffer);
 
-			// Update values
-			document.getElementById('valInt8').textContent = bytes.length >= 1 ? view.getInt8(0) : '-';
-			document.getElementById('valUInt8').textContent = bytes.length >= 1 ? view.getUint8(0) : '-';
-			document.getElementById('valInt16').textContent = bytes.length >= 2 ? view.getInt16(0, littleEndian) : '-';
-			document.getElementById('valUInt16').textContent = bytes.length >= 2 ? view.getUint16(0, littleEndian) : '-';
-			document.getElementById('valInt32').textContent = bytes.length >= 4 ? view.getInt32(0, littleEndian) : '-';
-			document.getElementById('valUInt32').textContent = bytes.length >= 4 ? view.getUint32(0, littleEndian) : '-';
-
-			if (bytes.length >= 8) {
-				try {
-					document.getElementById('valInt64').textContent = view.getBigInt64(0, littleEndian).toString();
-					document.getElementById('valUInt64').textContent = view.getBigUint64(0, littleEndian).toString();
-				} catch (e) {
-					document.getElementById('valInt64').textContent = '-';
-					document.getElementById('valUInt64').textContent = '-';
-				}
-			} else {
-				document.getElementById('valInt64').textContent = '-';
-				document.getElementById('valUInt64').textContent = '-';
-			}
-
-			document.getElementById('valFloat32').textContent = bytes.length >= 4 ? view.getFloat32(0, littleEndian).toPrecision(6) : '-';
-			document.getElementById('valFloat64').textContent = bytes.length >= 8 ? view.getFloat64(0, littleEndian).toPrecision(10) : '-';
-			document.getElementById('valBinary').textContent = bytes.length >= 1 ? bytes[0].toString(2).padStart(8, '0') : '-';
-
-			if (bytes.length >= 4) {
-				const ts = view.getUint32(0, littleEndian);
-				if (ts > 0 && ts < 4294967295) {
-					try {
-						document.getElementById('valUnixTime').textContent = new Date(ts * 1000).toISOString().slice(0, 19).replace('T', ' ');
-					} catch (e) {
-						document.getElementById('valUnixTime').textContent = '-';
-					}
-				} else {
-					document.getElementById('valUnixTime').textContent = '-';
-				}
-			} else {
-				document.getElementById('valUnixTime').textContent = '-';
-			}
-		}
-
-		function setInspectorLoading() {
-			const ids = ['valInt8', 'valUInt8', 'valInt16', 'valUInt16', 'valInt32', 'valUInt32',
-						 'valInt64', 'valUInt64', 'valFloat32', 'valFloat64', 'valBinary', 'valUnixTime'];
-			ids.forEach(id => {
-				const el = document.getElementById(id);
-				el.textContent = '...';
-				el.classList.add('loading');
-			});
+			document.getElementById('valInt8').textContent = view.getInt8(0);
+			document.getElementById('valUInt8').textContent = view.getUint8(0);
+			document.getElementById('valInt16').textContent = bytes.length >= 2 ? view.getInt16(0, true) : '-';
+			document.getElementById('valUInt16').textContent = bytes.length >= 2 ? view.getUint16(0, true) : '-';
+			document.getElementById('valInt32').textContent = bytes.length >= 4 ? view.getInt32(0, true) : '-';
+			document.getElementById('valUInt32').textContent = bytes.length >= 4 ? view.getUint32(0, true) : '-';
+			document.getElementById('valInt64').textContent = bytes.length >= 8 ? view.getBigInt64(0, true).toString() : '-';
+			document.getElementById('valUInt64').textContent = bytes.length >= 8 ? view.getBigUint64(0, true).toString() : '-';
+			document.getElementById('valFloat32').textContent = bytes.length >= 4 ? view.getFloat32(0, true).toPrecision(6) : '-';
+			document.getElementById('valFloat64').textContent = bytes.length >= 8 ? view.getFloat64(0, true).toPrecision(10) : '-';
 		}
 
 		function formatBytes(bytes) {
 			if (bytes === 0) return '0 B';
 			const k = 1024;
-			const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+			const sizes = ['B', 'KB', 'MB', 'GB'];
 			const i = Math.floor(Math.log(bytes) / Math.log(k));
 			return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 		}

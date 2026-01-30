@@ -672,6 +672,66 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 				packerTags.innerHTML = '<span style="color: var(--vscode-descriptionForeground);">No known packers detected</span>';
 			}
 
+			// Rich Header
+			const richContent = document.getElementById('richHeaderContent');
+			if (data.richHeader && data.richHeader.valid) {
+				let richHtml = '<div class="data-grid">';
+				richHtml += '<div class="data-label">XOR Key:</div><div class="data-value">0x' + data.richHeader.xorKey.toString(16).toUpperCase() + '</div>';
+				richHtml += '</div><div style="margin-top: 8px; font-size: 11px;">';
+				richHtml += '<strong>CompID Entries:</strong></div><div style="max-height: 150px; overflow-y: auto;">';
+				richHtml += '<table class="table"><thead><tr><th>Product</th><th>Build</th><th>Count</th></tr></thead><tbody>';
+				for (const entry of data.richHeader.entries) {
+					richHtml += '<tr><td>' + (entry.productName || 'Unknown') + '</td><td>' + (entry.compId >> 16) + '</td><td>' + entry.count + '</td></tr>';
+				}
+				richHtml += '</tbody></table></div>';
+				richContent.innerHTML = richHtml;
+			} else {
+				richContent.innerHTML = '<div style="padding: 8px; color: var(--vscode-descriptionForeground);">No Rich Header found</div>';
+			}
+
+			// Resources
+			const resourcesContent = document.getElementById('resourcesContent');
+			if (data.resources && data.resources.length > 0) {
+				resourcesContent.innerHTML = '<table class="table"><thead><tr><th>Type</th><th>Name</th><th>Size</th></tr></thead><tbody>' +
+					data.resources.map(r => '<tr><td>' + r.type + '</td><td>' + r.name + '</td><td>' + formatSize(r.size) + '</td></tr>').join('') +
+					'</tbody></table>';
+			} else {
+				resourcesContent.innerHTML = '<div style="padding: 8px; color: var(--vscode-descriptionForeground);">No resources found</div>';
+			}
+
+			// TLS Callbacks
+			const tlsContent = document.getElementById('tlsContent');
+			if (data.tlsCallbacks && data.tlsCallbacks.length > 0) {
+				tlsContent.innerHTML = '<div style="color: var(--vscode-errorForeground); font-weight: bold; margin-bottom: 8px;">⚠️ TLS Callbacks Detected!</div>' +
+					'<div style="font-size: 11px; color: var(--vscode-descriptionForeground); margin-bottom: 8px;">' +
+					'TLS callbacks execute before the entry point and can be used to hide malicious code.</div>' +
+					'<div class="tags">' + data.tlsCallbacks.map(addr => 
+						'<span class="tag" style="background: var(--vscode-errorForeground); color: white;">0x' + addr.toString(16).toUpperCase() + '</span>'
+					).join('') + '</div>';
+			} else {
+				tlsContent.innerHTML = '<div style="padding: 8px; color: var(--vscode-descriptionForeground);">No TLS callbacks found</div>';
+			}
+
+			// Anti-Debug
+			const antiDebugContent = document.getElementById('antiDebugContent');
+			if (data.antiDebug && data.antiDebug.length > 0) {
+				antiDebugContent.innerHTML = '<table class="table"><thead><tr><th>Technique</th><th>Severity</th></tr></thead><tbody>' +
+					data.antiDebug.map(a => '<tr><td>' + a.name + '<br><span style="font-size: 9px; color: var(--vscode-descriptionForeground);">' + a.description + '</span></td><td class="' + a.severity + '">' + a.severity.toUpperCase() + '</td></tr>').join('') +
+					'</tbody></table>';
+			} else {
+				antiDebugContent.innerHTML = '<div style="padding: 8px; color: var(--vscode-descriptionForeground);">No anti-debug techniques detected</div>';
+			}
+
+			// Mitigations
+			const mitigationsContent = document.getElementById('mitigationsContent');
+			if (data.mitigations && data.mitigations.length > 0) {
+				mitigationsContent.innerHTML = '<div class="data-grid">' +
+					data.mitigations.map(m => '<div class="data-label">' + m.name + '</div><div class="data-value ' + (m.enabled ? 'highlight' : '') + '">' + (m.enabled ? '✅ Enabled' : '❌ Disabled') + '</div>').join('') +
+					'</div>';
+			} else {
+				mitigationsContent.innerHTML = '<div style="padding: 8px; color: var(--vscode-descriptionForeground);">Unable to determine mitigations</div>';
+			}
+
 			// Suspicious Strings
 			const stringsList = document.getElementById('stringsList');
 			if (data.suspiciousStrings.length > 0) {

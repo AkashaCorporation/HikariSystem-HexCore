@@ -1,0 +1,203 @@
+{
+	"name": "hexcore-disassembler",
+	"displayName": "HexCore Disassembler",
+	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.70.0"
+	},
+	"categories": [
+		"Programming Languages",
+		"Debuggers",
+		"Visualization"
+	],
+	"keywords": [
+		"disassembler",
+		"assembly",
+		"capstone",
+		"x86",
+		"x64",
+		"arm",
+		"reverse engineering",
+		"malware analysis",
+		"binary analysis"
+	],
+	"activationEvents": [
+		"onCommand:hexcore.disasm.open",
+		"onCommand:hexcore.disasm.analyzeFile",
+		"onView:hexcore.disassembler.view"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.disasm.open",
+				"title": "Open in Disassembler",
+				"category": "HexCore Disassembler",
+				"icon": "$(list-flat)"
+			},
+			{
+				"command": "hexcore.disasm.analyzeFile",
+				"title": "Disassemble Binary",
+				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.goToAddress",
+				"title": "Go to Address",
+				"category": "HexCore Disassembler",
+				"icon": "$(arrow-right)"
+			},
+			{
+				"command": "hexcore.disasm.findXrefs",
+				"title": "Find Cross-References",
+				"category": "HexCore Disassembler",
+				"icon": "$(references)"
+			},
+			{
+				"command": "hexcore.disasm.addComment",
+				"title": "Add Comment",
+				"category": "HexCore Disassembler",
+				"icon": "$(comment)"
+			},
+			{
+				"command": "hexcore.disasm.renameFunction",
+				"title": "Rename Function",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-method)"
+			},
+			{
+				"command": "hexcore.disasm.showCFG",
+				"title": "Show Control Flow Graph",
+				"category": "HexCore Disassembler",
+				"icon": "$(debug-step-over)"
+			},
+			{
+				"command": "hexcore.disasm.searchString",
+				"title": "Search String References",
+				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.exportASM",
+				"title": "Export Assembly",
+				"category": "HexCore Disassembler"
+			}
+		],
+		"menus": {
+			"explorer/context": [
+				{
+					"command": "hexcore.disasm.analyzeFile",
+					"when": "resourceExtname == .exe || resourceExtname == .dll || resourceExtname == .bin || resourceExtname == .elf || resourceExtname == .so",
+					"group": "hexcore@2"
+				}
+			],
+			"editor/title": [
+				{
+					"command": "hexcore.disasm.goToAddress",
+					"group": "navigation",
+					"when": "activeWebviewPanelId == hexcore.disassembler"
+				},
+				{
+					"command": "hexcore.disasm.findXrefs",
+					"group": "navigation",
+					"when": "activeWebviewPanelId == hexcore.disassembler"
+				}
+			],
+			"view/title": [
+				{
+					"command": "hexcore.disasm.goToAddress",
+					"when": "view == hexcore.disassembler.view",
+					"group": "navigation"
+				}
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "hexcore-disassembler",
+					"title": "Disassembler",
+					"icon": "$(debug-disconnect)"
+				}
+			]
+		},
+		"views": {
+			"hexcore-disassembler": [
+				{
+					"type": "webview",
+					"id": "hexcore.disassembler.view",
+					"name": "Disassembly",
+					"icon": "$(debug-disconnect)"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.disassembler.functions",
+					"name": "Functions"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.disassembler.strings",
+					"name": "String References"
+				}
+			]
+		},
+		"configuration": {
+			"title": "HexCore Disassembler",
+			"properties": {
+				"hexcore.disassembler.defaultArchitecture": {
+					"type": "string",
+					"default": "x64",
+					"enum": [
+						"x86",
+						"x64",
+						"arm",
+						"arm64",
+						"mips"
+					],
+					"description": "Default architecture for disassembly"
+				},
+				"hexcore.disassembler.syntaxFlavor": {
+					"type": "string",
+					"default": "intel",
+					"enum": [
+						"intel",
+						"att"
+					],
+					"description": "Assembly syntax flavor"
+				},
+				"hexcore.disassembler.showBytes": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show instruction bytes alongside disassembly"
+				},
+				"hexcore.disassembler.showComments": {
+					"type": "boolean",
+					"default": true,
+					"description": "Show comments and annotations"
+				},
+				"hexcore.disassembler.highlightDangerous": {
+					"type": "boolean",
+					"default": true,
+					"description": "Highlight potentially dangerous instructions"
+				},
+				"hexcore.disassembler.maxFunctionSize": {
+					"type": "number",
+					"default": 4096,
+					"description": "Maximum function size for analysis (bytes)"
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"@alexaltea/capstone-js": "^3.0.5"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.70.0",
+		"typescript": "^5.0.0"
+	}
+}

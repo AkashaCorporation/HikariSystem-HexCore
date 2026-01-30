@@ -21,6 +21,7 @@ export interface PEAnalysis {
 	dosHeader?: DOSHeader;
 	peHeader?: PEHeader;
 	optionalHeader?: OptionalHeader;
+	richHeader?: RichHeader;
 
 	// Sections
 	sections: SectionHeader[];
@@ -29,10 +30,20 @@ export interface PEAnalysis {
 	imports: ImportEntry[];
 	exports: ExportEntry[];
 
-	// Analysis
+	// Advanced Analysis
+	resources: ResourceEntry[];
+	tlsCallbacks: number[];
+	exceptions: ExceptionEntry[];
+	relocations: RelocationEntry[];
+	debugInfo: DebugEntry[];
+
+	// Security Analysis
 	entropy: number;
 	suspiciousStrings: string[];
 	packerSignatures: string[];
+	antiDebug: AntiDebugTechnique[];
+	mitigations: SecurityMitigation[];
+
 	timestamps: TimestampInfo;
 }
 
@@ -124,6 +135,53 @@ export interface ExportEntry {
 export interface TimestampInfo {
 	compile: string;
 	compileUnix: number;
+}
+
+export interface RichHeader {
+	valid: boolean;
+	entries: Array<{ compId: number; count: number; productName?: string }>;
+	xorKey: number;
+}
+
+export interface ResourceEntry {
+	type: string;
+	name: string | number;
+	langId: number;
+	size: number;
+	offset: number;
+	data?: Buffer;
+}
+
+export interface ExceptionEntry {
+	beginAddress: number;
+	endAddress: number;
+	unwindInfoAddress: number;
+}
+
+export interface RelocationEntry {
+	pageRVA: number;
+	type: string;
+	offset: number;
+}
+
+export interface DebugEntry {
+	type: string;
+	size: number;
+	address: number;
+	pointer: number;
+}
+
+export interface AntiDebugTechnique {
+	name: string;
+	description: string;
+	severity: 'low' | 'medium' | 'high';
+	indicators: string[];
+}
+
+export interface SecurityMitigation {
+	name: string;
+	enabled: boolean;
+	description: string;
 }
 
 // ============================================================================
@@ -255,6 +313,13 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		sections: [],
 		imports: [],
 		exports: [],
+		resources: [],
+		tlsCallbacks: [],
+		exceptions: [],
+		relocations: [],
+		debugInfo: [],
+		antiDebug: [],
+		mitigations: [],
 		entropy: 0,
 		suspiciousStrings: [],
 		packerSignatures: [],
@@ -660,4 +725,441 @@ function extractSuspiciousStrings(buffer: Buffer): string[] {
 	}
 
 	return [...new Set(suspicious)].slice(0, 50); // Dedupe and limit
+}
+
+// ============================================================================
+// RICH HEADER PARSER
+// ============================================================================
+
+function parseRichHeader(buffer: Buffer): RichHeader {
+	// Rich header is located between DOS stub and PE header
+	// It starts with 'DanS' and ends with 'Rich'
+	
+	const result: RichHeader = {
+		valid: false,
+		entries: [],
+	xorKey: 0
+	};
+
+	try {
+		// Search for 'DanS' signature (start of rich header)
+		let danSOffset = -1;
+		for (let i = 64; i < Math.min(buffer.length - 4, 1024); i++) {
+			if (buffer.readUInt32LE(i) === 0x536E6144) { // 'DanS'
+				danSOffset = i;
+				break;
+			}
+		}
+
+		if (danSOffset === -1) {
+			return result;
+		}
+
+		// Find 'Rich' signature (end of rich header)
+		let richOffset = -1;
+		for (let i = danSOffset; i < Math.min(buffer.length - 8, 2048); i += 4) {
+			if (buffer.readUInt32LE(i) === 0x68636952) { // 'Rich'
+				richOffset = i;
+				break;
+			}
+		}
+
+		if (richOffset === -1) {
+			return result;
+		}
+
+		// XOR key is the DWORD after 'Rich'
+		const xorKey = buffer.readUInt32LE(richOffset + 4);
+		result.xorKey = xorKey;
+
+		// Parse entries (between DanS and Rich)
+		// Skip 'DanS' + 4 DWORDs of padding
+		const entriesStart = danSOffset + 16;
+		const entriesEnd = richOffset;
+
+		for (let offset = entriesStart; offset < entriesEnd; offset += 8) {
+			if (offset + 8 > entriesEnd) break;
+
+			const compId = buffer.readUInt32LE(offset) ^ xorKey;
+			const count = buffer.readUInt32LE(offset + 4) ^ xorKey;
+
+			if (count > 0 && count < 0xFFFF && compId > 0) {
+				const buildNumber = compId >> 16;
+				const prodId = compId & 0xFFFF;
+				result.entries.push({
+					compId,
+					count,
+					productName: getRichProductName(prodId, buildNumber)
+				});
+			}
+		}
+
+		result.valid = result.entries.length > 0;
+	} catch (e) {
+		// Invalid rich header
+	}
+
+	return result;
+}
+
+function getRichProductName(prodId: number, buildNumber: number): string {
+	const products: Record<number, string> = {
+		0x0000: 'Unknown',
+		0x0001: 'Import0',
+		0x0002: 'Linker510',
+		0x0003: 'Cvtomf510',
+		0x0004: 'Lnk510',
+		0x0005: 'Masm510',
+		0x0006: 'H2Inc',
+		0x0007: 'CvtRes',
+		0x0008: 'Utc11_Basic',
+		0x0009: 'Utc11_C',
+		0x000A: 'Utc12_Basic',
+		0x000B: 'Utc12_C',
+		0x000C: 'Utc12_CPP',
+		0x000D: 'AliasObj60',
+		0x000E: 'VisualBasic60',
+		0x000F: 'Masm610',
+		0x0010: 'Masm620',
+		0x0011: 'Linker600',
+		0x0012: 'Cvtomf600',
+		0x0013: 'CvtRes500',
+		0x0014: 'Utc13_Basic',
+		0x0015: 'Utc13_C',
+		0x0016: 'Utc13_CPP',
+		0x0017: 'Linker610',
+		0x0018: 'Cvtomf610',
+		0x0019: 'Linker620',
+		0x001A: 'Cvtomf620',
+		0x001B: 'Asm',
+		0x001C: 'Utc12_1_Basic',
+		0x001D: 'Utc12_1_C',
+		0x001E: 'Utc12_1_CPP',
+		0x001F: 'Linker621',
+		0x0020: 'Linker700',
+		0x0021: 'Export',
+		0x0022: 'ImpLib',
+		0x0023: 'Masm700',
+		0x0024: 'Utc13_LTCG_C',
+		0x0025: 'Utc13_LTCG_CPP',
+		0x0026: 'Utc13_POGO_I_C',
+		0x0027: 'Utc13_POGO_I_CPP',
+		0x0028: 'CvtPGD',
+		0x0029: 'Linker710',
+		0x002A: 'Cvtomf710',
+		0x002B: 'Utc14_Basic',
+		0x002C: 'Utc14_C',
+		0x002D: 'Utc14_CPP',
+		0x002E: 'Utc14_LTCG_C',
+		0x002F: 'Utc14_LTCG_CPP',
+		0x0030: 'Utc14_POGO_I_C',
+		0x0031: 'Utc14_POGO_I_CPP',
+		0x0032: 'CvtPGD',
+	};
+	
+	return products[prodId] || `Product_${prodId.toString(16).toUpperCase()}`;
+}
+
+// ============================================================================
+// ANTI-DEBUG DETECTION
+// ============================================================================
+
+function detectAntiDebug(buffer: Buffer, imports: ImportEntry[]): AntiDebugTechnique[] {
+	const techniques: AntiDebugTechnique[] = [];
+
+	// Anti-debugging APIs
+	const antiDebugApis = [
+		{ dll: 'kernel32.dll', api: 'IsDebuggerPresent', severity: 'low' as const },
+		{ dll: 'kernel32.dll', api: 'CheckRemoteDebuggerPresent', severity: 'low' as const },
+		{ dll: 'ntdll.dll', api: 'NtQueryInformationProcess', severity: 'medium' as const },
+		{ dll: 'kernel32.dll', api: 'OutputDebugString', severity: 'low' as const },
+		{ dll: 'ntdll.dll', api: 'NtSetInformationThread', severity: 'medium' as const },
+		{ dll: 'kernel32.dll', api: 'CloseHandle', severity: 'low' as const },
+		{ dll: 'ntdll.dll', api: 'NtClose', severity: 'low' as const },
+		{ dll: 'user32.dll', api: 'BlockInput', severity: 'high' as const },
+		{ dll: 'kernel32.dll', api: 'SetUnhandledExceptionFilter', severity: 'medium' as const },
+	];
+
+	for (const api of antiDebugApis) {
+		const dll = imports.find(i => i.dllName.toLowerCase() === api.dll);
+		if (dll && dll.functions.some(f => f.toLowerCase().includes(api.api.toLowerCase()))) {
+			techniques.push({
+				name: api.api,
+				description: `Uses ${api.api} API for debugger detection`,
+				severity: api.severity,
+				indicators: [`${api.dll}: ${api.api}`]
+			});
+		}
+	}
+
+	// Check for suspicious strings
+	const bufferStr = buffer.toString('binary').toLowerCase();
+	const suspiciousStrings = [
+		{ name: 'PEB.IsDebugged', pattern: 'isdebugged', severity: 'low' as const },
+		{ name: 'PEB.NtGlobalFlag', pattern: 'ntglobalflag', severity: 'medium' as const },
+		{ name: 'Heap.Flags', pattern: 'heap', severity: 'medium' as const },
+		{ name: 'Timing Check', pattern: 'rdtsc', severity: 'low' as const },
+		{ name: 'Int3 Detection', pattern: 'int 3', severity: 'low' as const },
+		{ name: 'Int2D Detection', pattern: 'int 2d', severity: 'medium' as const },
+	];
+
+	for (const check of suspiciousStrings) {
+		if (bufferStr.includes(check.pattern)) {
+			// Check if not already added
+			if (!techniques.some(t => t.name === check.name)) {
+				techniques.push({
+					name: check.name,
+					description: `Contains ${check.name} anti-debug pattern`,
+					severity: check.severity,
+					indicators: [`Pattern: ${check.pattern}`]
+				});
+			}
+		}
+	}
+
+	return techniques;
+}
+
+// ============================================================================
+// SECURITY MITIGATIONS ANALYSIS
+// ============================================================================
+
+function analyzeMitigations(optionalHeader?: OptionalHeader): SecurityMitigation[] {
+	const mitigations: SecurityMitigation[] = [];
+
+	if (!optionalHeader) {
+		return mitigations;
+	}
+
+	mitigations.push({
+		name: 'ASLR (Address Space Layout Randomization)',
+		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('DYNAMIC_BASE')),
+		description: 'Randomizes memory addresses'
+	});
+
+	mitigations.push({
+		name: 'DEP/NX (Data Execution Prevention)',
+		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('NX_COMPAT')),
+		description: 'Prevents execution of data pages'
+	});
+
+	mitigations.push({
+		name: 'SEH (Structured Exception Handling)',
+		enabled: !optionalHeader.dllCharacteristics.some(c => c.includes('NO_SEH')),
+		description: 'Exception handling support'
+	});
+
+	mitigations.push({
+		name: 'CFG (Control Flow Guard)',
+		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('GUARD_CF')),
+		description: 'Control flow integrity protection'
+	});
+
+	mitigations.push({
+		name: 'Stack Cookie (GS)',
+		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('FORCE_INTEGRITY')),
+		description: 'Stack buffer overrun protection'
+	});
+
+	mitigations.push({
+		name: 'High Entropy ASLR',
+		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('HIGH_ENTROPY_VA')),
+		description: '64-bit address space randomization'
+	});
+
+	return mitigations;
+}
+
+// ============================================================================
+// RESOURCE PARSER
+// ============================================================================
+
+function parseResources(fd: number, buffer: Buffer, resourceDir: DataDirectory, sections: SectionHeader[]): ResourceEntry[] {
+	const resources: ResourceEntry[] = [];
+
+	try {
+		if (resourceDir.virtualAddress === 0 || resourceDir.size === 0) {
+			return resources;
+		}
+
+		const fileOffset = rvaToFileOffset(resourceDir.virtualAddress, sections);
+		if (fileOffset === 0) return resources;
+
+		// Resource types
+		const resourceTypes: Record<number, string> = {
+			1: 'CURSOR',
+			2: 'BITMAP',
+			3: 'ICON',
+			4: 'MENU',
+			5: 'DIALOG',
+			6: 'STRING',
+			7: 'FONTDIR',
+			8: 'FONT',
+			9: 'ACCELERATOR',
+			10: 'RCDATA',
+			11: 'MESSAGETABLE',
+			12: 'GROUP_CURSOR',
+			14: 'GROUP_ICON',
+			16: 'VERSION',
+			17: 'DLGINCLUDE',
+			19: 'PLUGPLAY',
+			20: 'VXD',
+			21: 'ANICURSOR',
+			22: 'ANIICON',
+			23: 'HTML',
+			24: 'MANIFEST',
+		};
+
+		// Parse resource directory (simplified)
+		const resourceBuffer = Buffer.alloc(Math.min(resourceDir.size, 65536));
+		fs.readSync(fd, resourceBuffer, 0, resourceBuffer.length, fileOffset);
+
+		// Look for common resource patterns
+		for (let i = 0; i < resourceBuffer.length - 8; i += 4) {
+			// Check for RT_VERSION (16)
+			if (resourceBuffer.readUInt32LE(i) === 16) {
+				resources.push({
+					type: 'VERSION',
+					name: 'VS_VERSION_INFO',
+					langId: 0,
+					size: 0,
+					offset: fileOffset + i
+				});
+			}
+			// Check for RT_MANIFEST (24)
+			else if (resourceBuffer.readUInt32LE(i) === 24) {
+				resources.push({
+					type: 'MANIFEST',
+					name: '1',
+					langId: 0,
+					size: 0,
+					offset: fileOffset + i
+				});
+			}
+			// Check for RT_ICON (3)
+			else if (resourceBuffer.readUInt32LE(i) === 3) {
+				resources.push({
+					type: 'ICON',
+					name: '1',
+					langId: 0,
+					size: 0,
+					offset: fileOffset + i
+				});
+			}
+		}
+
+		// Deduplicate
+		const seen = new Set<string>();
+		return resources.filter(r => {
+			const key = r.type + r.name;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		});
+	} catch (e) {
+		// Resource parsing failed
+	}
+
+	return resources;
+}
+
+// ============================================================================
+// TLS CALLBACKS PARSER
+// ============================================================================
+
+function parseTLSDirectory(fd: number, buffer: Buffer, tlsDir: DataDirectory, sections: SectionHeader[]): number[] {
+	const callbacks: number[] = [];
+
+	try {
+		if (tlsDir.virtualAddress === 0 || tlsDir.size === 0) {
+			return callbacks;
+		}
+
+		const fileOffset = rvaToFileOffset(tlsDir.virtualAddress, sections);
+		if (fileOffset === 0) return callbacks;
+
+		// TLS directory structure:
+		// 0x00: StartAddressOfRawData
+		// 0x04/0x08: EndAddressOfRawData
+		// 0x08/0x10: AddressOfIndex
+		// 0x0C/0x18: AddressOfCallbacks
+		// ...
+
+		const is64Bit = buffer.readUInt16LE(buffer.readUInt32LE(60) + 24 + 4) === 0x20b;
+		const tlsBuffer = Buffer.alloc(64);
+		fs.readSync(fd, tlsBuffer, 0, 64, fileOffset);
+
+		const callbacksRVAOffset = is64Bit ? 0x18 : 0x0C;
+		let callbacksRVA = is64Bit
+			? Number(tlsBuffer.readBigUInt64LE(callbacksRVAOffset))
+			: tlsBuffer.readUInt32LE(callbacksRVAOffset);
+
+		if (callbacksRVA === 0) return callbacks;
+
+		// Read callback array
+		const callbacksOffset = rvaToFileOffset(callbacksRVA, sections);
+		if (callbacksOffset === 0) return callbacks;
+
+		const callbackBuffer = Buffer.alloc(256);
+		fs.readSync(fd, callbackBuffer, 0, 256, callbacksOffset);
+
+		// Read until null terminator
+		for (let i = 0; i < 32; i++) {
+			const callback = is64Bit
+				? Number(callbackBuffer.readBigUInt64LE(i * 8))
+				: callbackBuffer.readUInt32LE(i * 4);
+
+			if (callback === 0) break;
+			if (callback !== 0 && callback !== 0xCCCCCCCC) {
+				callbacks.push(callback);
+			}
+		}
+	} catch (e) {
+		// TLS parsing failed
+	}
+
+	return callbacks;
+}
+
+// ============================================================================
+// EXCEPTION HANDLERS PARSER
+// ============================================================================
+
+function parseExceptions(fd: number, buffer: Buffer, exceptionDir: DataDirectory, sections: SectionHeader[]): ExceptionEntry[] {
+	const exceptions: ExceptionEntry[] = [];
+
+	try {
+		if (exceptionDir.virtualAddress === 0 || exceptionDir.size === 0) {
+			return exceptions;
+		}
+
+		const fileOffset = rvaToFileOffset(exceptionDir.virtualAddress, sections);
+		if (fileOffset === 0) return exceptions;
+
+		// Runtime Function entry (x64 unwind info)
+		// Each entry is 12 bytes (32-bit) or 12 bytes (64-bit)
+		const entryCount = Math.min(exceptionDir.size / 12, 100); // Limit to 100 entries
+
+		const exceptionBuffer = Buffer.alloc(entryCount * 12);
+		fs.readSync(fd, exceptionBuffer, 0, exceptionBuffer.length, fileOffset);
+
+		for (let i = 0; i < entryCount; i++) {
+			const offset = i * 12;
+			const beginAddress = exceptionBuffer.readUInt32LE(offset);
+			const endAddress = exceptionBuffer.readUInt32LE(offset + 4);
+			const unwindInfo = exceptionBuffer.readUInt32LE(offset + 8);
+
+			if (beginAddress !== 0 && endAddress !== 0) {
+				exceptions.push({
+					beginAddress,
+					endAddress,
+					unwindInfoAddress: unwindInfo
+				});
+			}
+		}
+	} catch (e) {
+		// Exception parsing failed
+	}
+
+	return exceptions;
 }

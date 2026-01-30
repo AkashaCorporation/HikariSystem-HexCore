@@ -25,6 +25,21 @@
 	"browser": "./out/extension.js",
 	"contributes": {
 		"commands": [
+				{
+					"command": "hexcore.addBookmark",
+					"title": "Add Bookmark",
+					"category": "HexCore"
+				},
+				{
+					"command": "hexcore.applyTemplate",
+					"title": "Apply Structure Template",
+					"category": "HexCore"
+				},
+				{
+					"command": "hexcore.toggleEdit",
+					"title": "Toggle Edit Mode",
+					"category": "HexCore"
+				},
 			{
 				"command": "hexcore.openHexView",
 				"title": "Open Hex View",
