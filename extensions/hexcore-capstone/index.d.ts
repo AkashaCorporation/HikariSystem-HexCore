@@ -267,55 +267,148 @@ export interface Version {
 
 /**
  * Capstone disassembler class
+ *
+ * @example
+ * ```typescript
+ * import { Capstone, ARCH, MODE, OPT, OPT_VALUE } from 'hexcore-capstone';
+ *
+ * // Create disassembler for x86-64
+ * const cs = new Capstone(ARCH.X86, MODE.MODE_64);
+ *
+ * // Enable detail mode for operand info
+ * cs.setOption(OPT.DETAIL, OPT_VALUE.ON);
+ *
+ * // Disassemble code
+ * const code = Buffer.from([0x55, 0x48, 0x89, 0xe5]);
+ * const instructions = cs.disasm(code, 0x1000);
+ *
+ * for (const insn of instructions) {
+ *   console.log(`${insn.address.toString(16)}: ${insn.mnemonic} ${insn.opStr}`);
+ * }
+ *
+ * // Clean up
+ * cs.close();
+ * ```
  */
 export class Capstone {
 	/**
 	 * Create a new Capstone disassembler instance
-	 * @param arch Architecture (use ARCH constants)
-	 * @param mode Mode (use MODE constants, can be combined with |)
+	 *
+	 * @param arch - Architecture constant (use ARCH.X86, ARCH.ARM, etc.)
+	 * @param mode - Mode flags (use MODE.MODE_64, MODE.LITTLE_ENDIAN, etc.)
+	 * @throws Error if architecture or mode is invalid
+	 *
+	 * @example
+	 * ```typescript
+	 * // x86-64 disassembler
+	 * const cs64 = new Capstone(ARCH.X86, MODE.MODE_64);
+	 *
+	 * // ARM Thumb mode
+	 * const csArm = new Capstone(ARCH.ARM, MODE.THUMB);
+	 *
+	 * // MIPS big-endian 32-bit
+	 * const csMips = new Capstone(ARCH.MIPS, MODE.MODE_32 | MODE.BIG_ENDIAN);
+	 * ```
 	 */
 	constructor(arch: number, mode: number);
 
 	/**
-	 * Disassemble code buffer
-	 * @param code Buffer containing machine code
-	 * @param address Base address of the code
-	 * @param count Maximum number of instructions to disassemble (0 = all)
+	 * Disassemble code buffer (synchronous)
+	 *
+	 * **Note:** For large buffers (>1MB), use `disasmAsync()` to avoid blocking.
+	 *
+	 * @param code - Buffer containing machine code to disassemble
+	 * @param address - Base address of the code (for correct jump targets)
+	 * @param count - Maximum number of instructions to disassemble (0 = all)
 	 * @returns Array of disassembled instructions
+	 *
+	 * @example
+	 * ```typescript
+	 * const code = Buffer.from([0x55, 0x48, 0x89, 0xe5, 0xc3]);
+	 * const insns = cs.disasm(code, 0x401000);
+	 * // Returns: push rbp, mov rbp,rsp, ret
+	 * ```
 	 */
 	disasm(code: Buffer | Uint8Array, address: number, count?: number): Instruction[];
 
 	/**
+	 * Disassemble code buffer (asynchronous, non-blocking)
+	 *
+	 * Use this method for large buffers to avoid blocking the event loop.
+	 * The disassembly runs in a background thread and returns a Promise.
+	 *
+	 * @param code - Buffer containing machine code to disassemble
+	 * @param address - Base address of the code (for correct jump targets)
+	 * @param count - Maximum number of instructions to disassemble (0 = all)
+	 * @returns Promise resolving to array of disassembled instructions
+	 *
+	 * @example
+	 * ```typescript
+	 * // Large file async disassembly
+	 * const largeCode = fs.readFileSync('large_binary.bin');
+	 * const insns = await cs.disasmAsync(largeCode, 0x401000);
+	 * console.log(`Disassembled ${insns.length} instructions`);
+	 * ```
+	 */
+	disasmAsync(code: Buffer | Uint8Array, address: number, count?: number): Promise<Instruction[]>;
+
+	/**
 	 * Set a disassembler option
-	 * @param type Option type (use OPT constants)
-	 * @param value Option value (use OPT_VALUE constants)
-	 * @returns true on success
+	 *
+	 * @param type - Option type (OPT.DETAIL, OPT.SYNTAX, etc.)
+	 * @param value - Option value (OPT_VALUE.ON, OPT_VALUE.SYNTAX_INTEL, etc.)
+	 * @returns true on success, throws on failure
+	 *
+	 * @example
+	 * ```typescript
+	 * // Enable detailed instruction info
+	 * cs.setOption(OPT.DETAIL, OPT_VALUE.ON);
+	 *
+	 * // Use Intel syntax (default)
+	 * cs.setOption(OPT.SYNTAX, OPT_VALUE.SYNTAX_INTEL);
+	 *
+	 * // Use AT&T syntax
+	 * cs.setOption(OPT.SYNTAX, OPT_VALUE.SYNTAX_ATT);
+	 * ```
 	 */
 	setOption(type: number, value: number): boolean;
 
 	/**
 	 * Close the disassembler and free resources
+	 *
+	 * Always call this when done to prevent memory leaks.
 	 */
 	close(): void;
 
 	/**
 	 * Get register name by ID
-	 * @param regId Register ID
-	 * @returns Register name or null if not found
+	 *
+	 * @param regId - Register ID from instruction details
+	 * @returns Register name (e.g., "rax", "eip") or null if not found
+	 *
+	 * @example
+	 * ```typescript
+	 * const insn = cs.disasm(code, 0x1000)[0];
+	 * if (insn.detail?.x86?.operands[0]?.reg) {
+	 *   console.log(cs.regName(insn.detail.x86.operands[0].reg)); // "rbp"
+	 * }
+	 * ```
 	 */
 	regName(regId: number): string | null;
 
 	/**
 	 * Get instruction name by ID
-	 * @param insnId Instruction ID
+	 *
+	 * @param insnId - Instruction ID from disassembled instruction
 	 * @returns Instruction name or null if not found
 	 */
 	insnName(insnId: number): string | null;
 
 	/**
 	 * Get group name by ID
-	 * @param groupId Group ID
-	 * @returns Group name or null if not found
+	 *
+	 * @param groupId - Group ID from instruction details
+	 * @returns Group name (e.g., "jump", "call", "ret") or null
 	 */
 	groupName(groupId: number): string | null;
 
@@ -333,7 +426,7 @@ export class Capstone {
 
 	/**
 	 * Get error message string
-	 * @param err Error code (optional, defaults to last error)
+	 * @param err - Error code (optional, defaults to last error)
 	 * @returns Error message
 	 */
 	strError(err?: number): string;

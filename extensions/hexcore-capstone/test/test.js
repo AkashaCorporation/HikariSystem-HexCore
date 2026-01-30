@@ -126,4 +126,36 @@ try {
 	console.log('  ✓ error handling works\n');
 }
 
-console.log('=== All tests passed! ===');
+// Test async disassembly
+console.log('Testing async disassembly (disasmAsync)...');
+(async () => {
+	const csAsync = new Capstone(ARCH.X86, MODE.MODE_64);
+
+	// Larger code buffer to test async
+	const codeAsync = Buffer.from([
+		0x55,                         // push rbp
+		0x48, 0x89, 0xe5,             // mov rbp, rsp
+		0x48, 0x83, 0xec, 0x20,       // sub rsp, 0x20
+		0x48, 0x89, 0x7d, 0xf8,       // mov [rbp-8], rdi
+		0x48, 0x89, 0x75, 0xf0,       // mov [rbp-16], rsi
+		0x48, 0x8b, 0x45, 0xf8,       // mov rax, [rbp-8]
+		0x48, 0x83, 0xc4, 0x20,       // add rsp, 0x20
+		0x5d,                         // pop rbp
+		0xc3                          // ret
+	]);
+
+	try {
+		const insnsAsync = await csAsync.disasmAsync(codeAsync, 0x401000);
+		console.log(`  Async disassembled ${insnsAsync.length} instructions`);
+		console.assert(insnsAsync.length === 8, 'Expected 8 instructions from async');
+		console.assert(Array.isArray(insnsAsync), 'Result should be an array');
+		console.assert(insnsAsync[0].mnemonic === 'push', 'First should be push');
+		console.log('  ✓ disasmAsync works\n');
+	} catch (e) {
+		console.error(`  ✗ disasmAsync failed: ${e.message}`);
+		process.exit(1);
+	}
+
+	csAsync.close();
+	console.log('=== All tests passed! ===');
+})();

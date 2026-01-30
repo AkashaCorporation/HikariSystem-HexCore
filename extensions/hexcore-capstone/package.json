@@ -1,9 +1,17 @@
 {
 	"name": "hexcore-capstone",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"description": "Modern Node.js bindings for Capstone disassembler engine using N-API",
 	"main": "./index.js",
+	"module": "./index.mjs",
 	"types": "./index.d.ts",
+	"exports": {
+		".": {
+			"import": "./index.mjs",
+			"require": "./index.js",
+			"types": "./index.d.ts"
+		}
+	},
 	"scripts": {
 		"install": "prebuild-install || node-gyp rebuild",
 		"build": "node-gyp rebuild",
@@ -25,9 +33,13 @@
 		"arm",
 		"arm64",
 		"mips",
+		"ppc",
+		"sparc",
+		"m68k",
 		"riscv",
 		"native",
-		"napi"
+		"napi",
+		"async"
 	],
 	"author": "HikariSystem <hikarisystem@example.com>",
 	"license": "MIT",
@@ -51,11 +63,11 @@
 		"prebuildify": "^6.0.0"
 	},
 	"files": [
-		"lib/",
 		"src/",
 		"prebuilds/",
 		"binding.gyp",
 		"index.js",
+		"index.mjs",
 		"index.d.ts"
 	],
 	"binary": {

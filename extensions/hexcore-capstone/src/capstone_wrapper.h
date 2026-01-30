@@ -13,12 +13,16 @@
 #include <vector>
 #include <string>
 
+// Forward declaration
+class DisasmAsyncWorker;
+
 /**
  * CapstoneWrapper - N-API class wrapping Capstone disassembler
  *
  * JavaScript usage:
  *   const cs = new Capstone(ARCH.X86, MODE.MODE_64);
  *   const instructions = cs.disasm(buffer, 0x1000);
+ *   const instructionsAsync = await cs.disasmAsync(buffer, 0x1000);
  *   cs.close();
  */
 class CapstoneWrapper : public Napi::ObjectWrap<CapstoneWrapper> {
@@ -39,24 +43,39 @@ public:
      */
     ~CapstoneWrapper();
 
+    // Accessors for async worker
+    csh GetHandle() const { return handle_; }
+    cs_arch GetArch() const { return arch_; }
+    bool IsOpened() const { return opened_; }
+
 private:
     // Capstone handle
     csh handle_;
     bool opened_;
     cs_arch arch_;
     cs_mode mode_;
+    bool detailEnabled_;
 
     // Class reference for preventing garbage collection during async ops
     static Napi::FunctionReference constructor;
 
     /**
-     * Disassemble a buffer
+     * Disassemble a buffer (synchronous)
      * @param info[0] Buffer - code to disassemble
      * @param info[1] Number - base address
      * @param info[2] Number - (optional) max instructions, 0 = all
      * @returns Array of instruction objects
      */
     Napi::Value Disasm(const Napi::CallbackInfo& info);
+
+    /**
+     * Disassemble a buffer (asynchronous - non-blocking)
+     * @param info[0] Buffer - code to disassemble
+     * @param info[1] Number - base address
+     * @param info[2] Number - (optional) max instructions, 0 = all
+     * @returns Promise<Array> of instruction objects
+     */
+    Napi::Value DisasmAsync(const Napi::CallbackInfo& info);
 
     /**
      * Set option
@@ -117,6 +136,12 @@ private:
     Napi::Object ArmDetailToObject(Napi::Env env, cs_arm* arm);
     Napi::Object Arm64DetailToObject(Napi::Env env, cs_arm64* arm64);
     Napi::Object MipsDetailToObject(Napi::Env env, cs_mips* mips);
+    Napi::Object PpcDetailToObject(Napi::Env env, cs_ppc* ppc);
+    Napi::Object SparcDetailToObject(Napi::Env env, cs_sparc* sparc);
+    Napi::Object SyszDetailToObject(Napi::Env env, cs_sysz* sysz);
+    Napi::Object XcoreDetailToObject(Napi::Env env, cs_xcore* xcore);
+    Napi::Object M68kDetailToObject(Napi::Env env, cs_m68k* m68k);
 };
 
 #endif // CAPSTONE_WRAPPER_H
+

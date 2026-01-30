@@ -6,6 +6,7 @@
  */
 
 #include "capstone_wrapper.h"
+#include "disasm_async_worker.h"
 #include <cstring>
 
 // Static constructor reference
@@ -19,6 +20,7 @@ Napi::Object CapstoneWrapper::Init(Napi::Env env, Napi::Object exports) {
 
     Napi::Function func = DefineClass(env, "Capstone", {
         InstanceMethod("disasm", &CapstoneWrapper::Disasm),
+        InstanceMethod("disasmAsync", &CapstoneWrapper::DisasmAsync),
         InstanceMethod("setOption", &CapstoneWrapper::SetOption),
         InstanceMethod("close", &CapstoneWrapper::Close),
         InstanceMethod("regName", &CapstoneWrapper::RegName),
@@ -40,7 +42,7 @@ Napi::Object CapstoneWrapper::Init(Napi::Env env, Napi::Object exports) {
  * Constructor - opens Capstone handle
  */
 CapstoneWrapper::CapstoneWrapper(const Napi::CallbackInfo& info)
-    : Napi::ObjectWrap<CapstoneWrapper>(info), handle_(0), opened_(false) {
+    : Napi::ObjectWrap<CapstoneWrapper>(info), handle_(0), opened_(false), detailEnabled_(false) {
 
     Napi::Env env = info.Env();
 
@@ -150,6 +152,70 @@ Napi::Value CapstoneWrapper::Disasm(const Napi::CallbackInfo& info) {
 }
 
 /**
+ * Disassemble a buffer asynchronously (non-blocking)
+ * Returns a Promise that resolves to an array of instructions
+ */
+Napi::Value CapstoneWrapper::DisasmAsync(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (!opened_) {
+        Napi::Error::New(env, "Capstone handle is closed")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    if (info.Length() < 2) {
+        Napi::TypeError::New(env, "Expected at least 2 arguments: buffer and address")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    // Get the code buffer and copy it (worker will own the data)
+    std::vector<uint8_t> codeVec;
+
+    if (info[0].IsBuffer()) {
+        Napi::Buffer<uint8_t> codeBuffer = info[0].As<Napi::Buffer<uint8_t>>();
+        codeVec.assign(codeBuffer.Data(), codeBuffer.Data() + codeBuffer.Length());
+    } else if (info[0].IsTypedArray()) {
+        Napi::TypedArray typedArray = info[0].As<Napi::TypedArray>();
+        const uint8_t* data = static_cast<const uint8_t*>(typedArray.ArrayBuffer().Data()) + typedArray.ByteOffset();
+        codeVec.assign(data, data + typedArray.ByteLength());
+    } else {
+        Napi::TypeError::New(env, "First argument must be a Buffer or Uint8Array")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+
+    // Get base address
+    if (!info[1].IsNumber()) {
+        Napi::TypeError::New(env, "Second argument (address) must be a number")
+            .ThrowAsJavaScriptException();
+        return env.Null();
+    }
+    uint64_t address = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+
+    // Get max instructions (optional)
+    size_t count = 0;
+    if (info.Length() > 2 && info[2].IsNumber()) {
+        count = static_cast<size_t>(info[2].As<Napi::Number>().Uint32Value());
+    }
+
+    // Create and queue the async worker
+    DisasmAsyncWorker* worker = new DisasmAsyncWorker(
+        env,
+        handle_,
+        arch_,
+        std::move(codeVec),
+        address,
+        count,
+        detailEnabled_
+    );
+
+    worker->Queue();
+    return worker->GetPromise();
+}
+
+/**
  * Convert a single instruction to a JavaScript object
  */
 Napi::Object CapstoneWrapper::InstructionToObject(Napi::Env env, cs_insn* insn) {
@@ -214,6 +280,21 @@ Napi::Object CapstoneWrapper::DetailToObject(Napi::Env env, cs_insn* insn) {
             break;
         case CS_ARCH_MIPS:
             obj.Set("mips", MipsDetailToObject(env, &detail->mips));
+            break;
+        case CS_ARCH_PPC:
+            obj.Set("ppc", PpcDetailToObject(env, &detail->ppc));
+            break;
+        case CS_ARCH_SPARC:
+            obj.Set("sparc", SparcDetailToObject(env, &detail->sparc));
+            break;
+        case CS_ARCH_SYSZ:
+            obj.Set("sysz", SyszDetailToObject(env, &detail->sysz));
+            break;
+        case CS_ARCH_XCORE:
+            obj.Set("xcore", XcoreDetailToObject(env, &detail->xcore));
+            break;
+        case CS_ARCH_M68K:
+            obj.Set("m68k", M68kDetailToObject(env, &detail->m68k));
             break;
         default:
             break;
@@ -425,6 +506,238 @@ Napi::Object CapstoneWrapper::MipsDetailToObject(Napi::Env env, cs_mips* mips) {
 }
 
 /**
+ * Convert PPC detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::PpcDetailToObject(Napi::Env env, cs_ppc* ppc) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    obj.Set("bc", Napi::Number::New(env, ppc->bc));
+    obj.Set("bh", Napi::Number::New(env, ppc->bh));
+    obj.Set("updateCr0", Napi::Boolean::New(env, ppc->update_cr0));
+
+    Napi::Array operands = Napi::Array::New(env, ppc->op_count);
+    for (uint8_t i = 0; i < ppc->op_count; i++) {
+        cs_ppc_op* op = &ppc->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+
+        switch (op->type) {
+            case PPC_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case PPC_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, static_cast<double>(op->imm)));
+                break;
+            case PPC_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("base", Napi::Number::New(env, op->mem.base));
+                    mem.Set("disp", Napi::Number::New(env, static_cast<double>(op->mem.disp)));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            case PPC_OP_CRX:
+                {
+                    Napi::Object crx = Napi::Object::New(env);
+                    crx.Set("scale", Napi::Number::New(env, op->crx.scale));
+                    crx.Set("reg", Napi::Number::New(env, op->crx.reg));
+                    crx.Set("cond", Napi::Number::New(env, op->crx.cond));
+                    opObj.Set("crx", crx);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+
+/**
+ * Convert SPARC detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::SparcDetailToObject(Napi::Env env, cs_sparc* sparc) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    obj.Set("cc", Napi::Number::New(env, sparc->cc));
+    obj.Set("hint", Napi::Number::New(env, sparc->hint));
+
+    Napi::Array operands = Napi::Array::New(env, sparc->op_count);
+    for (uint8_t i = 0; i < sparc->op_count; i++) {
+        cs_sparc_op* op = &sparc->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+
+        switch (op->type) {
+            case SPARC_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case SPARC_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, static_cast<double>(op->imm)));
+                break;
+            case SPARC_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("base", Napi::Number::New(env, op->mem.base));
+                    mem.Set("index", Napi::Number::New(env, op->mem.index));
+                    mem.Set("disp", Napi::Number::New(env, op->mem.disp));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+
+/**
+ * Convert SYSZ detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::SyszDetailToObject(Napi::Env env, cs_sysz* sysz) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    obj.Set("cc", Napi::Number::New(env, sysz->cc));
+
+    Napi::Array operands = Napi::Array::New(env, sysz->op_count);
+    for (uint8_t i = 0; i < sysz->op_count; i++) {
+        cs_sysz_op* op = &sysz->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+
+        switch (op->type) {
+            case SYSZ_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case SYSZ_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, static_cast<double>(op->imm)));
+                break;
+            case SYSZ_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("base", Napi::Number::New(env, op->mem.base));
+                    mem.Set("index", Napi::Number::New(env, op->mem.index));
+                    mem.Set("length", Napi::Number::New(env, op->mem.length));
+                    mem.Set("disp", Napi::Number::New(env, static_cast<double>(op->mem.disp)));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+
+/**
+ * Convert XCORE detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::XcoreDetailToObject(Napi::Env env, cs_xcore* xcore) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    Napi::Array operands = Napi::Array::New(env, xcore->op_count);
+    for (uint8_t i = 0; i < xcore->op_count; i++) {
+        cs_xcore_op* op = &xcore->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+
+        switch (op->type) {
+            case XCORE_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case XCORE_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, op->imm));
+                break;
+            case XCORE_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("base", Napi::Number::New(env, op->mem.base));
+                    mem.Set("index", Napi::Number::New(env, op->mem.index));
+                    mem.Set("disp", Napi::Number::New(env, op->mem.disp));
+                    mem.Set("direct", Napi::Number::New(env, op->mem.direct));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+
+/**
+ * Convert M68K detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::M68kDetailToObject(Napi::Env env, cs_m68k* m68k) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    obj.Set("opSize", Napi::Number::New(env, m68k->op_size.type));
+
+    Napi::Array operands = Napi::Array::New(env, m68k->op_count);
+    for (uint8_t i = 0; i < m68k->op_count; i++) {
+        cs_m68k_op* op = &m68k->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+        opObj.Set("addressMode", Napi::Number::New(env, op->address_mode));
+
+        switch (op->type) {
+            case M68K_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case M68K_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, static_cast<double>(op->imm)));
+                break;
+            case M68K_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("baseReg", Napi::Number::New(env, op->mem.base_reg));
+                    mem.Set("indexReg", Napi::Number::New(env, op->mem.index_reg));
+                    mem.Set("inBaseReg", Napi::Number::New(env, op->mem.in_base_reg));
+                    mem.Set("inDisp", Napi::Number::New(env, op->mem.in_disp));
+                    mem.Set("outDisp", Napi::Number::New(env, op->mem.out_disp));
+                    mem.Set("disp", Napi::Number::New(env, static_cast<double>(op->mem.disp)));
+                    mem.Set("scale", Napi::Number::New(env, op->mem.scale));
+                    mem.Set("bitfield", Napi::Number::New(env, op->mem.bitfield));
+                    mem.Set("width", Napi::Number::New(env, op->mem.width));
+                    mem.Set("offset", Napi::Number::New(env, op->mem.offset));
+                    mem.Set("indexSize", Napi::Number::New(env, op->mem.index_size));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            case M68K_OP_FP_DOUBLE:
+                opObj.Set("fpDouble", Napi::Number::New(env, op->dimm));
+                break;
+            case M68K_OP_FP_SINGLE:
+                opObj.Set("fpSingle", Napi::Number::New(env, op->simm));
+                break;
+            case M68K_OP_REG_BITS:
+                opObj.Set("regBits", Napi::Number::New(env, op->register_bits));
+                break;
+            case M68K_OP_REG_PAIR:
+                {
+                    Napi::Object regPair = Napi::Object::New(env);
+                    regPair.Set("reg0", Napi::Number::New(env, op->reg_pair.reg_0));
+                    regPair.Set("reg1", Napi::Number::New(env, op->reg_pair.reg_1));
+                    opObj.Set("regPair", regPair);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+
+/**
  * Set Capstone option
  */
 Napi::Value CapstoneWrapper::SetOption(const Napi::CallbackInfo& info) {
@@ -450,6 +763,11 @@ Napi::Value CapstoneWrapper::SetOption(const Napi::CallbackInfo& info) {
         Napi::Error::New(env, std::string("Failed to set option: ") + cs_strerror(err))
             .ThrowAsJavaScriptException();
         return Napi::Boolean::New(env, false);
+    }
+
+    // Track detail mode for async worker
+    if (type == CS_OPT_DETAIL) {
+        detailEnabled_ = (value == CS_OPT_ON);
     }
 
     return Napi::Boolean::New(env, true);
