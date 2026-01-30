@@ -1,0 +1,10 @@
+node_modules/
+build/
+prebuilds/
+*.log
+*.txt
+.vscode/
+compile_commands.json
+.DS_Store
+test_v11.txt
+build_v11.txt

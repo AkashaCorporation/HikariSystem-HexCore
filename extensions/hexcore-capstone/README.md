@@ -7,12 +7,13 @@ Modern Node.js bindings for [Capstone](https://capstone-engine.org) disassembler
 
 ## Features
 
-- **Modern N-API**: Uses Node-API for binary compatibility across Node.js versions
-- **Full Capstone API**: Complete bindings for all Capstone functions
-- **TypeScript Support**: Full TypeScript definitions included
-- **Multi-Architecture**: x86, x64, ARM, ARM64, MIPS, RISC-V, and more
-- **Detail Mode**: Access to operands, registers, groups, and flags
-- **Prebuilt Binaries**: No compilation needed for most platforms
+-  **Async API**: Non-blocking `disasmAsync()` for large binaries
+-  **Modern N-API**: Binary compatible across Node.js 18+
+-  **Zero Dependencies**: Capstone is bundled - just `npm install`
+-  **Full TypeScript**: Complete type definitions with JSDoc
+-  **Multi-Architecture**: x86, ARM, ARM64, MIPS, PPC, SPARC, M68K, and more
+-  **Detail Mode**: Access operands, registers, groups, and flags
+-  **ESM + CommonJS**: Works with `import` and `require`
 
 ## Installation
 
@@ -20,32 +21,9 @@ Modern Node.js bindings for [Capstone](https://capstone-engine.org) disassembler
 npm install hexcore-capstone
 ```
 
-### Prerequisites
+No system dependencies required! Capstone is compiled from source automatically.
 
-You need `libcapstone` installed on your system:
-
-**Windows:**
-```powershell
-# Download from https://capstone-engine.org/download.html
-# Or use vcpkg: vcpkg install capstone
-```
-
-**macOS:**
-```bash
-brew install capstone
-```
-
-**Linux (Debian/Ubuntu):**
-```bash
-sudo apt install libcapstone-dev
-```
-
-**Linux (Fedora):**
-```bash
-sudo dnf install capstone-devel
-```
-
-## Usage
+## Quick Start
 
 ### Basic Example
 
@@ -76,18 +54,45 @@ for (const insn of instructions) {
 // 0x401004: sub rsp, 0x20
 // 0x401008: ret
 
-// Clean up
 cs.close();
 ```
 
-### With Detail Mode
+### Async Disassembly (Recommended for large files)
+
+```javascript
+const { Capstone, ARCH, MODE } = require('hexcore-capstone');
+const fs = require('fs');
+
+const cs = new Capstone(ARCH.X86, MODE.MODE_64);
+
+// Load a large binary
+const largeCode = fs.readFileSync('large_binary.bin');
+
+// Disassemble without blocking the event loop
+const instructions = await cs.disasmAsync(largeCode, 0x401000);
+
+console.log(`Disassembled ${instructions.length} instructions`);
+
+cs.close();
+```
+
+### ESM Import
+
+```javascript
+import { Capstone, ARCH, MODE, OPT, OPT_VALUE } from 'hexcore-capstone';
+
+const cs = new Capstone(ARCH.ARM64, MODE.ARM);
+// ...
+```
+
+### Detail Mode
 
 ```javascript
 const { Capstone, ARCH, MODE, OPT, OPT_VALUE } = require('hexcore-capstone');
 
 const cs = new Capstone(ARCH.X86, MODE.MODE_64);
 
-// Enable detail mode
+// Enable detail mode for operand info
 cs.setOption(OPT.DETAIL, OPT_VALUE.ON);
 
 const code = Buffer.from([0x48, 0x89, 0xc3]); // mov rbx, rax
@@ -106,87 +111,75 @@ for (const insn of insns) {
 cs.close();
 ```
 
-### ARM Disassembly
+## Supported Architectures
 
-```javascript
-const { Capstone, ARCH, MODE } = require('hexcore-capstone');
-
-const cs = new Capstone(ARCH.ARM, MODE.ARM);
-
-const armCode = Buffer.from([
-    0x04, 0xe0, 0x2d, 0xe5,  // push {lr}
-    0x00, 0x00, 0xa0, 0xe1,  // nop
-    0x04, 0xf0, 0x9d, 0xe4   // pop {pc}
-]);
-
-const insns = cs.disasm(armCode, 0x1000);
-for (const insn of insns) {
-    console.log(`${insn.mnemonic} ${insn.opStr}`);
-}
-
-cs.close();
-```
-
-### Check Capstone Version
-
-```javascript
-const { version, support, ARCH } = require('hexcore-capstone');
-
-console.log(`Capstone version: ${version().string}`);
-console.log(`x86 supported: ${support(ARCH.X86)}`);
-console.log(`RISC-V supported: ${support(ARCH.RISCV)}`);
-```
+| Architecture | Constant | Detail Mode |
+|--------------|----------|-------------|
+| x86/x64 | `ARCH.X86` | ✅ Full |
+| ARM | `ARCH.ARM` | ✅ Full |
+| ARM64 | `ARCH.ARM64` | ✅ Full |
+| MIPS | `ARCH.MIPS` | ✅ Full |
+| PowerPC | `ARCH.PPC` | ✅ Full |
+| SPARC | `ARCH.SPARC` | ✅ Full |
+| SystemZ | `ARCH.SYSZ` | ✅ Full |
+| XCore | `ARCH.XCORE` | ✅ Full |
+| M68K | `ARCH.M68K` | ✅ Full |
 
 ## API Reference
 
 ### Class: Capstone
 
 #### `new Capstone(arch, mode)`
-
 Create a new disassembler instance.
 
-- `arch` - Architecture constant (e.g., `ARCH.X86`)
-- `mode` - Mode constant (e.g., `MODE.MODE_64`)
-
 #### `cs.disasm(code, address, [count])`
+Disassemble code buffer synchronously. Returns `Instruction[]`.
 
-Disassemble code buffer.
+#### `cs.disasmAsync(code, address, [count])`
+Disassemble code buffer asynchronously. Returns `Promise<Instruction[]>`.
 
-- `code` - Buffer or Uint8Array containing machine code
-- `address` - Base address of the code
-- `count` - (Optional) Maximum instructions to disassemble
-
-Returns an array of instruction objects.
+> ⚡ **Use `disasmAsync()` for buffers >1MB** to avoid blocking the event loop.
 
 #### `cs.setOption(type, value)`
-
-Set a disassembler option.
+Set a disassembler option (e.g., enable detail mode).
 
 #### `cs.close()`
-
 Close the handle and free resources.
 
 #### `cs.regName(regId)`, `cs.insnName(insnId)`, `cs.groupName(groupId)`
+Get human-readable names.
 
-Get human-readable names for registers, instructions, and groups.
+### Helper Functions
 
-### Constants
+```javascript
+const { version, support, ARCH } = require('hexcore-capstone');
 
-- `ARCH` - Architecture constants
-- `MODE` - Mode constants
-- `OPT` - Option type constants
-- `OPT_VALUE` - Option value constants
-- `ERR` - Error code constants
+console.log(`Capstone version: ${version().string}`);  // "5.0"
+console.log(`ARM supported: ${support(ARCH.ARM)}`);    // true
+```
 
 ## Building from Source
 
 ```bash
-git clone https://github.com/hikarisystem/hexcore-capstone.git
+git clone --recursive https://github.com/LXrdKnowkill/hexcore-capstone.git
 cd hexcore-capstone
 npm install
 npm run build
 npm test
 ```
+
+> **Note:** Use `--recursive` to clone the vendored Capstone submodule.
+
+## Changelog
+
+### v1.1.0
+-  Add `disasmAsync()` for non-blocking disassembly
+-  Add ESM support via `index.mjs`
+-  Add detail mode for PPC, SPARC, SYSZ, XCORE, M68K
+-  Enhanced TypeScript definitions with JSDoc
+
+### v1.0.0
+-  Initial release with sync API
 
 ## License
 
