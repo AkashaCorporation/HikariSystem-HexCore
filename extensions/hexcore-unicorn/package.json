@@ -1,0 +1,83 @@
+{
+  "name": "hexcore-unicorn",
+  "version": "1.0.0",
+  "description": "Modern Node.js bindings for Unicorn CPU emulator engine using N-API",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "install": "prebuild-install || node-gyp rebuild",
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "prebuild": "prebuildify --napi --strip",
+    "prebuild:all": "prebuildify-cross -i centos7-devtoolset7 -i alpine -i linux-armv7 -i linux-arm64",
+    "test": "node test/test.js",
+    "clean": "node-gyp clean",
+    "prepare": "npm run build"
+  },
+  "keywords": [
+    "unicorn",
+    "emulator",
+    "emulation",
+    "cpu",
+    "x86",
+    "x64",
+    "arm",
+    "arm64",
+    "mips",
+    "sparc",
+    "ppc",
+    "riscv",
+    "reverse-engineering",
+    "binary-analysis",
+    "dynamic-analysis",
+    "native",
+    "napi",
+    "async"
+  ],
+  "author": "HikariSystem <hikarisystem@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LXrdKnowkill/hexcore-unicorn.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LXrdKnowkill/hexcore-unicorn/issues"
+  },
+  "homepage": "https://github.com/LXrdKnowkill/hexcore-unicorn#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.0.0",
+    "prebuild-install": "^7.1.1"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0",
+    "prebuildify": "^6.0.0"
+  },
+  "files": [
+    "src/",
+    "deps/unicorn/*.dll",
+    "deps/unicorn/*.lib",
+    "deps/unicorn/*.so",
+    "deps/unicorn/*.dylib",
+    "deps/unicorn/include/",
+    "prebuilds/",
+    "binding.gyp",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "binary": {
+    "napi_versions": [8]
+  }
+}

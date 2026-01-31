@@ -1,6 +1,6 @@
 {
 	"name": "hexcore-capstone",
-	"version": "1.1.0",
+	"version": "1.3.0",
 	"description": "Modern Node.js bindings for Capstone disassembler engine using N-API",
 	"main": "./index.js",
 	"module": "./index.mjs",
@@ -45,15 +45,14 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/hikarisystem/hexcore-capstone.git"
+		"url": "https://github.com/LXrdKnowkill/hexcore-capstone.git"
 	},
 	"bugs": {
-		"url": "https://github.com/hikarisystem/hexcore-capstone/issues"
+		"url": "https://github.com/LXrdKnowkill/hexcore-capstone/issues"
 	},
-	"homepage": "https://github.com/hikarisystem/hexcore-capstone#readme",
+	"homepage": "https://github.com/LXrdKnowkill/hexcore-capstone#readme",
 	"engines": {
-		"node": ">=18.0.0",
-		"vscode": "^1.90.0"
+		"node": ">=18.0.0"
 	},
 	"dependencies": {
 		"node-addon-api": "^7.0.0",
@@ -65,11 +64,16 @@
 	},
 	"files": [
 		"src/",
+		"deps/capstone/*.c",
+		"deps/capstone/*.h",
+		"deps/capstone/include/",
+		"deps/capstone/arch/",
 		"prebuilds/",
 		"binding.gyp",
 		"index.js",
 		"index.mjs",
-		"index.d.ts"
+		"index.d.ts",
+		"README.md"
 	],
 	"binary": {
 		"napi_versions": [

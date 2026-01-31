@@ -141,6 +141,9 @@ private:
     Napi::Object SyszDetailToObject(Napi::Env env, cs_sysz* sysz);
     Napi::Object XcoreDetailToObject(Napi::Env env, cs_xcore* xcore);
     Napi::Object M68kDetailToObject(Napi::Env env, cs_m68k* m68k);
+#ifdef CS_ARCH_RISCV
+    Napi::Object RiscvDetailToObject(Napi::Env env, cs_riscv* riscv);
+#endif
 };
 
 #endif // CAPSTONE_WRAPPER_H

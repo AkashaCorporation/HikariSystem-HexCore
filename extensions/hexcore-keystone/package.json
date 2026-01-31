@@ -1,0 +1,62 @@
+{
+	"name": "hexcore-keystone",
+	"version": "1.0.0",
+	"description": "Modern Node.js bindings for Keystone assembler engine using N-API",
+	"main": "./index.js",
+	"types": "./index.d.ts",
+	"scripts": {
+		"install": "node scripts/install.js && (prebuild-install || node-gyp rebuild)",
+		"build": "node-gyp rebuild",
+		"build:debug": "node-gyp rebuild --debug",
+		"prebuild": "prebuildify --napi --strip",
+		"test": "node test/test.js",
+		"clean": "node-gyp clean"
+	},
+	"keywords": [
+		"keystone",
+		"assembler",
+		"assembly",
+		"reverse-engineering",
+		"binary-analysis",
+		"shellcode",
+		"patching",
+		"x86",
+		"x64",
+		"arm",
+		"arm64",
+		"mips",
+		"native",
+		"napi",
+		"async"
+	],
+	"author": "HikariSystem",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/LXrdKnowkill/hexcore-keystone.git"
+	},
+	"engines": {
+		"node": ">=18.0.0"
+	},
+	"dependencies": {
+		"node-addon-api": "^7.0.0",
+		"prebuild-install": "^7.1.1"
+	},
+	"devDependencies": {
+		"node-gyp": "^10.0.0",
+		"prebuildify": "^6.0.0"
+	},
+	"files": [
+		"src/",
+		"scripts/",
+		"deps/keystone/",
+		"prebuilds/",
+		"binding.gyp",
+		"index.js",
+		"index.d.ts",
+		"README.md"
+	],
+	"binary": {
+		"napi_versions": [8]
+	}
+}

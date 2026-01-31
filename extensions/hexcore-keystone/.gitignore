@@ -1,0 +1,10 @@
+build/
+node_modules/
+prebuilds/
+*.node
+*.lib
+*.dll
+*.so
+*.dylib
+deps/keystone/build_new/
+deps/keystone/lib/

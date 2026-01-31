@@ -296,6 +296,11 @@ Napi::Object CapstoneWrapper::DetailToObject(Napi::Env env, cs_insn* insn) {
         case CS_ARCH_M68K:
             obj.Set("m68k", M68kDetailToObject(env, &detail->m68k));
             break;
+#ifdef CS_ARCH_RISCV
+        case CS_ARCH_RISCV:
+            obj.Set("riscv", RiscvDetailToObject(env, &detail->riscv));
+            break;
+#endif
         default:
             break;
     }
@@ -908,3 +913,41 @@ Napi::Value CapstoneWrapper::StrError(const Napi::CallbackInfo& info) {
 
     return Napi::String::New(env, cs_strerror(err));
 }
+
+#ifdef CS_ARCH_RISCV
+/**
+ * Convert RISC-V detail to JavaScript object
+ */
+Napi::Object CapstoneWrapper::RiscvDetailToObject(Napi::Env env, cs_riscv* riscv) {
+    Napi::Object obj = Napi::Object::New(env);
+
+    Napi::Array operands = Napi::Array::New(env, riscv->op_count);
+    for (uint8_t i = 0; i < riscv->op_count; i++) {
+        cs_riscv_op* op = &riscv->operands[i];
+        Napi::Object opObj = Napi::Object::New(env);
+        opObj.Set("type", Napi::Number::New(env, op->type));
+
+        switch (op->type) {
+            case RISCV_OP_REG:
+                opObj.Set("reg", Napi::Number::New(env, op->reg));
+                break;
+            case RISCV_OP_IMM:
+                opObj.Set("imm", Napi::Number::New(env, static_cast<double>(op->imm)));
+                break;
+            case RISCV_OP_MEM:
+                {
+                    Napi::Object mem = Napi::Object::New(env);
+                    mem.Set("base", Napi::Number::New(env, op->mem.base));
+                    mem.Set("disp", Napi::Number::New(env, static_cast<double>(op->mem.disp)));
+                    opObj.Set("mem", mem);
+                }
+                break;
+            default:
+                break;
+        }
+        operands.Set(i, opObj);
+    }
+    obj.Set("operands", operands);
+    return obj;
+}
+#endif

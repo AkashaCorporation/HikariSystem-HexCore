@@ -1,0 +1,12 @@
+build/
+node_modules/
+prebuilds/
+*.node
+*.lib
+*.dll
+*.so
+*.dylib
+deps/unicorn/*.dll
+deps/unicorn/*.lib
+deps/unicorn/*.so
+deps/unicorn/*.dylib

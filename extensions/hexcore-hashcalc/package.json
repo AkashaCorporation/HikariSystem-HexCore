@@ -6,7 +6,7 @@
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
-		"vscode": "^1.60.0"
+		"vscode": "^1.75.0"
 	},
 	"categories": [
 		"Other"
@@ -21,11 +21,6 @@
 		"malware"
 	],
 	"main": "./out/extension.js",
-	"activationEvents": [
-		"onCommand:hexcore.hashcalc.calculate",
-		"onCommand:hexcore.hashcalc.quick",
-		"onCommand:hexcore.hashcalc.verify"
-	],
 	"contributes": {
 		"commands": [
 			{

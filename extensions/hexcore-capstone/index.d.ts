@@ -224,6 +224,160 @@ export interface MipsDetail {
 }
 
 /**
+ * PPC operand structure
+ */
+export interface PpcOperand {
+	type: number;
+	reg?: number;
+	imm?: number;
+	mem?: {
+		base: number;
+		disp: number;
+	};
+	crx?: {
+		scale: number;
+		reg: number;
+		cond: number;
+	};
+}
+
+/**
+ * PPC instruction detail
+ */
+export interface PpcDetail {
+	bc: number;
+	bh: number;
+	updateCr0: boolean;
+	operands: PpcOperand[];
+}
+
+/**
+ * SPARC operand structure
+ */
+export interface SparcOperand {
+	type: number;
+	reg?: number;
+	imm?: number;
+	mem?: {
+		base: number;
+		index: number;
+		disp: number;
+	};
+}
+
+/**
+ * SPARC instruction detail
+ */
+export interface SparcDetail {
+	cc: number;
+	hint: number;
+	operands: SparcOperand[];
+}
+
+/**
+ * SystemZ operand structure
+ */
+export interface SyszOperand {
+	type: number;
+	reg?: number;
+	imm?: number;
+	mem?: {
+		base: number;
+		index: number;
+		length: number;
+		disp: number;
+	};
+}
+
+/**
+ * SystemZ instruction detail
+ */
+export interface SyszDetail {
+	cc: number;
+	operands: SyszOperand[];
+}
+
+/**
+ * XCore operand structure
+ */
+export interface XcoreOperand {
+	type: number;
+	reg?: number;
+	imm?: number;
+	mem?: {
+		base: number;
+		index: number;
+		disp: number;
+		direct: number;
+	};
+}
+
+/**
+ * XCore instruction detail
+ */
+export interface XcoreDetail {
+	operands: XcoreOperand[];
+}
+
+/**
+ * M68K operand structure
+ */
+export interface M68kOperand {
+	type: number;
+	addressMode: number;
+	reg?: number;
+	imm?: number;
+	fpDouble?: number;
+	fpSingle?: number;
+	regBits?: number;
+	regPair?: {
+		reg0: number;
+		reg1: number;
+	};
+	mem?: {
+		baseReg: number;
+		indexReg: number;
+		inBaseReg: number;
+		inDisp: number;
+		outDisp: number;
+		disp: number;
+		scale: number;
+		bitfield: number;
+		width: number;
+		offset: number;
+		indexSize: number;
+	};
+}
+
+/**
+ * M68K instruction detail
+ */
+export interface M68kDetail {
+	opSize: number;
+	operands: M68kOperand[];
+}
+
+/**
+ * RISC-V operand structure
+ */
+export interface RiscvOperand {
+	type: number;
+	reg?: number;
+	imm?: number;
+	mem?: {
+		base: number;
+		disp: number;
+	};
+}
+
+/**
+ * RISC-V instruction detail
+ */
+export interface RiscvDetail {
+	operands: RiscvOperand[];
+}
+
+/**
  * Instruction detail (when detail mode is enabled)
  */
 export interface InstructionDetail {
@@ -234,6 +388,12 @@ export interface InstructionDetail {
 	arm?: ArmDetail;
 	arm64?: Arm64Detail;
 	mips?: MipsDetail;
+	ppc?: PpcDetail;
+	sparc?: SparcDetail;
+	sysz?: SyszDetail;
+	xcore?: XcoreDetail;
+	m68k?: M68kDetail;
+	riscv?: RiscvDetail;
 }
 
 /**

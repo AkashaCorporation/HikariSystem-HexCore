@@ -6,7 +6,7 @@
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
-		"vscode": "^1.60.0"
+		"vscode": "^1.75.0"
 	},
 	"categories": [
 		"Other"
@@ -19,9 +19,6 @@
 		"analysis"
 	],
 	"main": "./out/extension.js",
-	"activationEvents": [
-		"onCommand:hexcore.entropy.analyze"
-	],
 	"contributes": {
 		"commands": [
 			{
