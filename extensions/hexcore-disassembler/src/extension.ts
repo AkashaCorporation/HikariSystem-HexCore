@@ -205,6 +205,171 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// ============================================================================
+	// Assembly & Patching Commands (LLVM MC)
+	// ============================================================================
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.patchInstruction', async () => {
+			const addr = disasmProvider.getCurrentAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No instruction selected');
+				return;
+			}
+
+			const newCode = await vscode.window.showInputBox({
+				prompt: `Patch instruction at 0x${addr.toString(16)}`,
+				placeHolder: 'mov rax, rbx'
+			});
+
+			if (newCode) {
+				try {
+					const result = await engine.patchInstruction(addr, newCode);
+					if (result.success) {
+						engine.applyPatch(addr, result.bytes);
+						disasmProvider.refresh();
+						const msg = result.nopPadding > 0
+							? `Patched with ${result.nopPadding} NOP padding`
+							: 'Instruction patched successfully';
+						vscode.window.showInformationMessage(msg);
+					} else {
+						vscode.window.showErrorMessage(`Patch failed: ${result.error}`);
+					}
+				} catch (error: any) {
+					vscode.window.showErrorMessage(`Patch error: ${error.message}`);
+				}
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.nopInstruction', async () => {
+			const addr = disasmProvider.getCurrentAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No instruction selected');
+				return;
+			}
+
+			const confirm = await vscode.window.showQuickPick(['Yes', 'No'], {
+				placeHolder: `NOP instruction at 0x${addr.toString(16)}?`
+			});
+
+			if (confirm === 'Yes') {
+				try {
+					const success = await engine.nopInstruction(addr);
+					if (success) {
+						disasmProvider.refresh();
+						vscode.window.showInformationMessage('Instruction replaced with NOPs');
+					} else {
+						vscode.window.showErrorMessage('Failed to NOP instruction');
+					}
+				} catch (error: any) {
+					vscode.window.showErrorMessage(`NOP error: ${error.message}`);
+				}
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.assemble', async () => {
+			const code = await vscode.window.showInputBox({
+				prompt: 'Assemble instruction',
+				placeHolder: 'mov rax, 0x1234'
+			});
+
+			if (code) {
+				try {
+					const result = await engine.assemble(code);
+					if (result.success) {
+						const hex = result.bytes.toString('hex').toUpperCase().match(/.{2}/g)?.join(' ');
+						vscode.window.showInformationMessage(`${result.size} bytes: ${hex}`);
+					} else {
+						vscode.window.showErrorMessage(`Assembly error: ${result.error}`);
+					}
+				} catch (error: any) {
+					vscode.window.showErrorMessage(`Assembly error: ${error.message}`);
+				}
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.assembleMultiple', async () => {
+			const input = await vscode.window.showInputBox({
+				prompt: 'Assemble multiple instructions (separate with ;)',
+				placeHolder: 'push rbp; mov rbp, rsp; sub rsp, 0x20'
+			});
+
+			if (input) {
+				const instructions = input.split(';').map(s => s.trim()).filter(s => s.length > 0);
+				try {
+					const results = await engine.assembleMultiple(instructions);
+					const allBytes: Buffer[] = [];
+					let hasError = false;
+
+					for (const r of results) {
+						if (r.success) {
+							allBytes.push(r.bytes);
+						} else {
+							vscode.window.showErrorMessage(`Error in "${r.statement}": ${r.error}`);
+							hasError = true;
+							break;
+						}
+					}
+
+					if (!hasError) {
+						const combined = Buffer.concat(allBytes);
+						const hex = combined.toString('hex').toUpperCase().match(/.{2}/g)?.join(' ');
+						vscode.window.showInformationMessage(`${combined.length} bytes: ${hex}`);
+					}
+				} catch (error: any) {
+					vscode.window.showErrorMessage(`Assembly error: ${error.message}`);
+				}
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.savePatchedFile', async () => {
+			const uri = await vscode.window.showSaveDialog({
+				filters: {
+					'Executables': ['exe', 'dll', 'elf', 'so', 'bin'],
+					'All Files': ['*']
+				},
+				saveLabel: 'Save Patched File'
+			});
+
+			if (uri) {
+				try {
+					engine.savePatched(uri.fsPath);
+					vscode.window.showInformationMessage(`Patched file saved to ${uri.fsPath}`);
+				} catch (error: any) {
+					vscode.window.showErrorMessage(`Save error: ${error.message}`);
+				}
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.setSyntax', async () => {
+			const syntax = await vscode.window.showQuickPick(['Intel', 'AT&T'], {
+				placeHolder: 'Select assembly syntax'
+			});
+
+			if (syntax) {
+				engine.setAssemblySyntax(syntax === 'Intel' ? 'intel' : 'att');
+				vscode.window.showInformationMessage(`Syntax set to ${syntax}`);
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.showLlvmVersion', () => {
+			const version = engine.getLlvmVersion();
+			vscode.window.showInformationMessage(`LLVM MC Version: ${version}`);
+		})
+	);
+
 	console.log('HexCore Disassembler extension activated');
 }
 

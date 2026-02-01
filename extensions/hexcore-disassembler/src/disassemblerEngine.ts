@@ -7,6 +7,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
+import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
 
 // Types
 export interface Instruction {
@@ -67,8 +68,13 @@ export class DisassemblerEngine {
 	private capstone: CapstoneWrapper;
 	private capstoneInitialized: boolean = false;
 
+	// LLVM MC Assembler (for patching)
+	private llvmMc: LlvmMcWrapper;
+	private llvmMcInitialized: boolean = false;
+
 	constructor() {
 		this.capstone = new CapstoneWrapper();
+		this.llvmMc = new LlvmMcWrapper();
 	}
 
 	/**
@@ -760,11 +766,168 @@ export class DisassemblerEngine {
 		return this.baseAddress;
 	}
 
+	// ============================================================================
+	// Assembly & Patching (LLVM MC)
+	// ============================================================================
+
+	/**
+	 * Initialize LLVM MC assembler
+	 */
+	private async ensureLlvmMcInitialized(): Promise<void> {
+		if (!this.llvmMcInitialized) {
+			try {
+				await this.llvmMc.initialize(this.architecture);
+				this.llvmMcInitialized = true;
+				console.log(`LLVM MC initialized for ${this.architecture}`);
+			} catch (error) {
+				console.warn('LLVM MC initialization failed:', error);
+			}
+		} else if (this.llvmMc.getArchitecture() !== this.architecture) {
+			await this.llvmMc.setArchitecture(this.architecture);
+		}
+	}
+
+	/**
+	 * Assemble an instruction
+	 */
+	async assemble(code: string, address?: number): Promise<AssembleResult> {
+		await this.ensureLlvmMcInitialized();
+		return this.llvmMc.assemble(code, address ? BigInt(address) : undefined);
+	}
+
+	/**
+	 * Assemble multiple instructions
+	 */
+	async assembleMultiple(instructions: string[], startAddress?: number): Promise<AssembleResult[]> {
+		await this.ensureLlvmMcInitialized();
+		return this.llvmMc.assembleMultiple(instructions, startAddress ? BigInt(startAddress) : undefined);
+	}
+
+	/**
+	 * Patch instruction at address
+	 * Returns the patch bytes, padded with NOPs if smaller than original
+	 */
+	async patchInstruction(address: number, newInstruction: string): Promise<PatchResult> {
+		await this.ensureLlvmMcInitialized();
+
+		// Get original instruction to know its size
+		const original = this.instructions.get(address);
+		if (!original) {
+			// Disassemble to find original instruction size
+			const disasm = await this.disassembleRange(address, 16);
+			if (disasm.length === 0) {
+				return {
+					success: false,
+					bytes: Buffer.alloc(0),
+					size: 0,
+					originalSize: 0,
+					nopPadding: 0,
+					error: 'Could not find instruction at address'
+				};
+			}
+		}
+
+		const originalSize = original?.size || 1;
+		return this.llvmMc.createPatch(newInstruction, originalSize, BigInt(address));
+	}
+
+	/**
+	 * Apply patch to file buffer (in memory)
+	 */
+	applyPatch(address: number, patchBytes: Buffer): boolean {
+		if (!this.fileBuffer) return false;
+
+		const offset = this.addressToOffset(address);
+		if (offset < 0 || offset + patchBytes.length > this.fileBuffer.length) {
+			return false;
+		}
+
+		patchBytes.copy(this.fileBuffer, offset);
+
+		// Invalidate cached instructions at this address
+		for (let i = 0; i < patchBytes.length; i++) {
+			this.instructions.delete(address + i);
+		}
+
+		return true;
+	}
+
+	/**
+	 * Replace instruction with NOPs
+	 */
+	async nopInstruction(address: number): Promise<boolean> {
+		await this.ensureLlvmMcInitialized();
+
+		const original = this.instructions.get(address);
+		if (!original) return false;
+
+		const nopSled = this.llvmMc.createNopSled(original.size);
+		return this.applyPatch(address, nopSled);
+	}
+
+	/**
+	 * Save patched file to disk
+	 */
+	savePatched(outputPath: string): void {
+		if (!this.fileBuffer) {
+			throw new Error('No file loaded');
+		}
+		fs.writeFileSync(outputPath, this.fileBuffer);
+	}
+
+	/**
+	 * Validate assembly instruction
+	 */
+	async validateInstruction(code: string): Promise<{ valid: boolean; error?: string }> {
+		await this.ensureLlvmMcInitialized();
+		return this.llvmMc.validate(code);
+	}
+
+	/**
+	 * Get NOP instruction for current architecture
+	 */
+	getNop(): Buffer {
+		if (!this.llvmMcInitialized) {
+			// Fallback NOPs
+			switch (this.architecture) {
+				case 'x86':
+				case 'x64':
+					return Buffer.from([0x90]);
+				case 'arm':
+					return Buffer.from([0x00, 0x00, 0xA0, 0xE1]);
+				case 'arm64':
+					return Buffer.from([0x1F, 0x20, 0x03, 0xD5]);
+				default:
+					return Buffer.from([0x90]);
+			}
+		}
+		return this.llvmMc.getNop();
+	}
+
+	/**
+	 * Get LLVM MC version
+	 */
+	getLlvmVersion(): string {
+		if (!this.llvmMcInitialized) return 'not initialized';
+		return this.llvmMc.getVersion();
+	}
+
+	/**
+	 * Set assembly syntax (intel/att) for x86
+	 */
+	setAssemblySyntax(syntax: 'intel' | 'att'): void {
+		if (this.llvmMcInitialized) {
+			this.llvmMc.setSyntax(syntax);
+		}
+	}
+
 	/**
 	 * Dispose of resources
 	 */
 	dispose(): void {
 		this.capstone.dispose();
 		this.capstoneInitialized = false;
+		this.llvmMc.dispose();
+		this.llvmMcInitialized = false;
 	}
 }

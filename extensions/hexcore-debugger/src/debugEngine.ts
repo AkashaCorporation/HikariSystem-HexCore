@@ -1,12 +1,16 @@
 /*---------------------------------------------------------------------------------------------
  *  HexCore Debugger Engine
- *  Debug interface abstraction
+ *  Debug interface abstraction with Unicorn Emulation support
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
 import * as os from 'os';
+import { UnicornWrapper, ArchitectureType, X86_64Registers, EmulationState } from './unicornWrapper';
+
+export type DebugMode = 'native' | 'emulation';
 
 export interface RegisterState {
 	rax: bigint;
@@ -42,6 +46,13 @@ export class DebugEngine {
 	private isRunning: boolean = false;
 	private registers: Partial<RegisterState> = {};
 	private listeners: Array<(event: string, data?: any) => void> = [];
+
+	// Emulation mode
+	private mode: DebugMode = 'native';
+	private emulator?: UnicornWrapper;
+	private architecture: ArchitectureType = 'x64';
+	private baseAddress: bigint = 0x400000n;
+	private fileBuffer?: Buffer;
 
 	async startDebugging(filePath: string): Promise<void> {
 		this.targetPath = filePath;
@@ -210,7 +221,346 @@ export class DebugEngine {
 	}
 
 	stop(): void {
-		this.process?.kill();
+		if (this.mode === 'emulation' && this.emulator) {
+			this.emulator.stop();
+		} else {
+			this.process?.kill();
+		}
 		this.isRunning = false;
+	}
+
+	// ============================================================================
+	// Emulation Mode Methods (Unicorn Engine)
+	// ============================================================================
+
+	/**
+	 * Start emulation mode for a binary file
+	 */
+	async startEmulation(filePath: string, arch?: ArchitectureType): Promise<void> {
+		this.targetPath = filePath;
+		this.mode = 'emulation';
+
+		// Read the file
+		this.fileBuffer = fs.readFileSync(filePath);
+
+		// Detect architecture if not specified
+		this.architecture = arch || this.detectArchitecture();
+
+		// Initialize emulator
+		this.emulator = new UnicornWrapper();
+		await this.emulator.initialize(this.architecture);
+
+		// Detect base address and entry point
+		const { baseAddress, entryPoint, codeOffset, codeSize } = this.analyzeFile();
+		this.baseAddress = baseAddress;
+
+		// Load code into emulator
+		const codeBuffer = this.fileBuffer.subarray(codeOffset, codeOffset + codeSize);
+		this.emulator.loadCode(codeBuffer, baseAddress + BigInt(codeOffset));
+
+		// Setup stack
+		const stackBase = 0x7fff0000n;
+		this.emulator.setupStack(stackBase);
+
+		// Set instruction pointer to entry point
+		this.emulator.setRegister(this.architecture === 'x64' ? 'rip' : 'eip', entryPoint);
+
+		this.isRunning = true;
+		this.emit('emulation-started', { entryPoint, architecture: this.architecture });
+
+		console.log(`Emulation started: ${this.architecture} at 0x${entryPoint.toString(16)}`);
+	}
+
+	/**
+	 * Detect architecture from file headers
+	 */
+	private detectArchitecture(): ArchitectureType {
+		if (!this.fileBuffer) return 'x64';
+
+		// PE file
+		if (this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A) {
+			const peOffset = this.fileBuffer.readUInt32LE(0x3C);
+			if (peOffset + 6 < this.fileBuffer.length) {
+				const machine = this.fileBuffer.readUInt16LE(peOffset + 4);
+				switch (machine) {
+					case 0x014c: return 'x86';
+					case 0x8664: return 'x64';
+					case 0x01c0: return 'arm';
+					case 0xaa64: return 'arm64';
+				}
+			}
+		}
+
+		// ELF file
+		if (this.fileBuffer[0] === 0x7F && this.fileBuffer.toString('ascii', 1, 4) === 'ELF') {
+			const elfClass = this.fileBuffer[4];
+			const machine = this.fileBuffer.readUInt16LE(18);
+			switch (machine) {
+				case 0x03: return elfClass === 2 ? 'x64' : 'x86';
+				case 0x3E: return 'x64';
+				case 0x28: return 'arm';
+				case 0xB7: return 'arm64';
+			}
+		}
+
+		return 'x64';
+	}
+
+	/**
+	 * Analyze file to get base address and entry point
+	 */
+	private analyzeFile(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
+		if (!this.fileBuffer) {
+			return { baseAddress: 0x400000n, entryPoint: 0x401000n, codeOffset: 0, codeSize: 0x1000 };
+		}
+
+		// PE file
+		if (this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A) {
+			return this.analyzePE();
+		}
+
+		// ELF file
+		if (this.fileBuffer[0] === 0x7F && this.fileBuffer.toString('ascii', 1, 4) === 'ELF') {
+			return this.analyzeELF();
+		}
+
+		// Raw binary
+		return {
+			baseAddress: 0x400000n,
+			entryPoint: 0x400000n,
+			codeOffset: 0,
+			codeSize: Math.min(this.fileBuffer.length, 0x100000)
+		};
+	}
+
+	/**
+	 * Analyze PE file
+	 */
+	private analyzePE(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
+		const buf = this.fileBuffer!;
+		const peOffset = buf.readUInt32LE(0x3C);
+		const optHeaderOffset = peOffset + 24;
+		const magic = buf.readUInt16LE(optHeaderOffset);
+		const is64Bit = magic === 0x20B;
+
+		const imageBase = is64Bit
+			? buf.readBigUInt64LE(optHeaderOffset + 24)
+			: BigInt(buf.readUInt32LE(optHeaderOffset + 28));
+
+		const entryPointRVA = buf.readUInt32LE(optHeaderOffset + 16);
+
+		// Find .text section
+		const numberOfSections = buf.readUInt16LE(peOffset + 6);
+		const sizeOfOptionalHeader = buf.readUInt16LE(peOffset + 20);
+		const sectionTableOffset = peOffset + 24 + sizeOfOptionalHeader;
+
+		let codeOffset = 0x1000;
+		let codeSize = 0x1000;
+
+		for (let i = 0; i < numberOfSections; i++) {
+			const sectionOffset = sectionTableOffset + (i * 40);
+			const sectionName = buf.toString('ascii', sectionOffset, sectionOffset + 8).replace(/\0/g, '');
+
+			if (sectionName === '.text' || sectionName === 'CODE') {
+				codeSize = buf.readUInt32LE(sectionOffset + 16);
+				codeOffset = buf.readUInt32LE(sectionOffset + 20);
+				break;
+			}
+		}
+
+		return {
+			baseAddress: imageBase,
+			entryPoint: imageBase + BigInt(entryPointRVA),
+			codeOffset,
+			codeSize
+		};
+	}
+
+	/**
+	 * Analyze ELF file
+	 */
+	private analyzeELF(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
+		const buf = this.fileBuffer!;
+		const is64Bit = buf[4] === 2;
+
+		const entryPoint = is64Bit
+			? buf.readBigUInt64LE(24)
+			: BigInt(buf.readUInt32LE(24));
+
+		// Simplified - assume code starts after headers
+		return {
+			baseAddress: 0x400000n,
+			entryPoint,
+			codeOffset: is64Bit ? 64 : 52, // ELF header size
+			codeSize: Math.min(buf.length - (is64Bit ? 64 : 52), 0x100000)
+		};
+	}
+
+	/**
+	 * Step one instruction in emulation mode
+	 */
+	async emulationStep(): Promise<void> {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+
+		await this.emulator.step();
+		await this.updateEmulationRegisters();
+		this.emit('step');
+	}
+
+	/**
+	 * Continue emulation until breakpoint or end
+	 */
+	async emulationContinue(): Promise<void> {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+
+		await this.emulator.continue();
+		await this.updateEmulationRegisters();
+		this.emit('continue');
+	}
+
+	/**
+	 * Set breakpoint in emulation mode
+	 */
+	emulationSetBreakpoint(address: bigint): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.addBreakpoint(address);
+	}
+
+	/**
+	 * Remove breakpoint in emulation mode
+	 */
+	emulationRemoveBreakpoint(address: bigint): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.removeBreakpoint(address);
+	}
+
+	/**
+	 * Read memory in emulation mode
+	 */
+	emulationReadMemory(address: bigint, size: number): Buffer {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		return this.emulator.readMemory(address, size);
+	}
+
+	/**
+	 * Write memory in emulation mode
+	 */
+	emulationWriteMemory(address: bigint, data: Buffer): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.writeMemory(address, data);
+	}
+
+	/**
+	 * Set register value in emulation mode
+	 */
+	emulationSetRegister(name: string, value: bigint): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.setRegister(name, value);
+	}
+
+	/**
+	 * Update registers from emulator
+	 */
+	private async updateEmulationRegisters(): Promise<void> {
+		if (!this.emulator) return;
+
+		if (this.architecture === 'x64') {
+			const regs = this.emulator.getRegistersX64();
+			this.registers = regs;
+		} else if (this.architecture === 'x86') {
+			const regs = this.emulator.getRegistersX86();
+			this.registers = {
+				rax: BigInt(regs.eax),
+				rbx: BigInt(regs.ebx),
+				rcx: BigInt(regs.ecx),
+				rdx: BigInt(regs.edx),
+				rsi: BigInt(regs.esi),
+				rdi: BigInt(regs.edi),
+				rbp: BigInt(regs.ebp),
+				rsp: BigInt(regs.esp),
+				rip: BigInt(regs.eip),
+				rflags: BigInt(regs.eflags)
+			};
+		}
+	}
+
+	/**
+	 * Get emulation state
+	 */
+	getEmulationState(): EmulationState | null {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			return null;
+		}
+		return this.emulator.getState();
+	}
+
+	/**
+	 * Get current debug mode
+	 */
+	getMode(): DebugMode {
+		return this.mode;
+	}
+
+	/**
+	 * Get memory regions (emulation mode)
+	 */
+	getEmulationMemoryRegions(): MemoryRegion[] {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			return [];
+		}
+		return this.emulator.getMemoryRegions().map(r => ({
+			address: r.address,
+			size: Number(r.size),
+			permissions: r.permissions,
+			name: r.name
+		}));
+	}
+
+	/**
+	 * Save emulation snapshot
+	 */
+	saveSnapshot(): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.saveState();
+		this.emit('snapshot-saved');
+	}
+
+	/**
+	 * Restore emulation snapshot
+	 */
+	restoreSnapshot(): void {
+		if (this.mode !== 'emulation' || !this.emulator) {
+			throw new Error('Not in emulation mode');
+		}
+		this.emulator.restoreState();
+		this.updateEmulationRegisters();
+		this.emit('snapshot-restored');
+	}
+
+	/**
+	 * Dispose emulator resources
+	 */
+	disposeEmulation(): void {
+		if (this.emulator) {
+			this.emulator.dispose();
+			this.emulator = undefined;
+		}
+		this.mode = 'native';
 	}
 }

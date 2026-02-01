@@ -1,0 +1,73 @@
+{
+  "name": "hexcore-llvm-mc",
+  "version": "1.0.0",
+  "description": "LLVM MC-based assembler bindings for Node.js - Part of HikariSystem HexCore",
+  "main": "index.js",
+  "module": "index.mjs",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "clean": "node-gyp clean",
+    "configure": "node-gyp configure",
+    "test": "node test/test.js",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "keywords": [
+    "llvm",
+    "assembler",
+    "assembly",
+    "asm",
+    "x86",
+    "x86-64",
+    "arm",
+    "arm64",
+    "aarch64",
+    "mips",
+    "riscv",
+    "risc-v",
+    "powerpc",
+    "sparc",
+    "machine-code",
+    "binary",
+    "disassembler",
+    "hexcore",
+    "hikari"
+  ],
+  "author": "HikariSystem",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.0.0"
+  },
+  "devDependencies": {
+    "node-gyp": "^10.0.0"
+  },
+  "files": [
+    "src/",
+    "deps/",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "binding.gyp",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hikarisystem/hexcore-llvm-mc"
+  },
+  "bugs": {
+    "url": "https://github.com/hikarisystem/hexcore-llvm-mc/issues"
+  },
+  "homepage": "https://github.com/hikarisystem/hexcore-llvm-mc#readme",
+  "gypfile": true
+}

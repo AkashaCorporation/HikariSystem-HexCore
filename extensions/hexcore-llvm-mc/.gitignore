@@ -1,0 +1,25 @@
+# Build outputs
+build/
+Release/
+Debug/
+
+# Dependencies (too large for git - download separately)
+deps/
+node_modules/
+
+# Lock files
+package-lock.json
+
+# Compiled outputs
+*.node
+*.obj
+*.o
+*.lib
+*.a
+*.so
+*.dylib
+
+# IDE
+.vscode/
+*.suo
+*.user
