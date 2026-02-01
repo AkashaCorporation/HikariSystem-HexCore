@@ -5,9 +5,35 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-02-01 - "Integration"
+
+### Added
+
+#### hexcore-debugger: Unicorn Emulation Mode
+- CPU emulation support via Unicorn Engine
+- Multi-architecture emulation (x86, x64, ARM, ARM64, MIPS, RISC-V)
+- Commands: emulate, step, continue, breakpoints
+- Memory read/write and register manipulation
+- Snapshot save/restore for state management
+- Auto-detection of PE/ELF architecture and entry points
+
+#### hexcore-disassembler: LLVM-MC Patching
+- Inline assembly patching with LLVM MC backend
+- Patch instructions with automatic NOP padding
+- NOP instruction replacement
+- Assemble single/multiple instructions
+- Save patched files to disk
+- Intel/AT&T syntax toggle for x86
+
+#### hexcore-llvm-mc: New Native Module
+- LLVM 18.1.8 MC-based assembler (replaces Keystone)
+- Full multi-arch support: X86, ARM, ARM64, MIPS, RISC-V, PowerPC, SPARC, SystemZ, Hexagon, WebAssembly, BPF, LoongArch
+- N-API bindings with async assembly support
+- Plug-and-play (no external LLVM installation required)
+
 ## [3.0.0] - 2026-01-31 - "Trinity"
 
-### 🚀 Added - New Engines
+### Added - New Engines
 
 #### hexcore-unicorn v1.0.0
 - **Complete Unicorn Engine bindings** using N-API
@@ -48,7 +74,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **CTF-Ready Toolkit:**
 - **Disassembly**: hexcore-capstone (analyze code)
-- **Assembly**: hexcore-keystone (create/modify code)  
+- **Assembly**: hexcore-keystone (create/modify code)
 - **Emulation**: hexcore-unicorn (execute and debug)
 
 Complete binary analysis pipeline for security research and CTF competitions.
