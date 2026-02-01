@@ -20,6 +20,12 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/TargetParser/Triple.h>
 
+// Object file parsing for extracting code bytes
+#include <llvm/Object/ObjectFile.h>
+#include <llvm/Object/ELFObjectFile.h>
+#include <llvm/Object/COFF.h>
+#include <llvm/Object/MachO.h>
+
 #include <sstream>
 
 Napi::FunctionReference LlvmMcWrapper::constructor;
@@ -215,10 +221,69 @@ bool LlvmMcWrapper::AssembleCode(const std::string& code, uint64_t address,
         // Finalize the stream
         streamer->finish();
 
-        // Extract the bytes (skip ELF/COFF header for raw bytes)
-        // For now, return the full object file content
-        // A more sophisticated implementation would parse the object and extract just code
-        bytes.assign(codeBuffer.begin(), codeBuffer.end());
+        // Extract just the code bytes from the object file
+        if (codeBuffer.empty()) {
+            error = "No code generated";
+            return false;
+        }
+
+        // Create a MemoryBuffer from the assembled object
+        auto objBuffer = llvm::MemoryBuffer::getMemBuffer(
+            llvm::StringRef(codeBuffer.data(), codeBuffer.size()),
+            "", false);
+
+        // Parse as object file to extract .text section
+        auto objOrErr = llvm::object::ObjectFile::createObjectFile(
+            objBuffer->getMemBufferRef());
+
+        if (!objOrErr) {
+            // If we can't parse as object file, try to use raw bytes
+            // This might happen with very simple code
+            llvm::consumeError(objOrErr.takeError());
+            bytes.assign(codeBuffer.begin(), codeBuffer.end());
+            return true;
+        }
+
+        auto& obj = *objOrErr.get();
+
+        // Find the .text section (or equivalent code section)
+        bool foundCode = false;
+        for (const auto& section : obj.sections()) {
+            auto nameOrErr = section.getName();
+            if (!nameOrErr) {
+                llvm::consumeError(nameOrErr.takeError());
+                continue;
+            }
+
+            llvm::StringRef sectionName = *nameOrErr;
+
+            // Check for code sections by name or flags
+            bool isCodeSection = sectionName == ".text" ||
+                                 sectionName == "__text" ||  // Mach-O
+                                 sectionName == "CODE" ||
+                                 section.isText();
+
+            if (isCodeSection) {
+                auto contentsOrErr = section.getContents();
+                if (contentsOrErr) {
+                    llvm::StringRef contents = *contentsOrErr;
+                    if (!contents.empty()) {
+                        bytes.assign(contents.begin(), contents.end());
+                        foundCode = true;
+                        break;
+                    }
+                } else {
+                    llvm::consumeError(contentsOrErr.takeError());
+                }
+            }
+        }
+
+        if (!foundCode) {
+            // Fallback: return all bytes if no .text section found
+            // This can happen with some object formats
+            bytes.assign(codeBuffer.begin(), codeBuffer.end());
+        }
+
         return true;
 
     } catch (const std::exception& e) {

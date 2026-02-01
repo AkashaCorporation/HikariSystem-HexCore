@@ -23,6 +23,8 @@
 	"activationEvents": [
 		"onCommand:hexcore.debug.start",
 		"onCommand:hexcore.debug.attach",
+		"onCommand:hexcore.debug.emulate",
+		"onCommand:hexcore.debug.emulateWithArch",
 		"onView:hexcore.debugger.view"
 	],
 	"main": "./out/extension.js",
@@ -78,6 +80,54 @@
 				"command": "hexcore.debug.traceAPI",
 				"title": "Enable API Tracing",
 				"category": "HexCore Debugger"
+			},
+			{
+				"command": "hexcore.debug.emulate",
+				"title": "Emulate: Start Emulation",
+				"category": "HexCore Debugger",
+				"icon": "$(vm)"
+			},
+			{
+				"command": "hexcore.debug.emulateWithArch",
+				"title": "Emulate: Start with Architecture",
+				"category": "HexCore Debugger",
+				"icon": "$(vm)"
+			},
+			{
+				"command": "hexcore.debug.emulationStep",
+				"title": "Emulate: Step Instruction",
+				"category": "HexCore Debugger",
+				"icon": "$(debug-step-into)"
+			},
+			{
+				"command": "hexcore.debug.emulationContinue",
+				"title": "Emulate: Continue",
+				"category": "HexCore Debugger",
+				"icon": "$(debug-continue)"
+			},
+			{
+				"command": "hexcore.debug.emulationBreakpoint",
+				"title": "Emulate: Set Breakpoint",
+				"category": "HexCore Debugger",
+				"icon": "$(debug-breakpoint)"
+			},
+			{
+				"command": "hexcore.debug.emulationReadMemory",
+				"title": "Emulate: Read Memory",
+				"category": "HexCore Debugger",
+				"icon": "$(file-binary)"
+			},
+			{
+				"command": "hexcore.debug.saveSnapshot",
+				"title": "Emulate: Save Snapshot",
+				"category": "HexCore Debugger",
+				"icon": "$(save)"
+			},
+			{
+				"command": "hexcore.debug.restoreSnapshot",
+				"title": "Emulate: Restore Snapshot",
+				"category": "HexCore Debugger",
+				"icon": "$(history)"
 			}
 		],
 		"viewsContainers": {
@@ -138,6 +188,9 @@
 	"scripts": {
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"hexcore-unicorn": "file:../hexcore-unicorn"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",

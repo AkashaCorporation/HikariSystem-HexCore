@@ -77,6 +77,45 @@
 				"command": "hexcore.disasm.exportASM",
 				"title": "Export Assembly",
 				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.patchInstruction",
+				"title": "Patch Instruction",
+				"category": "HexCore Disassembler",
+				"icon": "$(edit)"
+			},
+			{
+				"command": "hexcore.disasm.nopInstruction",
+				"title": "NOP Instruction",
+				"category": "HexCore Disassembler",
+				"icon": "$(close)"
+			},
+			{
+				"command": "hexcore.disasm.assemble",
+				"title": "Assemble Code",
+				"category": "HexCore Disassembler",
+				"icon": "$(code)"
+			},
+			{
+				"command": "hexcore.disasm.assembleMultiple",
+				"title": "Assemble Multiple Instructions",
+				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.savePatchedFile",
+				"title": "Save Patched File",
+				"category": "HexCore Disassembler",
+				"icon": "$(save-as)"
+			},
+			{
+				"command": "hexcore.disasm.setSyntax",
+				"title": "Set Assembly Syntax",
+				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.showLlvmVersion",
+				"title": "Show LLVM Version",
+				"category": "HexCore Disassembler"
 			}
 		],
 		"menus": {
@@ -194,7 +233,8 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"dependencies": {
-		"hexcore-capstone": "file:../hexcore-capstone"
+		"hexcore-capstone": "file:../hexcore-capstone",
+		"hexcore-llvm-mc": "file:../hexcore-llvm-mc"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",
