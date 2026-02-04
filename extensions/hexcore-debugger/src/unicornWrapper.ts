@@ -1,10 +1,9 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Debugger - Unicorn Emulation Wrapper
- *  CPU emulation interface using Unicorn Engine
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as path from 'path';
+import { loadNativeModule } from 'hexcore-common';
 
 // Types from hexcore-unicorn
 interface UnicornModule {
@@ -142,6 +141,8 @@ export class UnicornWrapper {
 	private unicornModule?: UnicornModule;
 	private uc?: UnicornInstance;
 	private architecture: ArchitectureType = 'x64';
+	private initialized: boolean = false;
+	private lastError?: string;
 	private state: EmulationState = {
 		isRunning: false,
 		isPaused: false,
@@ -158,6 +159,14 @@ export class UnicornWrapper {
 	 * Initialize the Unicorn engine
 	 */
 	async initialize(arch: ArchitectureType): Promise<void> {
+		if (this.initialized && this.uc && this.architecture === arch) {
+			return;
+		}
+
+		if (this.uc) {
+			this.dispose();
+		}
+
 		this.architecture = arch;
 
 		// Try to load hexcore-unicorn from the extensions folder
@@ -167,23 +176,26 @@ export class UnicornWrapper {
 			'hexcore-unicorn'
 		];
 
-		for (const modulePath of possiblePaths) {
-			try {
-				this.unicornModule = require(modulePath) as UnicornModule;
-				break;
-			} catch {
-				continue;
-			}
-		}
+		const result = loadNativeModule<UnicornModule>({
+			moduleName: 'hexcore-unicorn',
+			candidatePaths: possiblePaths
+		});
 
-		if (!this.unicornModule) {
+		if (!result.module) {
+			this.lastError = result.errorMessage;
+			this.initialized = false;
 			throw new Error('Failed to load hexcore-unicorn module');
 		}
 
-		const { arch: ucArch, mode } = this.getArchMode(arch);
-		this.uc = new this.unicornModule.Unicorn(ucArch, mode);
+		this.lastError = undefined;
+		const unicornModule = result.module;
+		this.unicornModule = unicornModule;
 
-		console.log(`Unicorn initialized: ${arch} (version: ${this.unicornModule.version().string})`);
+		const { arch: ucArch, mode } = this.getArchMode(arch);
+		this.uc = new unicornModule.Unicorn(ucArch, mode);
+		this.initialized = true;
+
+		console.log(`Unicorn initialized: ${arch} (version: ${unicornModule.version().string})`);
 	}
 
 	/**
@@ -215,7 +227,9 @@ export class UnicornWrapper {
 	 * Load binary code into emulator memory
 	 */
 	loadCode(code: Buffer, baseAddress: bigint): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const PROT = this.unicornModule!.PROT;
 		const pageSize = BigInt(this.uc.pageSize);
@@ -235,13 +249,21 @@ export class UnicornWrapper {
 	 * Map additional memory region
 	 */
 	mapMemory(address: bigint, size: number, permissions: 'r' | 'w' | 'x' | 'rw' | 'rx' | 'rwx'): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const PROT = this.unicornModule!.PROT;
 		let perms = 0;
-		if (permissions.includes('r')) perms |= PROT.READ;
-		if (permissions.includes('w')) perms |= PROT.WRITE;
-		if (permissions.includes('x')) perms |= PROT.EXEC;
+		if (permissions.includes('r')) {
+			perms |= PROT.READ;
+		}
+		if (permissions.includes('w')) {
+			perms |= PROT.WRITE;
+		}
+		if (permissions.includes('x')) {
+			perms |= PROT.EXEC;
+		}
 
 		const pageSize = BigInt(this.uc.pageSize);
 		const alignedBase = (address / pageSize) * pageSize;
@@ -254,7 +276,9 @@ export class UnicornWrapper {
 	 * Set up stack for emulation
 	 */
 	setupStack(stackBase: bigint, stackSize: number = 0x100000): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const PROT = this.unicornModule!.PROT;
 		this.uc.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
@@ -268,7 +292,9 @@ export class UnicornWrapper {
 	 * Set stack pointer based on architecture
 	 */
 	private setStackPointer(sp: bigint): void {
-		if (!this.uc) return;
+		if (!this.uc) {
+			return;
+		}
 
 		const X86_REG = this.unicornModule!.X86_REG;
 		const ARM64_REG = this.unicornModule!.ARM64_REG;
@@ -290,7 +316,9 @@ export class UnicornWrapper {
 	 * Start emulation
 	 */
 	async start(startAddress: bigint, endAddress: bigint = 0n, timeout: number = 0, count: number = 0): Promise<void> {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		this.state.isRunning = true;
 		this.state.isPaused = false;
@@ -334,7 +362,9 @@ export class UnicornWrapper {
 	 * Step one instruction
 	 */
 	async step(): Promise<void> {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const currentAddr = this.state.currentAddress;
 		this.stepMode = true;
@@ -349,7 +379,9 @@ export class UnicornWrapper {
 	 * Continue execution
 	 */
 	async continue(): Promise<void> {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		this.state.isPaused = false;
 		this.stepMode = false;
@@ -360,7 +392,9 @@ export class UnicornWrapper {
 	 * Stop emulation
 	 */
 	stop(): void {
-		if (!this.uc) return;
+		if (!this.uc) {
+			return;
+		}
 		this.uc.emuStop();
 		this.state.isRunning = false;
 	}
@@ -390,7 +424,9 @@ export class UnicornWrapper {
 	 * Read memory
 	 */
 	readMemory(address: bigint, size: number): Buffer {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 		return this.uc.memRead(address, size);
 	}
 
@@ -398,7 +434,9 @@ export class UnicornWrapper {
 	 * Write memory
 	 */
 	writeMemory(address: bigint, data: Buffer): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 		this.uc.memWrite(address, data);
 	}
 
@@ -406,7 +444,9 @@ export class UnicornWrapper {
 	 * Get x86-64 registers
 	 */
 	getRegistersX64(): X86_64Registers {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const REG = this.unicornModule!.X86_REG;
 		return {
@@ -435,7 +475,9 @@ export class UnicornWrapper {
 	 * Get x86 (32-bit) registers
 	 */
 	getRegistersX86(): X86Registers {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const REG = this.unicornModule!.X86_REG;
 		return {
@@ -456,7 +498,9 @@ export class UnicornWrapper {
 	 * Get ARM64 registers
 	 */
 	getRegistersArm64(): Arm64Registers {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const REG = this.unicornModule!.ARM64_REG;
 		return {
@@ -480,7 +524,9 @@ export class UnicornWrapper {
 	 * Set register value
 	 */
 	setRegister(name: string, value: bigint | number): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		const X86_REG = this.unicornModule!.X86_REG;
 		const ARM64_REG = this.unicornModule!.ARM64_REG;
@@ -518,14 +564,22 @@ export class UnicornWrapper {
 	 * Get mapped memory regions
 	 */
 	getMemoryRegions(): MemoryRegion[] {
-		if (!this.uc) return [];
+		if (!this.uc) {
+			return [];
+		}
 
 		const PROT = this.unicornModule!.PROT;
 		return this.uc.memRegions().map(region => {
 			let perms = '';
-			if (region.perms & PROT.READ) perms += 'r';
-			if (region.perms & PROT.WRITE) perms += 'w';
-			if (region.perms & PROT.EXEC) perms += 'x';
+			if (region.perms & PROT.READ) {
+				perms += 'r';
+			}
+			if (region.perms & PROT.WRITE) {
+				perms += 'w';
+			}
+			if (region.perms & PROT.EXEC) {
+				perms += 'x';
+			}
 
 			return {
 				address: region.begin,
@@ -539,7 +593,9 @@ export class UnicornWrapper {
 	 * Save current state (snapshot)
 	 */
 	saveState(): void {
-		if (!this.uc) throw new Error('Unicorn not initialized');
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
 
 		if (this.savedContext) {
 			this.savedContext.free();
@@ -551,7 +607,9 @@ export class UnicornWrapper {
 	 * Restore saved state
 	 */
 	restoreState(): void {
-		if (!this.uc || !this.savedContext) throw new Error('No saved state');
+		if (!this.uc || !this.savedContext) {
+			throw new Error('No saved state');
+		}
 		this.uc.contextRestore(this.savedContext);
 	}
 
@@ -589,7 +647,11 @@ export class UnicornWrapper {
 	 * Check if initialized
 	 */
 	isInitialized(): boolean {
-		return this.uc !== undefined;
+		return this.initialized && this.uc !== undefined;
+	}
+
+	getLastError(): string | undefined {
+		return this.lastError;
 	}
 
 	/**
@@ -604,8 +666,10 @@ export class UnicornWrapper {
 			this.uc.close();
 			this.uc = undefined;
 		}
+		this.initialized = false;
 		this.codeHooks.clear();
 		this.memoryHooks.clear();
 		this.breakpoints.clear();
 	}
 }
+

@@ -1,9 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Debugger Engine
- *  Debug interface abstraction with Unicorn Emulation support
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { spawn, ChildProcess } from 'child_process';
@@ -50,6 +48,7 @@ export class DebugEngine {
 	// Emulation mode
 	private mode: DebugMode = 'native';
 	private emulator?: UnicornWrapper;
+	private emulationInitError?: string;
 	private architecture: ArchitectureType = 'x64';
 	private baseAddress: bigint = 0x400000n;
 	private fileBuffer?: Buffer;
@@ -75,7 +74,7 @@ export class DebugEngine {
 
 		this.setupProcessHandlers();
 		this.isRunning = true;
-		
+
 		// Initial setup commands
 		if (platform !== 'win32') {
 			this.sendCommand('-gdb-set mi-async on');
@@ -174,7 +173,9 @@ export class DebugEngine {
 	}
 
 	private setupProcessHandlers(): void {
-		if (!this.process) return;
+		if (!this.process) {
+			return;
+		}
 
 		this.process.stdout?.on('data', (data: Buffer) => {
 			const output = data.toString();
@@ -247,8 +248,18 @@ export class DebugEngine {
 		this.architecture = arch || this.detectArchitecture();
 
 		// Initialize emulator
-		this.emulator = new UnicornWrapper();
-		await this.emulator.initialize(this.architecture);
+		if (!this.emulator) {
+			this.emulator = new UnicornWrapper();
+		}
+
+		try {
+			await this.emulator.initialize(this.architecture);
+			this.emulationInitError = undefined;
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.emulationInitError = message;
+			throw new Error(message);
+		}
 
 		// Detect base address and entry point
 		const { baseAddress, entryPoint, codeOffset, codeSize } = this.analyzeFile();
@@ -271,11 +282,29 @@ export class DebugEngine {
 		console.log(`Emulation started: ${this.architecture} at 0x${entryPoint.toString(16)}`);
 	}
 
+	async getEmulationAvailability(arch: ArchitectureType): Promise<{ available: boolean; error?: string }> {
+		if (!this.emulator) {
+			this.emulator = new UnicornWrapper();
+		}
+
+		try {
+			await this.emulator.initialize(arch);
+			this.emulationInitError = undefined;
+			return { available: true };
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.emulationInitError = message;
+			return { available: false, error: message };
+		}
+	}
+
 	/**
 	 * Detect architecture from file headers
 	 */
 	private detectArchitecture(): ArchitectureType {
-		if (!this.fileBuffer) return 'x64';
+		if (!this.fileBuffer) {
+			return 'x64';
+		}
 
 		// PE file
 		if (this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A) {
@@ -476,7 +505,9 @@ export class DebugEngine {
 	 * Update registers from emulator
 	 */
 	private async updateEmulationRegisters(): Promise<void> {
-		if (!this.emulator) return;
+		if (!this.emulator) {
+			return;
+		}
 
 		if (this.architecture === 'x64') {
 			const regs = this.emulator.getRegistersX64();
@@ -564,3 +595,4 @@ export class DebugEngine {
 		this.mode = 'native';
 	}
 }
+

@@ -13,7 +13,7 @@
     }
   },
   "scripts": {
-    "install": "prebuild-install || node-gyp rebuild",
+    "install": "node ../../scripts/hexcore-native-install.js",
     "build": "node-gyp rebuild",
     "build:debug": "node-gyp rebuild --debug",
     "prebuild": "prebuildify --napi --strip",
@@ -53,6 +53,7 @@
   },
   "homepage": "https://github.com/LXrdKnowkill/hexcore-unicorn#readme",
   "engines": {
+    "vscode": "^1.0.0",
     "node": ">=18.0.0"
   },
   "dependencies": {

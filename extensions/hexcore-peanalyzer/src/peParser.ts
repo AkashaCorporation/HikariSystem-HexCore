@@ -1,7 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore PE Analyzer - PE Parser
- *  Parses PE (Portable Executable) files according to Microsoft specification
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
@@ -123,7 +122,13 @@ export interface SectionHeader {
 
 export interface ImportEntry {
 	dllName: string;
-	functions: string[];
+	functions: ImportFunctionEntry[];
+}
+
+export interface ImportFunctionEntry {
+	name: string;
+	ordinal?: number;
+	address: number; // IAT address
 }
 
 export interface ExportEntry {
@@ -384,7 +389,7 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 
 		// Parse Imports
 		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[1]?.size > 0) {
-			analysis.imports = parseImports(fd, buffer, analysis.optionalHeader.dataDirectories[1], analysis.sections);
+			analysis.imports = parseImports(fd, buffer, analysis.optionalHeader.dataDirectories[1], analysis.sections, analysis.optionalHeader.is64Bit);
 		}
 
 		// Calculate overall entropy
@@ -502,7 +507,9 @@ function parseSectionHeaders(buffer: Buffer, offset: number, count: number, fd: 
 
 	for (let i = 0; i < count; i++) {
 		const secOffset = offset + i * 40;
-		if (secOffset + 40 > buffer.length) break;
+		if (secOffset + 40 > buffer.length) {
+			break;
+		}
 
 		const name = buffer.toString('ascii', secOffset, secOffset + 8).replace(/\x00/g, '');
 		const characteristics = buffer.readUInt32LE(secOffset + 36);
@@ -540,8 +547,9 @@ function parseSectionHeaders(buffer: Buffer, offset: number, count: number, fd: 
 // IMPORT PARSER
 // ============================================================================
 
-function parseImports(fd: number, headerBuffer: Buffer, importDir: DataDirectory, sections: SectionHeader[]): ImportEntry[] {
+function parseImports(fd: number, headerBuffer: Buffer, importDir: DataDirectory, sections: SectionHeader[], is64Bit: boolean): ImportEntry[] {
 	const imports: ImportEntry[] = [];
+	const pointerSize = is64Bit ? 8 : 4;
 
 	if (importDir.virtualAddress === 0 || importDir.size === 0) {
 		return imports;
@@ -549,10 +557,9 @@ function parseImports(fd: number, headerBuffer: Buffer, importDir: DataDirectory
 
 	// Find section containing import directory
 	const fileOffset = rvaToFileOffset(importDir.virtualAddress, sections);
-	if (fileOffset === 0) return imports;
-
-	// Determine if 32-bit or 64-bit based on Optional Header magic (already parsed)
-	// For simplicity, we'll try to detect from the imports themselves
+	if (fileOffset === 0) {
+		return imports;
+	}
 
 	try {
 		const importBuffer = Buffer.alloc(Math.min(importDir.size, 16384));
@@ -562,65 +569,105 @@ function parseImports(fd: number, headerBuffer: Buffer, importDir: DataDirectory
 		while (offset + 20 <= importBuffer.length && imports.length < 200) {
 			const originalFirstThunk = importBuffer.readUInt32LE(offset); // ILT RVA
 			const nameRVA = importBuffer.readUInt32LE(offset + 12);
-			const firstThunk = importBuffer.readUInt32LE(offset + 16); // IAT RVA
+			const firstThunk = importBuffer.readUInt32LE(offset + 16); // IAT RVA (Base for addresses)
 
-			if (nameRVA === 0) break;
+			if (nameRVA === 0 && firstThunk === 0) {
+				break;
+			} // End of imports
 
 			// Read DLL name
 			const nameOffset = rvaToFileOffset(nameRVA, sections);
+			let dllName = `Unknown_0x${nameRVA.toString(16)}`;
+
 			if (nameOffset > 0) {
 				const nameBuffer = Buffer.alloc(256);
 				fs.readSync(fd, nameBuffer, 0, 256, nameOffset);
-				const dllName = readNullTerminatedString(nameBuffer);
+				dllName = readNullTerminatedString(nameBuffer);
+			}
 
-				// Parse imported functions from ILT or IAT
-				const functions: string[] = [];
-				const thunkRVA = originalFirstThunk || firstThunk;
+			// Parse imported functions from ILT or IAT
+			const functions: ImportFunctionEntry[] = [];
+			const thunkRVA = originalFirstThunk || firstThunk;
 
-				if (thunkRVA > 0) {
-					const thunkOffset = rvaToFileOffset(thunkRVA, sections);
-					if (thunkOffset > 0) {
-						const thunkBuffer = Buffer.alloc(2048);
-						fs.readSync(fd, thunkBuffer, 0, thunkBuffer.length, thunkOffset);
+			if (thunkRVA > 0) {
+				const thunkOffset = rvaToFileOffset(thunkRVA, sections);
+				if (thunkOffset > 0) {
+					// Read enough for a reasonable number of imports
+					const thunkBuffer = Buffer.alloc(4096);
+					fs.readSync(fd, thunkBuffer, 0, thunkBuffer.length, thunkOffset);
 
-						let thunkPos = 0;
-						while (thunkPos + 4 <= thunkBuffer.length && functions.length < 100) {
-							const thunkValue = thunkBuffer.readUInt32LE(thunkPos);
-							if (thunkValue === 0) break;
-
-							// Check if import by ordinal (high bit set for 32-bit)
-							if (thunkValue & 0x80000000) {
-								const ordinal = thunkValue & 0xFFFF;
-								functions.push(`Ordinal ${ordinal}`);
-							} else {
-								// Import by name - thunkValue is RVA to IMAGE_IMPORT_BY_NAME
-								const hintNameOffset = rvaToFileOffset(thunkValue, sections);
-								if (hintNameOffset > 0) {
-									const hintNameBuffer = Buffer.alloc(256);
-									fs.readSync(fd, hintNameBuffer, 0, 256, hintNameOffset);
-									// Skip 2-byte hint, read name
-									const funcName = readNullTerminatedString(hintNameBuffer.subarray(2));
-									if (funcName.length > 0 && funcName.length < 200) {
-										functions.push(funcName);
-									}
-								}
-							}
-
-							thunkPos += 4; // 32-bit thunk size
+					let thunkPos = 0;
+					let functionIndex = 0;
+					while (thunkPos + pointerSize <= thunkBuffer.length && functions.length < 200) {
+						let thunkValue: number | bigint;
+						if (is64Bit) {
+							thunkValue = thunkBuffer.readBigUInt64LE(thunkPos);
+						} else {
+							thunkValue = thunkBuffer.readUInt32LE(thunkPos);
 						}
+
+						if (thunkValue === 0 || (typeof thunkValue === 'bigint' && thunkValue === 0n)) {
+							break;
+						}
+
+						const iatAddress = firstThunk + (functionIndex * pointerSize); // RVA of this import slot
+
+						// Check if import by ordinal
+						const isOrdinal = is64Bit
+							? (BigInt(thunkValue) & 0x8000000000000000n) !== 0n
+							: (Number(thunkValue) & 0x80000000) !== 0;
+
+						if (isOrdinal) {
+							const ordinal = is64Bit
+								? Number(BigInt(thunkValue) & 0xFFFFn)
+								: Number(thunkValue) & 0xFFFF;
+
+							functions.push({
+								name: `Ordinal_${ordinal}`,
+								ordinal,
+								address: iatAddress
+							});
+						} else {
+							// Import by name - thunkValue is RVA to IMAGE_IMPORT_BY_NAME
+							// Mask off high bits just in case
+							const nameRefRVA = is64Bit
+								? Number(BigInt(thunkValue) & 0x7FFFFFFFn)
+								: Number(thunkValue) & 0x7FFFFFFF;
+
+							const hintNameOffset = rvaToFileOffset(nameRefRVA, sections);
+							if (hintNameOffset > 0) {
+								const hintNameBuffer = Buffer.alloc(256);
+								fs.readSync(fd, hintNameBuffer, 0, 256, hintNameOffset);
+								// Skip 2-byte hint, read name
+								const funcName = readNullTerminatedString(hintNameBuffer.subarray(2));
+								if (funcName.length > 0) {
+									functions.push({
+										name: funcName,
+										address: iatAddress
+									});
+								} else {
+									functions.push({ name: `Func_0x${nameRefRVA.toString(16)}`, address: iatAddress });
+								}
+							} else {
+								functions.push({ name: `Func_0x${nameRefRVA.toString(16)}`, address: iatAddress });
+							}
+						}
+
+						thunkPos += pointerSize;
+						functionIndex++;
 					}
 				}
-
-				imports.push({
-					dllName,
-					functions: functions.slice(0, 50), // Limit to 50 functions per DLL
-				});
 			}
+
+			imports.push({
+				dllName,
+				functions: functions // No limit, allow Disassembler to handle limiting if needed
+			});
 
 			offset += 20; // Size of IMAGE_IMPORT_DESCRIPTOR
 		}
 	} catch (e) {
-		// Ignore parsing errors
+		console.error('Import parse error:', e);
 	}
 
 	return imports;
@@ -641,7 +688,9 @@ function parseFlags(value: number, flagMap: Record<number, string>): string[] {
 }
 
 function calculateEntropy(buffer: Buffer): number {
-	if (buffer.length === 0) return 0;
+	if (buffer.length === 0) {
+		return 0;
+	}
 
 	const freq = new Array(256).fill(0);
 	for (let i = 0; i < buffer.length; i++) {
@@ -670,7 +719,9 @@ function rvaToFileOffset(rva: number, sections: SectionHeader[]): number {
 
 function readNullTerminatedString(buffer: Buffer): string {
 	let end = buffer.indexOf(0);
-	if (end === -1) end = buffer.length;
+	if (end === -1) {
+		end = buffer.length;
+	}
 	return buffer.toString('ascii', 0, end);
 }
 
@@ -689,11 +740,21 @@ function detectPackers(buffer: Buffer, sections: SectionHeader[]): string[] {
 	// Check section names for packer signatures
 	for (const section of sections) {
 		const name = section.name.toLowerCase();
-		if (name.includes('upx')) detected.add('UPX');
-		if (name.includes('aspack')) detected.add('ASPack');
-		if (name.includes('vmp')) detected.add('VMProtect');
-		if (name.includes('themida')) detected.add('Themida');
-		if (name.includes('enigma')) detected.add('Enigma');
+		if (name.includes('upx')) {
+			detected.add('UPX');
+		}
+		if (name.includes('aspack')) {
+			detected.add('ASPack');
+		}
+		if (name.includes('vmp')) {
+			detected.add('VMProtect');
+		}
+		if (name.includes('themida')) {
+			detected.add('Themida');
+		}
+		if (name.includes('enigma')) {
+			detected.add('Enigma');
+		}
 	}
 
 	return Array.from(detected);
@@ -796,7 +857,9 @@ function parseRichHeader(buffer: Buffer): RichHeader {
 		const entriesEnd = richOffset;
 
 		for (let offset = entriesStart; offset < entriesEnd; offset += 8) {
-			if (offset + 8 > entriesEnd) break;
+			if (offset + 8 > entriesEnd) {
+				break;
+			}
 
 			const compId = buffer.readUInt32LE(offset) ^ xorKey;
 			const count = buffer.readUInt32LE(offset + 4) ^ xorKey;
@@ -900,7 +963,7 @@ function detectAntiDebug(buffer: Buffer, imports: ImportEntry[]): AntiDebugTechn
 
 	for (const api of antiDebugApis) {
 		const dll = imports.find(i => i.dllName.toLowerCase() === api.dll);
-		if (dll && dll.functions.some(f => f.toLowerCase().includes(api.api.toLowerCase()))) {
+		if (dll && dll.functions.some(f => f.name.toLowerCase().includes(api.api.toLowerCase()))) {
 			techniques.push({
 				name: api.api,
 				description: `Uses ${api.api} API for debugger detection`,
@@ -1001,7 +1064,9 @@ function parseResources(fd: number, buffer: Buffer, resourceDir: DataDirectory, 
 		}
 
 		const fileOffset = rvaToFileOffset(resourceDir.virtualAddress, sections);
-		if (fileOffset === 0) return resources;
+		if (fileOffset === 0) {
+			return resources;
+		}
 
 		// Resource types
 		const resourceTypes: Record<number, string> = {
@@ -1070,7 +1135,9 @@ function parseResources(fd: number, buffer: Buffer, resourceDir: DataDirectory, 
 		const seen = new Set<string>();
 		return resources.filter(r => {
 			const key = r.type + r.name;
-			if (seen.has(key)) return false;
+			if (seen.has(key)) {
+				return false;
+			}
 			seen.add(key);
 			return true;
 		});
@@ -1094,7 +1161,9 @@ function parseTLSDirectory(fd: number, buffer: Buffer, tlsDir: DataDirectory, se
 		}
 
 		const fileOffset = rvaToFileOffset(tlsDir.virtualAddress, sections);
-		if (fileOffset === 0) return callbacks;
+		if (fileOffset === 0) {
+			return callbacks;
+		}
 
 		// TLS directory structure:
 		// 0x00: StartAddressOfRawData
@@ -1108,15 +1177,19 @@ function parseTLSDirectory(fd: number, buffer: Buffer, tlsDir: DataDirectory, se
 		fs.readSync(fd, tlsBuffer, 0, 64, fileOffset);
 
 		const callbacksRVAOffset = is64Bit ? 0x18 : 0x0C;
-		let callbacksRVA = is64Bit
+		const callbacksRVA = is64Bit
 			? Number(tlsBuffer.readBigUInt64LE(callbacksRVAOffset))
 			: tlsBuffer.readUInt32LE(callbacksRVAOffset);
 
-		if (callbacksRVA === 0) return callbacks;
+		if (callbacksRVA === 0) {
+			return callbacks;
+		}
 
 		// Read callback array
 		const callbacksOffset = rvaToFileOffset(callbacksRVA, sections);
-		if (callbacksOffset === 0) return callbacks;
+		if (callbacksOffset === 0) {
+			return callbacks;
+		}
 
 		const callbackBuffer = Buffer.alloc(256);
 		fs.readSync(fd, callbackBuffer, 0, 256, callbacksOffset);
@@ -1127,7 +1200,9 @@ function parseTLSDirectory(fd: number, buffer: Buffer, tlsDir: DataDirectory, se
 				? Number(callbackBuffer.readBigUInt64LE(i * 8))
 				: callbackBuffer.readUInt32LE(i * 4);
 
-			if (callback === 0) break;
+			if (callback === 0) {
+				break;
+			}
 			if (callback !== 0 && callback !== 0xCCCCCCCC) {
 				callbacks.push(callback);
 			}
@@ -1152,7 +1227,9 @@ function parseExceptions(fd: number, buffer: Buffer, exceptionDir: DataDirectory
 		}
 
 		const fileOffset = rvaToFileOffset(exceptionDir.virtualAddress, sections);
-		if (fileOffset === 0) return exceptions;
+		if (fileOffset === 0) {
+			return exceptions;
+		}
 
 		// Runtime Function entry (x64 unwind info)
 		// Each entry is 12 bytes (32-bit) or 12 bytes (64-bit)
@@ -1181,3 +1258,4 @@ function parseExceptions(fd: number, buffer: Buffer, exceptionDir: DataDirectory
 
 	return exceptions;
 }
+

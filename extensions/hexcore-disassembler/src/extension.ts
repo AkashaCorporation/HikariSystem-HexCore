@@ -1,25 +1,99 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Disassembler Extension
- *  Professional disassembly with Capstone engine
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as vscode from 'vscode';
 import * as path from 'path';
 import { DisassemblerViewProvider } from './disassemblerView';
+import { DisassemblyEditorProvider } from './disassemblyEditor';
 import { FunctionTreeProvider } from './functionTree';
 import { StringRefProvider } from './stringRefTree';
+import { SectionTreeProvider } from './sectionTree';
+import { ImportTreeProvider } from './importTree';
+import { ExportTreeProvider } from './exportTree';
 import { DisassemblerEngine } from './disassemblerEngine';
+import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
 
 export function activate(context: vscode.ExtensionContext): void {
-	const engine = new DisassemblerEngine();
+	// Use Factory to get the initial global engine (or specific if we knew context)
+	const factory = DisassemblerFactory.getInstance();
+	const engine = factory.getEngine(); // Default global engine for now
+
+	// Event emitter for synchronization between views
+	const onDidChangeActiveEditor = new vscode.EventEmitter<string | undefined>();
+
 	const disasmProvider = new DisassemblerViewProvider(context.extensionUri, engine);
+	const disasmEditorProvider = new DisassemblyEditorProvider(context, engine, onDidChangeActiveEditor);
 	const functionProvider = new FunctionTreeProvider(engine);
 	const stringRefProvider = new StringRefProvider(engine);
+	const sectionProvider = new SectionTreeProvider(engine);
+	const importProvider = new ImportTreeProvider(engine);
+	const exportProvider = new ExportTreeProvider(engine);
 	const graphViewProvider = new GraphViewProvider(context.extensionUri, engine);
 
-	// Register Webview Providers
+	const ensureAssemblerAvailable = async (): Promise<boolean> => {
+		const availability = await engine.getAssemblerAvailability();
+		if (availability.available) {
+			return true;
+		}
+
+		const detail = availability.error ? ` ${availability.error}` : '';
+		vscode.window.showErrorMessage(
+			vscode.l10n.t('LLVM MC engine is not available.{0}', detail)
+		);
+		return false;
+	};
+
+	const showNativeStatus = async (): Promise<void> => {
+		const disassembler = await engine.getDisassemblerAvailability();
+		const assembler = await engine.getAssemblerAvailability();
+		if (disassembler.available && assembler.available) {
+			vscode.window.showInformationMessage(
+				vscode.l10n.t('Native engines are available for this session.')
+			);
+			return;
+		}
+
+		const parts: string[] = [];
+		if (!disassembler.available) {
+			parts.push(
+				vscode.l10n.t('Capstone: {0}', disassembler.error ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+		if (!assembler.available) {
+			parts.push(
+				vscode.l10n.t('LLVM MC: {0}', assembler.error ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+
+		vscode.window.showWarningMessage(
+			vscode.l10n.t('Native engine status: {0}', parts.join(' | '))
+		);
+	};
+
+	// Sync tree views when editor changes
+	onDidChangeActiveEditor.event(() => {
+		functionProvider.refresh();
+		stringRefProvider.refresh();
+		sectionProvider.refresh();
+		importProvider.refresh();
+		exportProvider.refresh();
+	});
+
+	// Register Custom Editor (Main disassembly view)
+	context.subscriptions.push(
+		vscode.window.registerCustomEditorProvider(
+			DisassemblyEditorProvider.viewType,
+			disasmEditorProvider,
+			{
+				webviewOptions: { retainContextWhenHidden: true },
+				supportsMultipleEditorsPerDocument: false
+			}
+		)
+	);
+
+	// Register Webview Providers (Sidebar)
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
 			'hexcore.disassembler.view',
@@ -39,11 +113,33 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Register Tree Providers
 	context.subscriptions.push(
 		vscode.window.registerTreeDataProvider('hexcore.disassembler.functions', functionProvider),
-		vscode.window.registerTreeDataProvider('hexcore.disassembler.strings', stringRefProvider)
+		vscode.window.registerTreeDataProvider('hexcore.disassembler.strings', stringRefProvider),
+		vscode.window.registerTreeDataProvider('hexcore.disassembler.sections', sectionProvider),
+		vscode.window.registerTreeDataProvider('hexcore.disassembler.imports', importProvider),
+		vscode.window.registerTreeDataProvider('hexcore.disassembler.exports', exportProvider)
 	);
 
 
 	// Register Commands
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.openFile', async () => {
+			const uris = await vscode.window.showOpenDialog({
+				canSelectMany: false,
+				openLabel: 'Open Binary',
+				filters: {
+					'Windows Executables': ['exe', 'dll', 'sys', 'ocx', 'scr', 'cpl'],
+					'Linux Executables': ['elf', 'so', 'a', 'o'],
+					'Raw Binary': ['bin', 'raw', 'dmp'],
+					'All Files': ['*']
+				}
+			});
+			if (uris && uris.length > 0) {
+				// Open in Custom Editor
+				await vscode.commands.executeCommand('vscode.openWith', uris[0], DisassemblyEditorProvider.viewType);
+			}
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.analyzeFile', async (uri?: vscode.Uri) => {
 			if (!uri) {
@@ -64,6 +160,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					await disasmProvider.loadFile(uri.fsPath);
 					functionProvider.refresh();
 					stringRefProvider.refresh();
+					sectionProvider.refresh();
+					importProvider.refresh();
+					exportProvider.refresh();
 				} catch (error: any) {
 					vscode.window.showErrorMessage(`Failed to disassemble file: ${error.message}`);
 				}
@@ -211,6 +310,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.patchInstruction', async () => {
+			if (!(await ensureAssemblerAvailable())) {
+				return;
+			}
+
 			const addr = disasmProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No instruction selected');
@@ -244,6 +347,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.nopInstruction', async () => {
+			if (!(await ensureAssemblerAvailable())) {
+				return;
+			}
+
 			const addr = disasmProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No instruction selected');
@@ -272,6 +379,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.assemble', async () => {
+			if (!(await ensureAssemblerAvailable())) {
+				return;
+			}
+
 			const code = await vscode.window.showInputBox({
 				prompt: 'Assemble instruction',
 				placeHolder: 'mov rax, 0x1234'
@@ -295,6 +406,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.assembleMultiple', async () => {
+			if (!(await ensureAssemblerAvailable())) {
+				return;
+			}
+
 			const input = await vscode.window.showInputBox({
 				prompt: 'Assemble multiple instructions (separate with ;)',
 				placeHolder: 'push rbp; mov rbp, rsp; sub rsp, 0x20'
@@ -352,6 +467,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.setSyntax', async () => {
+			if (!(await ensureAssemblerAvailable())) {
+				return;
+			}
+
 			const syntax = await vscode.window.showQuickPick(['Intel', 'AT&T'], {
 				placeHolder: 'Select assembly syntax'
 			});
@@ -365,8 +484,23 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.showLlvmVersion', () => {
-			const version = engine.getLlvmVersion();
-			vscode.window.showInformationMessage(`LLVM MC Version: ${version}`);
+			engine.getAssemblerAvailability().then((availability) => {
+				if (!availability.available) {
+					const detail = availability.error ? ` ${availability.error}` : '';
+					vscode.window.showErrorMessage(
+						vscode.l10n.t('LLVM MC engine is not available.{0}', detail)
+					);
+					return;
+				}
+				const version = engine.getLlvmVersion();
+				vscode.window.showInformationMessage(`LLVM MC Version: ${version}`);
+			});
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.nativeStatus', async () => {
+			await showNativeStatus();
 		})
 	);
 
@@ -374,5 +508,6 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-	// Cleanup
+	DisassemblerFactory.getInstance().disposeAll();
 }
+

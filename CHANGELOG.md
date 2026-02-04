@@ -5,6 +5,23 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.1] - 2026-02-03 - "Stability Pass"
+
+### Added
+- Native engine availability diagnostics for Disassembler and Debugger (Capstone/LLVM MC/Unicorn).
+- Shared native module loader in `hexcore-common` with consistent error reporting.
+- Postinstall native prebuild installer (`scripts/hexcore-native-install.js`) and Windows prebuild workflow.
+- `engines.vscode` metadata for native engine packages to prevent extension host load errors.
+- Function selector in the large disassembly editor for quick navigation.
+
+### Fixed
+- Disassembler PE analysis now passes file path (not buffer) and awaits results so Sections/Imports/Exports render.
+- Large disassembly editor navigation now selects the containing function for a target address.
+- Default function selection prefers entry point or first non-empty function instead of empty stubs.
+
+### Changed
+- Hardened native engine loading paths for Capstone/LLVM MC/Unicorn to improve portability.
+
 ## [3.1.0] - 2026-02-01 - "Integration"
 
 ### Added
@@ -45,7 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Context save/restore for snapshotting
 - ThreadSafeFunction for JavaScript callbacks from native hooks
 - **29/29 tests passing** ✅
-- Author: **Bih** (Kyu 1 Codewars legend)
+- Author: **Bih** [(ThreatBih)](https://github.com/ThreatBiih)
 
 #### hexcore-keystone v1.0.0
 - **Automated Keystone assembler** bindings
@@ -93,5 +110,7 @@ Complete binary analysis pipeline for security research and CTF competitions.
 - Capstone N-API binding
 - New analysis tools
 
+[3.1.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.1
+[3.1.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.0
 [3.0.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.0.0
 [2.0.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v2.0.0

@@ -91,6 +91,12 @@ jobs:
           cd ../tunnel-forwarding && npm ci --ignore-scripts
           cd ../typescript-language-features && npm ci --ignore-scripts
 
+      - name: Install HexCore Native Engines
+        run: |
+          cd extensions/hexcore-capstone && npm ci
+          cd ../hexcore-unicorn && npm ci
+          cd ../hexcore-llvm-mc && npm ci
+
       - name: Compile HexCore Extensions
         run: |
           cd extensions/hexcore-hexviewer && npm ci && npm run compile
@@ -101,6 +107,8 @@ jobs:
           cd ../hexcore-base64 && npm ci && npm run compile
           cd ../hexcore-filetype && npm ci && npm run compile
           cd ../hexcore-common && npm ci && npm run compile
+          cd ../hexcore-disassembler && npm ci && npm run compile
+          cd ../hexcore-debugger && npm ci && npm run compile
 
       - name: Build VS Code
         run: npm run gulp vscode-win32-x64-min

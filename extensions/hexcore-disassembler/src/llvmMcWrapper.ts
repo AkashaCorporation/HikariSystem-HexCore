@@ -1,10 +1,9 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Disassembler - LLVM MC Wrapper
- *  Assembly patching interface using LLVM MC
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as path from 'path';
+import { loadNativeModule } from 'hexcore-common';
 
 // Types from hexcore-llvm-mc
 interface LlvmMcModule {
@@ -94,6 +93,7 @@ export class LlvmMcWrapper {
 	private architecture: ArchitectureConfig = 'x64';
 	private syntax: 'intel' | 'att' = 'intel';
 	private initialized: boolean = false;
+	private lastError?: string;
 
 	/**
 	 * Initialize the LLVM MC assembler
@@ -108,36 +108,41 @@ export class LlvmMcWrapper {
 			'hexcore-llvm-mc'
 		];
 
-		for (const modulePath of possiblePaths) {
-			try {
-				this.llvmMcModule = require(modulePath) as LlvmMcModule;
-				break;
-			} catch {
-				continue;
-			}
-		}
+		const result = loadNativeModule<LlvmMcModule>({
+			moduleName: 'hexcore-llvm-mc',
+			candidatePaths: possiblePaths
+		});
 
-		if (!this.llvmMcModule) {
+		if (!result.module) {
+			this.lastError = result.errorMessage;
 			throw new Error('Failed to load hexcore-llvm-mc module');
 		}
 
-		const triple = this.getTriple(arch);
-		this.assembler = new this.llvmMcModule.LlvmMc(triple);
+		this.lastError = undefined;
+		this.llvmMcModule = result.module;
+		const module = this.llvmMcModule;
+		if (!module) {
+			this.lastError = 'Failed to load hexcore-llvm-mc module';
+			throw new Error(this.lastError);
+		}
+
+		const triple = this.getTriple(arch, module);
+		this.assembler = new module.LlvmMc(triple);
 
 		// Set Intel syntax for x86
 		if (arch === 'x86' || arch === 'x64') {
-			this.assembler.setOption(this.llvmMcModule.OPTION.SYNTAX, this.llvmMcModule.SYNTAX.INTEL);
+			this.assembler.setOption(module.OPTION.SYNTAX, module.SYNTAX.INTEL);
 		}
 
 		this.initialized = true;
-		console.log(`LLVM MC initialized: ${arch} (version: ${this.llvmMcModule.version()})`);
+		console.log(`LLVM MC initialized: ${arch} (version: ${module.version()})`);
 	}
 
 	/**
 	 * Get target triple for architecture
 	 */
-	private getTriple(arch: ArchitectureConfig): string {
-		const TRIPLE = this.llvmMcModule!.TRIPLE;
+	private getTriple(arch: ArchitectureConfig, module: LlvmMcModule): string {
+		const TRIPLE = module.TRIPLE;
 
 		switch (arch) {
 			case 'x86': return TRIPLE.I386;
@@ -157,7 +162,9 @@ export class LlvmMcWrapper {
 	 * Set assembly syntax (intel/att)
 	 */
 	setSyntax(syntax: 'intel' | 'att'): void {
-		if (!this.assembler || !this.llvmMcModule) return;
+		if (!this.assembler || !this.llvmMcModule) {
+			return;
+		}
 
 		this.syntax = syntax;
 		if (this.architecture === 'x86' || this.architecture === 'x64') {
@@ -262,8 +269,19 @@ export class LlvmMcWrapper {
 		let patchBytes = result.bytes;
 
 		if (nopPadding > 0) {
-			const nopByte = this.getNopByte();
-			const padding = Buffer.alloc(nopPadding, nopByte);
+			const nop = this.getNop();
+			if (nopPadding % nop.length !== 0 && this.architecture !== 'x86' && this.architecture !== 'x64') {
+				return {
+					success: false,
+					bytes: Buffer.alloc(0),
+					size: result.size,
+					originalSize,
+					nopPadding,
+					error: `NOP padding of ${nopPadding} bytes is not aligned for ${this.architecture}`
+				};
+			}
+
+			const padding = this.createNopSled(nopPadding);
 			patchBytes = Buffer.concat([result.bytes, padding]);
 		}
 
@@ -274,24 +292,6 @@ export class LlvmMcWrapper {
 			originalSize,
 			nopPadding
 		};
-	}
-
-	/**
-	 * Get NOP byte for current architecture
-	 */
-	private getNopByte(): number {
-		switch (this.architecture) {
-			case 'x86':
-			case 'x64':
-				return 0x90; // NOP
-			case 'arm':
-			case 'thumb':
-				return 0x00; // ARM has multi-byte NOPs
-			case 'arm64':
-				return 0x1F; // Part of ARM64 NOP
-			default:
-				return 0x00;
-		}
 	}
 
 	/**
@@ -359,7 +359,9 @@ export class LlvmMcWrapper {
 	 * Get available targets
 	 */
 	getAvailableTargets(): TargetInfo[] {
-		if (!this.llvmMcModule) return [];
+		if (!this.llvmMcModule) {
+			return [];
+		}
 		return this.llvmMcModule.getTargets();
 	}
 
@@ -367,7 +369,9 @@ export class LlvmMcWrapper {
 	 * Get LLVM version
 	 */
 	getVersion(): string {
-		if (!this.llvmMcModule) return 'unknown';
+		if (!this.llvmMcModule) {
+			return 'unknown';
+		}
 		return this.llvmMcModule.version();
 	}
 
@@ -390,6 +394,10 @@ export class LlvmMcWrapper {
 	 */
 	isInitialized(): boolean {
 		return this.initialized && this.assembler?.isOpen === true;
+	}
+
+	getLastError(): string | undefined {
+		return this.lastError;
 	}
 
 	/**
@@ -422,3 +430,4 @@ export class LlvmMcWrapper {
 		this.initialized = false;
 	}
 }
+

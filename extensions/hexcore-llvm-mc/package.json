@@ -13,11 +13,13 @@
     }
   },
   "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js",
     "build": "node-gyp rebuild",
     "build:debug": "node-gyp rebuild --debug",
     "clean": "node-gyp clean",
     "configure": "node-gyp configure",
     "test": "node test/test.js",
+    "prebuild": "prebuildify --napi --strip",
     "prepublishOnly": "npm run build && npm test"
   },
   "keywords": [
@@ -44,13 +46,16 @@
   "author": "HikariSystem",
   "license": "MIT",
   "engines": {
+    "vscode": "^1.0.0",
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "node-addon-api": "^7.0.0"
+    "node-addon-api": "^7.0.0",
+    "prebuild-install": "^7.1.1"
   },
   "devDependencies": {
-    "node-gyp": "^10.0.0"
+    "node-gyp": "^10.0.0",
+    "prebuildify": "^6.0.0"
   },
   "files": [
     "src/",
@@ -69,5 +74,10 @@
     "url": "https://github.com/hikarisystem/hexcore-llvm-mc/issues"
   },
   "homepage": "https://github.com/hikarisystem/hexcore-llvm-mc#readme",
-  "gypfile": true
+  "gypfile": true,
+  "binary": {
+    "napi_versions": [
+      8
+    ]
+  }
 }

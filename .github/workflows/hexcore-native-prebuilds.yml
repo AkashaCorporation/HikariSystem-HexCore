@@ -1,0 +1,48 @@
+name: HexCore Native Prebuilds
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prebuild-windows:
+    name: Build Native Prebuilds (Windows)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Build Capstone Prebuilds
+        working-directory: extensions/hexcore-capstone
+        run: |
+          npm ci
+          npm run prebuild
+
+      - name: Build Unicorn Prebuilds
+        working-directory: extensions/hexcore-unicorn
+        run: |
+          npm ci
+          npm run prebuild
+
+      - name: Build LLVM MC Prebuilds
+        working-directory: extensions/hexcore-llvm-mc
+        run: |
+          npm ci
+          npm run prebuild
+
+      - name: Upload Prebuild Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hexcore-native-prebuilds-win32
+          path: |
+            extensions/hexcore-capstone/prebuilds/**
+            extensions/hexcore-unicorn/prebuilds/**
+            extensions/hexcore-llvm-mc/prebuilds/**
+            extensions/hexcore-unicorn/deps/unicorn/unicorn.dll

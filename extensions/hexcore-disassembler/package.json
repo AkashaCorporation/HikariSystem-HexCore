@@ -8,6 +8,19 @@
 	"engines": {
 		"vscode": "^1.75.0"
 	},
+	"activationEvents": [
+		"onCommand:hexcore.disasm.openFile",
+		"onCommand:hexcore.disasm.open",
+		"onCommand:hexcore.disasm.analyzeFile",
+		"onCommand:hexcore.disasm.nativeStatus",
+		"onCommand:hexcore.disasm.showLlvmVersion",
+		"onCustomEditor:hexcore.disassembler.editor",
+		"onView:hexcore.disassembler.view",
+		"onView:hexcore.disassembler.graphView"
+	],
+	"extensionDependencies": [
+		"hikarisystem.hexcore-peanalyzer"
+	],
 	"categories": [
 		"Programming Languages",
 		"Debuggers",
@@ -26,7 +39,31 @@
 	],
 	"main": "./out/extension.js",
 	"contributes": {
+		"customEditors": [
+			{
+				"viewType": "hexcore.disassembler.editor",
+				"displayName": "HexCore Disassembler",
+				"selector": [
+					{
+						"filenamePattern": "*.{exe,dll,sys,ocx,scr,cpl}"
+					},
+					{
+						"filenamePattern": "*.{elf,so,a,o}"
+					},
+					{
+						"filenamePattern": "*.{bin,raw,dmp}"
+					}
+				],
+				"priority": "default"
+			}
+		],
 		"commands": [
+			{
+				"command": "hexcore.disasm.openFile",
+				"title": "Open Binary File...",
+				"category": "HexCore Disassembler",
+				"icon": "$(file-binary)"
+			},
 			{
 				"command": "hexcore.disasm.open",
 				"title": "Open in Disassembler",
@@ -116,6 +153,11 @@
 				"command": "hexcore.disasm.showLlvmVersion",
 				"title": "Show LLVM Version",
 				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.nativeStatus",
+				"title": "Show Native Engine Status",
+				"category": "HexCore Disassembler"
 			}
 		],
 		"menus": {
@@ -151,7 +193,8 @@
 				{
 					"id": "hexcore-disassembler",
 					"title": "Disassembler",
-					"icon": "$(debug-disconnect)"
+					"icon": "$(debug-disconnect)",
+					"when": "hexcore:disassemblerActive"
 				}
 			]
 		},
@@ -172,12 +215,32 @@
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.functions",
-					"name": "Functions"
+					"name": "Functions",
+					"icon": "$(symbol-method)"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.disassembler.sections",
+					"name": "Sections",
+					"icon": "$(split-horizontal)"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.disassembler.imports",
+					"name": "Imports",
+					"icon": "$(arrow-down)"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.disassembler.exports",
+					"name": "Exports",
+					"icon": "$(arrow-up)"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.strings",
-					"name": "String References"
+					"name": "Strings",
+					"icon": "$(quote)"
 				}
 			]
 		},
@@ -234,6 +297,7 @@
 	},
 	"dependencies": {
 		"hexcore-capstone": "file:../hexcore-capstone",
+		"hexcore-common": "file:../hexcore-common",
 		"hexcore-llvm-mc": "file:../hexcore-llvm-mc"
 	},
 	"devDependencies": {

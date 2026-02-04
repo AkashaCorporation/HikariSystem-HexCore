@@ -1,14 +1,14 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Common Utilities v1.0.0
- *  Shared utilities for all HexCore extensions
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 /**
  * Format bytes to human-readable string
  */
 export function formatBytes(bytes: number): string {
-	if (bytes === 0) return '0 B';
+	if (bytes === 0) {
+		return '0 B';
+	}
 	const k = 1024;
 	const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 	const i = Math.floor(Math.log(bytes) / Math.log(k));
@@ -19,7 +19,9 @@ export function formatBytes(bytes: number): string {
  * Calculate Shannon entropy of a buffer
  */
 export function calculateEntropy(buffer: Buffer): number {
-	if (buffer.length === 0) return 0;
+	if (buffer.length === 0) {
+		return 0;
+	}
 
 	const freq = new Array(256).fill(0);
 	for (let i = 0; i < buffer.length; i++) {
@@ -42,7 +44,9 @@ export function calculateEntropy(buffer: Buffer): number {
  */
 export function readNullTerminatedString(buffer: Buffer, maxLength: number = 256): string {
 	let end = buffer.indexOf(0);
-	if (end === -1) end = Math.min(buffer.length, maxLength);
+	if (end === -1) {
+		end = Math.min(buffer.length, maxLength);
+	}
 	return buffer.toString('ascii', 0, end);
 }
 
@@ -71,8 +75,17 @@ export function toHexDump(buffer: Buffer, bytesPerLine: number = 16): string {
  * Escape HTML special characters
  */
 export function escapeHtml(text: string): string {
-	const map: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
-	return text.replace(/[&<>"']/g, m => map[m] || m);
+	const doubleQuote = String.fromCharCode(34);
+	const singleQuote = String.fromCharCode(39);
+	const map: Record<string, string> = {
+		'&': '&amp;',
+		'<': '&lt;',
+		'>': '&gt;',
+		[doubleQuote]: '&quot;',
+		[singleQuote]: '&#039;'
+	};
+	const matcher = new RegExp(`[&<>'${doubleQuote}]`, 'g');
+	return text.replace(matcher, m => map[m] || m);
 }
 
 /**
@@ -107,7 +120,9 @@ export async function processFileInChunks(
 			const bytesToRead = Math.min(chunkSize, totalSize - offset);
 			const { bytesRead } = await promisify(fs.read)(fd, buffer, 0, bytesToRead, offset);
 
-			if (bytesRead === 0) break;
+			if (bytesRead === 0) {
+				break;
+			}
 
 			const chunk = buffer.subarray(0, bytesRead);
 			await processor(chunk, offset);
@@ -121,3 +136,10 @@ export async function processFileInChunks(
 		await promisify(fs.close)(fd);
 	}
 }
+
+export {
+	loadNativeModule,
+	type NativeModuleLoadOptions,
+	type NativeModuleLoadResult
+} from './nativeModuleLoader';
+

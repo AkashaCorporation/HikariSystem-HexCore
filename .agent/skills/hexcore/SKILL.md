@@ -16,7 +16,7 @@ HexCore é um conjunto de extensões para análise de binários e engenharia rev
 ## Available Extensions
 
 ### 1. HexCore Disassembler (`hexcore-disassembler`)
-**Status**: ✅ Funcional (Capstone Engine via WebAssembly)
+**Status**: ✅ Funcional (Capstone Engine via N-API)
 
 Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
 
@@ -29,6 +29,11 @@ Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
 - `hexcore.disasm.showCFG` - Mostrar grafo de fluxo de controle
 - `hexcore.disasm.searchString` - Buscar referências de string
 - `hexcore.disasm.exportASM` - Exportar assembly para arquivo
+- `hexcore.disasm.patchInstruction` - Patching inline via LLVM MC
+- `hexcore.disasm.nopInstruction` - NOP padding automático
+- `hexcore.disasm.assemble` - Montar instrução
+- `hexcore.disasm.assembleMultiple` - Montar várias instruções
+- `hexcore.disasm.nativeStatus` - Status dos motores nativos
 
 **Arquiteturas suportadas**:
 - `x86` - Intel 32-bit
@@ -128,13 +133,14 @@ Calcula hashes de arquivos ou seleções.
 ---
 
 ### 8. HexCore Base64 (`hexcore-base64`)
-**Status**: ✅ Funcional
+**Status**: ⚠️ Funcional (apenas decode)
 
-Codificação e decodificação Base64.
+Decodificação Base64 de strings em binários.
 
-**Commands** (prováveis):
-- `hexcore.base64.encode` - Codificar em Base64
+**Commands**:
 - `hexcore.base64.decode` - Decodificar de Base64
+
+**⚠️ Limitação**: Atualmente apenas suporta decode. Comando de encode não está implementado.
 
 ---
 
@@ -160,6 +166,10 @@ Debugger integrado para análise dinâmica.
 - Step through code
 - Register view
 - Memory view
+- Emulação via Unicorn (x86/x64/ARM/ARM64/MIPS/RISC-V)
+
+**Commands úteis**:
+- `hexcore.debug.nativeStatus` - Status do Unicorn
 
 ---
 
@@ -245,7 +255,7 @@ a interpretar o que encontrar.
 ## Referência Técnica
 
 ### Capstone Engine (Disassembler)
-O disassembler usa Capstone Engine via WebAssembly para disassembly real.
+O disassembler usa Capstone Engine via N-API para disassembly real.
 Suporta Intel syntax por padrão.
 
 ### Formatos de Arquivo Suportados
@@ -279,4 +289,4 @@ Suporta Intel syntax por padrão.
 
 ---
 
-*HexCore v1.0 - Powered by Capstone Engine*
+*HexCore v3.x - Powered by Capstone/LLVM MC/Unicorn*

@@ -36,6 +36,7 @@
 		"url": "https://github.com/LXrdKnowkill/hexcore-keystone.git"
 	},
 	"engines": {
+		"vscode": "^1.0.0",
 		"node": ">=18.0.0"
 	},
 	"dependencies": {

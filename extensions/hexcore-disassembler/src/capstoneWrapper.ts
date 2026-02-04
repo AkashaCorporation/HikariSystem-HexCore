@@ -1,10 +1,12 @@
 /*---------------------------------------------------------------------------------------------
- *  Capstone Wrapper - Native N-API Edition
- *  Async disassembly using Capstone Engine via hexcore-capstone
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import * as path from 'path';
+import type { Instruction as CapstoneInstruction } from 'hexcore-capstone';
+import { loadNativeModule } from 'hexcore-common';
 
-import { Capstone, ARCH, MODE, Instruction as CapstoneInstruction } from 'hexcore-capstone';
+type CapstoneModule = typeof import('hexcore-capstone');
 
 export type ArchitectureConfig = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'mips64';
 
@@ -26,9 +28,36 @@ export interface DisassembledInstruction {
  * Provides native N-API bindings with async disassembly
  */
 export class CapstoneWrapper {
-	private capstone: Capstone | null = null;
+	private capstoneModule?: CapstoneModule;
+	private capstone: InstanceType<CapstoneModule['Capstone']> | null = null;
 	private architecture: ArchitectureConfig = 'x64';
 	private initialized: boolean = false;
+	private lastError?: string;
+
+	private loadModule(): CapstoneModule | undefined {
+		if (this.capstoneModule) {
+			return this.capstoneModule;
+		}
+
+		const candidatePaths = [
+			path.join(__dirname, '..', '..', 'hexcore-capstone'),
+			path.join(__dirname, '..', '..', '..', 'hexcore-capstone')
+		];
+
+		const result = loadNativeModule<CapstoneModule>({
+			moduleName: 'hexcore-capstone',
+			candidatePaths
+		});
+
+		if (!result.module) {
+			this.lastError = result.errorMessage;
+			return undefined;
+		}
+
+		this.lastError = undefined;
+		this.capstoneModule = result.module;
+		return this.capstoneModule;
+	}
 
 	/**
 	 * Initialize Capstone with the specified architecture
@@ -38,26 +67,37 @@ export class CapstoneWrapper {
 		this.architecture = arch;
 
 		try {
+			const module = this.loadModule();
+			if (!module) {
+				this.initialized = false;
+				throw new Error(this.lastError ?? 'Capstone module unavailable');
+			}
+
 			// Close existing instance if any
 			if (this.capstone) {
 				this.capstone.close();
 			}
 
-			const config = this.getArchConfig(arch);
-			// Native N-API - inicialização é síncrona e rápida (não bloqueia como WASM)
-			this.capstone = new Capstone(config.arch, config.mode);
+			const config = this.getArchConfig(module, arch);
+			// Native N-API - initialization is synchronous and fast (does not block like WASM)
+			this.capstone = new module.Capstone(config.arch, config.mode);
 			this.initialized = true;
 			console.log(`Capstone ${arch} initialized successfully (native N-API)`);
-		} catch (error) {
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.lastError = message;
 			console.error('Failed to initialize Capstone:', error);
-			throw new Error(`Capstone initialization failed: ${error}`);
+			throw new Error(`Capstone initialization failed: ${message}`);
 		}
 	}
 
 	/**
 	 * Map architecture string to Capstone constants
 	 */
-	private getArchConfig(arch: ArchitectureConfig): { arch: number; mode: number } {
+	private getArchConfig(module: CapstoneModule, arch: ArchitectureConfig): { arch: number; mode: number } {
+		const ARCH = module.ARCH;
+		const MODE = module.MODE;
+
 		switch (arch) {
 			case 'x86':
 				return { arch: ARCH.X86, mode: MODE.MODE_32 };
@@ -66,7 +106,7 @@ export class CapstoneWrapper {
 			case 'arm':
 				return { arch: ARCH.ARM, mode: MODE.ARM };
 			case 'arm64':
-				return { arch: ARCH.ARM64, mode: MODE.ARM };
+				return { arch: ARCH.ARM64, mode: MODE.LITTLE_ENDIAN };
 			case 'mips':
 				return { arch: ARCH.MIPS, mode: MODE.MODE_32 | MODE.LITTLE_ENDIAN };
 			case 'mips64':
@@ -86,10 +126,10 @@ export class CapstoneWrapper {
 		}
 
 		const bytes = buffer instanceof Buffer ? buffer : Buffer.from(buffer);
-		
-		// Use disasmAsync para não bloquear a thread principal
+
+		// Use disasmAsync to avoid blocking the main thread
 		const rawInstructions = await this.capstone.disasmAsync(bytes, baseAddress, maxInstructions);
-		
+
 		return rawInstructions.map(inst => this.convertInstruction(inst));
 	}
 
@@ -162,6 +202,10 @@ export class CapstoneWrapper {
 		return this.initialized;
 	}
 
+	getLastError(): string | undefined {
+		return this.lastError;
+	}
+
 	/**
 	 * Change architecture (requires re-initialization)
 	 */
@@ -203,3 +247,4 @@ export async function initializeCapstone(arch: ArchitectureConfig = 'x64'): Prom
 	}
 	return instance;
 }
+

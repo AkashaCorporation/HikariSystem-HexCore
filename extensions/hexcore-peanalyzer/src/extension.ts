@@ -1,9 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore PE Analyzer - Extension Entry Point
- *  Copyright (c) HikariSystem. All rights reserved.
- *  Licensed under the MIT License.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as vscode from 'vscode';
 import { PEAnalyzerViewProvider } from './peAnalyzerView';
 import { analyzePEFile } from './peParser';
@@ -38,7 +36,7 @@ export function activate(context: vscode.ExtensionContext) {
 			try {
 				vscode.window.withProgress({
 					location: vscode.ProgressLocation.Notification,
-					title: "Analyzing PE file...",
+					title: vscode.l10n.t("Analyzing PE file..."),
 					cancellable: false
 				}, async () => {
 					const analysis = await analyzePEFile(uri.fsPath);
@@ -61,6 +59,13 @@ export function activate(context: vscode.ExtensionContext) {
 			}
 		})
 	);
+	// Public API
+	const api = {
+		analyzePEFile: analyzePEFile
+	};
+
+	return api;
 }
 
 export function deactivate() { }
+

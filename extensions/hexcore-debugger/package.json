@@ -23,6 +23,7 @@
 	"activationEvents": [
 		"onCommand:hexcore.debug.start",
 		"onCommand:hexcore.debug.attach",
+		"onCommand:hexcore.debug.nativeStatus",
 		"onCommand:hexcore.debug.emulate",
 		"onCommand:hexcore.debug.emulateWithArch",
 		"onView:hexcore.debugger.view"
@@ -79,6 +80,11 @@
 			{
 				"command": "hexcore.debug.traceAPI",
 				"title": "Enable API Tracing",
+				"category": "HexCore Debugger"
+			},
+			{
+				"command": "hexcore.debug.nativeStatus",
+				"title": "Show Unicorn Engine Status",
 				"category": "HexCore Debugger"
 			},
 			{
@@ -190,6 +196,7 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"dependencies": {
+		"hexcore-common": "file:../hexcore-common",
 		"hexcore-unicorn": "file:../hexcore-unicorn"
 	},
 	"devDependencies": {

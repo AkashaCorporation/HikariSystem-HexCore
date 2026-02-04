@@ -1,20 +1,47 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Debugger Extension
- *  Dynamic analysis with debugger integration
- *  Copyright (c) HikariSystem. All rights reserved.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-
 import * as vscode from 'vscode';
 import { DebuggerViewProvider } from './debuggerView';
 import { RegisterTreeProvider } from './registerTree';
 import { MemoryTreeProvider } from './memoryTree';
 import { DebugEngine } from './debugEngine';
+import type { ArchitectureType } from './unicornWrapper';
 
 export function activate(context: vscode.ExtensionContext): void {
 	const engine = new DebugEngine();
 	const debuggerView = new DebuggerViewProvider(context.extensionUri, engine);
 	const registerProvider = new RegisterTreeProvider(engine);
 	const memoryProvider = new MemoryTreeProvider(engine);
+
+	const ensureEmulationAvailable = async (arch: ArchitectureType): Promise<boolean> => {
+		const availability = await engine.getEmulationAvailability(arch);
+		if (availability.available) {
+			return true;
+		}
+
+		const detail = availability.error ? ` ${availability.error}` : '';
+		vscode.window.showErrorMessage(
+			vscode.l10n.t('Unicorn engine is not available.{0}', detail)
+		);
+		return false;
+	};
+
+	const showNativeStatus = async (): Promise<void> => {
+		const availability = await engine.getEmulationAvailability('x64');
+		if (availability.available) {
+			vscode.window.showInformationMessage(
+				vscode.l10n.t('Unicorn engine is available for this session.')
+			);
+			return;
+		}
+
+		const detail = availability.error ?? vscode.l10n.t('Unavailable');
+		vscode.window.showWarningMessage(
+			vscode.l10n.t('Unicorn engine status: {0}', detail)
+		);
+	};
 
 	// Register providers
 	context.subscriptions.push(
@@ -35,6 +62,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				debuggerView.show();
 				registerProvider.refresh();
 			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.nativeStatus', async () => {
+			await showNativeStatus();
 		})
 	);
 
@@ -91,6 +124,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			});
 			if (uri && uri[0]) {
+				if (!(await ensureEmulationAvailable('x64'))) {
+					return;
+				}
 				try {
 					await engine.startEmulation(uri[0].fsPath);
 					debuggerView.show();
@@ -114,13 +150,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			});
 			if (uri && uri[0]) {
-				const arch = await vscode.window.showQuickPick(
-					['x64', 'x86', 'arm64', 'arm', 'mips', 'riscv'],
-					{ placeHolder: 'Select architecture' }
+				const architectureItems: Array<vscode.QuickPickItem & { arch: ArchitectureType }> = [
+					{ label: 'x64', arch: 'x64' },
+					{ label: 'x86', arch: 'x86' },
+					{ label: 'arm64', arch: 'arm64' },
+					{ label: 'arm', arch: 'arm' },
+					{ label: 'mips', arch: 'mips' },
+					{ label: 'riscv', arch: 'riscv' }
+				];
+				const selection = await vscode.window.showQuickPick(
+					architectureItems,
+					{ placeHolder: vscode.l10n.t("Select architecture") }
 				);
-				if (arch) {
+				if (selection) {
+					const arch = selection.arch;
+					if (!(await ensureEmulationAvailable(arch))) {
+						return;
+					}
 					try {
-						await engine.startEmulation(uri[0].fsPath, arch as any);
+						await engine.startEmulation(uri[0].fsPath, arch);
 						debuggerView.show();
 						registerProvider.refresh();
 						vscode.window.showInformationMessage(`Emulation started (${arch})`);
@@ -260,3 +308,4 @@ function formatHexDump(data: Buffer, baseAddress: bigint): string {
 export function deactivate(): void {
 	// Cleanup
 }
+

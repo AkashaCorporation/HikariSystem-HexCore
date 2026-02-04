@@ -28,7 +28,9 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 - Professional binary file analysis with hex viewer
 - Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS)
+- Inline assembly patching with LLVM MC
 - PE/ELF executable parsing and inspection
+- CPU emulation with Unicorn for dynamic analysis
 - Cryptographic hash calculation with VirusTotal integration
 - String extraction and categorization
 - YARA rule scanning
@@ -56,6 +58,19 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 ---
 
+### Native Engines (Standalone Packages)
+
+These engines are shipped with HexCore and can also be used independently in Node.js projects.
+
+| Package | Version | Description |
+|---------|---------|-------------|
+| **hexcore-capstone** | 1.3.0 | Capstone N-API binding with async disassembly |
+| **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding for CPU emulation (Coming Soon) |
+| **hexcore-llvm-mc** | 1.0.0 | LLVM MC N-API binding for assembly/patching (Coming Soon) |
+| **hexcore-keystone** | 1.0.0 | Legacy assembler (superseded by LLVM MC)|
+
+---
+
 ### Hex Viewer
 
 Professional binary file viewer with virtual scrolling for large files.
@@ -78,10 +93,12 @@ Native multi-architecture disassembler powered by **Capstone Engine v5.0**.
 - **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
 - **PE/ELF Support** - Automatic architecture detection
 - **Code Analysis** - Function detection, cross-references
+- **Patching** - Assemble, patch instructions, NOP sleds (LLVM MC)
 - **Detail Mode** - Operands, registers, instruction groups
 - **Graph View** - Control flow visualization (planned)
 
 > Powered by [hexcore-capstone](extensions/hexcore-capstone), our custom N-API binding for Capstone.
+> Assembly and patching powered by [hexcore-llvm-mc](extensions/hexcore-llvm-mc).
 
 ---
 
@@ -146,6 +163,18 @@ Visual entropy analysis with ASCII graph for detecting packed or encrypted regio
 
 ---
 
+### Debugger
+
+Dynamic analysis and emulation tooling with **Unicorn Engine**.
+
+- **Emulation** - x86/x64/ARM/ARM64/MIPS/RISC-V
+- **Registers & Memory** - Read/write and snapshot support
+- **Hooks** - Code execution and memory access hooks
+
+> Powered by [hexcore-unicorn](extensions/hexcore-unicorn), our custom N-API binding for Unicorn.
+
+---
+
 ## Installation
 
 ### Development Mode
@@ -182,6 +211,9 @@ HikariSystem-HexCore/
 │   ├── hexcore-peanalyzer/     # PE file analyzer
 │   ├── hexcore-disassembler/   # Multi-arch disassembler
 │   ├── hexcore-capstone/       # Capstone N-API binding
+│   ├── hexcore-llvm-mc/        # LLVM MC N-API binding
+│   ├── hexcore-unicorn/        # Unicorn N-API binding
+│   ├── hexcore-keystone/       # Legacy assembler binding
 │   ├── hexcore-debugger/       # Integrated debugger
 │   ├── hexcore-yara/           # YARA scanner
 │   ├── hexcore-hashcalc/       # Hash calculator
