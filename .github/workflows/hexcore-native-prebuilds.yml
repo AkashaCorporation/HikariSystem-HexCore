@@ -67,12 +67,34 @@ jobs:
           $version = node -p "require('./package.json').version"
           "version=$version" >> $env:GITHUB_OUTPUT
 
+      - name: Read N-API Version
+        id: napi-version
+        working-directory: engine
+        run: |
+          $napi = node -p "((require('./package.json').binary || {}).napi_versions || [8])[0]"
+          "napi=$napi" >> $env:GITHUB_OUTPUT
+
+      - name: Pack Prebuilds
+        id: pack-prebuilds
+        working-directory: engine
+        run: |
+          $name = node -p "require('./package.json').name"
+          $version = "${{ steps.engine-version.outputs.version }}"
+          $napi = "${{ steps.napi-version.outputs.napi }}"
+          $asset = "$name-v$version-napi-v$napi-win32-x64.tar.gz"
+          if (-not (Test-Path prebuilds)) {
+            throw "prebuilds/ directory not found"
+          }
+          tar -czf $asset prebuilds
+          "asset=$asset" >> $env:GITHUB_OUTPUT
+
       - name: Upload Prebuild Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.engine.name }}-prebuilds-win32
           path: |
             engine/prebuilds/**
+            engine/${{ steps.pack-prebuilds.outputs.asset }}
 
       - name: Upload Prebuilds to Release
         if: ${{ env.HEXCORE_RELEASE_TOKEN != '' }}
@@ -86,8 +108,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title $tag --notes "Automated native prebuilds for $env:ENGINE_VERSION"
           }
-          $files = Get-ChildItem engine/prebuilds -Recurse -Filter *.node | ForEach-Object { $_.FullName }
-          if (-not $files) {
-            throw "No prebuild .node files found under engine/prebuilds"
+          $asset = "engine/${{ steps.pack-prebuilds.outputs.asset }}"
+          if (-not (Test-Path $asset)) {
+            throw "Prebuild package not found: $asset"
           }
-          gh release upload $tag $files --clobber
+          gh release upload $tag $asset --clobber
