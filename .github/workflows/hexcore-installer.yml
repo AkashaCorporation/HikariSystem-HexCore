@@ -98,9 +98,15 @@ jobs:
 
       - name: Install HexCore Native Engines
         run: |
-          cd extensions/hexcore-capstone && npm ci
-          cd ../hexcore-unicorn && npm ci
-          cd ../hexcore-llvm-mc && npm ci
+          cd extensions/hexcore-capstone && npm ci --ignore-scripts
+          cd ../hexcore-unicorn && npm ci --ignore-scripts
+          cd ../hexcore-llvm-mc && npm ci --ignore-scripts
+
+      - name: Fetch HexCore Native Prebuilds
+        run: |
+          cd extensions/hexcore-capstone && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
 
       - name: Compile HexCore Extensions
         run: |
