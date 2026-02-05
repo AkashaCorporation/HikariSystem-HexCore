@@ -70,12 +70,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/hikarisystem/hexcore-llvm-mc"
+    "url": "https://github.com/LXrdKnowkill/hexcore-llvm-mc"
   },
   "bugs": {
-    "url": "https://github.com/hikarisystem/hexcore-llvm-mc/issues"
+    "url": "https://github.com/LXrdKnowkill/hexcore-llvm-mc/issues"
   },
-  "homepage": "https://github.com/hikarisystem/hexcore-llvm-mc#readme",
+  "homepage": "https://github.com/LXrdKnowkill/hexcore-llvm-mc#readme",
   "gypfile": true,
   "binary": {
     "napi_versions": [
