@@ -7,9 +7,6 @@ Debug/
 deps/
 node_modules/
 
-# Lock files
-package-lock.json
-
 # Compiled outputs
 *.node
 *.obj
