@@ -1,0 +1,3 @@
+[submodule "extensions/hexcore-keystone/deps/keystone"]
+	path = extensions/hexcore-keystone/deps/keystone
+	url = https://github.com/keystone-engine/keystone.git
