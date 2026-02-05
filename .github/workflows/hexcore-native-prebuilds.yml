@@ -13,6 +13,8 @@ jobs:
   prebuild-windows:
     name: Build Native Prebuilds (Windows)
     runs-on: windows-latest
+    env:
+      HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
     strategy:
       fail-fast: false
       matrix:
@@ -63,9 +65,9 @@ jobs:
             engine/prebuilds/**
 
       - name: Upload Prebuilds to Release
-        if: ${{ secrets.HEXCORE_RELEASE_TOKEN != '' }}
+        if: ${{ env.HEXCORE_RELEASE_TOKEN != '' }}
         env:
-          GH_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
           GH_REPO: ${{ matrix.engine.repo }}
           ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
         run: |
