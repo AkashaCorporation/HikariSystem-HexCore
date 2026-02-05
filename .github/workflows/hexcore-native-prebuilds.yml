@@ -44,7 +44,7 @@ jobs:
 
       - name: Install Dependencies
         working-directory: engine
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build Prebuilds
         working-directory: engine
