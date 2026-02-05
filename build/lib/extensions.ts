@@ -114,7 +114,20 @@ function fromLocalWebpack(extensionPath: string, webpackConfigFileName: string, 
 	// local extensions so we can use the vsce.PackageManager.None config to ignore dependencies list
 	// as a temporary workaround.
 	vsce.listFiles({ cwd: extensionPath, packageManager: vsce.PackageManager.None, packagedDependencies }).then(fileNames => {
-		const files = fileNames
+		const expandedFileNames = fileNames.flatMap(fileName => {
+			const filePath = path.join(extensionPath, fileName);
+			try {
+				const stat = fs.statSync(filePath);
+				if (stat.isDirectory()) {
+					return glob.sync('**/*', { cwd: filePath, nodir: true, dot: true })
+						.map(entry => path.join(fileName, entry));
+				}
+			} catch {
+				// Ignore and keep original fileName
+			}
+			return [fileName];
+		});
+		const files = expandedFileNames
 			.map(fileName => path.join(extensionPath, fileName))
 			.map(filePath => new File({
 				path: filePath,
@@ -211,7 +224,20 @@ function fromLocalNormal(extensionPath: string): Stream {
 
 	vsce.listFiles({ cwd: extensionPath, packageManager: vsce.PackageManager.Npm })
 		.then(fileNames => {
-			const files = fileNames
+			const expandedFileNames = fileNames.flatMap(fileName => {
+				const filePath = path.join(extensionPath, fileName);
+				try {
+					const stat = fs.statSync(filePath);
+					if (stat.isDirectory()) {
+						return glob.sync('**/*', { cwd: filePath, nodir: true, dot: true })
+							.map(entry => path.join(fileName, entry));
+					}
+				} catch {
+					// Ignore and keep original fileName
+				}
+				return [fileName];
+			});
+			const files = expandedFileNames
 				.map(fileName => path.join(extensionPath, fileName))
 				.map(filePath => new File({
 					path: filePath,
