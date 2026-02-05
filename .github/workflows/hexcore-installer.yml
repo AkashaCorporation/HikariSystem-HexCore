@@ -97,6 +97,8 @@ jobs:
           cd ../typescript-language-features && npm ci --ignore-scripts
 
       - name: Install HexCore Native Engines
+        env:
+          npm_config_ignore_scripts: true
         run: |
           cd extensions/hexcore-capstone && npm ci --ignore-scripts
           cd ../hexcore-unicorn && npm ci --ignore-scripts
