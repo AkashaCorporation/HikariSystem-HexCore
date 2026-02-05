@@ -4,45 +4,74 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
+
+env:
+  NODE_VERSION: "22.21.1"
 
 jobs:
   prebuild-windows:
     name: Build Native Prebuilds (Windows)
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          - name: hexcore-capstone
+            repo: LXrdKnowkill/hexcore-capstone
+          - name: hexcore-unicorn
+            repo: LXrdKnowkill/hexcore-unicorn
+          - name: hexcore-llvm-mc
+            repo: LXrdKnowkill/hexcore-llvm-mc
     steps:
-      - name: Checkout repository
+      - name: Checkout Engine Repository
         uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.engine.repo }}
+          path: engine
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "18"
+          node-version: ${{ env.NODE_VERSION }}
 
-      - name: Build Capstone Prebuilds
-        working-directory: extensions/hexcore-capstone
-        run: |
-          npm ci
-          npm run prebuild
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-      - name: Build Unicorn Prebuilds
-        working-directory: extensions/hexcore-unicorn
-        run: |
-          npm ci
-          npm run prebuild
+      - name: Install Dependencies
+        working-directory: engine
+        run: npm ci
 
-      - name: Build LLVM MC Prebuilds
-        working-directory: extensions/hexcore-llvm-mc
+      - name: Build Prebuilds
+        working-directory: engine
+        run: npm run prebuild
+
+      - name: Read Engine Version
+        id: engine-version
+        working-directory: engine
         run: |
-          npm ci
-          npm run prebuild
+          $version = node -p "require('./package.json').version"
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Upload Prebuild Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: hexcore-native-prebuilds-win32
+          name: ${{ matrix.engine.name }}-prebuilds-win32
           path: |
-            extensions/hexcore-capstone/prebuilds/**
-            extensions/hexcore-unicorn/prebuilds/**
-            extensions/hexcore-llvm-mc/prebuilds/**
-            extensions/hexcore-unicorn/deps/unicorn/unicorn.dll
+            engine/prebuilds/**
+
+      - name: Upload Prebuilds to Release
+        if: ${{ secrets.HEXCORE_RELEASE_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
+          GH_REPO: ${{ matrix.engine.repo }}
+          ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
+        run: |
+          $tag = "v$env:ENGINE_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --notes "Automated native prebuilds for $env:ENGINE_VERSION"
+          }
+          gh release upload $tag engine/prebuilds/** --clobber

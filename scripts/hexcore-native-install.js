@@ -96,7 +96,9 @@ function copyUnicornRuntimeDeps(binaryDir) {
 
 console.log(`[hexcore-native-install] Installing native module: ${moduleName}`);
 
-const prebuildResult = run('prebuild-install', ['--verbose']);
+const useNapiRuntime = Boolean(pkg.binary && Array.isArray(pkg.binary.napi_versions) && pkg.binary.napi_versions.length > 0);
+const prebuildArgs = useNapiRuntime ? ['--verbose', '--runtime', 'napi'] : ['--verbose'];
+const prebuildResult = run('prebuild-install', prebuildArgs);
 if (!prebuildResult.ok) {
 	console.warn(`[hexcore-native-install] prebuild-install failed: ${prebuildResult.error}`);
 	const buildResult = run('node-gyp', ['rebuild']);
