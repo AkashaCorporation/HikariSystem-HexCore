@@ -45,11 +45,12 @@ jobs:
       - name: Fetch LLVM deps (hexcore-llvm-mc)
         if: ${{ matrix.engine.name == 'hexcore-llvm-mc' }}
         run: |
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/LXrdKnowkill/HikariSystem-HexCore.git deps-src
-          cd deps-src
-          git sparse-checkout set extensions/hexcore-llvm-mc/deps/llvm
-          New-Item -ItemType Directory -Force ..\engine\deps | Out-Null
-          Copy-Item -Recurse -Force extensions/hexcore-llvm-mc/deps/llvm ..\engine\deps\
+          $tag = "v1.0.0"
+          $asset = "llvm-win32-x64.zip"
+          $url = "https://github.com/LXrdKnowkill/hexcore-llvm-mc/releases/download/$tag/$asset"
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          New-Item -ItemType Directory -Force engine/deps/llvm | Out-Null
+          Expand-Archive -Path $asset -DestinationPath engine/deps/llvm
 
       - name: Install Dependencies
         working-directory: engine
