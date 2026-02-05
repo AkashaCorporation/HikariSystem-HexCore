@@ -127,7 +127,13 @@ function fromLocalWebpack(extensionPath: string, webpackConfigFileName: string, 
 			}
 			return [fileName];
 		});
-		const files = expandedFileNames
+		const normalizedFileNames = expandedFileNames.filter(fileName => {
+			if (fileName.startsWith('node_modules/')) {
+				return !fileName.includes('/node_modules/');
+			}
+			return true;
+		});
+		const files = normalizedFileNames
 			.map(fileName => path.join(extensionPath, fileName))
 			.map(filePath => new File({
 				path: filePath,
@@ -237,7 +243,13 @@ function fromLocalNormal(extensionPath: string): Stream {
 				}
 				return [fileName];
 			});
-			const files = expandedFileNames
+			const normalizedFileNames = expandedFileNames.filter(fileName => {
+				if (fileName.startsWith('node_modules/')) {
+					return !fileName.includes('/node_modules/');
+				}
+				return true;
+			});
+			const files = normalizedFileNames
 				.map(fileName => path.join(extensionPath, fileName))
 				.map(filePath => new File({
 					path: filePath,
