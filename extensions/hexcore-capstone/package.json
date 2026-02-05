@@ -19,8 +19,7 @@
     "prebuild": "prebuildify --napi --strip",
     "prebuild:all": "prebuildify-cross -i centos7-devtoolset7 -i alpine -i linux-armv7 -i linux-arm64",
     "test": "node test/test.js",
-    "clean": "node-gyp clean",
-    "prepare": "npm run build"
+    "clean": "node-gyp clean"
   },
   "keywords": [
     "capstone",
