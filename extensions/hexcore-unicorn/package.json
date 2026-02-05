@@ -52,14 +52,15 @@
     "url": "https://github.com/LXrdKnowkill/hexcore-unicorn/issues"
   },
   "homepage": "https://github.com/LXrdKnowkill/hexcore-unicorn#readme",
-  "engines": {
-    "vscode": "^1.0.0",
-    "node": ">=18.0.0"
-  },
-  "dependencies": {
-    "node-addon-api": "^7.0.0",
-    "prebuild-install": "^7.1.1"
-  },
+	"engines": {
+		"vscode": "^1.0.0",
+		"node": ">=18.0.0"
+	},
+	"activationEvents": [],
+	"dependencies": {
+		"node-addon-api": "^7.0.0",
+		"prebuild-install": "^7.1.1"
+	},
   "devDependencies": {
     "node-gyp": "^10.0.0",
     "prebuildify": "^6.0.0"

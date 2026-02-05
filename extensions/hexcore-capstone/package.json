@@ -55,6 +55,7 @@
 		"vscode": "^1.0.0",
 		"node": ">=18.0.0"
 	},
+	"activationEvents": [],
 	"dependencies": {
 		"node-addon-api": "^7.0.0",
 		"prebuild-install": "^7.1.1"
