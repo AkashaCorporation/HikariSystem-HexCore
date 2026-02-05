@@ -111,17 +111,19 @@ jobs:
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
 
       - name: Compile HexCore Extensions
+        env:
+          npm_config_ignore_scripts: true
         run: |
-          cd extensions/hexcore-hexviewer && npm ci && npm run compile
-          cd ../hexcore-peanalyzer && npm ci && npm run compile
-          cd ../hexcore-hashcalc && npm ci && npm run compile
-          cd ../hexcore-strings && npm ci && npm run compile
-          cd ../hexcore-entropy && npm ci && npm run compile
-          cd ../hexcore-base64 && npm ci && npm run compile
-          cd ../hexcore-filetype && npm ci && npm run compile
-          cd ../hexcore-common && npm ci && npm run compile
-          cd ../hexcore-disassembler && npm ci && npm run compile
-          cd ../hexcore-debugger && npm ci && npm run compile
+          cd extensions/hexcore-hexviewer && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-peanalyzer && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-hashcalc && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-strings && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-entropy && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-base64 && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-filetype && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-common && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
 
       - name: Build VS Code
         run: npm run gulp vscode-win32-x64-min
