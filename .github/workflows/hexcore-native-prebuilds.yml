@@ -42,6 +42,15 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Fetch LLVM deps (hexcore-llvm-mc)
+        if: ${{ matrix.engine.name == 'hexcore-llvm-mc' }}
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/LXrdKnowkill/HikariSystem-HexCore.git deps-src
+          cd deps-src
+          git sparse-checkout set extensions/hexcore-llvm-mc/deps/llvm
+          New-Item -ItemType Directory -Force ..\engine\deps | Out-Null
+          Copy-Item -Recurse -Force extensions/hexcore-llvm-mc/deps/llvm ..\engine\deps\
+
       - name: Install Dependencies
         working-directory: engine
         run: npm ci --ignore-scripts
@@ -76,4 +85,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --title $tag --notes "Automated native prebuilds for $env:ENGINE_VERSION"
           }
-          gh release upload $tag engine/prebuilds/** --clobber
+          $files = Get-ChildItem engine/prebuilds -Recurse -Filter *.node | ForEach-Object { $_.FullName }
+          if (-not $files) {
+            throw "No prebuild .node files found under engine/prebuilds"
+          }
+          gh release upload $tag $files --clobber
