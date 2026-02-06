@@ -110,6 +110,12 @@ jobs:
           cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
 
+      - name: Clean native engine node_modules after prebuild fetch
+        run: |
+          Remove-Item -Recurse -Force extensions/hexcore-capstone/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-unicorn/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-llvm-mc/node_modules -ErrorAction SilentlyContinue
+
       - name: Compile HexCore Extensions
         env:
           npm_config_ignore_scripts: true
@@ -124,22 +130,6 @@ jobs:
           cd ../hexcore-common && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
-
-      - name: Clean heavy nested node_modules before packaging
-        shell: pwsh
-        run: |
-          # Remove nested node_modules inside native engine symlinks (prevents EMFILE)
-          # but keep the top-level node_modules so npm list can resolve dependencies
-          $dirs = @(
-            'extensions/hexcore-disassembler/node_modules/hexcore-capstone/node_modules',
-            'extensions/hexcore-disassembler/node_modules/hexcore-llvm-mc/node_modules',
-            'extensions/hexcore-disassembler/node_modules/hexcore-common/node_modules',
-            'extensions/hexcore-debugger/node_modules/hexcore-unicorn/node_modules',
-            'extensions/hexcore-debugger/node_modules/hexcore-common/node_modules'
-          )
-          foreach ($d in $dirs) {
-            if (Test-Path $d) { Remove-Item -Recurse -Force $d }
-          }
 
       - name: Build VS Code
         run: npm run gulp vscode-win32-x64-min
