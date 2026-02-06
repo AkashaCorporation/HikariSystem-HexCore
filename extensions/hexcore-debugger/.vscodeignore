@@ -1,0 +1,8 @@
+src/**
+node_modules/hexcore-unicorn/node_modules/**
+node_modules/hexcore-unicorn/src/**
+node_modules/hexcore-unicorn/deps/**
+node_modules/hexcore-unicorn/binding.gyp
+node_modules/hexcore-common/node_modules/**
+node_modules/hexcore-common/src/**
+package-lock.json

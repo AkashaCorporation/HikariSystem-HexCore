@@ -1,0 +1,12 @@
+src/**
+node_modules/hexcore-capstone/node_modules/**
+node_modules/hexcore-capstone/src/**
+node_modules/hexcore-capstone/deps/**
+node_modules/hexcore-capstone/binding.gyp
+node_modules/hexcore-llvm-mc/node_modules/**
+node_modules/hexcore-llvm-mc/src/**
+node_modules/hexcore-llvm-mc/deps/**
+node_modules/hexcore-llvm-mc/binding.gyp
+node_modules/hexcore-common/node_modules/**
+node_modules/hexcore-common/src/**
+package-lock.json
