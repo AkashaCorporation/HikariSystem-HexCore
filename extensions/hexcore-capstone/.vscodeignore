@@ -1,0 +1,9 @@
+node_modules/**
+src/**
+test/**
+deps/**
+build/**
+binding.gyp
+package-lock.json
+.gitignore
+README.md
