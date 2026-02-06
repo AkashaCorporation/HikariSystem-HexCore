@@ -125,6 +125,14 @@ jobs:
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
 
+      - name: Clean native engine node_modules before packaging
+        run: |
+          Remove-Item -Recurse -Force extensions/hexcore-capstone/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-unicorn/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-llvm-mc/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-disassembler/node_modules -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force extensions/hexcore-debugger/node_modules -ErrorAction SilentlyContinue
+
       - name: Build VS Code
         run: npm run gulp vscode-win32-x64-min
         env:
