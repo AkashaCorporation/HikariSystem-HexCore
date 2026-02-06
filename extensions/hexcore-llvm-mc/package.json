@@ -50,14 +50,12 @@
 		"node": ">=18.0.0"
 	},
 	"activationEvents": [],
-	"dependencies": {
+	"devDependencies": {
 		"node-addon-api": "^7.0.0",
-		"prebuild-install": "^7.1.1"
+		"node-gyp": "^10.0.0",
+		"prebuild-install": "^7.1.1",
+		"prebuildify": "^6.0.0"
 	},
-  "devDependencies": {
-    "node-gyp": "^10.0.0",
-    "prebuildify": "^6.0.0"
-  },
   "files": [
     "src/",
     "build/Release/*.node",
