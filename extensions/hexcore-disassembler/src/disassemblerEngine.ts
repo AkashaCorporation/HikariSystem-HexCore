@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'fs';
 import * as path from 'path';
-import * as vscode from 'vscode'; // Added for extension interaction
+import * as vscode from 'vscode';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
 
@@ -129,9 +129,20 @@ export class DisassemblerEngine {
 	private llvmMcInitialized: boolean = false;
 	private llvmMcError?: string;
 
+	// Configurable limits
+	private maxFunctions: number = 1000;
+	private maxFunctionSize: number = 65536;
+
 	constructor() {
 		this.capstone = new CapstoneWrapper();
 		this.llvmMc = new LlvmMcWrapper();
+		this.loadConfig();
+	}
+
+	private loadConfig(): void {
+		const config = vscode.workspace.getConfiguration('hexcore.disassembler');
+		this.maxFunctions = config.get<number>('maxFunctions', 1000);
+		this.maxFunctionSize = config.get<number>('maxFunctionSize', 65536);
 	}
 
 	/**
@@ -149,22 +160,18 @@ export class DisassemblerEngine {
 				this.capstoneInitialized = false;
 				this.capstoneError = message;
 				console.warn('Capstone initialization failed, falling back to basic decoder:', error);
-				// Continue without Capstone - we'll use fallback
 			}
 		} else if (this.capstone.getArchitecture() !== this.architecture) {
-			// Re-initialize if architecture changed
 			await this.capstone.setArchitecture(this.architecture);
 		}
 	}
 
 	async loadFile(filePath: string): Promise<boolean> {
 		try {
-			// Check if file exists
 			if (!fs.existsSync(filePath)) {
 				return false;
 			}
 
-			// Read file buffer
 			this.currentFile = filePath;
 			this.fileBuffer = fs.readFileSync(filePath);
 			// Reset state
@@ -176,25 +183,33 @@ export class DisassemblerEngine {
 			this.comments.clear();
 			this.xrefs = [];
 			this.strings.clear();
-			this.baseAddress = this.detectBaseAddress();
 
-			// Initialize architecture
+			// Initialize architecture first (needed for base address detection in PE)
 			this.architecture = this.detectArchitecture();
-			await this.ensureCapstoneInitialized();
 
-			// Parse file structure (sections, imports, exports)
+			// Parse file structure (sets baseAddress, fileInfo, sections, imports, exports)
 			if (this.isPEFile()) {
-				await this.analyzePEWithExtension();
+				this.parsePEStructure();
 			} else if (this.isELFFile()) {
 				this.parseELFStructure();
 			} else {
+				this.baseAddress = 0x400000;
 				this.parseRawFile();
 			}
 
-			// Initial analysis
+			await this.ensureCapstoneInitialized();
+
+			// Initial analysis from entry point
 			const entryPoint = this.detectEntryPoint();
 			if (entryPoint) {
 				await this.analyzeFunction(entryPoint, 'entry_point');
+			}
+
+			// Analyze functions from exports
+			for (const exp of this.exports) {
+				if (!exp.isForwarder && exp.address > 0 && !this.functions.has(exp.address)) {
+					await this.analyzeFunction(exp.address, exp.name);
+				}
 			}
 
 			// Find strings
@@ -208,6 +223,25 @@ export class DisassemblerEngine {
 	}
 
 	/**
+	 * Full analysis: entry point + exports + prolog scan
+	 */
+	async analyzeAll(): Promise<number> {
+		if (!this.fileBuffer) {
+			return 0;
+		}
+
+		const countBefore = this.functions.size;
+
+		// Scan for function prologs in code sections
+		await this.scanForFunctionPrologs();
+
+		// Build string cross-references
+		this.buildStringXrefs();
+
+		return this.functions.size - countBefore;
+	}
+
+	/**
 	 * Detect architecture from file headers
 	 */
 	private detectArchitecture(): ArchitectureConfig {
@@ -215,7 +249,6 @@ export class DisassemblerEngine {
 			return 'x64';
 		}
 
-		// PE file detection
 		if (this.isPEFile()) {
 			const peOffset = this.fileBuffer.readUInt32LE(0x3C);
 			if (peOffset + 6 < this.fileBuffer.length) {
@@ -229,20 +262,22 @@ export class DisassemblerEngine {
 			}
 		}
 
-		// ELF file detection
 		if (this.isELFFile()) {
 			const elfClass = this.fileBuffer[4];
-			const machine = this.fileBuffer.readUInt16LE(18);
+			const isLE = this.fileBuffer[5] === 1;
+			const machine = isLE
+				? this.fileBuffer.readUInt16LE(18)
+				: this.fileBuffer.readUInt16BE(18);
 			switch (machine) {
-				case 0x03: return elfClass === 2 ? 'x64' : 'x86'; // EM_386 / EM_X86_64
-				case 0x3E: return 'x64';  // EM_X86_64
-				case 0x28: return 'arm';  // EM_ARM
-				case 0xB7: return 'arm64'; // EM_AARCH64
-				case 0x08: return 'mips'; // EM_MIPS
+				case 0x03: return elfClass === 2 ? 'x64' : 'x86';
+				case 0x3E: return 'x64';
+				case 0x28: return 'arm';
+				case 0xB7: return 'arm64';
+				case 0x08: return 'mips';
 			}
 		}
 
-		return 'x64'; // Default
+		return 'x64';
 	}
 
 	async disassembleRange(startAddr: number, size: number): Promise<Instruction[]> {
@@ -256,19 +291,14 @@ export class DisassemblerEngine {
 		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
 		const bytesToDisasm = this.fileBuffer!.subarray(offset, endOffset);
 
-		// Use Capstone if available (async to avoid blocking)
 		if (this.capstoneInitialized) {
 			const rawInstructions = await this.capstone.disassemble(bytesToDisasm, startAddr, 1000);
 			return rawInstructions.map(inst => this.convertCapstoneInstruction(inst));
 		}
 
-		// Fallback to basic decoder
 		return this.disassembleRangeFallback(startAddr, size);
 	}
 
-	/**
-	 * Convert Capstone instruction to our Instruction format
-	 */
 	private convertCapstoneInstruction(inst: DisassembledInstruction): Instruction {
 		const instruction: Instruction = {
 			address: inst.address,
@@ -284,15 +314,12 @@ export class DisassemblerEngine {
 			targetAddress: inst.targetAddress
 		};
 
-		// Store in cache
 		this.instructions.set(inst.address, instruction);
-
 		return instruction;
 	}
 
 	/**
 	 * Fallback disassembly for when Capstone is not available
-	 * Uses basic opcode tables (limited support)
 	 */
 	private disassembleRangeFallback(startAddr: number, size: number): Instruction[] {
 		const instructions: Instruction[] = [];
@@ -308,7 +335,6 @@ export class DisassemblerEngine {
 				offset += inst.size;
 				addr += inst.size;
 			} else {
-				// Invalid instruction - treat as data byte
 				const dataByte = this.fileBuffer![offset];
 				instructions.push({
 					address: addr,
@@ -329,9 +355,6 @@ export class DisassemblerEngine {
 		return instructions;
 	}
 
-	/**
-	 * Basic fallback instruction decoder (simplified x86)
-	 */
 	private disassembleInstructionFallback(offset: number, addr: number): Instruction | null {
 		if (offset >= this.fileBuffer!.length) {
 			return null;
@@ -339,7 +362,6 @@ export class DisassemblerEngine {
 
 		const byte = this.fileBuffer![offset];
 
-		// Common patterns
 		if (byte === 0x90) {
 			return this.createInstruction(addr, Buffer.from([byte]), 'nop', '', 1, false, false, false, false);
 		}
@@ -355,10 +377,8 @@ export class DisassemblerEngine {
 			const rel = this.fileBuffer!.readInt32LE(offset + 1);
 			const target = addr + 5 + rel;
 			return this.createInstruction(
-				addr,
-				this.fileBuffer!.subarray(offset, offset + 5),
-				'call',
-				`0x${target.toString(16).toUpperCase()}`,
+				addr, this.fileBuffer!.subarray(offset, offset + 5),
+				'call', `0x${target.toString(16).toUpperCase()}`,
 				5, true, false, false, false, target
 			);
 		}
@@ -368,10 +388,8 @@ export class DisassemblerEngine {
 			const rel = this.fileBuffer!.readInt32LE(offset + 1);
 			const target = addr + 5 + rel;
 			return this.createInstruction(
-				addr,
-				this.fileBuffer!.subarray(offset, offset + 5),
-				'jmp',
-				`0x${target.toString(16).toUpperCase()}`,
+				addr, this.fileBuffer!.subarray(offset, offset + 5),
+				'jmp', `0x${target.toString(16).toUpperCase()}`,
 				5, false, true, false, false, target
 			);
 		}
@@ -381,10 +399,8 @@ export class DisassemblerEngine {
 			const rel = this.fileBuffer!.readInt8(offset + 1);
 			const target = addr + 2 + rel;
 			return this.createInstruction(
-				addr,
-				this.fileBuffer!.subarray(offset, offset + 2),
-				'jmp',
-				`0x${target.toString(16).toUpperCase()}`,
+				addr, this.fileBuffer!.subarray(offset, offset + 2),
+				'jmp', `0x${target.toString(16).toUpperCase()}`,
 				2, false, true, false, false, target
 			);
 		}
@@ -392,25 +408,13 @@ export class DisassemblerEngine {
 		// PUSH r64 (0x50-0x57)
 		if (byte >= 0x50 && byte <= 0x57) {
 			const regs = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi'];
-			return this.createInstruction(
-				addr,
-				Buffer.from([byte]),
-				'push',
-				regs[byte - 0x50],
-				1, false, false, false, false
-			);
+			return this.createInstruction(addr, Buffer.from([byte]), 'push', regs[byte - 0x50], 1, false, false, false, false);
 		}
 
 		// POP r64 (0x58-0x5F)
 		if (byte >= 0x58 && byte <= 0x5F) {
 			const regs = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi'];
-			return this.createInstruction(
-				addr,
-				Buffer.from([byte]),
-				'pop',
-				regs[byte - 0x58],
-				1, false, false, false, false
-			);
+			return this.createInstruction(addr, Buffer.from([byte]), 'pop', regs[byte - 0x58], 1, false, false, false, false);
 		}
 
 		// Conditional jumps (0x70-0x7F)
@@ -419,43 +423,74 @@ export class DisassemblerEngine {
 			const rel = this.fileBuffer!.readInt8(offset + 1);
 			const target = addr + 2 + rel;
 			return this.createInstruction(
-				addr,
-				this.fileBuffer!.subarray(offset, offset + 2),
-				`j${conditions[byte - 0x70]}`,
-				`0x${target.toString(16).toUpperCase()}`,
+				addr, this.fileBuffer!.subarray(offset, offset + 2),
+				`j${conditions[byte - 0x70]}`, `0x${target.toString(16).toUpperCase()}`,
 				2, false, true, false, true, target
 			);
+		}
+
+		// MOV reg, imm (0xB8-0xBF for 32/64-bit)
+		if (byte >= 0xB8 && byte <= 0xBF && offset + 5 <= this.fileBuffer!.length) {
+			const regs = ['eax', 'ecx', 'edx', 'ebx', 'esp', 'ebp', 'esi', 'edi'];
+			const imm = this.fileBuffer!.readUInt32LE(offset + 1);
+			return this.createInstruction(
+				addr, this.fileBuffer!.subarray(offset, offset + 5),
+				'mov', `${regs[byte - 0xB8]}, 0x${imm.toString(16).toUpperCase()}`,
+				5, false, false, false, false
+			);
+		}
+
+		// SUB RSP, imm8 (0x48 0x83 0xEC imm8) - common x64 prolog
+		if (byte === 0x48 && offset + 4 <= this.fileBuffer!.length) {
+			const byte2 = this.fileBuffer![offset + 1];
+			const byte3 = this.fileBuffer![offset + 2];
+			if (byte2 === 0x83 && byte3 === 0xEC) {
+				const imm = this.fileBuffer![offset + 3];
+				return this.createInstruction(
+					addr, this.fileBuffer!.subarray(offset, offset + 4),
+					'sub', `rsp, 0x${imm.toString(16).toUpperCase()}`,
+					4, false, false, false, false
+				);
+			}
+			// MOV RBP, RSP (0x48 0x89 0xE5)
+			if (byte2 === 0x89 && byte3 === 0xE5) {
+				return this.createInstruction(
+					addr, this.fileBuffer!.subarray(offset, offset + 3),
+					'mov', 'rbp, rsp',
+					3, false, false, false, false
+				);
+			}
+		}
+
+		// 2-byte conditional jumps (0x0F 0x80-0x8F)
+		if (byte === 0x0F && offset + 6 <= this.fileBuffer!.length) {
+			const byte2 = this.fileBuffer![offset + 1];
+			if (byte2 >= 0x80 && byte2 <= 0x8F) {
+				const conditions = ['o', 'no', 'b', 'nb', 'z', 'nz', 'be', 'nbe', 's', 'ns', 'p', 'np', 'l', 'nl', 'le', 'nle'];
+				const rel = this.fileBuffer!.readInt32LE(offset + 2);
+				const target = addr + 6 + rel;
+				return this.createInstruction(
+					addr, this.fileBuffer!.subarray(offset, offset + 6),
+					`j${conditions[byte2 - 0x80]}`, `0x${target.toString(16).toUpperCase()}`,
+					6, false, true, false, true, target
+				);
+			}
 		}
 
 		return null;
 	}
 
 	private createInstruction(
-		address: number,
-		bytes: Buffer,
-		mnemonic: string,
-		opStr: string,
-		size: number,
-		isCall: boolean = false,
-		isJump: boolean = false,
-		isRet: boolean = false,
-		isConditional: boolean = false,
-		targetAddress?: number
+		address: number, bytes: Buffer, mnemonic: string, opStr: string, size: number,
+		isCall: boolean = false, isJump: boolean = false, isRet: boolean = false,
+		isConditional: boolean = false, targetAddress?: number
 	): Instruction {
-		return {
-			address,
-			bytes,
-			mnemonic,
-			opStr,
-			size,
-			comment: this.comments.get(address),
-			isCall,
-			isJump,
-			isRet,
-			isConditional,
-			targetAddress
-		};
+		return { address, bytes, mnemonic, opStr, size, comment: this.comments.get(address), isCall, isJump, isRet, isConditional, targetAddress };
 	}
+
+	// ============================================================================
+	// String Analysis
+	// ============================================================================
 
 	async findStrings(): Promise<void> {
 		if (!this.fileBuffer) {
@@ -468,17 +503,11 @@ export class DisassemblerEngine {
 		let match;
 
 		while ((match = asciiPattern.exec(text)) !== null) {
-			if (match[0].length <= 256) { // Reasonable limit
+			if (match[0].length <= 256) {
 				const offset = match.index;
 				const str = match[0];
 				const addr = this.offsetToAddress(offset);
-
-				this.strings.set(addr, {
-					address: addr,
-					string: str,
-					encoding: 'ascii',
-					references: []
-				});
+				this.strings.set(addr, { address: addr, string: str, encoding: 'ascii', references: [] });
 			}
 		}
 
@@ -496,14 +525,39 @@ export class DisassemblerEngine {
 				const str = this.fileBuffer.toString('utf16le', i, i + len * 2);
 				const addr = this.offsetToAddress(i);
 				if (!this.strings.has(addr)) {
-					this.strings.set(addr, {
-						address: addr,
-						string: str,
-						encoding: 'unicode',
-						references: []
-					});
+					this.strings.set(addr, { address: addr, string: str, encoding: 'unicode', references: [] });
 				}
 				i += len * 2;
+			}
+		}
+	}
+
+	/**
+	 * Build string cross-references from disassembled instructions
+	 */
+	private buildStringXrefs(): void {
+		const addrRegex = /0x([0-9a-fA-F]+)/g;
+
+		for (const inst of this.instructions.values()) {
+			if (!inst.opStr) {
+				continue;
+			}
+			let addrMatch;
+			while ((addrMatch = addrRegex.exec(inst.opStr)) !== null) {
+				const targetAddr = parseInt(addrMatch[1], 16);
+				const strRef = this.strings.get(targetAddr);
+				if (strRef) {
+					if (!strRef.references.includes(inst.address)) {
+						strRef.references.push(inst.address);
+					}
+					this.xrefs.push({ from: inst.address, to: targetAddr, type: 'string' });
+				}
+			}
+			addrRegex.lastIndex = 0;
+
+			// Data xrefs: any address reference to non-string data
+			if (inst.targetAddress && !inst.isCall && !inst.isJump) {
+				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'data' });
 			}
 		}
 	}
@@ -519,7 +573,7 @@ export class DisassemblerEngine {
 		if (!this.fileBuffer || this.fileBuffer.length < 64) {
 			return false;
 		}
-		return this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A; // MZ
+		return this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A;
 	}
 
 	private isELFFile(): boolean {
@@ -529,14 +583,352 @@ export class DisassemblerEngine {
 		return this.fileBuffer[0] === 0x7F &&
 			this.fileBuffer[1] === 0x45 &&
 			this.fileBuffer[2] === 0x4C &&
-			this.fileBuffer[3] === 0x46; // \x7FELF
+			this.fileBuffer[3] === 0x46;
 	}
 
 	// ============================================================================
-	// PE/ELF Structure Parsing
+	// PE Structure Parsing (inline - no external extension dependency)
 	// ============================================================================
 
+	private parsePEStructure(): void {
+		if (!this.fileBuffer || this.fileBuffer.length < 64) {
+			return;
+		}
 
+		const peOffset = this.fileBuffer.readUInt32LE(0x3C);
+		if (peOffset + 24 >= this.fileBuffer.length) {
+			return;
+		}
+
+		// Verify PE signature
+		const peSignature = this.fileBuffer.readUInt32LE(peOffset);
+		if (peSignature !== 0x00004550) { // "PE\0\0"
+			return;
+		}
+
+		// COFF Header (20 bytes after signature)
+		const coffOffset = peOffset + 4;
+		const machine = this.fileBuffer.readUInt16LE(coffOffset);
+		const numberOfSections = this.fileBuffer.readUInt16LE(coffOffset + 2);
+		const timeDateStamp = this.fileBuffer.readUInt32LE(coffOffset + 4);
+		const sizeOfOptionalHeader = this.fileBuffer.readUInt16LE(coffOffset + 16);
+
+		// Optional Header
+		const optOffset = coffOffset + 20;
+		if (optOffset + 2 >= this.fileBuffer.length) {
+			return;
+		}
+		const magic = this.fileBuffer.readUInt16LE(optOffset);
+		const is64 = magic === 0x20B; // PE32+
+
+		let imageBase: number;
+		let entryPointRVA: number;
+		let sizeOfImage: number;
+		let numberOfRvaAndSizes: number;
+		let dataDirectoryOffset: number;
+		let subsystem: number;
+
+		if (is64) {
+			entryPointRVA = this.fileBuffer.readUInt32LE(optOffset + 16);
+			imageBase = Number(this.fileBuffer.readBigUInt64LE(optOffset + 24));
+			sizeOfImage = this.fileBuffer.readUInt32LE(optOffset + 56);
+			subsystem = this.fileBuffer.readUInt16LE(optOffset + 68);
+			numberOfRvaAndSizes = this.fileBuffer.readUInt32LE(optOffset + 108);
+			dataDirectoryOffset = optOffset + 112;
+		} else {
+			entryPointRVA = this.fileBuffer.readUInt32LE(optOffset + 16);
+			imageBase = this.fileBuffer.readUInt32LE(optOffset + 28);
+			sizeOfImage = this.fileBuffer.readUInt32LE(optOffset + 56);
+			subsystem = this.fileBuffer.readUInt16LE(optOffset + 68);
+			numberOfRvaAndSizes = this.fileBuffer.readUInt32LE(optOffset + 92);
+			dataDirectoryOffset = optOffset + 96;
+		}
+
+		this.baseAddress = imageBase;
+
+		this.fileInfo = {
+			format: is64 ? 'PE64' : 'PE',
+			architecture: this.architecture,
+			entryPoint: entryPointRVA + imageBase,
+			baseAddress: imageBase,
+			imageSize: sizeOfImage,
+			timestamp: timeDateStamp > 0 ? new Date(timeDateStamp * 1000) : undefined,
+			subsystem: subsystem.toString()
+		};
+
+		// Parse section table
+		const sectionTableOffset = optOffset + sizeOfOptionalHeader;
+		this.parsePESections(sectionTableOffset, numberOfSections);
+
+		// Parse imports (DataDirectory[1])
+		if (numberOfRvaAndSizes > 1) {
+			const importDirRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 8);
+			const importDirSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 12);
+			if (importDirRVA > 0 && importDirSize > 0) {
+				this.parsePEImports(importDirRVA, is64);
+			}
+		}
+
+		// Parse exports (DataDirectory[0])
+		if (numberOfRvaAndSizes > 0) {
+			const exportDirRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset);
+			const exportDirSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 4);
+			if (exportDirRVA > 0 && exportDirSize > 0) {
+				this.parsePEExports(exportDirRVA, exportDirSize);
+			}
+		}
+	}
+
+	private parsePESections(offset: number, count: number): void {
+		if (!this.fileBuffer) {
+			return;
+		}
+
+		for (let i = 0; i < count; i++) {
+			const secOffset = offset + i * 40;
+			if (secOffset + 40 > this.fileBuffer.length) {
+				break;
+			}
+
+			// Section name (8 bytes, null-padded)
+			let name = '';
+			for (let j = 0; j < 8; j++) {
+				const ch = this.fileBuffer[secOffset + j];
+				if (ch === 0) { break; }
+				name += String.fromCharCode(ch);
+			}
+
+			const virtualSize = this.fileBuffer.readUInt32LE(secOffset + 8);
+			const virtualAddress = this.fileBuffer.readUInt32LE(secOffset + 12);
+			const rawSize = this.fileBuffer.readUInt32LE(secOffset + 16);
+			const rawAddress = this.fileBuffer.readUInt32LE(secOffset + 20);
+			const characteristics = this.fileBuffer.readUInt32LE(secOffset + 36);
+
+			const isReadable = (characteristics & 0x40000000) !== 0;
+			const isWritable = (characteristics & 0x80000000) !== 0;
+			const isExecutable = (characteristics & 0x20000000) !== 0;
+			const isCode = (characteristics & 0x00000020) !== 0;
+			const isData = (characteristics & 0x00000040) !== 0;
+
+			let permissions = isReadable ? 'r' : '-';
+			permissions += isWritable ? 'w' : '-';
+			permissions += isExecutable ? 'x' : '-';
+
+			this.sections.push({
+				name,
+				virtualAddress: virtualAddress + this.baseAddress,
+				virtualSize,
+				rawAddress,
+				rawSize,
+				characteristics,
+				permissions,
+				isCode,
+				isData,
+				isReadable,
+				isWritable,
+				isExecutable
+			});
+		}
+	}
+
+	private parsePEImports(importDirRVA: number, is64: boolean): void {
+		if (!this.fileBuffer) {
+			return;
+		}
+
+		const importDirOffset = this.rvaToFileOffset(importDirRVA);
+		if (importDirOffset < 0 || importDirOffset >= this.fileBuffer.length) {
+			return;
+		}
+
+		// Each IMAGE_IMPORT_DESCRIPTOR is 20 bytes
+		let descOffset = importDirOffset;
+		for (let i = 0; i < 256; i++) { // Safety limit
+			if (descOffset + 20 > this.fileBuffer.length) {
+				break;
+			}
+
+			const originalFirstThunk = this.fileBuffer.readUInt32LE(descOffset);     // ILT RVA
+			const nameRVA = this.fileBuffer.readUInt32LE(descOffset + 12);            // DLL name RVA
+			const firstThunk = this.fileBuffer.readUInt32LE(descOffset + 16);         // IAT RVA
+
+			// Null terminator
+			if (nameRVA === 0 && firstThunk === 0) {
+				break;
+			}
+
+			// Read DLL name
+			const nameOffset = this.rvaToFileOffset(nameRVA);
+			let dllName = '';
+			if (nameOffset >= 0 && nameOffset < this.fileBuffer.length) {
+				for (let j = nameOffset; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+					dllName += String.fromCharCode(this.fileBuffer[j]);
+					if (dllName.length > 256) { break; }
+				}
+			}
+
+			if (dllName.length === 0) {
+				descOffset += 20;
+				continue;
+			}
+
+			// Walk the ILT (or IAT if ILT is zero)
+			const thunkRVA = originalFirstThunk > 0 ? originalFirstThunk : firstThunk;
+			const functions: ImportFunction[] = [];
+			const entrySize = is64 ? 8 : 4;
+
+			let thunkOffset = this.rvaToFileOffset(thunkRVA);
+			let iatRVA = firstThunk;
+
+			for (let j = 0; j < 4096; j++) { // Safety limit
+				if (thunkOffset < 0 || thunkOffset + entrySize > this.fileBuffer.length) {
+					break;
+				}
+
+				let entry: number;
+				let isOrdinal: boolean;
+
+				if (is64) {
+					const val = this.fileBuffer.readBigUInt64LE(thunkOffset);
+					if (val === 0n) { break; }
+					isOrdinal = (val & 0x8000000000000000n) !== 0n;
+					entry = Number(isOrdinal ? (val & 0xFFFFn) : val);
+				} else {
+					entry = this.fileBuffer.readUInt32LE(thunkOffset);
+					if (entry === 0) { break; }
+					isOrdinal = (entry & 0x80000000) !== 0;
+					if (isOrdinal) {
+						entry = entry & 0xFFFF;
+					}
+				}
+
+				if (isOrdinal) {
+					functions.push({
+						name: `Ordinal_${entry}`,
+						ordinal: entry,
+						address: iatRVA + this.baseAddress,
+						hint: 0
+					});
+				} else {
+					// Name import: entry is RVA to IMAGE_IMPORT_BY_NAME (hint + name)
+					const nameEntryOffset = this.rvaToFileOffset(entry);
+					if (nameEntryOffset >= 0 && nameEntryOffset + 2 < this.fileBuffer.length) {
+						const hint = this.fileBuffer.readUInt16LE(nameEntryOffset);
+						let funcName = '';
+						for (let k = nameEntryOffset + 2; k < this.fileBuffer.length && this.fileBuffer[k] !== 0; k++) {
+							funcName += String.fromCharCode(this.fileBuffer[k]);
+							if (funcName.length > 256) { break; }
+						}
+						functions.push({
+							name: funcName || `Unknown_${j}`,
+							ordinal: undefined,
+							address: iatRVA + this.baseAddress,
+							hint
+						});
+					}
+				}
+
+				thunkOffset += entrySize;
+				iatRVA += entrySize;
+			}
+
+			if (functions.length > 0) {
+				this.imports.push({ name: dllName, functions });
+			}
+
+			descOffset += 20;
+		}
+	}
+
+	private parsePEExports(exportDirRVA: number, exportDirSize: number): void {
+		if (!this.fileBuffer) {
+			return;
+		}
+
+		const exportOffset = this.rvaToFileOffset(exportDirRVA);
+		if (exportOffset < 0 || exportOffset + 40 > this.fileBuffer.length) {
+			return;
+		}
+
+		const numberOfFunctions = this.fileBuffer.readUInt32LE(exportOffset + 20);
+		const numberOfNames = this.fileBuffer.readUInt32LE(exportOffset + 24);
+		const addressOfFunctions = this.fileBuffer.readUInt32LE(exportOffset + 28);   // RVA
+		const addressOfNames = this.fileBuffer.readUInt32LE(exportOffset + 32);       // RVA
+		const addressOfOrdinals = this.fileBuffer.readUInt32LE(exportOffset + 36);    // RVA
+		const ordinalBase = this.fileBuffer.readUInt32LE(exportOffset + 16);
+
+		const funcTableOffset = this.rvaToFileOffset(addressOfFunctions);
+		const nameTableOffset = this.rvaToFileOffset(addressOfNames);
+		const ordTableOffset = this.rvaToFileOffset(addressOfOrdinals);
+
+		if (funcTableOffset < 0 || nameTableOffset < 0 || ordTableOffset < 0) {
+			return;
+		}
+
+		// Build name → ordinal mapping
+		const nameMap = new Map<number, string>();
+		for (let i = 0; i < numberOfNames && i < 4096; i++) {
+			const nameRVAOff = nameTableOffset + i * 4;
+			const ordOff = ordTableOffset + i * 2;
+			if (nameRVAOff + 4 > this.fileBuffer.length || ordOff + 2 > this.fileBuffer.length) {
+				break;
+			}
+
+			const nameRVA = this.fileBuffer.readUInt32LE(nameRVAOff);
+			const ordinal = this.fileBuffer.readUInt16LE(ordOff);
+
+			const nameFileOffset = this.rvaToFileOffset(nameRVA);
+			if (nameFileOffset >= 0 && nameFileOffset < this.fileBuffer.length) {
+				let name = '';
+				for (let j = nameFileOffset; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+					name += String.fromCharCode(this.fileBuffer[j]);
+					if (name.length > 256) { break; }
+				}
+				nameMap.set(ordinal, name);
+			}
+		}
+
+		// Build export entries
+		for (let i = 0; i < numberOfFunctions && i < 4096; i++) {
+			const funcRVAOff = funcTableOffset + i * 4;
+			if (funcRVAOff + 4 > this.fileBuffer.length) {
+				break;
+			}
+
+			const funcRVA = this.fileBuffer.readUInt32LE(funcRVAOff);
+			if (funcRVA === 0) {
+				continue;
+			}
+
+			// Check if forwarder (RVA falls within export directory)
+			const isForwarder = funcRVA >= exportDirRVA && funcRVA < exportDirRVA + exportDirSize;
+			let forwarderName: string | undefined;
+
+			if (isForwarder) {
+				const fwdOffset = this.rvaToFileOffset(funcRVA);
+				if (fwdOffset >= 0 && fwdOffset < this.fileBuffer.length) {
+					forwarderName = '';
+					for (let j = fwdOffset; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+						forwarderName += String.fromCharCode(this.fileBuffer[j]);
+						if (forwarderName.length > 256) { break; }
+					}
+				}
+			}
+
+			const name = nameMap.get(i) || '';
+			this.exports.push({
+				name: name || `Ordinal_${i + ordinalBase}`,
+				ordinal: i + ordinalBase,
+				address: isForwarder ? 0 : funcRVA + this.baseAddress,
+				isForwarder,
+				forwarderName
+			});
+		}
+	}
+
+	// ============================================================================
+	// ELF Structure Parsing
+	// ============================================================================
 
 	private parseELFStructure(): void {
 		if (!this.fileBuffer) {
@@ -546,30 +938,43 @@ export class DisassemblerEngine {
 		const is64Bit = this.fileBuffer[4] === 2;
 		const isLittleEndian = this.fileBuffer[5] === 1;
 
-		// For now, only support little-endian
-		if (!isLittleEndian) {
-			return;
+		// Helper for endian-aware reads
+		const readU16 = (off: number): number =>
+			isLittleEndian ? this.fileBuffer!.readUInt16LE(off) : this.fileBuffer!.readUInt16BE(off);
+		const readU32 = (off: number): number =>
+			isLittleEndian ? this.fileBuffer!.readUInt32LE(off) : this.fileBuffer!.readUInt32BE(off);
+		const readU64 = (off: number): bigint =>
+			isLittleEndian ? this.fileBuffer!.readBigUInt64LE(off) : this.fileBuffer!.readBigUInt64BE(off);
+		const readAddr = (off: number): number =>
+			is64Bit ? Number(readU64(off)) : readU32(off);
+
+		const entryPoint = readAddr(24);
+		const phoff = is64Bit ? Number(readU64(32)) : readU32(28);
+		const shoff = is64Bit ? Number(readU64(40)) : readU32(32);
+		const phentsize = readU16(is64Bit ? 54 : 42);
+		const phnum = readU16(is64Bit ? 56 : 44);
+		const shentsize = readU16(is64Bit ? 58 : 46);
+		const shnum = readU16(is64Bit ? 60 : 48);
+		const shstrndx = readU16(is64Bit ? 62 : 50);
+
+		// Detect base address from first LOAD segment
+		let baseAddr = 0x400000;
+		if (phoff > 0 && phnum > 0) {
+			for (let i = 0; i < phnum; i++) {
+				const phOff = phoff + i * phentsize;
+				if (phOff + phentsize > this.fileBuffer.length) { break; }
+				const pType = readU32(phOff);
+				if (pType === 1) { // PT_LOAD
+					const pVaddr = is64Bit ? Number(readU64(phOff + 16)) : readU32(phOff + 8);
+					if (pVaddr > 0) {
+						baseAddr = pVaddr;
+						break;
+					}
+				}
+			}
 		}
+		this.baseAddress = baseAddr;
 
-		const entryPoint = is64Bit
-			? Number(this.fileBuffer.readBigUInt64LE(24))
-			: this.fileBuffer.readUInt32LE(24);
-
-		const phoff = is64Bit
-			? Number(this.fileBuffer.readBigUInt64LE(32))
-			: this.fileBuffer.readUInt32LE(28);
-
-		const shoff = is64Bit
-			? Number(this.fileBuffer.readBigUInt64LE(40))
-			: this.fileBuffer.readUInt32LE(32);
-
-		const phentsize = this.fileBuffer.readUInt16LE(is64Bit ? 54 : 42);
-		const phnum = this.fileBuffer.readUInt16LE(is64Bit ? 56 : 44);
-		const shentsize = this.fileBuffer.readUInt16LE(is64Bit ? 58 : 46);
-		const shnum = this.fileBuffer.readUInt16LE(is64Bit ? 60 : 48);
-		const shstrndx = this.fileBuffer.readUInt16LE(is64Bit ? 62 : 50);
-
-		// File info
 		this.fileInfo = {
 			format: is64Bit ? 'ELF64' : 'ELF32',
 			architecture: this.architecture,
@@ -579,52 +984,58 @@ export class DisassemblerEngine {
 			characteristics: ['ELF']
 		};
 
-		// Parse section headers
+		// Parse section headers - collect raw info for symbol parsing
+		interface ElfSection {
+			name: string;
+			type: number;
+			flags: number;
+			addr: number;
+			offset: number;
+			size: number;
+			link: number;
+			entsize: number;
+		}
+		const elfSections: ElfSection[] = [];
+
 		if (shoff > 0 && shnum > 0 && shstrndx < shnum) {
 			// Get section name string table
-			const shstrtabOffset = shoff + (shstrndx * shentsize);
-			const shstrtabFileOffset = is64Bit
-				? Number(this.fileBuffer.readBigUInt64LE(shstrtabOffset + 24))
-				: this.fileBuffer.readUInt32LE(shstrtabOffset + 16);
+			const shstrtabOff = shoff + shstrndx * shentsize;
+			const shstrtabFileOff = is64Bit
+				? Number(readU64(shstrtabOff + 24))
+				: readU32(shstrtabOff + 16);
 
 			for (let i = 0; i < shnum; i++) {
-				const sectionOffset = shoff + (i * shentsize);
-				if (sectionOffset + shentsize > this.fileBuffer.length) {
+				const secOff = shoff + i * shentsize;
+				if (secOff + shentsize > this.fileBuffer.length) {
 					break;
 				}
 
-				const nameOffset = this.fileBuffer.readUInt32LE(sectionOffset);
-				const type = this.fileBuffer.readUInt32LE(sectionOffset + 4);
-				const flags = is64Bit
-					? Number(this.fileBuffer.readBigUInt64LE(sectionOffset + 8))
-					: this.fileBuffer.readUInt32LE(sectionOffset + 8);
-				const addr = is64Bit
-					? Number(this.fileBuffer.readBigUInt64LE(sectionOffset + 16))
-					: this.fileBuffer.readUInt32LE(sectionOffset + 12);
-				const offset = is64Bit
-					? Number(this.fileBuffer.readBigUInt64LE(sectionOffset + 24))
-					: this.fileBuffer.readUInt32LE(sectionOffset + 16);
-				const size = is64Bit
-					? Number(this.fileBuffer.readBigUInt64LE(sectionOffset + 32))
-					: this.fileBuffer.readUInt32LE(sectionOffset + 20);
+				const nameIdx = readU32(secOff);
+				const type = readU32(secOff + 4);
+				const flags = is64Bit ? Number(readU64(secOff + 8)) : readU32(secOff + 8);
+				const addr = is64Bit ? Number(readU64(secOff + 16)) : readU32(secOff + 12);
+				const offset = is64Bit ? Number(readU64(secOff + 24)) : readU32(secOff + 16);
+				const size = is64Bit ? Number(readU64(secOff + 32)) : readU32(secOff + 20);
+				const link = readU32(is64Bit ? secOff + 40 : secOff + 24);
+				const entsize = is64Bit ? Number(readU64(secOff + 56)) : readU32(secOff + 36);
 
 				// Read section name
 				let name = '';
-				if (shstrtabFileOffset + nameOffset < this.fileBuffer.length) {
-					for (let j = shstrtabFileOffset + nameOffset; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+				if (shstrtabFileOff + nameIdx < this.fileBuffer.length) {
+					for (let j = shstrtabFileOff + nameIdx; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
 						name += String.fromCharCode(this.fileBuffer[j]);
 					}
 				}
-
 				if (name.length === 0) {
 					name = `section_${i}`;
 				}
+
+				elfSections.push({ name, type, flags, addr, offset, size, link, entsize });
 
 				const isWritable = (flags & 0x1) !== 0;
 				const isAlloc = (flags & 0x2) !== 0;
 				const isExecutable = (flags & 0x4) !== 0;
 
-				// Skip non-allocated sections (debug, etc)
 				if (!isAlloc && type !== 1) {
 					continue;
 				}
@@ -647,6 +1058,136 @@ export class DisassemblerEngine {
 					isWritable,
 					isExecutable
 				});
+			}
+		}
+
+		// Parse symbol tables (SHT_SYMTAB=2 and SHT_DYNSYM=11)
+		for (const sec of elfSections) {
+			if (sec.type !== 2 && sec.type !== 11) {
+				continue;
+			}
+			if (sec.entsize === 0 || sec.size === 0) {
+				continue;
+			}
+
+			// Get associated string table
+			const strTabSec = elfSections[sec.link];
+			if (!strTabSec) {
+				continue;
+			}
+
+			const symCount = Math.floor(sec.size / sec.entsize);
+			const isDynSym = sec.type === 11;
+
+			for (let i = 0; i < symCount && i < 8192; i++) {
+				const symOff = sec.offset + i * sec.entsize;
+				if (symOff + sec.entsize > this.fileBuffer.length) {
+					break;
+				}
+
+				let stName: number, stInfo: number, stShndx: number, stValue: number, stSize: number;
+
+				if (is64Bit) {
+					stName = readU32(symOff);
+					stInfo = this.fileBuffer[symOff + 4];
+					stShndx = readU16(symOff + 6);
+					stValue = Number(readU64(symOff + 8));
+					stSize = Number(readU64(symOff + 16));
+				} else {
+					stName = readU32(symOff);
+					stValue = readU32(symOff + 4);
+					stSize = readU32(symOff + 8);
+					stInfo = this.fileBuffer[symOff + 12];
+					stShndx = readU16(symOff + 14);
+				}
+
+				const stBind = stInfo >> 4;   // STB_LOCAL=0, STB_GLOBAL=1, STB_WEAK=2
+				const stType = stInfo & 0xF;  // STT_FUNC=2, STT_OBJECT=1
+
+				// Read symbol name
+				let symName = '';
+				const nameOff = strTabSec.offset + stName;
+				if (nameOff < this.fileBuffer.length) {
+					for (let j = nameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+						symName += String.fromCharCode(this.fileBuffer[j]);
+						if (symName.length > 256) { break; }
+					}
+				}
+
+				if (symName.length === 0) {
+					continue;
+				}
+
+				const SHN_UNDEF = 0;
+				const isUndefined = stShndx === SHN_UNDEF;
+
+				if (isUndefined && (stBind === 1 || stBind === 2)) {
+					// Import: undefined global/weak symbol
+					// Group by library name (use "external" as fallback since ELF doesn't specify per-symbol)
+					let libEntry = this.imports.find(lib => lib.name === 'external');
+					if (!libEntry) {
+						libEntry = { name: 'external', functions: [] };
+						this.imports.push(libEntry);
+					}
+					libEntry.functions.push({
+						name: symName,
+						ordinal: i,
+						address: stValue || 0,
+						hint: 0
+					});
+				} else if (!isUndefined && (stBind === 1 || stBind === 2) && stType === 2) {
+					// Export: defined global/weak function symbol
+					this.exports.push({
+						name: symName,
+						ordinal: i,
+						address: stValue,
+						isForwarder: false
+					});
+				}
+			}
+		}
+
+		// Parse .dynamic section for NEEDED entries (shared library names)
+		for (const sec of elfSections) {
+			if (sec.type !== 6) { // SHT_DYNAMIC
+				continue;
+			}
+
+			const dynStrSec = elfSections[sec.link];
+			if (!dynStrSec) {
+				continue;
+			}
+
+			const entrySize = is64Bit ? 16 : 8;
+			const numEntries = Math.floor(sec.size / entrySize);
+
+			for (let i = 0; i < numEntries; i++) {
+				const entOff = sec.offset + i * entrySize;
+				if (entOff + entrySize > this.fileBuffer.length) {
+					break;
+				}
+
+				const dTag = is64Bit ? Number(readU64(entOff)) : readU32(entOff);
+				const dVal = is64Bit ? Number(readU64(entOff + 8)) : readU32(entOff + 4);
+
+				if (dTag === 0) { break; } // DT_NULL
+				if (dTag === 1) { // DT_NEEDED
+					let libName = '';
+					const nameOff = dynStrSec.offset + dVal;
+					if (nameOff < this.fileBuffer.length) {
+						for (let j = nameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+							libName += String.fromCharCode(this.fileBuffer[j]);
+							if (libName.length > 256) { break; }
+						}
+					}
+					// Re-group import symbols under their actual library name
+					if (libName) {
+						const existing = this.imports.find(lib => lib.name === libName);
+						if (!existing) {
+							this.imports.push({ name: libName, functions: [] });
+						}
+					}
+				}
 			}
 		}
 	}
@@ -685,7 +1226,6 @@ export class DisassemblerEngine {
 			return -1;
 		}
 
-		// Find section containing this RVA
 		for (const section of this.sections) {
 			const sectionRVA = section.virtualAddress - this.baseAddress;
 			if (rva >= sectionRVA && rva < sectionRVA + section.virtualSize) {
@@ -693,11 +1233,204 @@ export class DisassemblerEngine {
 			}
 		}
 
-		// Fallback: assume 1:1 mapping (headers)
 		return rva;
 	}
 
-	// Getters for new data
+	// ============================================================================
+	// Function Analysis
+	// ============================================================================
+
+	async analyzeFunction(address: number, name?: string): Promise<Function> {
+		const existing = this.functions.get(address);
+		if (existing) {
+			return existing;
+		}
+
+		const instructions = await this.disassembleRange(address, this.maxFunctionSize);
+
+		if (instructions.length === 0) {
+			const offset = this.addressToOffset(address);
+			if (offset >= 0 && offset < this.fileBuffer!.length) {
+				const byteCount = Math.min(16, this.fileBuffer!.length - offset);
+				instructions.push({
+					address,
+					bytes: this.fileBuffer!.subarray(offset, offset + byteCount),
+					mnemonic: 'db',
+					opStr: Array.from(this.fileBuffer!.subarray(offset, offset + byteCount))
+						.map(b => `0x${b.toString(16).padStart(2, '0').toUpperCase()}`).join(', '),
+					size: byteCount,
+					isCall: false,
+					isJump: false,
+					isRet: false,
+					isConditional: false
+				});
+			}
+		}
+
+		// Find function end - handle multiple RETs, look for the last one followed by
+		// padding (0xCC/0x90) or another function prolog
+		let endIdx = instructions.length;
+		let lastRetIdx = -1;
+		for (let i = 0; i < instructions.length; i++) {
+			if (instructions[i].isRet) {
+				lastRetIdx = i;
+				// Check if next instruction is padding or unreachable
+				if (i + 1 < instructions.length) {
+					const next = instructions[i + 1];
+					const nextByte = next.bytes[0];
+					// If next is INT3 (0xCC), NOP (0x90), or another function prolog, end here
+					if (nextByte === 0xCC || nextByte === 0x90 || nextByte === 0x55) {
+						endIdx = i + 1;
+						break;
+					}
+					// If next instruction is a jump target from within the function, continue
+					const isJumpTarget = instructions.slice(0, i).some(
+						inst => inst.targetAddress === next.address
+					);
+					if (!isJumpTarget) {
+						endIdx = i + 1;
+						break;
+					}
+					// Otherwise continue (this RET is in a branch, not the end)
+				} else {
+					endIdx = i + 1;
+					break;
+				}
+			}
+			if (instructions[i].isJump && !instructions[i].isConditional) {
+				if (instructions[i].targetAddress &&
+					(instructions[i].targetAddress! < address ||
+					 instructions[i].targetAddress! > address + this.maxFunctionSize)) {
+					// Check if there are more reachable instructions after
+					if (i + 1 < instructions.length) {
+						const nextIsTarget = instructions.slice(0, i).some(
+							inst => inst.targetAddress === instructions[i + 1].address
+						);
+						if (!nextIsTarget) {
+							endIdx = i + 1;
+							break;
+						}
+					} else {
+						endIdx = i + 1;
+						break;
+					}
+				}
+			}
+		}
+
+		// If we never found a clear end, use last RET if found
+		if (endIdx === instructions.length && lastRetIdx >= 0) {
+			endIdx = lastRetIdx + 1;
+		}
+
+		const funcInstructions = instructions.slice(0, endIdx);
+
+		const func: Function = {
+			address,
+			name: name || `sub_${address.toString(16).toUpperCase()}`,
+			size: funcInstructions.length > 0
+				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size - address)
+				: 0,
+			endAddress: funcInstructions.length > 0
+				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size)
+				: address,
+			instructions: funcInstructions,
+			callers: [],
+			callees: []
+		};
+
+		this.functions.set(address, func);
+
+		// Recursively analyze called functions
+		for (const inst of funcInstructions) {
+			if (inst.isCall && inst.targetAddress && this.functions.size < this.maxFunctions) {
+				func.callees.push(inst.targetAddress);
+				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'call' });
+
+				// Track caller in target function
+				const target = this.functions.get(inst.targetAddress);
+				if (target) {
+					if (!target.callers.includes(inst.address)) {
+						target.callers.push(inst.address);
+					}
+				}
+
+				// Don't await to avoid deep recursion
+				this.analyzeFunction(inst.targetAddress);
+			}
+
+			// Record jump xrefs
+			if (inst.isJump && inst.targetAddress) {
+				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'jump' });
+			}
+		}
+
+		return func;
+	}
+
+	/**
+	 * Scan code sections for function prologs
+	 */
+	private async scanForFunctionPrologs(): Promise<void> {
+		if (!this.fileBuffer) {
+			return;
+		}
+
+		for (const section of this.sections) {
+			if (!section.isCode && !section.isExecutable) {
+				continue;
+			}
+
+			const secOffset = section.rawAddress;
+			const secEnd = secOffset + section.rawSize;
+
+			for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off++) {
+				const byte = this.fileBuffer[off];
+
+				// x64: push rbp (0x55) followed by mov rbp, rsp (0x48 0x89 0xE5)
+				if (byte === 0x55 && off + 3 < secEnd) {
+					if (this.fileBuffer[off + 1] === 0x48 &&
+						this.fileBuffer[off + 2] === 0x89 &&
+						this.fileBuffer[off + 3] === 0xE5) {
+						const addr = this.sectionOffsetToAddress(off, section);
+						if (addr > 0 && !this.functions.has(addr)) {
+							await this.analyzeFunction(addr);
+						}
+						continue;
+					}
+					// x86: push ebp (0x55) followed by mov ebp, esp (0x89 0xE5)
+					if (this.fileBuffer[off + 1] === 0x89 &&
+						this.fileBuffer[off + 2] === 0xE5) {
+						const addr = this.sectionOffsetToAddress(off, section);
+						if (addr > 0 && !this.functions.has(addr)) {
+							await this.analyzeFunction(addr);
+						}
+						continue;
+					}
+				}
+
+				// x64: sub rsp, imm8 (0x48 0x83 0xEC imm8) - frameless function
+				if (byte === 0x48 && off + 3 < secEnd) {
+					if (this.fileBuffer[off + 1] === 0x83 &&
+						this.fileBuffer[off + 2] === 0xEC) {
+						const addr = this.sectionOffsetToAddress(off, section);
+						if (addr > 0 && !this.functions.has(addr)) {
+							await this.analyzeFunction(addr);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	private sectionOffsetToAddress(fileOffset: number, section: Section): number {
+		return section.virtualAddress + (fileOffset - section.rawAddress);
+	}
+
+	// ============================================================================
+	// Getters
+	// ============================================================================
+
 	getFileInfo(): FileInfo | undefined {
 		return this.fileInfo;
 	}
@@ -720,204 +1453,6 @@ export class DisassemblerEngine {
 
 	getFilePath(): string | undefined {
 		return this.currentFile;
-	}
-
-	private async analyzePEWithExtension(): Promise<void> {
-		if (!this.fileBuffer) {
-			return;
-		}
-
-		const ext = vscode.extensions.getExtension('hikarisystem.hexcore-peanalyzer');
-		if (!ext) {
-			console.warn('HexCore PE Analyzer extension not found');
-			return;
-		}
-
-		if (!ext.isActive) {
-			await ext.activate();
-		}
-
-		const api = ext.exports;
-		if (!api || !api.analyzePEFile) {
-			console.warn('HexCore PE Analyzer API not available');
-			return;
-		}
-
-		try {
-			if (!this.currentFile) {
-				console.warn('HexCore PE Analyzer: no file path available');
-				return;
-			}
-
-			const analysis = await api.analyzePEFile(this.currentFile);
-
-			// Map Basic Info
-			const is64 = analysis.optionalHeader?.is64Bit === true;
-			const imageBase = analysis.optionalHeader?.imageBase;
-			this.baseAddress = imageBase !== undefined
-				? Number(imageBase)
-				: (is64 ? 0x140000000 : 0x400000);
-			// Architecture is likely already set by detectArchitecture, but let's confirm
-			// this.architecture = is64 ? 'x64' : 'x86';
-
-			this.fileInfo = {
-				format: is64 ? 'PE64' : 'PE',
-				architecture: this.architecture,
-				entryPoint: (analysis.optionalHeader?.addressOfEntryPoint || 0) + this.baseAddress,
-				baseAddress: this.baseAddress,
-				imageSize: analysis.optionalHeader?.sizeOfImage || 0,
-				timestamp: analysis.fileHeader?.timeDateStamp ? new Date(analysis.fileHeader.timeDateStamp * 1000) : undefined,
-				subsystem: analysis.optionalHeader?.subsystem?.toString()
-			};
-
-			// Map Sections
-			if (analysis.sections) {
-				this.sections = analysis.sections.map((s: any) => {
-					const characteristicsRaw = typeof s.characteristicsRaw === 'number'
-						? s.characteristicsRaw
-						: (typeof s.characteristics === 'number' ? s.characteristics : 0);
-
-					return {
-						name: s.name,
-						virtualAddress: s.virtualAddress + this.baseAddress,
-						virtualSize: s.virtualSize,
-						rawAddress: s.pointerToRawData,
-						rawSize: s.sizeOfRawData,
-						characteristics: characteristicsRaw,
-						permissions: s.permissions || 'r-x', // Fallback
-						isCode: (characteristicsRaw & 0x00000020) !== 0,
-						isData: (characteristicsRaw & 0x00000040) !== 0,
-						isReadable: (characteristicsRaw & 0x40000000) !== 0,
-						isWritable: (characteristicsRaw & 0x80000000) !== 0,
-						isExecutable: (characteristicsRaw & 0x20000000) !== 0
-					};
-				});
-			}
-
-			// Map Imports
-			if (analysis.imports) {
-				this.imports = analysis.imports.map((imp: any) => ({
-					name: imp.dllName,
-					functions: imp.functions.map((f: any) => ({
-						name: f.name,
-						ordinal: f.ordinal,
-						address: f.address + this.baseAddress, // IAT Address (RVA -> VA)
-						hint: 0
-					}))
-				}));
-			}
-
-			// Map Exports
-			if (analysis.exports) {
-				this.exports = analysis.exports.map((exp: any) => ({
-					name: exp.name,
-					ordinal: exp.ordinal,
-					address: exp.rva + this.baseAddress,
-					isForwarder: !!exp.forwarder,
-					forwarderName: exp.forwarder
-				}));
-			}
-
-		} catch (e) {
-			console.error('Failed to analyze PE with extension:', e);
-		}
-	}
-
-	private async analyzeELFFile(): Promise<void> {
-		// Basic ELF analysis - can be expanded
-		if (!this.fileBuffer) {
-			return;
-		}
-
-		const is64Bit = this.fileBuffer[4] === 2;
-		const entryPointOffset = is64Bit ? 24 : 24;
-
-		if (entryPointOffset + 8 < this.fileBuffer.length) {
-			const entryPoint = is64Bit
-				? Number(this.fileBuffer.readBigUInt64LE(entryPointOffset))
-				: this.fileBuffer.readUInt32LE(entryPointOffset);
-
-			if (entryPoint > 0) {
-				await this.analyzeFunction(entryPoint, '_start');
-			}
-		}
-	}
-
-
-
-	async analyzeFunction(address: number, name?: string): Promise<Function> {
-		const existing = this.functions.get(address);
-		if (existing) {
-			return existing;
-		}
-
-		const instructions = await this.disassembleRange(address, 4096);
-
-		if (instructions.length === 0) {
-			const offset = this.addressToOffset(address);
-			if (offset >= 0 && offset < this.fileBuffer!.length) {
-				const byteCount = Math.min(16, this.fileBuffer!.length - offset);
-				instructions.push({
-					address,
-					bytes: this.fileBuffer!.subarray(offset, offset + byteCount),
-					mnemonic: 'db',
-					opStr: Array.from(this.fileBuffer!.subarray(offset, offset + byteCount))
-						.map(b => `0x${b.toString(16).padStart(2, '0').toUpperCase()}`).join(', '),
-					size: byteCount,
-					isCall: false,
-					isJump: false,
-					isRet: false,
-					isConditional: false
-				});
-			}
-		}
-
-		// Find function end (RET or unconditional JMP)
-		let endIdx = instructions.length;
-		for (let i = 0; i < instructions.length; i++) {
-			if (instructions[i].isRet) {
-				endIdx = i + 1;
-				break;
-			}
-			if (instructions[i].isJump && !instructions[i].isConditional) {
-				if (instructions[i].targetAddress &&
-					(instructions[i].targetAddress! < address || instructions[i].targetAddress! > address + 4096)) {
-					endIdx = i + 1;
-					break;
-				}
-			}
-		}
-
-		const funcInstructions = instructions.slice(0, endIdx);
-
-		const func: Function = {
-			address,
-			name: name || `sub_${address.toString(16).toUpperCase()}`,
-			size: funcInstructions.length > 0
-				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size - address)
-				: 0,
-			endAddress: funcInstructions.length > 0
-				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size)
-				: address,
-			instructions: funcInstructions,
-			callers: [],
-			callees: []
-		};
-
-		this.functions.set(address, func);
-
-		// Recursively analyze called functions (limit depth)
-		for (const inst of funcInstructions) {
-			if (inst.isCall && inst.targetAddress && this.functions.size < 100) {
-				func.callees.push(inst.targetAddress);
-				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'call' });
-
-				// Don't await to avoid deep recursion
-				this.analyzeFunction(inst.targetAddress);
-			}
-		}
-
-		return func;
 	}
 
 	async findCrossReferences(address: number): Promise<XRef[]> {
@@ -1007,19 +1542,32 @@ export class DisassemblerEngine {
 	}
 
 	private addressToOffset(address: number): number {
-		// Convert virtual address to file offset
 		const rva = address - this.baseAddress;
 
-		// For PE files, we need to map RVA to file offset using section headers
 		if (this.isPEFile() && this.fileBuffer) {
 			return this.rvaToFileOffset(rva);
 		}
 
-		// For ELF or raw files, simple subtraction
+		// For ELF, use section mapping
+		if (this.isELFFile()) {
+			for (const section of this.sections) {
+				if (address >= section.virtualAddress &&
+					address < section.virtualAddress + section.virtualSize) {
+					return section.rawAddress + (address - section.virtualAddress);
+				}
+			}
+		}
+
 		return rva;
 	}
 
 	private offsetToAddress(offset: number): number {
+		// For PE/ELF, try section-based mapping
+		for (const section of this.sections) {
+			if (offset >= section.rawAddress && offset < section.rawAddress + section.rawSize) {
+				return section.virtualAddress + (offset - section.rawAddress);
+			}
+		}
 		return offset + this.baseAddress;
 	}
 
@@ -1027,7 +1575,6 @@ export class DisassemblerEngine {
 		if (this.fileInfo) {
 			return this.fileInfo.baseAddress;
 		}
-		// Fallback defaults if extension hasn't run yet
 		if (this.isPEFile()) {
 			return 0x400000;
 		}
@@ -1039,27 +1586,23 @@ export class DisassemblerEngine {
 			return this.fileInfo.entryPoint;
 		}
 
-		// Fallback for ELF (since we don't have an extension for it yet)
 		if (this.isELFFile() && this.fileBuffer) {
 			const is64Bit = this.fileBuffer[4] === 2;
+			const isLE = this.fileBuffer[5] === 1;
 			if (is64Bit) {
-				return Number(this.fileBuffer.readBigUInt64LE(24));
+				return Number(isLE ? this.fileBuffer.readBigUInt64LE(24) : this.fileBuffer.readBigUInt64BE(24));
 			} else {
-				return this.fileBuffer.readUInt32LE(24);
+				return isLE ? this.fileBuffer.readUInt32LE(24) : this.fileBuffer.readUInt32BE(24);
 			}
 		}
 
 		return this.baseAddress;
 	}
 
-
 	// ============================================================================
 	// Assembly & Patching (LLVM MC)
 	// ============================================================================
 
-	/**
-	 * Initialize LLVM MC assembler
-	 */
 	private async ensureLlvmMcInitialized(): Promise<void> {
 		if (!this.llvmMcInitialized) {
 			try {
@@ -1094,83 +1637,44 @@ export class DisassemblerEngine {
 		};
 	}
 
-	/**
-	 * Assemble an instruction
-	 */
 	async assemble(code: string, address?: number): Promise<AssembleResult> {
 		await this.ensureLlvmMcInitialized();
 		if (!this.llvmMcInitialized) {
-			return {
-				success: false,
-				bytes: Buffer.alloc(0),
-				size: 0,
-				statement: code,
-				error: this.llvmMcError ?? 'LLVM MC not available'
-			};
+			return { success: false, bytes: Buffer.alloc(0), size: 0, statement: code, error: this.llvmMcError ?? 'LLVM MC not available' };
 		}
 		return this.llvmMc.assemble(code, address ? BigInt(address) : undefined);
 	}
 
-	/**
-	 * Assemble multiple instructions
-	 */
 	async assembleMultiple(instructions: string[], startAddress?: number): Promise<AssembleResult[]> {
 		await this.ensureLlvmMcInitialized();
 		if (!this.llvmMcInitialized) {
 			return instructions.map(code => ({
-				success: false,
-				bytes: Buffer.alloc(0),
-				size: 0,
-				statement: code,
+				success: false, bytes: Buffer.alloc(0), size: 0, statement: code,
 				error: this.llvmMcError ?? 'LLVM MC not available'
 			}));
 		}
 		return this.llvmMc.assembleMultiple(instructions, startAddress ? BigInt(startAddress) : undefined);
 	}
 
-	/**
-	 * Patch instruction at address
-	 * Returns the patch bytes, padded with NOPs if smaller than original
-	 */
 	async patchInstruction(address: number, newInstruction: string): Promise<PatchResult> {
 		await this.ensureLlvmMcInitialized();
 		if (!this.llvmMcInitialized) {
-			return {
-				success: false,
-				bytes: Buffer.alloc(0),
-				size: 0,
-				originalSize: 0,
-				nopPadding: 0,
-				error: this.llvmMcError ?? 'LLVM MC not available'
-			};
+			return { success: false, bytes: Buffer.alloc(0), size: 0, originalSize: 0, nopPadding: 0, error: this.llvmMcError ?? 'LLVM MC not available' };
 		}
 
-		// Get original instruction to know its size
 		let original = this.instructions.get(address);
 		if (!original) {
-			// Disassemble to find original instruction size
 			const disasm = await this.disassembleRange(address, 16);
 			if (disasm.length === 0) {
-				return {
-					success: false,
-					bytes: Buffer.alloc(0),
-					size: 0,
-					originalSize: 0,
-					nopPadding: 0,
-					error: 'Could not find instruction at address'
-				};
+				return { success: false, bytes: Buffer.alloc(0), size: 0, originalSize: 0, nopPadding: 0, error: 'Could not find instruction at address' };
 			}
 			original = disasm[0];
 			this.instructions.set(original.address, original);
 		}
 
-		const originalSize = original.size;
-		return this.llvmMc.createPatch(newInstruction, originalSize, BigInt(address));
+		return this.llvmMc.createPatch(newInstruction, original.size, BigInt(address));
 	}
 
-	/**
-	 * Apply patch to file buffer (in memory)
-	 */
 	applyPatch(address: number, patchBytes: Buffer): boolean {
 		if (!this.fileBuffer) {
 			return false;
@@ -1183,7 +1687,6 @@ export class DisassemblerEngine {
 
 		patchBytes.copy(this.fileBuffer, offset);
 
-		// Invalidate cached instructions at this address
 		for (let i = 0; i < patchBytes.length; i++) {
 			this.instructions.delete(address + i);
 		}
@@ -1191,9 +1694,6 @@ export class DisassemblerEngine {
 		return true;
 	}
 
-	/**
-	 * Replace instruction with NOPs
-	 */
 	async nopInstruction(address: number): Promise<boolean> {
 		await this.ensureLlvmMcInitialized();
 		if (!this.llvmMcInitialized) {
@@ -1209,9 +1709,6 @@ export class DisassemblerEngine {
 		return this.applyPatch(address, nopSled);
 	}
 
-	/**
-	 * Save patched file to disk
-	 */
 	savePatched(outputPath: string): void {
 		if (!this.fileBuffer) {
 			throw new Error('No file loaded');
@@ -1219,9 +1716,6 @@ export class DisassemblerEngine {
 		fs.writeFileSync(outputPath, this.fileBuffer);
 	}
 
-	/**
-	 * Validate assembly instruction
-	 */
 	async validateInstruction(code: string): Promise<{ valid: boolean; error?: string }> {
 		await this.ensureLlvmMcInitialized();
 		if (!this.llvmMcInitialized) {
@@ -1230,12 +1724,8 @@ export class DisassemblerEngine {
 		return this.llvmMc.validate(code);
 	}
 
-	/**
-	 * Get NOP instruction for current architecture
-	 */
 	getNop(): Buffer {
 		if (!this.llvmMcInitialized) {
-			// Fallback NOPs
 			switch (this.architecture) {
 				case 'x86':
 				case 'x64':
@@ -1251,9 +1741,6 @@ export class DisassemblerEngine {
 		return this.llvmMc.getNop();
 	}
 
-	/**
-	 * Get LLVM MC version
-	 */
 	getLlvmVersion(): string {
 		if (!this.llvmMcInitialized) {
 			return 'not initialized';
@@ -1261,18 +1748,12 @@ export class DisassemblerEngine {
 		return this.llvmMc.getVersion();
 	}
 
-	/**
-	 * Set assembly syntax (intel/att) for x86
-	 */
 	setAssemblySyntax(syntax: 'intel' | 'att'): void {
 		if (this.llvmMcInitialized) {
 			this.llvmMc.setSyntax(syntax);
 		}
 	}
 
-	/**
-	 * Dispose of resources
-	 */
 	dispose(): void {
 		this.capstone.dispose();
 		this.capstoneInitialized = false;
@@ -1280,4 +1761,3 @@ export class DisassemblerEngine {
 		this.llvmMcInitialized = false;
 	}
 }
-

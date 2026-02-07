@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -16,11 +16,10 @@
 		"onCommand:hexcore.disasm.showLlvmVersion",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.view",
-		"onView:hexcore.disassembler.graphView"
+		"onView:hexcore.disassembler.graphView",
+		"onCommand:hexcore.disasm.analyzeAll"
 	],
-	"extensionDependencies": [
-		"hikarisystem.hexcore-peanalyzer"
-	],
+	"extensionDependencies": [],
 	"categories": [
 		"Programming Languages",
 		"Debuggers",
@@ -158,6 +157,12 @@
 				"command": "hexcore.disasm.nativeStatus",
 				"title": "Show Native Engine Status",
 				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.analyzeAll",
+				"title": "Deep Analysis (Prolog Scan + Xrefs)",
+				"category": "HexCore Disassembler",
+				"icon": "$(search)"
 			}
 		],
 		"menus": {
@@ -285,8 +290,13 @@
 				},
 				"hexcore.disassembler.maxFunctionSize": {
 					"type": "number",
-					"default": 4096,
+					"default": 65536,
 					"description": "Maximum function size for analysis (bytes)"
+				},
+				"hexcore.disassembler.maxFunctions": {
+					"type": "number",
+					"default": 1000,
+					"description": "Maximum number of functions to discover during analysis"
 				}
 			}
 		}

@@ -3,7 +3,6 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
-import * as path from 'path';
 import { DisassemblerViewProvider } from './disassemblerView';
 import { DisassemblyEditorProvider } from './disassemblyEditor';
 import { FunctionTreeProvider } from './functionTree';
@@ -501,6 +500,34 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.nativeStatus', async () => {
 			await showNativeStatus();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.analyzeAll', async () => {
+			await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: 'Analyzing binary...',
+					cancellable: false
+				},
+				async (progress) => {
+					progress.report({ message: 'Scanning for function prologs...' });
+					const newFunctions = await engine.analyzeAll();
+					progress.report({ message: 'Refreshing views...' });
+
+					functionProvider.refresh();
+					stringRefProvider.refresh();
+					sectionProvider.refresh();
+					importProvider.refresh();
+					exportProvider.refresh();
+
+					const total = engine.getFunctions().length;
+					vscode.window.showInformationMessage(
+						`Analysis complete: ${newFunctions} new functions found (${total} total)`
+					);
+				}
+			);
 		})
 	);
 
