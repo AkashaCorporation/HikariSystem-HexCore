@@ -39,6 +39,7 @@ jobs:
           npm install -g node-gyp
           npm install -g gulp-cli
           npm install -g tsx
+          npm install -g prebuild-install
 
       - name: Install build gyp dependencies
         run: npm --prefix build/npm/gyp ci
@@ -96,25 +97,11 @@ jobs:
           cd ../tunnel-forwarding && npm ci --ignore-scripts
           cd ../typescript-language-features && npm ci --ignore-scripts
 
-      - name: Install HexCore Native Engines
-        env:
-          npm_config_ignore_scripts: true
-        run: |
-          cd extensions/hexcore-capstone && npm ci --ignore-scripts
-          cd ../hexcore-unicorn && npm ci --ignore-scripts
-          cd ../hexcore-llvm-mc && npm ci --ignore-scripts
-
       - name: Fetch HexCore Native Prebuilds
         run: |
           cd extensions/hexcore-capstone && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
-
-      - name: Clean native engine node_modules after prebuild fetch
-        run: |
-          Remove-Item -Recurse -Force extensions/hexcore-capstone/node_modules -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force extensions/hexcore-unicorn/node_modules -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force extensions/hexcore-llvm-mc/node_modules -ErrorAction SilentlyContinue
 
       - name: Compile HexCore Extensions
         env:
