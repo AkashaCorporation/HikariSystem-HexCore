@@ -1,6 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  HexCore Debugger Extension
+ *  Emulation-based binary analysis using Unicorn engine
+ *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { DebuggerViewProvider } from './debuggerView';
@@ -28,21 +29,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		return false;
 	};
 
-	const showNativeStatus = async (): Promise<void> => {
-		const availability = await engine.getEmulationAvailability('x64');
-		if (availability.available) {
-			vscode.window.showInformationMessage(
-				vscode.l10n.t('Unicorn engine is available for this session.')
-			);
-			return;
-		}
-
-		const detail = availability.error ?? vscode.l10n.t('Unavailable');
-		vscode.window.showWarningMessage(
-			vscode.l10n.t('Unicorn engine status: {0}', detail)
-		);
-	};
-
 	// Register providers
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('hexcore.debugger.view', debuggerView),
@@ -50,69 +36,24 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.registerTreeDataProvider('hexcore.debugger.memory', memoryProvider)
 	);
 
-	// Commands
+	// Unicorn engine status
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.start', async () => {
-			const uri = await vscode.window.showOpenDialog({
-				canSelectMany: false,
-				openLabel: 'Debug'
-			});
-			if (uri && uri[0]) {
-				await engine.startDebugging(uri[0].fsPath);
-				debuggerView.show();
-				registerProvider.refresh();
+		vscode.commands.registerCommand('hexcore.debug.unicornStatus', async () => {
+			const availability = await engine.getEmulationAvailability('x64');
+			if (availability.available) {
+				vscode.window.showInformationMessage(
+					vscode.l10n.t('Unicorn engine is available for this session.')
+				);
+			} else {
+				const detail = availability.error ?? vscode.l10n.t('Unavailable');
+				vscode.window.showWarningMessage(
+					vscode.l10n.t('Unicorn engine status: {0}', detail)
+				);
 			}
 		})
 	);
 
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.nativeStatus', async () => {
-			await showNativeStatus();
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.attach', async () => {
-			const pid = await vscode.window.showInputBox({
-				prompt: 'Enter Process ID to attach'
-			});
-			if (pid) {
-				await engine.attach(parseInt(pid));
-				debuggerView.show();
-			}
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.breakpoint', async () => {
-			const addr = await vscode.window.showInputBox({
-				prompt: 'Breakpoint address (hex)',
-				placeHolder: '0x401000'
-			});
-			if (addr) {
-				await engine.setBreakpoint(parseInt(addr.replace(/^0x/, ''), 16));
-				vscode.window.showInformationMessage(`Breakpoint set at ${addr}`);
-			}
-		})
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.stepInto', () => engine.stepInto()),
-		vscode.commands.registerCommand('hexcore.debug.stepOver', () => engine.stepOver()),
-		vscode.commands.registerCommand('hexcore.debug.continue', () => engine.continue())
-	);
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.traceAPI', async () => {
-			await engine.enableAPITracing();
-			vscode.window.showInformationMessage('API Tracing enabled');
-		})
-	);
-
-	// ============================================================================
-	// Emulation Mode Commands (Unicorn Engine)
-	// ============================================================================
-
+	// Emulate - auto-detect architecture
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulate', async () => {
 			const uri = await vscode.window.showOpenDialog({
@@ -131,6 +72,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					await engine.startEmulation(uri[0].fsPath);
 					debuggerView.show();
 					registerProvider.refresh();
+					memoryProvider.refresh();
 					vscode.window.showInformationMessage('Emulation started');
 				} catch (error: any) {
 					vscode.window.showErrorMessage(`Emulation failed: ${error.message}`);
@@ -139,6 +81,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Emulate - choose architecture manually
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulateWithArch', async () => {
 			const uri = await vscode.window.showOpenDialog({
@@ -171,6 +114,7 @@ export function activate(context: vscode.ExtensionContext): void {
 						await engine.startEmulation(uri[0].fsPath, arch);
 						debuggerView.show();
 						registerProvider.refresh();
+						memoryProvider.refresh();
 						vscode.window.showInformationMessage(`Emulation started (${arch})`);
 					} catch (error: any) {
 						vscode.window.showErrorMessage(`Emulation failed: ${error.message}`);
@@ -180,28 +124,33 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Step instruction
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulationStep', async () => {
 			try {
 				await engine.emulationStep();
 				registerProvider.refresh();
+				memoryProvider.refresh();
 			} catch (error: any) {
 				vscode.window.showErrorMessage(`Step failed: ${error.message}`);
 			}
 		})
 	);
 
+	// Continue execution
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulationContinue', async () => {
 			try {
 				await engine.emulationContinue();
 				registerProvider.refresh();
+				memoryProvider.refresh();
 			} catch (error: any) {
 				vscode.window.showErrorMessage(`Continue failed: ${error.message}`);
 			}
 		})
 	);
 
+	// Set breakpoint
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulationBreakpoint', async () => {
 			const addr = await vscode.window.showInputBox({
@@ -220,6 +169,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Read memory
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulationReadMemory', async () => {
 			const addr = await vscode.window.showInputBox({
@@ -249,6 +199,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Save snapshot
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.saveSnapshot', () => {
 			try {
@@ -260,11 +211,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Restore snapshot
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.restoreSnapshot', () => {
 			try {
 				engine.restoreSnapshot();
 				registerProvider.refresh();
+				memoryProvider.refresh();
 				vscode.window.showInformationMessage('Snapshot restored');
 			} catch (error: any) {
 				vscode.window.showErrorMessage(`Failed to restore snapshot: ${error.message}`);
@@ -308,4 +261,3 @@ function formatHexDump(data: Buffer, baseAddress: bigint): string {
 export function deactivate(): void {
 	// Cleanup
 }
-

@@ -1,14 +1,14 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  HexCore Debugger - Debug Engine
+ *  Emulation-based debugger using Unicorn engine with PE/ELF loading
+ *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
-import * as vscode from 'vscode';
 import * as fs from 'fs';
-import { spawn, ChildProcess } from 'child_process';
-import * as os from 'os';
-import { UnicornWrapper, ArchitectureType, X86_64Registers, EmulationState } from './unicornWrapper';
-
-export type DebugMode = 'native' | 'emulation';
+import { UnicornWrapper, ArchitectureType, EmulationState } from './unicornWrapper';
+import { MemoryManager } from './memoryManager';
+import { PELoader, PEInfo } from './peLoader';
+import { ELFLoader, ELFInfo } from './elfLoader';
+import { WinApiHooks, ApiCallLog } from './winApiHooks';
 
 export interface RegisterState {
 	rax: bigint;
@@ -39,207 +39,44 @@ export interface MemoryRegion {
 }
 
 export class DebugEngine {
-	private process?: ChildProcess;
 	private targetPath?: string;
 	private isRunning: boolean = false;
 	private registers: Partial<RegisterState> = {};
 	private listeners: Array<(event: string, data?: any) => void> = [];
 
-	// Emulation mode
-	private mode: DebugMode = 'native';
+	// Emulation components
 	private emulator?: UnicornWrapper;
+	private memoryManager?: MemoryManager;
+	private peLoader?: PELoader;
+	private elfLoader?: ELFLoader;
+	private apiHooks?: WinApiHooks;
 	private emulationInitError?: string;
 	private architecture: ArchitectureType = 'x64';
 	private baseAddress: bigint = 0x400000n;
 	private fileBuffer?: Buffer;
+	private fileType: 'pe' | 'elf' | 'raw' = 'raw';
 
-	async startDebugging(filePath: string): Promise<void> {
-		this.targetPath = filePath;
-		const platform = os.platform();
-		const config = vscode.workspace.getConfiguration('hexcore.debugger');
-
-		if (platform === 'win32') {
-			// Use WinDbg or cdb
-			const windbgPath = config.get<string>('windbgPath') || 'cdb';
-			this.process = spawn(windbgPath, ['-g', '-G', filePath], {
-				detached: false
-			});
-		} else {
-			// Use GDB
-			const gdbPath = config.get<string>('gdbPath') || 'gdb';
-			this.process = spawn(gdbPath, ['-q', '-i', 'mi', filePath], {
-				detached: false
-			});
+	async getEmulationAvailability(arch: ArchitectureType): Promise<{ available: boolean; error?: string }> {
+		if (!this.emulator) {
+			this.emulator = new UnicornWrapper();
 		}
 
-		this.setupProcessHandlers();
-		this.isRunning = true;
-
-		// Initial setup commands
-		if (platform !== 'win32') {
-			this.sendCommand('-gdb-set mi-async on');
+		try {
+			await this.emulator.initialize(arch);
+			this.emulationInitError = undefined;
+			return { available: true };
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.emulationInitError = message;
+			return { available: false, error: message };
 		}
 	}
-
-	async attach(pid: number): Promise<void> {
-		const config = vscode.workspace.getConfiguration('hexcore.debugger');
-		const platform = os.platform();
-
-		if (platform === 'win32') {
-			const windbgPath = config.get<string>('windbgPath') || 'cdb';
-			this.process = spawn(windbgPath, ['-p', pid.toString()], { detached: false });
-		} else {
-			const gdbPath = config.get<string>('gdbPath') || 'gdb';
-			this.process = spawn(gdbPath, ['-q', '-i', 'mi', '-p', pid.toString()], { detached: false });
-		}
-
-		this.setupProcessHandlers();
-		this.isRunning = true;
-	}
-
-	async setBreakpoint(address: number): Promise<void> {
-		const platform = os.platform();
-		if (platform === 'win32') {
-			this.sendCommand(`bp 0x${address.toString(16)}`);
-		} else {
-			this.sendCommand(`-break-insert *0x${address.toString(16)}`);
-		}
-	}
-
-	async stepInto(): Promise<void> {
-		const platform = os.platform();
-		if (platform === 'win32') {
-			this.sendCommand('t');
-		} else {
-			this.sendCommand('-exec-step');
-		}
-		await this.updateRegisters();
-	}
-
-	async stepOver(): Promise<void> {
-		const platform = os.platform();
-		if (platform === 'win32') {
-			this.sendCommand('p');
-		} else {
-			this.sendCommand('-exec-next');
-		}
-		await this.updateRegisters();
-	}
-
-	async continue(): Promise<void> {
-		const platform = os.platform();
-		if (platform === 'win32') {
-			this.sendCommand('g');
-		} else {
-			this.sendCommand('-exec-continue');
-		}
-		await this.updateRegisters();
-	}
-
-	async readMemory(address: bigint, size: number): Promise<Buffer> {
-		// Simplified - in production would integrate with debugger
-		return Buffer.alloc(size);
-	}
-
-	async enableAPITracing(): Promise<void> {
-		// Hook common APIs
-		const apis = ['CreateFileW', 'ReadFile', 'WriteFile', 'VirtualAlloc', 'LoadLibraryA'];
-		for (const api of apis) {
-			// Set breakpoints on API entries
-			// This is simplified - real implementation would resolve API addresses
-		}
-	}
-
-	getRegisters(): Partial<RegisterState> {
-		return this.registers;
-	}
-
-	getMemoryRegions(): MemoryRegion[] {
-		// Return memory map
-		return [
-			{ address: BigInt(0x10000), size: 0x1000, permissions: 'r-x', name: 'code' },
-			{ address: BigInt(0x7fff0000), size: 0x10000, permissions: 'rw-', name: 'stack' }
-		];
-	}
-
-	onEvent(listener: (event: string, data?: any) => void): void {
-		this.listeners.push(listener);
-	}
-
-	private sendCommand(cmd: string): void {
-		if (this.process?.stdin?.writable) {
-			this.process.stdin.write(cmd + '\n');
-		}
-	}
-
-	private setupProcessHandlers(): void {
-		if (!this.process) {
-			return;
-		}
-
-		this.process.stdout?.on('data', (data: Buffer) => {
-			const output = data.toString();
-			this.parseOutput(output);
-		});
-
-		this.process.stderr?.on('data', (data: Buffer) => {
-			console.error('Debugger error:', data.toString());
-		});
-
-		this.process.on('close', (code) => {
-			this.isRunning = false;
-			this.emit('stopped', { code });
-		});
-	}
-
-	private parseOutput(output: string): void {
-		// Parse GDB-MI or WinDbg output
-		// Simplified parsing
-		if (output.includes('Stopped')) {
-			this.emit('stopped');
-		}
-		if (output.includes('Breakpoint')) {
-			this.emit('breakpoint-hit');
-		}
-	}
-
-	private async updateRegisters(): Promise<void> {
-		// In production, would query debugger for actual register values
-		// This is a placeholder
-		this.registers = {
-			rax: BigInt(0),
-			rbx: BigInt(0),
-			rcx: BigInt(0),
-			rdx: BigInt(0),
-			rbp: BigInt(0x7fff0000),
-			rsp: BigInt(0x7fff1000),
-			rip: BigInt(0x401000)
-		};
-	}
-
-	private emit(event: string, data?: any): void {
-		this.listeners.forEach(l => l(event, data));
-	}
-
-	stop(): void {
-		if (this.mode === 'emulation' && this.emulator) {
-			this.emulator.stop();
-		} else {
-			this.process?.kill();
-		}
-		this.isRunning = false;
-	}
-
-	// ============================================================================
-	// Emulation Mode Methods (Unicorn Engine)
-	// ============================================================================
 
 	/**
-	 * Start emulation mode for a binary file
+	 * Start emulation for a binary file
 	 */
 	async startEmulation(filePath: string, arch?: ArchitectureType): Promise<void> {
 		this.targetPath = filePath;
-		this.mode = 'emulation';
 
 		// Read the file
 		this.fileBuffer = fs.readFileSync(filePath);
@@ -261,41 +98,206 @@ export class DebugEngine {
 			throw new Error(message);
 		}
 
-		// Detect base address and entry point
-		const { baseAddress, entryPoint, codeOffset, codeSize } = this.analyzeFile();
-		this.baseAddress = baseAddress;
+		// Create memory manager with callback to the emulator
+		this.memoryManager = new MemoryManager(
+			(address, size, perms) => this.emulator!.mapMemoryRaw(address, size, perms),
+			this.emulator.getPageSize()
+		);
 
-		// Load code into emulator
-		const codeBuffer = this.fileBuffer.subarray(codeOffset, codeOffset + codeSize);
-		this.emulator.loadCode(codeBuffer, baseAddress + BigInt(codeOffset));
+		// Set up memory fault handler
+		this.emulator.setMemoryFaultHandler((type, address, size, _value) => {
+			return this.memoryManager!.handlePageFault(address, size, type);
+		});
 
-		// Setup stack
-		const stackBase = 0x7fff0000n;
-		this.emulator.setupStack(stackBase);
+		// Detect file type and load accordingly
+		this.fileType = this.detectFileType();
 
-		// Set instruction pointer to entry point
-		this.emulator.setRegister(this.architecture === 'x64' ? 'rip' : 'eip', entryPoint);
+		if (this.fileType === 'pe') {
+			await this.loadPE();
+		} else if (this.fileType === 'elf') {
+			await this.loadELF();
+		} else {
+			await this.loadRawBinary();
+		}
 
 		this.isRunning = true;
-		this.emit('emulation-started', { entryPoint, architecture: this.architecture });
+		this.emit('emulation-started', {
+			entryPoint: this.baseAddress,
+			architecture: this.architecture,
+			fileType: this.fileType
+		});
 
-		console.log(`Emulation started: ${this.architecture} at 0x${entryPoint.toString(16)}`);
+		console.log(`Emulation ready: ${this.architecture}, type=${this.fileType}`);
 	}
 
-	async getEmulationAvailability(arch: ArchitectureType): Promise<{ available: boolean; error?: string }> {
-		if (!this.emulator) {
-			this.emulator = new UnicornWrapper();
+	/**
+	 * Load a PE file with full section mapping and import resolution
+	 */
+	private async loadPE(): Promise<void> {
+		this.peLoader = new PELoader(this.emulator!, this.memoryManager!);
+		const peInfo = this.peLoader.load(this.fileBuffer!, this.architecture);
+
+		this.baseAddress = peInfo.entryPoint;
+
+		// Create API hooks for Windows PE
+		this.apiHooks = new WinApiHooks(this.emulator!, this.memoryManager!, this.architecture);
+		this.apiHooks.setImageBase(peInfo.imageBase);
+
+		// Initialize heap
+		this.memoryManager!.initializeHeap();
+
+		// Setup stack
+		const stackBase = 0x7FFF0000n;
+		this.emulator!.setupStack(stackBase);
+
+		// Install API call interceptor via code hook
+		this.installApiInterceptor();
+
+		// Set instruction pointer to entry point
+		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		this.emulator!.setRegister(ipReg, peInfo.entryPoint);
+		this.emulator!.setCurrentAddress(peInfo.entryPoint);
+
+		this.emit('pe-loaded', {
+			imageBase: peInfo.imageBase,
+			entryPoint: peInfo.entryPoint,
+			sections: peInfo.sections.length,
+			imports: peInfo.imports.length
+		});
+
+		console.log(`PE loaded: entry=0x${peInfo.entryPoint.toString(16)}, ${peInfo.sections.length} sections, ${peInfo.imports.length} imports`);
+	}
+
+	/**
+	 * Load an ELF file
+	 */
+	private async loadELF(): Promise<void> {
+		this.elfLoader = new ELFLoader(this.emulator!, this.memoryManager!);
+		const elfInfo = this.elfLoader.load(this.fileBuffer!);
+
+		this.baseAddress = elfInfo.entryPoint;
+
+		// Initialize heap
+		this.memoryManager!.initializeHeap();
+
+		// Setup stack
+		const stackBase = 0x7FFF0000n;
+		this.emulator!.setupStack(stackBase);
+
+		// Set instruction pointer to entry point
+		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		this.emulator!.setRegister(ipReg, elfInfo.entryPoint);
+		this.emulator!.setCurrentAddress(elfInfo.entryPoint);
+
+		this.emit('elf-loaded', {
+			entryPoint: elfInfo.entryPoint,
+			segments: elfInfo.programHeaders.length
+		});
+
+		console.log(`ELF loaded: entry=0x${elfInfo.entryPoint.toString(16)}`);
+	}
+
+	/**
+	 * Load a raw binary (shellcode, firmware, etc.)
+	 */
+	private async loadRawBinary(): Promise<void> {
+		const loadBase = 0x400000n;
+		this.emulator!.loadCode(this.fileBuffer!, loadBase);
+		this.baseAddress = loadBase;
+
+		// Initialize heap
+		this.memoryManager!.initializeHeap();
+
+		// Setup stack
+		const stackBase = 0x7FFF0000n;
+		this.emulator!.setupStack(stackBase);
+
+		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		this.emulator!.setRegister(ipReg, loadBase);
+		this.emulator!.setCurrentAddress(loadBase);
+	}
+
+	/**
+	 * Install a code hook that intercepts API calls to stub addresses
+	 */
+	private installApiInterceptor(): void {
+		if (!this.emulator || !this.peLoader || !this.apiHooks) {
+			return;
 		}
 
-		try {
-			await this.emulator.initialize(arch);
-			this.emulationInitError = undefined;
-			return { available: true };
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.emulationInitError = message;
-			return { available: false, error: message };
+		this.emulator.onCodeExecute((address, _size) => {
+			if (!this.peLoader!.isStubAddress(address)) {
+				return;
+			}
+
+			// This address is in the API stub region - it's an API call
+			const importEntry = this.peLoader!.lookupStub(address);
+			if (!importEntry) {
+				return;
+			}
+
+			// Handle the API call
+			const returnValue = this.apiHooks!.handleCall(importEntry.dll, importEntry.name);
+
+			// Set return value
+			if (this.architecture === 'x64') {
+				this.emulator!.setRegister('rax', returnValue);
+			} else {
+				this.emulator!.setRegister('eax', returnValue);
+			}
+
+			// Pop return address from stack and set IP
+			this.popReturnAddress();
+
+			// Emit API call event for the UI
+			this.emit('api-call', {
+				dll: importEntry.dll,
+				name: importEntry.name,
+				returnValue
+			});
+		});
+	}
+
+	/**
+	 * Pop the return address from the stack and set the instruction pointer
+	 */
+	private popReturnAddress(): void {
+		if (!this.emulator) {
+			return;
 		}
+
+		if (this.architecture === 'x64') {
+			const regs = this.emulator.getRegistersX64();
+			const retAddr = this.emulator.readMemory(regs.rsp, 8).readBigUInt64LE();
+			this.emulator.setRegister('rsp', regs.rsp + 8n);
+			this.emulator.setRegister('rip', retAddr);
+			this.emulator.setCurrentAddress(retAddr);
+		} else {
+			const regs = this.emulator.getRegistersX86();
+			const retAddr = BigInt(this.emulator.readMemory(BigInt(regs.esp), 4).readUInt32LE());
+			this.emulator.setRegister('esp', BigInt(regs.esp + 4));
+			this.emulator.setRegister('eip', retAddr);
+			this.emulator.setCurrentAddress(retAddr);
+		}
+	}
+
+	/**
+	 * Detect file type from magic bytes
+	 */
+	private detectFileType(): 'pe' | 'elf' | 'raw' {
+		if (!this.fileBuffer || this.fileBuffer.length < 4) {
+			return 'raw';
+		}
+
+		if (this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A) {
+			return 'pe';
+		}
+
+		if (this.fileBuffer[0] === 0x7F && this.fileBuffer.toString('ascii', 1, 4) === 'ELF') {
+			return 'elf';
+		}
+
+		return 'raw';
 	}
 
 	/**
@@ -336,101 +338,11 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Analyze file to get base address and entry point
-	 */
-	private analyzeFile(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
-		if (!this.fileBuffer) {
-			return { baseAddress: 0x400000n, entryPoint: 0x401000n, codeOffset: 0, codeSize: 0x1000 };
-		}
-
-		// PE file
-		if (this.fileBuffer[0] === 0x4D && this.fileBuffer[1] === 0x5A) {
-			return this.analyzePE();
-		}
-
-		// ELF file
-		if (this.fileBuffer[0] === 0x7F && this.fileBuffer.toString('ascii', 1, 4) === 'ELF') {
-			return this.analyzeELF();
-		}
-
-		// Raw binary
-		return {
-			baseAddress: 0x400000n,
-			entryPoint: 0x400000n,
-			codeOffset: 0,
-			codeSize: Math.min(this.fileBuffer.length, 0x100000)
-		};
-	}
-
-	/**
-	 * Analyze PE file
-	 */
-	private analyzePE(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
-		const buf = this.fileBuffer!;
-		const peOffset = buf.readUInt32LE(0x3C);
-		const optHeaderOffset = peOffset + 24;
-		const magic = buf.readUInt16LE(optHeaderOffset);
-		const is64Bit = magic === 0x20B;
-
-		const imageBase = is64Bit
-			? buf.readBigUInt64LE(optHeaderOffset + 24)
-			: BigInt(buf.readUInt32LE(optHeaderOffset + 28));
-
-		const entryPointRVA = buf.readUInt32LE(optHeaderOffset + 16);
-
-		// Find .text section
-		const numberOfSections = buf.readUInt16LE(peOffset + 6);
-		const sizeOfOptionalHeader = buf.readUInt16LE(peOffset + 20);
-		const sectionTableOffset = peOffset + 24 + sizeOfOptionalHeader;
-
-		let codeOffset = 0x1000;
-		let codeSize = 0x1000;
-
-		for (let i = 0; i < numberOfSections; i++) {
-			const sectionOffset = sectionTableOffset + (i * 40);
-			const sectionName = buf.toString('ascii', sectionOffset, sectionOffset + 8).replace(/\0/g, '');
-
-			if (sectionName === '.text' || sectionName === 'CODE') {
-				codeSize = buf.readUInt32LE(sectionOffset + 16);
-				codeOffset = buf.readUInt32LE(sectionOffset + 20);
-				break;
-			}
-		}
-
-		return {
-			baseAddress: imageBase,
-			entryPoint: imageBase + BigInt(entryPointRVA),
-			codeOffset,
-			codeSize
-		};
-	}
-
-	/**
-	 * Analyze ELF file
-	 */
-	private analyzeELF(): { baseAddress: bigint; entryPoint: bigint; codeOffset: number; codeSize: number } {
-		const buf = this.fileBuffer!;
-		const is64Bit = buf[4] === 2;
-
-		const entryPoint = is64Bit
-			? buf.readBigUInt64LE(24)
-			: BigInt(buf.readUInt32LE(24));
-
-		// Simplified - assume code starts after headers
-		return {
-			baseAddress: 0x400000n,
-			entryPoint,
-			codeOffset: is64Bit ? 64 : 52, // ELF header size
-			codeSize: Math.min(buf.length - (is64Bit ? 64 : 52), 0x100000)
-		};
-	}
-
-	/**
 	 * Step one instruction in emulation mode
 	 */
 	async emulationStep(): Promise<void> {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 
 		await this.emulator.step();
@@ -442,8 +354,8 @@ export class DebugEngine {
 	 * Continue emulation until breakpoint or end
 	 */
 	async emulationContinue(): Promise<void> {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 
 		await this.emulator.continue();
@@ -452,21 +364,21 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Set breakpoint in emulation mode
+	 * Set breakpoint
 	 */
 	emulationSetBreakpoint(address: bigint): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.addBreakpoint(address);
 	}
 
 	/**
-	 * Remove breakpoint in emulation mode
+	 * Remove breakpoint
 	 */
 	emulationRemoveBreakpoint(address: bigint): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.removeBreakpoint(address);
 	}
@@ -475,8 +387,8 @@ export class DebugEngine {
 	 * Read memory in emulation mode
 	 */
 	emulationReadMemory(address: bigint, size: number): Buffer {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		return this.emulator.readMemory(address, size);
 	}
@@ -485,8 +397,8 @@ export class DebugEngine {
 	 * Write memory in emulation mode
 	 */
 	emulationWriteMemory(address: bigint, data: Buffer): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.writeMemory(address, data);
 	}
@@ -495,8 +407,8 @@ export class DebugEngine {
 	 * Set register value in emulation mode
 	 */
 	emulationSetRegister(name: string, value: bigint): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.setRegister(name, value);
 	}
@@ -533,40 +445,65 @@ export class DebugEngine {
 	 * Get emulation state
 	 */
 	getEmulationState(): EmulationState | null {
-		if (this.mode !== 'emulation' || !this.emulator) {
+		if (!this.emulator) {
 			return null;
 		}
 		return this.emulator.getState();
 	}
 
 	/**
-	 * Get current debug mode
+	 * Get memory regions from emulator or memory manager
 	 */
-	getMode(): DebugMode {
-		return this.mode;
-	}
-
-	/**
-	 * Get memory regions (emulation mode)
-	 */
-	getEmulationMemoryRegions(): MemoryRegion[] {
-		if (this.mode !== 'emulation' || !this.emulator) {
+	getMemoryRegions(): MemoryRegion[] {
+		if (!this.emulator) {
 			return [];
 		}
+
+		// Use memory manager allocations for named regions
+		if (this.memoryManager) {
+			return this.memoryManager.getAllocations().map(alloc => ({
+				address: alloc.address,
+				size: alloc.size,
+				permissions: this.permsToString(alloc.permissions),
+				name: alloc.name
+			}));
+		}
+
 		return this.emulator.getMemoryRegions().map(r => ({
 			address: r.address,
 			size: Number(r.size),
 			permissions: r.permissions,
-			name: r.name
+			name: undefined
 		}));
+	}
+
+	/**
+	 * Get the emulation memory regions from Unicorn directly
+	 */
+	getEmulationMemoryRegions(): MemoryRegion[] {
+		return this.getMemoryRegions();
+	}
+
+	/**
+	 * Get registers
+	 */
+	getRegisters(): Partial<RegisterState> {
+		return this.registers;
+	}
+
+	/**
+	 * Get API call log
+	 */
+	getApiCallLog(): ApiCallLog[] {
+		return this.apiHooks?.getCallLog() ?? [];
 	}
 
 	/**
 	 * Save emulation snapshot
 	 */
 	saveSnapshot(): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.saveState();
 		this.emit('snapshot-saved');
@@ -576,8 +513,8 @@ export class DebugEngine {
 	 * Restore emulation snapshot
 	 */
 	restoreSnapshot(): void {
-		if (this.mode !== 'emulation' || !this.emulator) {
-			throw new Error('Not in emulation mode');
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
 		}
 		this.emulator.restoreState();
 		this.updateEmulationRegisters();
@@ -585,14 +522,65 @@ export class DebugEngine {
 	}
 
 	/**
+	 * Stop emulation
+	 */
+	stop(): void {
+		if (this.emulator) {
+			this.emulator.stop();
+		}
+		this.isRunning = false;
+	}
+
+	/**
+	 * Event listener registration
+	 */
+	onEvent(listener: (event: string, data?: any) => void): void {
+		this.listeners.push(listener);
+	}
+
+	private emit(event: string, data?: any): void {
+		this.listeners.forEach(l => l(event, data));
+	}
+
+	/**
+	 * Convert numeric permissions to string
+	 */
+	private permsToString(perms: number): string {
+		let result = '';
+		if (perms & 1) { result += 'r'; }
+		if (perms & 2) { result += 'w'; }
+		if (perms & 4) { result += 'x'; }
+		return result || '---';
+	}
+
+	/**
+	 * Get loaded PE info
+	 */
+	getPEInfo(): PEInfo | undefined {
+		return this.peLoader?.getPEInfo();
+	}
+
+	/**
+	 * Get loaded ELF info
+	 */
+	getELFInfo(): ELFInfo | undefined {
+		return this.elfLoader?.getELFInfo();
+	}
+
+	/**
 	 * Dispose emulator resources
 	 */
 	disposeEmulation(): void {
+		if (this.memoryManager) {
+			this.memoryManager.dispose();
+			this.memoryManager = undefined;
+		}
 		if (this.emulator) {
 			this.emulator.dispose();
 			this.emulator = undefined;
 		}
-		this.mode = 'native';
+		this.peLoader = undefined;
+		this.elfLoader = undefined;
+		this.apiHooks = undefined;
 	}
 }
-

@@ -1,8 +1,8 @@
 {
 	"name": "hexcore-debugger",
 	"displayName": "HexCore Debugger",
-	"description": "Dynamic analysis debugger integration for WinDbg and GDB",
-	"version": "1.0.0",
+	"description": "Emulation-based debugger using Unicorn Engine for PE/ELF binary analysis",
+	"version": "2.0.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -14,76 +14,24 @@
 	],
 	"keywords": [
 		"debugger",
+		"emulation",
+		"unicorn",
 		"dynamic analysis",
-		"windbg",
-		"gdb",
-		"runtime analysis",
+		"PE",
+		"ELF",
 		"api tracing"
 	],
 	"activationEvents": [
-		"onCommand:hexcore.debug.start",
-		"onCommand:hexcore.debug.attach",
-		"onCommand:hexcore.debug.nativeStatus",
 		"onCommand:hexcore.debug.emulate",
 		"onCommand:hexcore.debug.emulateWithArch",
+		"onCommand:hexcore.debug.unicornStatus",
 		"onView:hexcore.debugger.view"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [
 			{
-				"command": "hexcore.debug.start",
-				"title": "Debug: Start Analysis",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-start)"
-			},
-			{
-				"command": "hexcore.debug.attach",
-				"title": "Debug: Attach to Process",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-connect)"
-			},
-			{
-				"command": "hexcore.debug.breakpoint",
-				"title": "Toggle Breakpoint",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-breakpoint)"
-			},
-			{
-				"command": "hexcore.debug.stepInto",
-				"title": "Step Into",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-step-into)"
-			},
-			{
-				"command": "hexcore.debug.stepOver",
-				"title": "Step Over",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-step-over)"
-			},
-			{
-				"command": "hexcore.debug.continue",
-				"title": "Continue",
-				"category": "HexCore Debugger",
-				"icon": "$(debug-continue)"
-			},
-			{
-				"command": "hexcore.debug.readMemory",
-				"title": "Read Memory",
-				"category": "HexCore Debugger"
-			},
-			{
-				"command": "hexcore.debug.setRegister",
-				"title": "Set Register",
-				"category": "HexCore Debugger"
-			},
-			{
-				"command": "hexcore.debug.traceAPI",
-				"title": "Enable API Tracing",
-				"category": "HexCore Debugger"
-			},
-			{
-				"command": "hexcore.debug.nativeStatus",
+				"command": "hexcore.debug.unicornStatus",
 				"title": "Show Unicorn Engine Status",
 				"category": "HexCore Debugger"
 			},
@@ -168,27 +116,6 @@
 					"name": "Stack"
 				}
 			]
-		},
-		"configuration": {
-			"title": "HexCore Debugger",
-			"properties": {
-				"hexcore.debugger.backend": {
-					"type": "string",
-					"default": "auto",
-					"enum": ["auto", "windbg", "gdb", "lldb"],
-					"description": "Debugger backend to use"
-				},
-				"hexcore.debugger.windbgPath": {
-					"type": "string",
-					"default": "",
-					"description": "Path to WinDbg executable"
-				},
-				"hexcore.debugger.gdbPath": {
-					"type": "string",
-					"default": "gdb",
-					"description": "Path to GDB executable"
-				}
-			}
 		}
 	},
 	"scripts": {

@@ -28,6 +28,7 @@ interface UnicornInstance {
 	memMap(address: bigint | number, size: number, perms: number): void;
 	memRead(address: bigint | number, size: number): Buffer;
 	memWrite(address: bigint | number, data: Buffer): void;
+	memProtect(address: bigint | number, size: number, perms: number): void;
 	memRegions(): Array<{ begin: bigint; end: bigint; perms: number }>;
 	regRead(regId: number): bigint | number;
 	regWrite(regId: number, value: bigint | number): void;
@@ -72,6 +73,10 @@ interface HookConstants {
 	MEM_READ: number;
 	MEM_WRITE: number;
 	INTR: number;
+	UC_HOOK_MEM_READ_UNMAPPED: number;
+	UC_HOOK_MEM_WRITE_UNMAPPED: number;
+	UC_HOOK_MEM_FETCH_UNMAPPED: number;
+	UC_HOOK_MEM_UNMAPPED: number;
 }
 
 interface X86RegConstants {
@@ -83,6 +88,7 @@ interface X86RegConstants {
 	EAX: number; EBX: number; ECX: number; EDX: number;
 	ESI: number; EDI: number; EBP: number; ESP: number;
 	EIP: number; EFLAGS: number;
+	FS_BASE: number; GS_BASE: number;
 }
 
 interface Arm64RegConstants {
@@ -133,7 +139,9 @@ export interface MemoryRegion {
 
 // Hook callback types
 export type CodeHookCallback = (address: bigint, size: number) => void;
-export type MemoryHookCallback = (type: string, address: bigint, size: number, value: bigint) => void;
+export type MemoryHookCallback = (type: number, address: bigint, size: number, value: bigint) => void;
+export type MemoryFaultCallback = (type: number, address: bigint, size: number, value: bigint) => boolean;
+export type InterruptCallback = (intno: number) => void;
 
 export type ArchitectureType = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'riscv';
 
@@ -154,6 +162,11 @@ export class UnicornWrapper {
 	private breakpoints: Set<bigint> = new Set();
 	private savedContext?: UnicornContext;
 	private stepMode: boolean = false;
+	private activeHookHandles: number[] = [];
+
+	// Configurable callbacks for memory faults and interrupts
+	private memoryFaultHandler?: MemoryFaultCallback;
+	private interruptHandler?: InterruptCallback;
 
 	/**
 	 * Initialize the Unicorn engine
@@ -195,7 +208,61 @@ export class UnicornWrapper {
 		this.uc = new unicornModule.Unicorn(ucArch, mode);
 		this.initialized = true;
 
+		// Install memory fault hooks
+		this.installMemoryFaultHooks();
+
 		console.log(`Unicorn initialized: ${arch} (version: ${unicornModule.version().string})`);
+	}
+
+	/**
+	 * Install hooks for unmapped memory access (page faults)
+	 */
+	private installMemoryFaultHooks(): void {
+		if (!this.uc || !this.unicornModule) {
+			return;
+		}
+
+		const HOOK = this.unicornModule.HOOK;
+
+		// Combined hook for all unmapped memory access
+		const faultHook = this.uc.hookAdd(
+			HOOK.UC_HOOK_MEM_READ_UNMAPPED | HOOK.UC_HOOK_MEM_WRITE_UNMAPPED | HOOK.UC_HOOK_MEM_FETCH_UNMAPPED,
+			(type: number, address: bigint, size: number, value: bigint) => {
+				if (this.memoryFaultHandler) {
+					return this.memoryFaultHandler(type, address, size, value);
+				}
+				return false;
+			}
+		);
+		this.activeHookHandles.push(faultHook);
+	}
+
+	/**
+	 * Set handler for memory faults (unmapped access)
+	 * Handler should return true if it handled the fault (mapped the memory),
+	 * false to let the emulation crash.
+	 */
+	setMemoryFaultHandler(handler: MemoryFaultCallback): void {
+		this.memoryFaultHandler = handler;
+	}
+
+	/**
+	 * Set handler for interrupts (syscalls)
+	 */
+	setInterruptHandler(handler: InterruptCallback): void {
+		this.interruptHandler = handler;
+
+		if (!this.uc || !this.unicornModule) {
+			return;
+		}
+
+		const HOOK = this.unicornModule.HOOK;
+		const intrHook = this.uc.hookAdd(HOOK.INTR, (intno: number) => {
+			if (this.interruptHandler) {
+				this.interruptHandler(intno);
+			}
+		});
+		this.activeHookHandles.push(intrHook);
 	}
 
 	/**
@@ -253,6 +320,43 @@ export class UnicornWrapper {
 			throw new Error('Unicorn not initialized');
 		}
 
+		const perms = this.parsePermissions(permissions);
+		const pageSize = BigInt(this.uc.pageSize);
+		const alignedBase = (address / pageSize) * pageSize;
+		const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+
+		this.uc.memMap(alignedBase, alignedSize, perms);
+	}
+
+	/**
+	 * Map memory with numeric permissions (Unicorn PROT_* values)
+	 */
+	mapMemoryRaw(address: bigint, size: number, perms: number): void {
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		const pageSize = BigInt(this.uc.pageSize);
+		const alignedBase = (address / pageSize) * pageSize;
+		const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+
+		this.uc.memMap(alignedBase, alignedSize, perms);
+	}
+
+	/**
+	 * Change memory permissions
+	 */
+	memProtect(address: bigint, size: number, perms: number): void {
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
+		this.uc.memProtect(address, size, perms);
+	}
+
+	/**
+	 * Parse permission string to Unicorn PROT_* values
+	 */
+	private parsePermissions(permissions: string): number {
 		const PROT = this.unicornModule!.PROT;
 		let perms = 0;
 		if (permissions.includes('r')) {
@@ -264,16 +368,11 @@ export class UnicornWrapper {
 		if (permissions.includes('x')) {
 			perms |= PROT.EXEC;
 		}
-
-		const pageSize = BigInt(this.uc.pageSize);
-		const alignedBase = (address / pageSize) * pageSize;
-		const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
-
-		this.uc.memMap(alignedBase, alignedSize, perms);
+		return perms;
 	}
 
 	/**
-	 * Set up stack for emulation
+	 * Set up stack for emulation with proper alignment
 	 */
 	setupStack(stackBase: bigint, stackSize: number = 0x100000): void {
 		if (!this.uc) {
@@ -283,8 +382,23 @@ export class UnicornWrapper {
 		const PROT = this.unicornModule!.PROT;
 		this.uc.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
 
-		// Set stack pointer to middle of stack
-		const sp = stackBase + BigInt(stackSize / 2);
+		// Set stack pointer to near top of stack, 16-byte aligned
+		let sp = stackBase + BigInt(stackSize) - 0x1000n;
+		sp = (sp / 16n) * 16n; // 16-byte alignment for x64 ABI
+
+		// Push a fake return address (0xDEADDEAD) so RET at the end of main stops emulation
+		if (this.architecture === 'x64') {
+			sp -= 8n;
+			const retBuf = Buffer.alloc(8);
+			retBuf.writeBigUInt64LE(0xDEADDEADDEADDEADn);
+			this.uc.memWrite(sp, retBuf);
+		} else if (this.architecture === 'x86') {
+			sp -= 4n;
+			const retBuf = Buffer.alloc(4);
+			retBuf.writeUInt32LE(0xDEADDEAD);
+			this.uc.memWrite(sp, retBuf);
+		}
+
 		this.setStackPointer(sp);
 	}
 
@@ -304,7 +418,7 @@ export class UnicornWrapper {
 				this.uc.regWrite(X86_REG.RSP, sp);
 				break;
 			case 'x86':
-				this.uc.regWrite(X86_REG.ESP, Number(sp));
+				this.uc.regWrite(X86_REG.ESP, Number(sp & 0xFFFFFFFFn));
 				break;
 			case 'arm64':
 				this.uc.regWrite(ARM64_REG.SP, sp);
@@ -354,6 +468,7 @@ export class UnicornWrapper {
 			throw error;
 		} finally {
 			this.state.isRunning = false;
+			// Fix: always delete the tracking hook to prevent leaks
 			this.uc.hookDel(hookHandle);
 		}
 	}
@@ -521,7 +636,7 @@ export class UnicornWrapper {
 	}
 
 	/**
-	 * Set register value
+	 * Set register value with correct type handling per architecture
 	 */
 	setRegister(name: string, value: bigint | number): void {
 		if (!this.uc) {
@@ -532,12 +647,16 @@ export class UnicornWrapper {
 		const ARM64_REG = this.unicornModule!.ARM64_REG;
 
 		// x86-64 registers
-		const x86Regs: Record<string, number> = {
+		const x64Regs: Record<string, number> = {
 			'rax': X86_REG.RAX, 'rbx': X86_REG.RBX, 'rcx': X86_REG.RCX, 'rdx': X86_REG.RDX,
 			'rsi': X86_REG.RSI, 'rdi': X86_REG.RDI, 'rbp': X86_REG.RBP, 'rsp': X86_REG.RSP,
 			'r8': X86_REG.R8, 'r9': X86_REG.R9, 'r10': X86_REG.R10, 'r11': X86_REG.R11,
 			'r12': X86_REG.R12, 'r13': X86_REG.R13, 'r14': X86_REG.R14, 'r15': X86_REG.R15,
-			'rip': X86_REG.RIP, 'rflags': X86_REG.RFLAGS,
+			'rip': X86_REG.RIP, 'rflags': X86_REG.RFLAGS
+		};
+
+		// x86-32 registers
+		const x86Regs: Record<string, number> = {
 			'eax': X86_REG.EAX, 'ebx': X86_REG.EBX, 'ecx': X86_REG.ECX, 'edx': X86_REG.EDX,
 			'esi': X86_REG.ESI, 'edi': X86_REG.EDI, 'ebp': X86_REG.EBP, 'esp': X86_REG.ESP,
 			'eip': X86_REG.EIP, 'eflags': X86_REG.EFLAGS
@@ -551,10 +670,14 @@ export class UnicornWrapper {
 		};
 
 		const regName = name.toLowerCase();
-		if (x86Regs[regName] !== undefined) {
-			this.uc.regWrite(x86Regs[regName], value);
+
+		// Fix: use correct type per architecture to avoid type confusion
+		if (x64Regs[regName] !== undefined) {
+			this.uc.regWrite(x64Regs[regName], BigInt(value));
+		} else if (x86Regs[regName] !== undefined) {
+			this.uc.regWrite(x86Regs[regName], Number(value) & 0xFFFFFFFF);
 		} else if (arm64Regs[regName] !== undefined) {
-			this.uc.regWrite(arm64Regs[regName], value);
+			this.uc.regWrite(arm64Regs[regName], BigInt(value));
 		} else {
 			throw new Error(`Unknown register: ${name}`);
 		}
@@ -590,6 +713,27 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Get the page size
+	 */
+	getPageSize(): number {
+		return this.uc?.pageSize ?? 0x1000;
+	}
+
+	/**
+	 * Get the underlying Unicorn PROT constants
+	 */
+	getProtConstants(): ProtConstants | undefined {
+		return this.unicornModule?.PROT;
+	}
+
+	/**
+	 * Get the X86_REG constants
+	 */
+	getX86RegConstants(): X86RegConstants | undefined {
+		return this.unicornModule?.X86_REG;
+	}
+
+	/**
 	 * Save current state (snapshot)
 	 */
 	saveState(): void {
@@ -618,6 +762,13 @@ export class UnicornWrapper {
 	 */
 	getState(): EmulationState {
 		return { ...this.state };
+	}
+
+	/**
+	 * Set the current address (used when patching RIP externally, e.g. after API hook return)
+	 */
+	setCurrentAddress(addr: bigint): void {
+		this.state.currentAddress = addr;
 	}
 
 	/**
@@ -658,6 +809,18 @@ export class UnicornWrapper {
 	 * Close and cleanup
 	 */
 	dispose(): void {
+		// Clean up all active hook handles
+		if (this.uc) {
+			for (const handle of this.activeHookHandles) {
+				try {
+					this.uc.hookDel(handle);
+				} catch {
+					// Ignore errors during cleanup
+				}
+			}
+		}
+		this.activeHookHandles = [];
+
 		if (this.savedContext) {
 			this.savedContext.free();
 			this.savedContext = undefined;
@@ -670,6 +833,7 @@ export class UnicornWrapper {
 		this.codeHooks.clear();
 		this.memoryHooks.clear();
 		this.breakpoints.clear();
+		this.memoryFaultHandler = undefined;
+		this.interruptHandler = undefined;
 	}
 }
-

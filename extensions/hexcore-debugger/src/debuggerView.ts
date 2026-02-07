@@ -1,5 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Debugger View Provider - Simplified
+ *  HexCore Debugger View Provider
+ *  Webview with emulation controls and API call log
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
@@ -22,7 +23,7 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 
 	resolveWebviewView(
 		webviewView: vscode.WebviewView,
-		context: vscode.WebviewViewResolveContext,
+		_context: vscode.WebviewViewResolveContext,
 		_token: vscode.CancellationToken
 	): void {
 		this.view = webviewView;
@@ -31,17 +32,23 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 
 		webviewView.webview.onDidReceiveMessage((message) => {
 			switch (message.command) {
-				case 'stepInto':
-					vscode.commands.executeCommand('hexcore.debug.stepInto');
-					break;
-				case 'stepOver':
-					vscode.commands.executeCommand('hexcore.debug.stepOver');
+				case 'step':
+					vscode.commands.executeCommand('hexcore.debug.emulationStep');
 					break;
 				case 'continue':
-					vscode.commands.executeCommand('hexcore.debug.continue');
+					vscode.commands.executeCommand('hexcore.debug.emulationContinue');
 					break;
 				case 'breakpoint':
-					vscode.commands.executeCommand('hexcore.debug.breakpoint');
+					vscode.commands.executeCommand('hexcore.debug.emulationBreakpoint');
+					break;
+				case 'readMemory':
+					vscode.commands.executeCommand('hexcore.debug.emulationReadMemory');
+					break;
+				case 'snapshot':
+					vscode.commands.executeCommand('hexcore.debug.saveSnapshot');
+					break;
+				case 'restore':
+					vscode.commands.executeCommand('hexcore.debug.restoreSnapshot');
 					break;
 			}
 		});
@@ -66,48 +73,77 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 		}
 		.toolbar {
 			display: flex;
-			gap: 8px;
-			margin-bottom: 15px;
+			gap: 6px;
+			margin-bottom: 12px;
+			flex-wrap: wrap;
 		}
 		button {
-			padding: 6px 12px;
+			padding: 5px 10px;
 			background: var(--vscode-button-background);
 			color: var(--vscode-button-foreground);
 			border: none;
 			border-radius: 3px;
 			cursor: pointer;
+			font-size: 11px;
 		}
 		button:hover {
 			background: var(--vscode-button-hoverBackground);
 		}
-		.output {
+		.section-title {
+			font-weight: bold;
+			margin: 10px 0 5px 0;
+			font-size: 11px;
+			text-transform: uppercase;
+			color: var(--vscode-descriptionForeground);
+		}
+		.api-log {
 			font-family: Consolas, monospace;
-			font-size: 12px;
+			font-size: 11px;
 			background: var(--vscode-terminal-background);
-			padding: 10px;
+			padding: 8px;
 			border-radius: 4px;
-			min-height: 200px;
+			max-height: 300px;
+			overflow-y: auto;
+		}
+		.api-entry {
+			padding: 2px 0;
+			border-bottom: 1px solid var(--vscode-panel-border);
+		}
+		.api-name {
+			color: var(--vscode-symbolIcon-functionForeground, #DCDCAA);
+		}
+		.api-dll {
+			color: var(--vscode-descriptionForeground);
+		}
+		.api-ret {
+			color: var(--vscode-symbolIcon-numberForeground, #B5CEA8);
 		}
 		.status {
 			margin-top: 10px;
-			padding: 8px;
+			padding: 6px;
 			background: var(--vscode-statusBar-background);
 			border-radius: 3px;
+			font-size: 11px;
 		}
 	</style>
 </head>
 <body>
 	<div class="toolbar">
-		<button onclick="sendCmd('stepInto')">[Step In]</button>
-		<button onclick="sendCmd('stepOver')">[Step Over]</button>
-		<button onclick="sendCmd('continue')">[Continue]</button>
-		<button onclick="sendCmd('breakpoint')">[+ Break]</button>
+		<button onclick="sendCmd('step')" title="Step one instruction">Step</button>
+		<button onclick="sendCmd('continue')" title="Continue execution">Continue</button>
+		<button onclick="sendCmd('breakpoint')" title="Set breakpoint">+ Break</button>
+		<button onclick="sendCmd('readMemory')" title="Read memory">Memory</button>
+		<button onclick="sendCmd('snapshot')" title="Save snapshot">Save</button>
+		<button onclick="sendCmd('restore')" title="Restore snapshot">Restore</button>
 	</div>
-	<div class="output" id="output">Debugger ready. Start a session to see output.</div>
+	<div class="section-title">API Call Log</div>
+	<div class="api-log" id="apiLog">Waiting for emulation to start...</div>
 	<div class="status" id="status">Status: Idle</div>
 
 	<script>
 		const vscode = acquireVsCodeApi();
+		const apiLog = document.getElementById('apiLog');
+		const status = document.getElementById('status');
 
 		function sendCmd(cmd) {
 			vscode.postMessage({ command: cmd });
@@ -115,11 +151,39 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 
 		window.addEventListener('message', event => {
 			const msg = event.data;
-			if (msg.command === 'stopped') {
-				document.getElementById('status').textContent = 'Status: Stopped';
-			}
-			if (msg.command === 'breakpoint-hit') {
-				document.getElementById('output').textContent += '\n[Breakpoint hit]';
+			switch (msg.command) {
+				case 'emulation-started':
+					apiLog.textContent = '';
+					status.textContent = 'Status: Running (' + (msg.data?.fileType || 'unknown') + ')';
+					break;
+				case 'api-call':
+					if (msg.data) {
+						const entry = document.createElement('div');
+						entry.className = 'api-entry';
+						const ret = '0x' + (msg.data.returnValue || 0n).toString(16);
+						entry.innerHTML =
+							'<span class="api-dll">' + (msg.data.dll || '') + '!</span>' +
+							'<span class="api-name">' + (msg.data.name || '') + '</span>' +
+							' = <span class="api-ret">' + ret + '</span>';
+						apiLog.appendChild(entry);
+						apiLog.scrollTop = apiLog.scrollHeight;
+					}
+					break;
+				case 'step':
+					status.textContent = 'Status: Paused (stepped)';
+					break;
+				case 'stopped':
+					status.textContent = 'Status: Stopped';
+					break;
+				case 'breakpoint-hit':
+					status.textContent = 'Status: Breakpoint hit';
+					break;
+				case 'snapshot-saved':
+					status.textContent = 'Status: Snapshot saved';
+					break;
+				case 'snapshot-restored':
+					status.textContent = 'Status: Snapshot restored';
+					break;
 			}
 		});
 	</script>
