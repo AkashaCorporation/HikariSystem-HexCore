@@ -8,6 +8,21 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
+type OutputFormat = 'json' | 'md';
+
+interface CommandOutputOptions {
+	path: string;
+	format?: OutputFormat;
+}
+
+interface StringsCommandOptions {
+	file?: string;
+	minLength?: number;
+	maxStrings?: number;
+	output?: CommandOutputOptions;
+	quiet?: boolean;
+}
+
 interface ExtractedString {
 	offset: number;
 	value: string;
@@ -15,145 +30,22 @@ interface ExtractedString {
 	category?: string;
 }
 
-// Chunk size: 64KB for streaming
-const CHUNK_SIZE = 64 * 1024;
-
-export function activate(context: vscode.ExtensionContext) {
-	console.log('HexCore Strings Extractor v1.1.0 activated');
-
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.strings.extract', async (uri?: vscode.Uri) => {
-			if (!uri) {
-				const files = await vscode.window.showOpenDialog({
-					canSelectMany: false,
-					canSelectFiles: true,
-					title: 'Select file to extract strings from'
-				});
-				if (files && files.length > 0) {
-					uri = files[0];
-				} else {
-					return;
-				}
-			}
-
-			// Ask for minimum string length
-			const minLengthInput = await vscode.window.showInputBox({
-				prompt: 'Minimum string length',
-				value: '4',
-				validateInput: (val) => {
-					const num = parseInt(val);
-					if (isNaN(num) || num < 1 || num > 100) {
-						return 'Please enter a number between 1 and 100';
-					}
-					return null;
-				}
-			});
-
-			if (!minLengthInput) return;
-			const minLength = parseInt(minLengthInput);
-
-			await extractStringsWithStreaming(uri, minLength);
-		})
-	);
+interface StringsSummary {
+	asciiCount: number;
+	unicodeCount: number;
+	categories: Record<string, number>;
 }
 
-async function extractStringsWithStreaming(uri: vscode.Uri, minLength: number): Promise<void> {
-	const filePath = uri.fsPath;
-	const fileName = path.basename(filePath);
-
-	await vscode.window.withProgress({
-		location: vscode.ProgressLocation.Notification,
-		title: `Extracting strings from ${fileName}...`,
-		cancellable: true
-	}, async (progress, token) => {
-		try {
-			const stats = fs.statSync(filePath);
-			const totalSize = stats.size;
-
-			// Use streaming for large files (>10MB) or always for safety
-			const allStrings: ExtractedString[] = [];
-
-			// State for cross-chunk string detection
-			let asciiCarryover = '';
-			let asciiCarryoverOffset = 0;
-			let unicodeCarryover = Buffer.alloc(0);
-			let unicodeCarryoverOffset = 0;
-
-			// Open file for async reading
-			const fd = fs.openSync(filePath, 'r');
-			let offset = 0;
-
-			try {
-				while (offset < totalSize && !token.isCancellationRequested) {
-					const bytesToRead = Math.min(CHUNK_SIZE, totalSize - offset);
-					const buffer = Buffer.alloc(bytesToRead);
-					fs.readSync(fd, buffer, 0, bytesToRead, offset);
-
-					// Extract ASCII strings from chunk
-					const { strings: asciiStrings, carryover: newAsciiCarryover, carryoverOffset: newAsciiOffset } =
-						extractASCIIFromChunk(buffer, offset, minLength, asciiCarryover, asciiCarryoverOffset);
-					allStrings.push(...asciiStrings);
-					asciiCarryover = newAsciiCarryover;
-					asciiCarryoverOffset = newAsciiOffset;
-
-					// Extract Unicode strings from chunk
-					const { strings: unicodeStrings, carryover: newUnicodeCarryover, carryoverOffset: newUnicodeOffset } =
-						extractUnicodeFromChunk(buffer, offset, minLength, unicodeCarryover, unicodeCarryoverOffset);
-					allStrings.push(...unicodeStrings);
-					unicodeCarryover = Buffer.from(newUnicodeCarryover);
-					unicodeCarryoverOffset = newUnicodeOffset;
-
-					offset += bytesToRead;
-
-					// Report progress
-					const pct = Math.round((offset / totalSize) * 100);
-					progress.report({ increment: (bytesToRead / totalSize) * 100, message: `${pct}% - ${allStrings.length} strings found` });
-
-					// Limit total strings to prevent memory issues
-					if (allStrings.length > 50000) {
-						break;
-					}
-				}
-
-				// Handle remaining carryover
-				if (asciiCarryover.length >= minLength) {
-					allStrings.push({
-						offset: asciiCarryoverOffset,
-						value: asciiCarryover.trim(),
-						encoding: 'ASCII'
-					});
-				}
-
-			} finally {
-				fs.closeSync(fd);
-			}
-
-			if (token.isCancellationRequested) {
-				vscode.window.showInformationMessage('String extraction cancelled.');
-				return;
-			}
-
-			// Categorize strings
-			categorizeStrings(allStrings);
-
-			// Sort by offset and deduplicate
-			allStrings.sort((a, b) => a.offset - b.offset);
-			const uniqueStrings = deduplicateStrings(allStrings);
-
-			// Generate report
-			const content = generateStringsReport(fileName, filePath, totalSize, uniqueStrings, minLength);
-
-			const doc = await vscode.workspace.openTextDocument({
-				content: content,
-				language: 'markdown'
-			});
-
-			await vscode.window.showTextDocument(doc, { preview: false });
-
-		} catch (error: any) {
-			vscode.window.showErrorMessage(`Failed to extract strings: ${error.message}`);
-		}
-	});
+interface StringsExtractionResult {
+	fileName: string;
+	filePath: string;
+	fileSize: number;
+	minLength: number;
+	totalStrings: number;
+	truncated: boolean;
+	summary: StringsSummary;
+	strings: ExtractedString[];
+	reportMarkdown: string;
 }
 
 interface ChunkResult {
@@ -166,6 +58,304 @@ interface UnicodeChunkResult {
 	strings: ExtractedString[];
 	carryover: Buffer;
 	carryoverOffset: number;
+}
+
+interface CoreExtractionResult {
+	fileSize: number;
+	strings: ExtractedString[];
+	truncated: boolean;
+	cancelled: boolean;
+}
+
+const CHUNK_SIZE = 64 * 1024;
+const DEFAULT_MIN_LENGTH = 4;
+const DEFAULT_MAX_STRINGS = 50000;
+
+export function activate(context: vscode.ExtensionContext) {
+	console.log('HexCore Strings Extractor v1.1.0 activated');
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.strings.extract', async (arg?: vscode.Uri | StringsCommandOptions) => {
+			const options = normalizeOptions(arg);
+			const uri = await resolveTargetUri(arg, options);
+			if (!uri) {
+				return;
+			}
+
+			const minLength = await resolveMinLength(options);
+			if (minLength === undefined) {
+				return;
+			}
+
+			try {
+				return await extractStrings(uri, minLength, options);
+			} catch (error: unknown) {
+				if (!options.quiet) {
+					vscode.window.showErrorMessage(`Failed to extract strings: ${toErrorMessage(error)}`);
+				}
+				throw error;
+			}
+		})
+	);
+}
+
+function normalizeOptions(arg?: vscode.Uri | StringsCommandOptions): StringsCommandOptions {
+	if (arg instanceof vscode.Uri || arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+async function resolveTargetUri(
+	arg: vscode.Uri | StringsCommandOptions | undefined,
+	options: StringsCommandOptions
+): Promise<vscode.Uri | undefined> {
+	if (arg instanceof vscode.Uri) {
+		return arg;
+	}
+
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return vscode.Uri.file(options.file);
+	}
+
+	const activeUri = getActiveFileUri();
+	if (activeUri) {
+		return activeUri;
+	}
+
+	if (options.quiet) {
+		return undefined;
+	}
+
+	const files = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		canSelectFiles: true,
+		title: 'Select file to extract strings from'
+	});
+	return files?.[0];
+}
+
+function getActiveFileUri(): vscode.Uri | undefined {
+	const active = vscode.window.activeTextEditor?.document.uri;
+	if (!active || active.scheme !== 'file') {
+		return undefined;
+	}
+	return active;
+}
+
+async function resolveMinLength(options: StringsCommandOptions): Promise<number | undefined> {
+	if (typeof options.minLength === 'number') {
+		return clampMinLength(options.minLength);
+	}
+
+	if (options.quiet) {
+		return DEFAULT_MIN_LENGTH;
+	}
+
+	const minLengthInput = await vscode.window.showInputBox({
+		prompt: 'Minimum string length',
+		value: String(DEFAULT_MIN_LENGTH),
+		validateInput: value => {
+			const num = parseInt(value, 10);
+			if (Number.isNaN(num) || num < 1 || num > 100) {
+				return 'Please enter a number between 1 and 100';
+			}
+			return null;
+		}
+	});
+
+	if (!minLengthInput) {
+		return undefined;
+	}
+
+	return clampMinLength(parseInt(minLengthInput, 10));
+}
+
+function clampMinLength(value: number): number {
+	if (Number.isNaN(value)) {
+		return DEFAULT_MIN_LENGTH;
+	}
+	return Math.max(1, Math.min(100, Math.floor(value)));
+}
+
+async function extractStrings(uri: vscode.Uri, minLength: number, options: StringsCommandOptions): Promise<StringsExtractionResult | undefined> {
+	const filePath = uri.fsPath;
+	const fileName = path.basename(filePath);
+	const maxStrings = normalizeMaxStrings(options.maxStrings);
+
+	const runExtraction = (
+		onProgress?: (offset: number, totalSize: number, foundStrings: number) => void,
+		isCancelled?: () => boolean
+	): CoreExtractionResult => extractStringsCore(filePath, minLength, maxStrings, onProgress, isCancelled);
+
+	const coreResult = options.quiet
+		? runExtraction()
+		: await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Extracting strings from ${fileName}...`,
+				cancellable: true
+			},
+			async (progress, token) => runExtraction(
+				(offset, totalSize, foundStrings) => {
+					const pct = totalSize > 0 ? Math.round((offset / totalSize) * 100) : 100;
+					progress.report({ message: `${pct}% - ${foundStrings} strings found` });
+				},
+				() => token.isCancellationRequested
+			)
+		);
+
+	if (coreResult.cancelled) {
+		if (!options.quiet) {
+			vscode.window.showInformationMessage('String extraction cancelled.');
+		}
+		return undefined;
+	}
+
+	const summary = summarizeStrings(coreResult.strings);
+	const report = generateStringsReport(fileName, filePath, coreResult.fileSize, coreResult.strings, minLength, coreResult.truncated);
+	const result: StringsExtractionResult = {
+		fileName,
+		filePath,
+		fileSize: coreResult.fileSize,
+		minLength,
+		totalStrings: coreResult.strings.length,
+		truncated: coreResult.truncated,
+		summary,
+		strings: coreResult.strings,
+		reportMarkdown: report
+	};
+
+	if (options.output) {
+		writeOutput(result, options.output);
+	}
+
+	if (!options.quiet) {
+		const doc = await vscode.workspace.openTextDocument({
+			content: report,
+			language: 'markdown'
+		});
+		await vscode.window.showTextDocument(doc, { preview: false });
+	}
+
+	return result;
+}
+
+function normalizeMaxStrings(value?: number): number {
+	if (value === undefined || Number.isNaN(value)) {
+		return DEFAULT_MAX_STRINGS;
+	}
+	return Math.max(100, Math.floor(value));
+}
+
+function extractStringsCore(
+	filePath: string,
+	minLength: number,
+	maxStrings: number,
+	onProgress?: (offset: number, totalSize: number, foundStrings: number) => void,
+	isCancelled?: () => boolean
+): CoreExtractionResult {
+	const stats = fs.statSync(filePath);
+	const totalSize = stats.size;
+
+	const allStrings: ExtractedString[] = [];
+	let asciiCarryover = '';
+	let asciiCarryoverOffset = 0;
+	let unicodeCarryover = Buffer.alloc(0);
+	let unicodeCarryoverOffset = 0;
+	let offset = 0;
+	let truncated = false;
+	let cancelled = false;
+
+	const fd = fs.openSync(filePath, 'r');
+	try {
+		while (offset < totalSize) {
+			if (isCancelled?.()) {
+				cancelled = true;
+				break;
+			}
+
+			const bytesToRead = Math.min(CHUNK_SIZE, totalSize - offset);
+			const buffer = Buffer.alloc(bytesToRead);
+			fs.readSync(fd, buffer, 0, bytesToRead, offset);
+
+			const asciiResult = extractASCIIFromChunk(buffer, offset, minLength, asciiCarryover, asciiCarryoverOffset);
+			allStrings.push(...asciiResult.strings);
+			asciiCarryover = asciiResult.carryover;
+			asciiCarryoverOffset = asciiResult.carryoverOffset;
+
+			const unicodeResult = extractUnicodeFromChunk(buffer, offset, minLength, unicodeCarryover, unicodeCarryoverOffset);
+			allStrings.push(...unicodeResult.strings);
+			unicodeCarryover = Buffer.from(unicodeResult.carryover);
+			unicodeCarryoverOffset = unicodeResult.carryoverOffset;
+
+			offset += bytesToRead;
+			onProgress?.(offset, totalSize, allStrings.length);
+
+			if (allStrings.length > maxStrings) {
+				truncated = true;
+				break;
+			}
+		}
+	} finally {
+		fs.closeSync(fd);
+	}
+
+	if (asciiCarryover.length >= minLength) {
+		allStrings.push({
+			offset: asciiCarryoverOffset,
+			value: asciiCarryover.trim(),
+			encoding: 'ASCII'
+		});
+	}
+
+	categorizeStrings(allStrings);
+	allStrings.sort((a, b) => a.offset - b.offset);
+	const uniqueStrings = deduplicateStrings(allStrings);
+
+	return {
+		fileSize: totalSize,
+		strings: uniqueStrings,
+		truncated,
+		cancelled
+	};
+}
+
+function writeOutput(result: StringsExtractionResult, output: CommandOutputOptions): void {
+	const outputFormat = normalizeOutputFormat(output.path, output.format);
+	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	if (outputFormat === 'md') {
+		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(
+		output.path,
+		JSON.stringify(
+			{
+				fileName: result.fileName,
+				filePath: result.filePath,
+				fileSize: result.fileSize,
+				minLength: result.minLength,
+				totalStrings: result.totalStrings,
+				truncated: result.truncated,
+				summary: result.summary,
+				strings: result.strings,
+				generatedAt: new Date().toISOString()
+			},
+			null,
+			2
+		),
+		'utf8'
+	);
+}
+
+function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
+	if (format === 'json' || format === 'md') {
+		return format;
+	}
+	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
 function extractASCIIFromChunk(
@@ -218,7 +408,6 @@ function extractUnicodeFromChunk(
 ): UnicodeChunkResult {
 	const strings: ExtractedString[] = [];
 
-	// Combine carryover with new buffer
 	const combined = carryover.length > 0 ? Buffer.concat([carryover, buffer]) : buffer;
 	const combinedOffset = carryover.length > 0 ? carryoverOffset : baseOffset;
 
@@ -249,7 +438,6 @@ function extractUnicodeFromChunk(
 		}
 	}
 
-	// Handle odd byte at end
 	const newCarryover = combined.length % 2 === 1 ? Buffer.from(combined.subarray(-1)) : Buffer.alloc(0);
 
 	return {
@@ -261,9 +449,11 @@ function extractUnicodeFromChunk(
 
 function deduplicateStrings(strings: ExtractedString[]): ExtractedString[] {
 	const seen = new Set<string>();
-	return strings.filter(s => {
-		const key = `${s.offset}-${s.value.substring(0, 50)}`;
-		if (seen.has(key)) return false;
+	return strings.filter(stringValue => {
+		const key = `${stringValue.offset}-${stringValue.value.substring(0, 50)}`;
+		if (seen.has(key)) {
+			return false;
+		}
 		seen.add(key);
 		return true;
 	});
@@ -283,14 +473,37 @@ function categorizeStrings(strings: ExtractedString[]): void {
 		{ category: 'WinAPI', regex: /^(Nt|Zw|Rtl|Ldr|Crypt|Virtual|Heap|Process|Thread|Reg|File)/i },
 	];
 
-	for (const str of strings) {
+	for (const extracted of strings) {
 		for (const pattern of patterns) {
-			if (pattern.regex.test(str.value)) {
-				str.category = pattern.category;
+			if (pattern.regex.test(extracted.value)) {
+				extracted.category = pattern.category;
 				break;
 			}
 		}
 	}
+}
+
+function summarizeStrings(strings: ExtractedString[]): StringsSummary {
+	const categories: Record<string, number> = {};
+	let asciiCount = 0;
+	let unicodeCount = 0;
+
+	for (const extracted of strings) {
+		if (extracted.encoding === 'ASCII') {
+			asciiCount++;
+		} else {
+			unicodeCount++;
+		}
+
+		const category = extracted.category ?? 'General';
+		categories[category] = (categories[category] ?? 0) + 1;
+	}
+
+	return {
+		asciiCount,
+		unicodeCount,
+		categories
+	};
 }
 
 function generateStringsReport(
@@ -298,19 +511,19 @@ function generateStringsReport(
 	filePath: string,
 	fileSize: number,
 	strings: ExtractedString[],
-	minLength: number
+	minLength: number,
+	truncated: boolean
 ): string {
-	const asciiCount = strings.filter(s => s.encoding === 'ASCII').length;
-	const unicodeCount = strings.filter(s => s.encoding === 'UTF-16LE').length;
+	const asciiCount = strings.filter(stringValue => stringValue.encoding === 'ASCII').length;
+	const unicodeCount = strings.filter(stringValue => stringValue.encoding === 'UTF-16LE').length;
 
-	// Group by category
 	const categorized = new Map<string, ExtractedString[]>();
-	for (const str of strings) {
-		const cat = str.category || 'General';
-		if (!categorized.has(cat)) {
-			categorized.set(cat, []);
+	for (const stringValue of strings) {
+		const category = stringValue.category || 'General';
+		if (!categorized.has(category)) {
+			categorized.set(category, []);
 		}
-		categorized.get(cat)!.push(str);
+		categorized.get(category)!.push(stringValue);
 	}
 
 	let report = `# HexCore Strings Extractor Report
@@ -324,6 +537,7 @@ function generateStringsReport(
 | **File Size** | ${formatBytes(fileSize)} |
 | **Min Length** | ${minLength} characters |
 | **Processing** | Streaming (memory efficient) |
+| **Truncated** | ${truncated ? 'Yes (max strings limit reached)' : 'No'} |
 
 ---
 
@@ -341,13 +555,12 @@ function generateStringsReport(
 
 `;
 
-	// Priority order for categories
 	const priorityCategories = ['URL', 'IP Address', 'Email', 'Registry Key', 'Sensitive', 'File Path', 'DLL', 'Executable', 'WinAPI', 'Function'];
 
-	for (const cat of priorityCategories) {
-		const items = categorized.get(cat);
+	for (const category of priorityCategories) {
+		const items = categorized.get(category);
 		if (items && items.length > 0) {
-			report += `### ${cat} (${items.length})\n\n`;
+			report += `### ${category} (${items.length})\n\n`;
 			report += '| Offset | Encoding | Value |\n';
 			report += '|--------|----------|-------|\n';
 			for (const item of items.slice(0, 50)) {
@@ -361,7 +574,6 @@ function generateStringsReport(
 		}
 	}
 
-	// General strings (limited)
 	const generalStrings = categorized.get('General') || [];
 	if (generalStrings.length > 0) {
 		report += `### General Strings (showing first 100 of ${generalStrings.length})\n\n`;
@@ -369,8 +581,8 @@ function generateStringsReport(
 		report += '|--------|----------|-------|\n';
 		for (const item of generalStrings.slice(0, 100)) {
 			const escapedValue = item.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 80);
-			const truncated = item.value.length > 80 ? '...' : '';
-			report += `| 0x${item.offset.toString(16).toUpperCase().padStart(8, '0')} | ${item.encoding} | \`${escapedValue}${truncated}\` |\n`;
+			const truncatedValue = item.value.length > 80 ? '...' : '';
+			report += `| 0x${item.offset.toString(16).toUpperCase().padStart(8, '0')} | ${item.encoding} | \`${escapedValue}${truncatedValue}\` |\n`;
 		}
 		report += '\n';
 	}
@@ -383,11 +595,20 @@ function generateStringsReport(
 }
 
 function formatBytes(bytes: number): string {
-	if (bytes === 0) return '0 B';
+	if (bytes === 0) {
+		return '0 B';
+	}
 	const k = 1024;
 	const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 	const i = Math.floor(Math.log(bytes) / Math.log(k));
 	return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }
 
 export function deactivate() { }

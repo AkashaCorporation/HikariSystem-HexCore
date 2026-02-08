@@ -223,7 +223,7 @@ export class DisassemblerEngine {
 	}
 
 	/**
-	 * Full analysis: entry point + exports + prolog scan
+	 * Full analysis: entry point + exports + prolog scan + re-analyze empty functions
 	 */
 	async analyzeAll(): Promise<number> {
 		if (!this.fileBuffer) {
@@ -234,6 +234,21 @@ export class DisassemblerEngine {
 
 		// Scan for function prologs in code sections
 		await this.scanForFunctionPrologs();
+
+		// Re-analyze functions that ended up with 0 bytes (failed disassembly)
+		const emptyFuncs = Array.from(this.functions.values()).filter(f => f.size === 0);
+		for (const func of emptyFuncs) {
+			// Remove and re-analyze with fresh attempt
+			this.functions.delete(func.address);
+			try {
+				await this.analyzeFunction(func.address, func.name);
+			} catch {
+				// If still fails, restore the empty entry so we don't lose the name
+				if (!this.functions.has(func.address)) {
+					this.functions.set(func.address, func);
+				}
+			}
+		}
 
 		// Build string cross-references
 		this.buildStringXrefs();
@@ -503,7 +518,7 @@ export class DisassemblerEngine {
 		let match;
 
 		while ((match = asciiPattern.exec(text)) !== null) {
-			if (match[0].length <= 256) {
+			if (match[0].length <= 16384) {
 				const offset = match.index;
 				const str = match[0];
 				const addr = this.offsetToAddress(offset);
@@ -521,7 +536,7 @@ export class DisassemblerEngine {
 				}
 				len++;
 			}
-			if (len >= 4 && len <= 128) {
+			if (len >= 4 && len <= 512) {
 				const str = this.fileBuffer.toString('utf16le', i, i + len * 2);
 				const addr = this.offsetToAddress(i);
 				if (!this.strings.has(addr)) {
@@ -646,6 +661,13 @@ export class DisassemblerEngine {
 
 		this.baseAddress = imageBase;
 
+		// Decode subsystem name
+		const subsystemNames: Record<number, string> = {
+			1: 'Native', 2: 'Windows GUI', 3: 'Windows CUI',
+			5: 'OS/2 CUI', 7: 'POSIX CUI', 9: 'Windows CE GUI',
+			10: 'EFI Application', 14: 'Xbox'
+		};
+
 		this.fileInfo = {
 			format: is64 ? 'PE64' : 'PE',
 			architecture: this.architecture,
@@ -653,7 +675,7 @@ export class DisassemblerEngine {
 			baseAddress: imageBase,
 			imageSize: sizeOfImage,
 			timestamp: timeDateStamp > 0 ? new Date(timeDateStamp * 1000) : undefined,
-			subsystem: subsystem.toString()
+			subsystem: subsystemNames[subsystem] || subsystem.toString()
 		};
 
 		// Parse section table
@@ -857,11 +879,31 @@ export class DisassemblerEngine {
 		const addressOfOrdinals = this.fileBuffer.readUInt32LE(exportOffset + 36);    // RVA
 		const ordinalBase = this.fileBuffer.readUInt32LE(exportOffset + 16);
 
+		// Sanity check: corrupt export table (e.g. LARA.dll has numFuncs=281000)
+		// Max reasonable: 16384 exports. Also validate against file size.
+		const maxReasonableExports = 16384;
+		if (numberOfFunctions > maxReasonableExports || numberOfNames > maxReasonableExports) {
+			console.warn(`Export table looks corrupt: numFuncs=${numberOfFunctions}, numNames=${numberOfNames} - skipping`);
+			return;
+		}
+		if (numberOfNames > numberOfFunctions) {
+			console.warn(`Export table invalid: numNames(${numberOfNames}) > numFuncs(${numberOfFunctions}) - skipping`);
+			return;
+		}
+
 		const funcTableOffset = this.rvaToFileOffset(addressOfFunctions);
 		const nameTableOffset = this.rvaToFileOffset(addressOfNames);
 		const ordTableOffset = this.rvaToFileOffset(addressOfOrdinals);
 
 		if (funcTableOffset < 0 || nameTableOffset < 0 || ordTableOffset < 0) {
+			return;
+		}
+
+		// Validate table offsets are within file bounds
+		if (funcTableOffset + numberOfFunctions * 4 > this.fileBuffer.length ||
+			nameTableOffset + numberOfNames * 4 > this.fileBuffer.length ||
+			ordTableOffset + numberOfNames * 2 > this.fileBuffer.length) {
+			console.warn('Export table extends beyond file bounds - skipping');
 			return;
 		}
 
@@ -957,31 +999,50 @@ export class DisassemblerEngine {
 		const shnum = readU16(is64Bit ? 60 : 48);
 		const shstrndx = readU16(is64Bit ? 62 : 50);
 
+		// Detect ELF type: ET_EXEC=2 (fixed base), ET_DYN=3 (PIE or shared object)
+		const eType = readU16(16);
+		const isPIE = eType === 3; // ET_DYN - Position Independent Executable
+
 		// Detect base address from first LOAD segment
 		let baseAddr = 0x400000;
 		if (phoff > 0 && phnum > 0) {
+			// First pass: find lowest LOAD segment vaddr to detect PIE
+			let lowestVaddr = Number.MAX_SAFE_INTEGER;
 			for (let i = 0; i < phnum; i++) {
 				const phOff = phoff + i * phentsize;
 				if (phOff + phentsize > this.fileBuffer.length) { break; }
 				const pType = readU32(phOff);
 				if (pType === 1) { // PT_LOAD
 					const pVaddr = is64Bit ? Number(readU64(phOff + 16)) : readU32(phOff + 8);
-					if (pVaddr > 0) {
-						baseAddr = pVaddr;
-						break;
+					if (pVaddr < lowestVaddr) {
+						lowestVaddr = pVaddr;
 					}
 				}
+			}
+
+			if (lowestVaddr !== Number.MAX_SAFE_INTEGER) {
+				if (isPIE && lowestVaddr === 0) {
+					// PIE binary: virtual addresses start at 0, use conventional base
+					// Linux kernel typically loads PIE at 0x555555554000 for x64, 0x56555000 for x86
+					baseAddr = is64Bit ? 0x555555554000 : 0x56555000;
+				} else if (lowestVaddr > 0) {
+					baseAddr = lowestVaddr;
+				}
+				// If lowestVaddr is 0 and NOT PIE, keep default 0x400000
 			}
 		}
 		this.baseAddress = baseAddr;
 
+		// For PIE binaries, adjust entry point by adding the chosen base address
+		const adjustedEntryPoint = (isPIE && entryPoint < this.baseAddress) ? entryPoint + this.baseAddress : entryPoint;
+
 		this.fileInfo = {
 			format: is64Bit ? 'ELF64' : 'ELF32',
 			architecture: this.architecture,
-			entryPoint: entryPoint,
+			entryPoint: adjustedEntryPoint,
 			baseAddress: this.baseAddress,
 			imageSize: this.fileBuffer.length,
-			characteristics: ['ELF']
+			characteristics: isPIE ? ['ELF', 'PIE'] : ['ELF']
 		};
 
 		// Parse section headers - collect raw info for symbol parsing
@@ -1030,7 +1091,10 @@ export class DisassemblerEngine {
 					name = `section_${i}`;
 				}
 
-				elfSections.push({ name, type, flags, addr, offset, size, link, entsize });
+				// For PIE: adjust section addresses by adding base
+				const adjustedAddr = (isPIE && addr > 0 && addr < this.baseAddress) ? addr + this.baseAddress : addr;
+
+				elfSections.push({ name, type, flags, addr: adjustedAddr, offset, size, link, entsize });
 
 				const isWritable = (flags & 0x1) !== 0;
 				const isAlloc = (flags & 0x2) !== 0;
@@ -1046,7 +1110,7 @@ export class DisassemblerEngine {
 
 				this.sections.push({
 					name,
-					virtualAddress: addr,
+					virtualAddress: adjustedAddr,
 					virtualSize: size,
 					rawAddress: offset,
 					rawSize: size,
@@ -1137,10 +1201,11 @@ export class DisassemblerEngine {
 					});
 				} else if (!isUndefined && (stBind === 1 || stBind === 2) && stType === 2) {
 					// Export: defined global/weak function symbol
+					const adjustedSymAddr = (isPIE && stValue > 0 && stValue < this.baseAddress) ? stValue + this.baseAddress : stValue;
 					this.exports.push({
 						name: symName,
 						ordinal: i,
-						address: stValue,
+						address: adjustedSymAddr,
 						isForwarder: false
 					});
 				}
@@ -1185,6 +1250,68 @@ export class DisassemblerEngine {
 						const existing = this.imports.find(lib => lib.name === libName);
 						if (!existing) {
 							this.imports.push({ name: libName, functions: [] });
+						}
+					}
+				}
+			}
+		}
+
+		// Parse PLT section to get actual call addresses for imports
+		// PLT entries are small stubs that indirect through GOT
+		const pltSection = elfSections.find(s => s.name === '.plt' || s.name === '.plt.got' || s.name === '.plt.sec');
+		if (pltSection && pltSection.addr > 0) {
+			// Parse .rela.plt to map GOT slots to symbol names
+			const relaPlt = elfSections.find(s => s.name === '.rela.plt' || s.name === '.rel.plt');
+			const dynsymSec = elfSections.find(s => s.type === 11); // SHT_DYNSYM
+			const dynstrSec = dynsymSec ? elfSections[dynsymSec.link] : undefined;
+
+			if (relaPlt && dynsymSec && dynstrSec) {
+				const isRela = relaPlt.name.startsWith('.rela');
+				const relEntSize = isRela ? (is64Bit ? 24 : 12) : (is64Bit ? 16 : 8);
+				const numRel = relEntSize > 0 ? Math.floor(relaPlt.size / relEntSize) : 0;
+
+				for (let i = 0; i < numRel && i < 4096; i++) {
+					const relOff = relaPlt.offset + i * relEntSize;
+					if (relOff + relEntSize > this.fileBuffer.length) { break; }
+
+					const rOffset = is64Bit ? Number(readU64(relOff)) : readU32(relOff);
+					const rInfo = is64Bit ? Number(readU64(relOff + 8)) : readU32(relOff + 4);
+
+					// Extract symbol index from r_info
+					const symIdx = is64Bit ? (rInfo >> 32) : (rInfo >> 8);
+
+					// Read symbol name from .dynsym
+					const symEntSize = is64Bit ? 24 : 16;
+					const symOff = dynsymSec.offset + symIdx * symEntSize;
+					if (symOff + symEntSize > this.fileBuffer.length) { continue; }
+
+					const stName = readU32(symOff);
+					let symName = '';
+					const symNameOff = dynstrSec.offset + stName;
+					if (symNameOff < this.fileBuffer.length) {
+						for (let j = symNameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+							symName += String.fromCharCode(this.fileBuffer[j]);
+							if (symName.length > 256) { break; }
+						}
+					}
+
+					if (symName.length === 0) { continue; }
+
+					// PLT entry address: PLT base + (i+1) * PLT entry size (first entry is stub)
+					// Standard PLT entry size is 16 bytes on x86-64
+					const pltEntrySize = is64Bit ? 16 : 16;
+					const pltAddr = pltSection.addr + (i + 1) * pltEntrySize;
+
+					// Adjust for PIE
+					const adjustedPltAddr = (isPIE && pltAddr > 0 && pltAddr < this.baseAddress) ? pltAddr + this.baseAddress : pltAddr;
+					const adjustedGotAddr = (isPIE && rOffset > 0 && rOffset < this.baseAddress) ? rOffset + this.baseAddress : rOffset;
+
+					// Update import entries with PLT addresses
+					for (const lib of this.imports) {
+						const func = lib.functions.find(f => f.name === symName);
+						if (func) {
+							func.address = adjustedPltAddr;
+							break;
 						}
 					}
 				}

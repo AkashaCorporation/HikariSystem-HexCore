@@ -5,173 +5,168 @@
 </p>
 
 <p align="center">
-  <strong>A specialized IDE for malware analysis and reverse engineering</strong>
+  <strong>A specialized IDE for malware analysis, reverse engineering, and binary emulation</strong>
 </p>
 
 <p align="center">
   <a href="#features">Features</a> |
   <a href="#extensions">Extensions</a> |
+  <a href="#debugger--emulator">Debugger</a> |
+  <a href="#automation-pipeline">Automation</a> |
   <a href="#installation">Installation</a> |
   <a href="#usage">Usage</a> |
   <a href="#license">License</a>
+</p>
+
+<p align="center">
+  <code>binary analysis</code> &middot; <code>reverse engineering</code> &middot; <code>malware analysis</code> &middot; <code>CPU emulation</code> &middot; <code>PE/ELF</code> &middot; <code>CTF tools</code> &middot; <code>disassembler</code> &middot; <code>debugger</code>
 </p>
 
 ---
 
 ## Overview
 
-HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting.
+HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
+
+**What makes HexCore different:**
+- Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
+- Native Capstone/Unicorn/LLVM MC engines via N-API (no external installs)
+- Headless automation pipeline for batch analysis
+- Tested against real CTF binaries (HackTheBox)
 
 ---
 
 ## Features
 
-- Professional binary file analysis with hex viewer
-- Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS)
-- Inline assembly patching with LLVM MC
-- PE/ELF executable parsing and inspection
-- CPU emulation with Unicorn for dynamic analysis
-- Cryptographic hash calculation with VirusTotal integration
-- String extraction and categorization
-- YARA rule scanning
-- Entropy analysis for packer/encryption detection
-- Integrated debugging capabilities
+- **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
+- **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation
+- **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
+- **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
+- **Hex Viewer** — Virtual scrolling, data inspector, bookmarks, structure templates
+- **Hash Calculator** — MD5, SHA-1, SHA-256, SHA-512 with VirusTotal integration
+- **String Extraction** — ASCII/UTF-16, auto-categorization, cross-reference tracking
+- **Entropy Analysis** — Block-by-block entropy with packer/encryption detection
+- **YARA Scanning** — Rule loading, match highlighting, custom rules
+- **Automation** — Headless pipeline system for batch binary analysis
 
 ---
 
 ## Extensions
 
-### Core Analysis Tools
+### Analysis Tools
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
+| **Debugger** | 2.1.0 | PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation |
+| **Disassembler** | 1.2.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs |
 | **Hex Viewer** | 1.2.0 | Professional binary file viewer with virtual scrolling |
-| **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis |
-| **Disassembler** | 1.0.0 | Multi-architecture native disassembler |
-| **Strings Extractor** | 1.1.0 | Memory-efficient string extraction |
-| **Hash Calculator** | 1.1.0 | Fast file hashing with algorithm selection |
-| **Entropy Analyzer** | 1.0.0 | Visual entropy analysis for packed regions |
-| **Base64 Decoder** | 1.0.0 | Detect and decode Base64 strings |
+| **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
+| **Strings Extractor** | 1.1.0 | Memory-efficient string extraction with cross-references |
+| **Hash Calculator** | 1.1.0 | Fast file hashing with VirusTotal integration |
+| **Entropy Analyzer** | 1.0.0 | Visual entropy analysis for packed/encrypted regions |
 | **File Type Detector** | 1.0.0 | Magic bytes signature detection |
+| **Base64 Decoder** | 1.0.0 | Detect and decode Base64 strings |
 | **YARA Scanner** | 1.0.0 | YARA rule scanning and matching |
-| **Debugger** | 1.0.0 | Integrated debugging for analysis |
 
----
+### Native Engines (Standalone N-API Packages)
 
-### Native Engines (Standalone Packages)
-
-These engines are shipped with HexCore and can also be used independently in Node.js projects.
+These engines ship with HexCore and can also be used independently in Node.js projects.
 
 | Package | Version | Description |
 |---------|---------|-------------|
-| **hexcore-capstone** | 1.3.0 | Capstone N-API binding with async disassembly |
-| **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding for CPU emulation (Coming Soon) |
-| **hexcore-llvm-mc** | 1.0.0 | LLVM MC N-API binding for assembly/patching (Coming Soon) |
-| **hexcore-keystone** | 1.0.0 | Legacy assembler (superseded by LLVM MC)|
+| **hexcore-capstone** | 1.3.0 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
+| **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding — CPU emulation, hooks, context save/restore |
+| **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
+| **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
 ---
 
-### Hex Viewer
+## Debugger & Emulator
+
+The HexCore Debugger provides full CPU emulation for PE (Windows) and ELF (Linux) binaries via **Unicorn Engine**. No native debugger or target OS required — everything runs in-process.
+
+### Supported Formats
+- **PE (x86/x64)** — Automatic section loading, import resolution via IAT, 25+ Windows API hooks
+- **ELF (x86_64)** — PIE support, PLT/GOT resolution (`.rela.plt` + `.rela.dyn`), 40+ Linux API hooks
+- **Raw binaries** — Direct memory mapping for shellcode and firmware
+
+### Emulation Capabilities
+- **Step / Continue / Breakpoints** — Standard debugger controls with register and memory inspection
+- **API Hooking** — Transparent interception of library calls (no real DLLs/SOs needed)
+- **stdin Emulation** — Configurable input buffer for `scanf`, `read(0)`, `getchar`, `fgets`
+- **TLS/FS_BASE** — Automatic Thread Local Storage with stack canary for `-fstack-protector` binaries
+- **Syscall Handler** — Linux syscall interception (read, write, mmap, brk, arch_prctl, exit)
+- **`__libc_start_main` redirect** — Skip CRT init, jump directly to `main()` with argc/argv/envp
+- **Snapshot save/restore** — Save and restore full emulation state
+
+### Linux API Hooks (40+)
+I/O, string, memory, heap, conversion, process, time, file stubs, and security functions — all using System V AMD64 ABI argument passing.
+
+### Windows API Hooks (25+)
+Kernel32, user32, msvcrt emulation for common PE analysis scenarios.
+
+> Powered by [hexcore-unicorn](extensions/hexcore-unicorn) and [hexcore-capstone](extensions/hexcore-capstone).
+
+---
+
+## Disassembler
+
+Native multi-architecture disassembler powered by **Capstone Engine v5.0** with assembly patching via **LLVM MC**.
+
+- **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
+- **Inline PE/ELF parsing** — Imports, exports, sections without external dependencies
+- **Function detection** — Prolog scanning, call target analysis, up to 1000 functions
+- **String cross-references** — Track which instructions reference which strings
+- **Graph View** — IDA-style control flow graph visualization
+- **Patching** — Assemble, patch instructions, NOP sleds (LLVM MC)
+- **Headless mode** — `hexcore.disasm.analyzeAll` for automation with JSON/MD output
+
+> Powered by [hexcore-capstone](extensions/hexcore-capstone) and [hexcore-llvm-mc](extensions/hexcore-llvm-mc).
+
+---
+
+## Automation Pipeline
+
+HexCore supports headless batch analysis via `.hexcore_job.json` job files.
+
+```json
+{
+  "file": "C:\\bin\\sample.exe",
+  "outDir": "C:\\reports\\sample",
+  "steps": [
+    { "cmd": "hexcore.filetype.detect" },
+    { "cmd": "hexcore.peanalyzer.analyze" },
+    { "cmd": "hexcore.hashcalc.calculate" },
+    { "cmd": "hexcore.entropy.analyze" },
+    { "cmd": "hexcore.strings.extract", "args": { "minLength": 5 } },
+    { "cmd": "hexcore.disasm.analyzeAll" }
+  ]
+}
+```
+
+- **Auto-trigger** — Workspace watcher detects `.hexcore_job.json` on creation
+- **Step controls** — Per-step timeout, error handling, output validation
+- **Extension preflight** — Auto-activates required extensions before each step
+- **Output** — JSON/Markdown reports + `hexcore-pipeline.status.json` + `hexcore-pipeline.log`
+
+All analysis extensions support headless execution with `file`, `output`, and `quiet` parameters.
+
+See [docs/HEXCORE_AUTOMATION.md](docs/HEXCORE_AUTOMATION.md) for full documentation.
+
+---
+
+## Hex Viewer
 
 Professional binary file viewer with virtual scrolling for large files.
 
-- **Virtual Scrolling** - Handles files of any size efficiently
-- **Data Inspector** - View bytes as Int8/16/32/64, Float, Unix timestamp
-- **Bookmarks** - Save and navigate to important offsets
-- **Structure Templates** - Parse common binary structures
-- **Search** - Find hex patterns (e.g., `4D 5A` for PE headers)
-- **Go to Offset** - Jump directly to any offset
-- **Copy Selection** - Export as Hex, C Array, or Python bytes
+- **Virtual Scrolling** — Handles files of any size efficiently
+- **Data Inspector** — View bytes as Int8/16/32/64, Float, Unix timestamp
+- **Bookmarks** — Save and navigate to important offsets
+- **Structure Templates** — Parse common binary structures
+- **Search** — Find hex patterns (e.g., `4D 5A` for PE headers)
+- **Go to Offset** — Jump directly to any offset
+- **Copy Selection** — Export as Hex, C Array, or Python bytes
 - **Little/Big Endian** toggle
-
----
-
-### Disassembler
-
-Native multi-architecture disassembler powered by **Capstone Engine v5.0**.
-
-- **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
-- **PE/ELF Support** - Automatic architecture detection
-- **Code Analysis** - Function detection, cross-references
-- **Patching** - Assemble, patch instructions, NOP sleds (LLVM MC)
-- **Detail Mode** - Operands, registers, instruction groups
-- **Graph View** - Control flow visualization (planned)
-
-> Powered by [hexcore-capstone](extensions/hexcore-capstone), our custom N-API binding for Capstone.
-> Assembly and patching powered by [hexcore-llvm-mc](extensions/hexcore-llvm-mc).
-
----
-
-### PE Analyzer
-
-Comprehensive Portable Executable analysis for Windows binaries.
-
-- **DOS/PE/Optional Headers** - Complete header parsing
-- **Sections** - Name, size, entropy, permissions (R/W/X)
-- **Imports/Exports** - DLLs with imported/exported functions
-- **Entropy Analysis** - Visual entropy bar with compression detection
-- **Packer Detection** - UPX, VMProtect, Themida, ASPack, and more
-- **Suspicious Strings** - Automatic URL, IP, registry key extraction
-- **Security Flags** - ASLR, DEP, CFG detection
-- **Export to JSON** - Save analysis for external tools
-
----
-
-### YARA Scanner
-
-Fast YARA rule scanning for threat hunting.
-
-- **Rule Loading** - Load individual rules or rule directories
-- **Match Highlighting** - Navigate to matched offsets
-- **Custom Rules** - Create and test your own rules
-- **Integration** - Works with Hex Viewer and PE Analyzer
-
----
-
-### Hash Calculator
-
-Fast file hashing with algorithm selection.
-
-- **Algorithms** - MD5, SHA-1, SHA-256, SHA-512
-- **Quick Hash** - Instant SHA-256 with clipboard copy
-- **Verify Hash** - Compare file against known hash
-- **VirusTotal Links** - Quick lookup for malware analysis
-- **Streaming** - Efficient for large files
-
----
-
-### Strings Extractor
-
-Extract and categorize strings with memory-efficient streaming.
-
-- **Streaming Processing** - Handles files of any size (64KB chunks)
-- **ASCII and UTF-16LE** extraction
-- **Auto-categorization**: URLs, IPs, file paths, registry keys, WinAPI
-- **Configurable minimum length**
-- **Markdown report** with tables
-
----
-
-### Entropy Analyzer
-
-Visual entropy analysis with ASCII graph for detecting packed or encrypted regions.
-
-- **Block-by-block entropy** calculation
-- **ASCII graph** visualization
-- **High entropy region** detection
-- **Packer/encryption** assessment
-
----
-
-### Debugger
-
-Dynamic analysis and emulation tooling with **Unicorn Engine**.
-
-- **Emulation** - x86/x64/ARM/ARM64/MIPS/RISC-V
-- **Registers & Memory** - Read/write and snapshot support
-- **Hooks** - Code execution and memory access hooks
-
-> Powered by [hexcore-unicorn](extensions/hexcore-unicorn), our custom N-API binding for Unicorn.
 
 ---
 
@@ -207,14 +202,14 @@ $env:VSCODE_SKIP_NODE_VERSION_CHECK="1"
 ```
 HikariSystem-HexCore/
 ├── extensions/
+│   ├── hexcore-debugger/       # Emulation-based debugger (PE/ELF)
+│   ├── hexcore-disassembler/   # Multi-arch disassembler + patching
 │   ├── hexcore-hexviewer/      # Binary file viewer
 │   ├── hexcore-peanalyzer/     # PE file analyzer
-│   ├── hexcore-disassembler/   # Multi-arch disassembler
 │   ├── hexcore-capstone/       # Capstone N-API binding
 │   ├── hexcore-llvm-mc/        # LLVM MC N-API binding
 │   ├── hexcore-unicorn/        # Unicorn N-API binding
 │   ├── hexcore-keystone/       # Legacy assembler binding
-│   ├── hexcore-debugger/       # Integrated debugger
 │   ├── hexcore-yara/           # YARA scanner
 │   ├── hexcore-hashcalc/       # Hash calculator
 │   ├── hexcore-strings/        # Strings extractor
@@ -234,18 +229,29 @@ HikariSystem-HexCore/
 
 ## AI Agent Integration
 
-HexCore includes an AI skill definition for integration with AI agents. The skill provides:
+HexCore includes an AI skill definition for integration with AI agents (Claude Code, etc.). The skill provides:
 
-- Documentation for all HexCore commands
+- Complete command reference for all HexCore extensions
+- Emulator memory layout and API hook documentation
 - Typical analysis workflow guides
-- Output interpretation guidelines
-- Command usage examples
+- Automation pipeline job file generation
 
 See [.agent/skills/hexcore/SKILL.md](.agent/skills/hexcore/SKILL.md) for details.
 
 ---
 
 ## Usage
+
+### Debugger
+- Open any PE or ELF binary
+- Run **"HexCore: Start Emulation"** to begin CPU emulation
+- Use **Step**, **Continue**, and **Breakpoints** for dynamic analysis
+- Set stdin input with **"HexCore: Set Stdin Buffer"** for interactive binaries
+
+### Disassembler
+- Right-click any executable file
+- Select **"HexCore: Disassemble File"**
+- Use function tree, string references, and graph view for navigation
 
 ### Hex Viewer
 - Right-click any file and select **"HexCore: Open Hex View"**
@@ -255,10 +261,6 @@ See [.agent/skills/hexcore/SKILL.md](.agent/skills/hexcore/SKILL.md) for details
 - Right-click any `.exe`, `.dll`, `.sys`, or `.ocx` file
 - Select **"HexCore: Analyze PE File"**
 
-### Disassembler
-- Right-click any executable file
-- Select **"HexCore: Disassemble File"**
-
 ### Hash Calculator
 - Right-click any file
 - Select **"HexCore: Calculate File Hashes"**
@@ -267,9 +269,9 @@ See [.agent/skills/hexcore/SKILL.md](.agent/skills/hexcore/SKILL.md) for details
 - Right-click any file
 - Select **"HexCore: Extract Strings"**
 
-### YARA Scanner
-- Open the YARA Scanner view
-- Load rules and scan files
+### Automation
+- Create a `.hexcore_job.json` in your workspace
+- HexCore auto-detects and runs it, or run manually via **"Run HexCore Automation Job"**
 
 ---
 
@@ -290,5 +292,5 @@ This project is licensed under the MIT License. See the [LICENSE.txt](LICENSE.tx
 ---
 
 <p align="center">
-  <strong>HikariSystem</strong> - Security Tools for Professionals
+  <strong>HikariSystem</strong> — Security Tools for Professionals
 </p>

@@ -24,6 +24,7 @@
 	"activationEvents": [
 		"onCommand:hexcore.debug.emulate",
 		"onCommand:hexcore.debug.emulateWithArch",
+		"onCommand:hexcore.debug.setStdin",
 		"onCommand:hexcore.debug.unicornStatus",
 		"onView:hexcore.debugger.view"
 	],
@@ -70,6 +71,12 @@
 				"title": "Emulate: Read Memory",
 				"category": "HexCore Debugger",
 				"icon": "$(file-binary)"
+			},
+			{
+				"command": "hexcore.debug.setStdin",
+				"title": "Emulate: Set STDIN Buffer",
+				"category": "HexCore Debugger",
+				"icon": "$(edit)"
 			},
 			{
 				"command": "hexcore.debug.saveSnapshot",

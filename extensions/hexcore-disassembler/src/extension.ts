@@ -2,8 +2,9 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import * as fs from 'fs';
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { DisassemblerViewProvider } from './disassemblerView';
 import { DisassemblyEditorProvider } from './disassemblyEditor';
 import { FunctionTreeProvider } from './functionTree';
 import { StringRefProvider } from './stringRefTree';
@@ -13,6 +14,49 @@ import { ExportTreeProvider } from './exportTree';
 import { DisassemblerEngine } from './disassemblerEngine';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
+import { AutomationPipelineRunner, PipelineRunStatus } from './automationPipelineRunner';
+
+type OutputFormat = 'json' | 'md';
+
+interface AnalyzeAllOutputOptions {
+	path: string;
+	format?: OutputFormat;
+}
+
+interface AnalyzeAllCommandOptions {
+	file?: string;
+	output?: AnalyzeAllOutputOptions;
+	quiet?: boolean;
+}
+
+interface AnalyzeAllFunctionSummary {
+	address: string;
+	name: string;
+	size: number;
+	instructionCount: number;
+	callers: number;
+	callees: number;
+}
+
+interface AnalyzeAllResult {
+	filePath: string;
+	fileName: string;
+	newFunctions: number;
+	totalFunctions: number;
+	totalStrings: number;
+	architecture: string;
+	baseAddress: string;
+	sections: number;
+	imports: number;
+	exports: number;
+	functions: AnalyzeAllFunctionSummary[];
+	reportMarkdown: string;
+}
+
+interface RunJobCommandOptions {
+	jobFile?: string;
+	quiet?: boolean;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
 	// Use Factory to get the initial global engine (or specific if we knew context)
@@ -22,7 +66,6 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Event emitter for synchronization between views
 	const onDidChangeActiveEditor = new vscode.EventEmitter<string | undefined>();
 
-	const disasmProvider = new DisassemblerViewProvider(context.extensionUri, engine);
 	const disasmEditorProvider = new DisassemblyEditorProvider(context, engine, onDidChangeActiveEditor);
 	const functionProvider = new FunctionTreeProvider(engine);
 	const stringRefProvider = new StringRefProvider(engine);
@@ -71,6 +114,64 @@ export function activate(context: vscode.ExtensionContext): void {
 		);
 	};
 
+	const pipelineRunner = new AutomationPipelineRunner();
+	const pendingJobRuns = new Map<string, NodeJS.Timeout>();
+
+	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<PipelineRunStatus | undefined> => {
+		const options = normalizeRunJobCommandOptions(arg);
+		const quiet = options.quiet ?? false;
+		const jobFilePath = resolveJobFilePath(arg, options.jobFile);
+		if (!jobFilePath) {
+			if (!quiet) {
+				vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
+			}
+			return undefined;
+		}
+
+		try {
+			const status = await pipelineRunner.runJobFile(jobFilePath, true);
+			if (!quiet) {
+				if (status.status === 'ok') {
+					vscode.window.showInformationMessage(`Pipeline completed successfully. Status file: ${path.join(status.outDir, 'hexcore-pipeline.status.json')}`);
+				} else {
+					vscode.window.showWarningMessage(`Pipeline finished with errors. Check: ${path.join(status.outDir, 'hexcore-pipeline.log')}`);
+				}
+			}
+			return status;
+		} catch (error: unknown) {
+			if (!quiet) {
+				vscode.window.showErrorMessage(`Pipeline execution failed: ${toErrorMessage(error)}`);
+			}
+			throw error;
+		}
+	};
+
+	const scheduleJobRun = (jobFilePath: string): void => {
+		const normalizedPath = path.resolve(jobFilePath);
+		const existing = pendingJobRuns.get(normalizedPath);
+		if (existing) {
+			clearTimeout(existing);
+		}
+
+		const timeoutHandle = setTimeout(() => {
+			pendingJobRuns.delete(normalizedPath);
+			runPipelineJob({ jobFile: normalizedPath, quiet: true }).catch(error => {
+				console.error('HexCore pipeline auto-run failed:', error);
+			});
+		}, 350);
+		pendingJobRuns.set(normalizedPath, timeoutHandle);
+	};
+
+	const autoRunExistingJobs = (): void => {
+		const folders = vscode.workspace.workspaceFolders ?? [];
+		for (const folder of folders) {
+			const jobFilePath = path.join(folder.uri.fsPath, '.hexcore_job.json');
+			if (fs.existsSync(jobFilePath)) {
+				scheduleJobRun(jobFilePath);
+			}
+		}
+	};
+
 	// Sync tree views when editor changes
 	onDidChangeActiveEditor.event(() => {
 		functionProvider.refresh();
@@ -95,14 +196,6 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Register Webview Providers (Sidebar)
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
-			'hexcore.disassembler.view',
-			disasmProvider,
-			{ webviewOptions: { retainContextWhenHidden: true } }
-		)
-	);
-
-	context.subscriptions.push(
-		vscode.window.registerWebviewViewProvider(
 			'hexcore.disassembler.graphView',
 			graphViewProvider,
 			{ webviewOptions: { retainContextWhenHidden: true } }
@@ -118,6 +211,28 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.window.registerTreeDataProvider('hexcore.disassembler.exports', exportProvider)
 	);
 
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.pipeline.runJob', async (arg?: vscode.Uri | string | RunJobCommandOptions) => {
+			return runPipelineJob(arg);
+		})
+	);
+
+	const jobWatcher = vscode.workspace.createFileSystemWatcher('**/.hexcore_job.json');
+	context.subscriptions.push(jobWatcher);
+	context.subscriptions.push(
+		jobWatcher.onDidCreate(uri => scheduleJobRun(uri.fsPath)),
+		jobWatcher.onDidChange(uri => scheduleJobRun(uri.fsPath))
+	);
+	context.subscriptions.push({
+		dispose: () => {
+			for (const timeoutHandle of pendingJobRuns.values()) {
+				clearTimeout(timeoutHandle);
+			}
+			pendingJobRuns.clear();
+		}
+	});
+
+	autoRunExistingJobs();
 
 	// Register Commands
 	context.subscriptions.push(
@@ -140,6 +255,17 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.open', async (uri?: vscode.Uri) => {
+			if (uri) {
+				await vscode.commands.executeCommand('vscode.openWith', uri, DisassemblyEditorProvider.viewType);
+				return;
+			}
+
+			await vscode.commands.executeCommand('hexcore.disasm.openFile');
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.analyzeFile', async (uri?: vscode.Uri) => {
 			if (!uri) {
 				const uris = await vscode.window.showOpenDialog({
@@ -156,12 +282,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			if (uri) {
 				try {
-					await disasmProvider.loadFile(uri.fsPath);
-					functionProvider.refresh();
-					stringRefProvider.refresh();
-					sectionProvider.refresh();
-					importProvider.refresh();
-					exportProvider.refresh();
+					// Open in custom editor (main disassembly view)
+					await vscode.commands.executeCommand('vscode.openWith', uri, DisassemblyEditorProvider.viewType);
 				} catch (error: any) {
 					vscode.window.showErrorMessage(`Failed to disassemble file: ${error.message}`);
 				}
@@ -189,9 +311,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (addr !== undefined) {
 				const targetAddress = addr;
-				disasmProvider.navigateToAddress(targetAddress);
+				disasmEditorProvider.navigateToAddress(targetAddress);
 
-				// Sync Graph View if function exists
+				// Sync Graph View if function exists - auto-focus graph
 				let func = engine.getFunctionAt(targetAddress);
 				if (!func) {
 					// Try to find containing function
@@ -199,7 +321,13 @@ export function activate(context: vscode.ExtensionContext): void {
 					func = funcs.find(f => targetAddress >= f.address && targetAddress < f.endAddress);
 				}
 
-				if (func) {
+				if (func && func.instructions.length > 0) {
+					// Auto-focus the graph view and show CFG
+					try {
+						await vscode.commands.executeCommand('hexcore.disassembler.graphView.focus');
+					} catch {
+						// View may not be visible yet, that's ok
+					}
 					graphViewProvider.showFunction(func);
 				}
 			}
@@ -215,14 +343,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (input) {
 				const addr = parseInt(input.replace(/^0x/, ''), 16);
 				const xrefs = await engine.findCrossReferences(addr);
-				disasmProvider.showXrefs(xrefs);
+				disasmEditorProvider.showXrefs(xrefs);
 			}
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.addComment', async () => {
-			const addr = disasmProvider.getCurrentAddress();
+			const addr = disasmEditorProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No address selected');
 				return;
@@ -233,14 +361,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			});
 			if (comment) {
 				engine.addComment(addr, comment);
-				disasmProvider.refresh();
+				disasmEditorProvider.refresh();
 			}
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.renameFunction', async (item?: any) => {
-			const addr = item?.address || disasmProvider.getCurrentAddress();
+			const addr = item?.address || disasmEditorProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No function selected');
 				return;
@@ -253,14 +381,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (newName) {
 				engine.renameFunction(addr, newName);
 				functionProvider.refresh();
-				disasmProvider.refresh();
+				disasmEditorProvider.refresh();
 			}
 		})
 	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.showCFG', async () => {
-			const addr = disasmProvider.getCurrentFunctionAddress();
+			const addr = disasmEditorProvider.getCurrentFunctionAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No function selected');
 				return;
@@ -313,7 +441,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 
-			const addr = disasmProvider.getCurrentAddress();
+			const addr = disasmEditorProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No instruction selected');
 				return;
@@ -329,7 +457,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					const result = await engine.patchInstruction(addr, newCode);
 					if (result.success) {
 						engine.applyPatch(addr, result.bytes);
-						disasmProvider.refresh();
+						disasmEditorProvider.refresh();
 						const msg = result.nopPadding > 0
 							? `Patched with ${result.nopPadding} NOP padding`
 							: 'Instruction patched successfully';
@@ -350,7 +478,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				return;
 			}
 
-			const addr = disasmProvider.getCurrentAddress();
+			const addr = disasmEditorProvider.getCurrentAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No instruction selected');
 				return;
@@ -364,7 +492,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				try {
 					const success = await engine.nopInstruction(addr);
 					if (success) {
-						disasmProvider.refresh();
+						disasmEditorProvider.refresh();
 						vscode.window.showInformationMessage('Instruction replaced with NOPs');
 					} else {
 						vscode.window.showErrorMessage('Failed to NOP instruction');
@@ -504,30 +632,61 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.disasm.analyzeAll', async () => {
-			await vscode.window.withProgress(
-				{
-					location: vscode.ProgressLocation.Notification,
-					title: 'Analyzing binary...',
-					cancellable: false
-				},
-				async (progress) => {
-					progress.report({ message: 'Scanning for function prologs...' });
-					const newFunctions = await engine.analyzeAll();
-					progress.report({ message: 'Refreshing views...' });
-
-					functionProvider.refresh();
-					stringRefProvider.refresh();
-					sectionProvider.refresh();
-					importProvider.refresh();
-					exportProvider.refresh();
-
-					const total = engine.getFunctions().length;
-					vscode.window.showInformationMessage(
-						`Analysis complete: ${newFunctions} new functions found (${total} total)`
-					);
+		vscode.commands.registerCommand('hexcore.disasm.analyzeAll', async (arg?: vscode.Uri | AnalyzeAllCommandOptions) => {
+			const options = normalizeAnalyzeAllCommandOptions(arg);
+			const targetFilePath = await resolveAnalyzeAllTargetFilePath(arg, options, engine);
+			if (!targetFilePath) {
+				const errorMessage = 'No binary file is selected for analysis.';
+				if (options.quiet) {
+					throw new Error(errorMessage);
 				}
-			);
+				vscode.window.showWarningMessage(errorMessage);
+				return undefined;
+			}
+
+			const runAnalysis = async (progress?: vscode.Progress<{ message?: string }>): Promise<number> => {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== targetFilePath) {
+					progress?.report({ message: `Loading ${path.basename(targetFilePath)}...` });
+					const loaded = await engine.loadFile(targetFilePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${targetFilePath}`);
+					}
+				}
+
+				progress?.report({ message: 'Scanning for function prologs and references...' });
+				return engine.analyzeAll();
+			};
+
+			const newFunctions = options.quiet
+				? await runAnalysis()
+				: await vscode.window.withProgress(
+					{
+						location: vscode.ProgressLocation.Notification,
+						title: 'Analyzing binary...',
+						cancellable: false
+					},
+					async progress => runAnalysis(progress)
+				);
+
+			functionProvider.refresh();
+			stringRefProvider.refresh();
+			sectionProvider.refresh();
+			importProvider.refresh();
+			exportProvider.refresh();
+
+			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions);
+			if (options.output) {
+				writeAnalyzeAllOutput(result, options.output);
+			}
+
+			if (!options.quiet) {
+				vscode.window.showInformationMessage(
+					`Analysis complete: ${result.newFunctions} new functions found (${result.totalFunctions} total)`
+				);
+			}
+
+			return result;
 		})
 	);
 
@@ -536,5 +695,225 @@ export function activate(context: vscode.ExtensionContext): void {
 
 export function deactivate(): void {
 	DisassemblerFactory.getInstance().disposeAll();
+}
+
+function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandOptions): AnalyzeAllCommandOptions {
+	if (arg instanceof vscode.Uri || arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+async function resolveAnalyzeAllTargetFilePath(
+	arg: vscode.Uri | AnalyzeAllCommandOptions | undefined,
+	options: AnalyzeAllCommandOptions,
+	engine: DisassemblerEngine
+): Promise<string | undefined> {
+	if (arg instanceof vscode.Uri && arg.scheme === 'file') {
+		return arg.fsPath;
+	}
+
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return path.resolve(options.file);
+	}
+
+	const activeFilePath = getActiveFilePath();
+	if (activeFilePath) {
+		return activeFilePath;
+	}
+
+	const loadedFilePath = engine.getFilePath();
+	if (loadedFilePath) {
+		return loadedFilePath;
+	}
+
+	if (options.quiet) {
+		return undefined;
+	}
+
+	const uris = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		openLabel: 'Analyze',
+		filters: {
+			'Executables': ['exe', 'dll', 'elf', 'so', 'bin'],
+			'All Files': ['*']
+		}
+	});
+	return uris?.[0]?.fsPath;
+}
+
+function getActiveFilePath(): string | undefined {
+	const uri = vscode.window.activeTextEditor?.document.uri;
+	if (!uri || uri.scheme !== 'file') {
+		return undefined;
+	}
+	return uri.fsPath;
+}
+
+function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommandOptions): RunJobCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+	if (arg instanceof vscode.Uri) {
+		return { jobFile: arg.fsPath };
+	}
+	if (typeof arg === 'string') {
+		return { jobFile: arg };
+	}
+	return arg;
+}
+
+function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | undefined, explicitPath?: string): string | undefined {
+	if (typeof explicitPath === 'string' && explicitPath.length > 0) {
+		return path.resolve(explicitPath);
+	}
+
+	if (arg instanceof vscode.Uri) {
+		return arg.fsPath;
+	}
+
+	if (typeof arg === 'string' && arg.length > 0) {
+		return path.resolve(arg);
+	}
+
+	const folders = vscode.workspace.workspaceFolders ?? [];
+	for (const folder of folders) {
+		const candidate = path.join(folder.uri.fsPath, '.hexcore_job.json');
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+	}
+
+	return undefined;
+}
+
+function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number): AnalyzeAllResult {
+	const functions = engine.getFunctions();
+	const functionSummaries: AnalyzeAllFunctionSummary[] = functions.map(func => ({
+		address: toHexAddress(func.address),
+		name: func.name,
+		size: func.size,
+		instructionCount: func.instructions.length,
+		callers: func.callers.length,
+		callees: func.callees.length
+	}));
+
+	const result: AnalyzeAllResult = {
+		filePath: targetFilePath,
+		fileName: path.basename(targetFilePath),
+		newFunctions,
+		totalFunctions: functions.length,
+		totalStrings: engine.getStrings().length,
+		architecture: engine.getArchitecture(),
+		baseAddress: toHexAddress(engine.getBaseAddress()),
+		sections: engine.getSections().length,
+		imports: engine.getImports().length,
+		exports: engine.getExports().length,
+		functions: functionSummaries,
+		reportMarkdown: ''
+	};
+
+	result.reportMarkdown = generateAnalyzeAllReport(result);
+	return result;
+}
+
+function generateAnalyzeAllReport(result: AnalyzeAllResult): string {
+	let report = `# HexCore Disassembly Analysis Report
+
+## File Information
+
+| Property | Value |
+|----------|-------|
+| **File Name** | ${result.fileName} |
+| **File Path** | ${result.filePath} |
+| **Architecture** | ${result.architecture} |
+| **Base Address** | ${result.baseAddress} |
+
+---
+
+## Analysis Summary
+
+| Metric | Value |
+|--------|-------|
+| **New Functions** | ${result.newFunctions} |
+| **Total Functions** | ${result.totalFunctions} |
+| **Total Strings** | ${result.totalStrings} |
+| **Sections** | ${result.sections} |
+| **Imports** | ${result.imports} |
+| **Exports** | ${result.exports} |
+
+---
+
+## Functions (Top 100)
+
+| Address | Name | Size | Instructions | Callers | Callees |
+|---------|------|------|--------------|---------|---------|
+`;
+
+	for (const func of result.functions.slice(0, 100)) {
+		report += `| ${func.address} | ${func.name} | ${func.size} | ${func.instructionCount} | ${func.callers} | ${func.callees} |\n`;
+	}
+
+	if (result.functions.length > 100) {
+		report += `| ... | ... | ... | ... | ... | ... |\n`;
+	}
+
+	report += `
+---
+*Generated by HexCore Disassembler*
+`;
+
+	return report;
+}
+
+function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutputOptions): void {
+	const format = normalizeOutputFormat(output.path, output.format);
+	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	if (format === 'md') {
+		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(
+		output.path,
+		JSON.stringify(
+			{
+				filePath: result.filePath,
+				fileName: result.fileName,
+				newFunctions: result.newFunctions,
+				totalFunctions: result.totalFunctions,
+				totalStrings: result.totalStrings,
+				architecture: result.architecture,
+				baseAddress: result.baseAddress,
+				sections: result.sections,
+				imports: result.imports,
+				exports: result.exports,
+				functions: result.functions,
+				generatedAt: new Date().toISOString()
+			},
+			null,
+			2
+		),
+		'utf8'
+	);
+}
+
+function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
+	if (format === 'json' || format === 'md') {
+		return format;
+	}
+	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
+}
+
+function toHexAddress(address: number): string {
+	return `0x${address.toString(16).toUpperCase()}`;
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }
 

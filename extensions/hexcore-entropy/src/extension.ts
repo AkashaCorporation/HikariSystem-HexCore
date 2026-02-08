@@ -8,80 +8,277 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
+type OutputFormat = 'json' | 'md';
+
+interface CommandOutputOptions {
+	path: string;
+	format?: OutputFormat;
+}
+
+interface EntropyCommandOptions {
+	file?: string;
+	output?: CommandOutputOptions;
+	quiet?: boolean;
+	blockSize?: number;
+}
+
 interface EntropyBlock {
 	offset: number;
 	size: number;
 	entropy: number;
 }
 
+interface EntropySummary {
+	averageEntropy: number;
+	maxEntropy: number;
+	minEntropy: number;
+	highEntropyBlocks: EntropyBlock[];
+	lowEntropyBlocks: EntropyBlock[];
+	assessment: string;
+	assessmentDetails: string;
+}
+
+interface EntropyAnalysisResult {
+	fileName: string;
+	filePath: string;
+	fileSize: number;
+	blockSize: number;
+	totalBlocks: number;
+	blocks: EntropyBlock[];
+	summary: EntropySummary;
+	graph: string;
+	reportMarkdown: string;
+}
+
+const DEFAULT_BLOCK_SIZE = 256;
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('HexCore Entropy Analyzer extension activated');
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.entropy.analyze', async (uri?: vscode.Uri) => {
+		vscode.commands.registerCommand('hexcore.entropy.analyze', async (arg?: vscode.Uri | EntropyCommandOptions) => {
+			const options = normalizeOptions(arg);
+			const uri = await resolveTargetUri(arg, options);
 			if (!uri) {
-				const files = await vscode.window.showOpenDialog({
-					canSelectMany: false,
-					canSelectFiles: true,
-					title: 'Select file for entropy analysis'
-				});
-				if (files && files.length > 0) {
-					uri = files[0];
-				} else {
-					return;
-				}
+				return;
 			}
 
-			await analyzeEntropy(uri);
+			try {
+				return await analyzeEntropy(uri, options);
+			} catch (error: unknown) {
+				if (!options.quiet) {
+					vscode.window.showErrorMessage(`Entropy analysis failed: ${toErrorMessage(error)}`);
+				}
+				throw error;
+			}
 		})
 	);
 }
 
-async function analyzeEntropy(uri: vscode.Uri): Promise<void> {
+function normalizeOptions(arg?: vscode.Uri | EntropyCommandOptions): EntropyCommandOptions {
+	if (arg instanceof vscode.Uri || arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+async function resolveTargetUri(
+	arg: vscode.Uri | EntropyCommandOptions | undefined,
+	options: EntropyCommandOptions
+): Promise<vscode.Uri | undefined> {
+	if (arg instanceof vscode.Uri) {
+		return arg;
+	}
+
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return vscode.Uri.file(options.file);
+	}
+
+	const activeUri = getActiveFileUri();
+	if (activeUri) {
+		return activeUri;
+	}
+
+	if (options.quiet) {
+		return undefined;
+	}
+
+	const files = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		canSelectFiles: true,
+		title: 'Select file for entropy analysis'
+	});
+	return files?.[0];
+}
+
+function getActiveFileUri(): vscode.Uri | undefined {
+	const active = vscode.window.activeTextEditor?.document.uri;
+	if (!active || active.scheme !== 'file') {
+		return undefined;
+	}
+	return active;
+}
+
+async function analyzeEntropy(uri: vscode.Uri, options: EntropyCommandOptions): Promise<EntropyAnalysisResult> {
 	const filePath = uri.fsPath;
 	const fileName = path.basename(filePath);
+	const blockSize = normalizeBlockSize(options.blockSize);
 
-	await vscode.window.withProgress({
-		location: vscode.ProgressLocation.Notification,
-		title: `Analyzing entropy of ${fileName}...`,
-		cancellable: false
-	}, async (progress) => {
-		try {
-			const stats = fs.statSync(filePath);
-			const buffer = fs.readFileSync(filePath);
+	const runAnalysis = async (): Promise<EntropyAnalysisResult> => {
+		const stats = fs.statSync(filePath);
+		const buffer = fs.readFileSync(filePath);
 
-			progress.report({ increment: 30, message: 'Calculating entropy blocks...' });
-
-			// Calculate entropy in 256-byte blocks
-			const blockSize = 256;
-			const blocks: EntropyBlock[] = [];
-
-			for (let offset = 0; offset < buffer.length; offset += blockSize) {
-				const end = Math.min(offset + blockSize, buffer.length);
-				const chunk = buffer.subarray(offset, end);
-				const entropy = calculateEntropy(chunk);
-				blocks.push({ offset, size: end - offset, entropy });
-			}
-
-			progress.report({ increment: 40, message: 'Generating report...' });
-
-			const report = generateEntropyReport(fileName, filePath, stats.size, blocks);
-
-			const doc = await vscode.workspace.openTextDocument({
-				content: report,
-				language: 'markdown'
+		const blocks: EntropyBlock[] = [];
+		for (let offset = 0; offset < buffer.length; offset += blockSize) {
+			const end = Math.min(offset + blockSize, buffer.length);
+			const chunk = buffer.subarray(offset, end);
+			blocks.push({
+				offset,
+				size: end - offset,
+				entropy: calculateEntropy(chunk)
 			});
-
-			await vscode.window.showTextDocument(doc, { preview: false });
-
-		} catch (error: any) {
-			vscode.window.showErrorMessage(`Entropy analysis failed: ${error.message}`);
 		}
-	});
+
+		const summary = summarizeEntropy(blocks);
+		const graph = generateAsciiGraph(blocks, 60, 20);
+		const report = generateEntropyReport(fileName, filePath, stats.size, blockSize, blocks, summary, graph);
+
+		return {
+			fileName,
+			filePath,
+			fileSize: stats.size,
+			blockSize,
+			totalBlocks: blocks.length,
+			blocks,
+			summary,
+			graph,
+			reportMarkdown: report
+		};
+	};
+
+	const result = options.quiet
+		? await runAnalysis()
+		: await vscode.window.withProgress(
+			{
+				location: vscode.ProgressLocation.Notification,
+				title: `Analyzing entropy of ${fileName}...`,
+				cancellable: false
+			},
+			async progress => {
+				progress.report({ increment: 30, message: 'Calculating entropy blocks...' });
+				const analysis = await runAnalysis();
+				progress.report({ increment: 70, message: 'Generating report...' });
+				return analysis;
+			}
+		);
+
+	if (options.output) {
+		writeOutput(result, options.output);
+	}
+
+	if (!options.quiet) {
+		const doc = await vscode.workspace.openTextDocument({
+			content: result.reportMarkdown,
+			language: 'markdown'
+		});
+		await vscode.window.showTextDocument(doc, { preview: false });
+	}
+
+	return result;
+}
+
+function normalizeBlockSize(blockSize?: number): number {
+	if (!blockSize || Number.isNaN(blockSize)) {
+		return DEFAULT_BLOCK_SIZE;
+	}
+	return Math.min(65536, Math.max(16, Math.floor(blockSize)));
+}
+
+function summarizeEntropy(blocks: EntropyBlock[]): EntropySummary {
+	if (blocks.length === 0) {
+		return {
+			averageEntropy: 0,
+			maxEntropy: 0,
+			minEntropy: 0,
+			highEntropyBlocks: [],
+			lowEntropyBlocks: [],
+			assessment: 'Empty File',
+			assessmentDetails: 'The selected file has no data blocks to analyze.'
+		};
+	}
+
+	const entropies = blocks.map(block => block.entropy);
+	const averageEntropy = entropies.reduce((acc, value) => acc + value, 0) / entropies.length;
+	const maxEntropy = Math.max(...entropies);
+	const minEntropy = Math.min(...entropies);
+	const highEntropyBlocks = blocks.filter(block => block.entropy > 7.0);
+	const lowEntropyBlocks = blocks.filter(block => block.entropy < 1.0);
+
+	let assessment = 'Normal';
+	let assessmentDetails = 'File appears to be uncompressed and unencrypted.';
+
+	if (averageEntropy > 7.5) {
+		assessment = 'Highly Encrypted/Compressed';
+		assessmentDetails = 'Very high entropy suggests encryption or strong compression.';
+	} else if (averageEntropy > 6.5) {
+		assessment = 'Possibly Packed';
+		assessmentDetails = 'Elevated entropy may indicate packing or compression.';
+	} else if (highEntropyBlocks.length > blocks.length * 0.5) {
+		assessment = 'Mixed Content';
+		assessmentDetails = 'Significant portions have high entropy - possible encrypted sections.';
+	}
+
+	return {
+		averageEntropy,
+		maxEntropy,
+		minEntropy,
+		highEntropyBlocks,
+		lowEntropyBlocks,
+		assessment,
+		assessmentDetails
+	};
+}
+
+function writeOutput(result: EntropyAnalysisResult, output: CommandOutputOptions): void {
+	const outputFormat = normalizeOutputFormat(output.path, output.format);
+	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	if (outputFormat === 'md') {
+		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(
+		output.path,
+		JSON.stringify(
+			{
+				fileName: result.fileName,
+				filePath: result.filePath,
+				fileSize: result.fileSize,
+				blockSize: result.blockSize,
+				totalBlocks: result.totalBlocks,
+				summary: result.summary,
+				blocks: result.blocks,
+				generatedAt: new Date().toISOString()
+			},
+			null,
+			2
+		),
+		'utf8'
+	);
+}
+
+function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
+	if (format === 'json' || format === 'md') {
+		return format;
+	}
+	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
 function calculateEntropy(buffer: Buffer): number {
-	if (buffer.length === 0) return 0;
+	if (buffer.length === 0) {
+		return 0;
+	}
 
 	const freq = new Array(256).fill(0);
 	for (let i = 0; i < buffer.length; i++) {
@@ -103,37 +300,17 @@ function generateEntropyReport(
 	fileName: string,
 	filePath: string,
 	fileSize: number,
-	blocks: EntropyBlock[]
+	blockSize: number,
+	blocks: EntropyBlock[],
+	summary: EntropySummary,
+	graph: string
 ): string {
-	// Calculate statistics
-	const entropies = blocks.map(b => b.entropy);
-	const avgEntropy = entropies.reduce((a, b) => a + b, 0) / entropies.length;
-	const maxEntropy = Math.max(...entropies);
-	const minEntropy = Math.min(...entropies);
-
-	// Detect suspicious regions
-	const highEntropyBlocks = blocks.filter(b => b.entropy > 7.0);
-	const lowEntropyBlocks = blocks.filter(b => b.entropy < 1.0);
-
-	// Determine overall assessment
-	let assessment = 'Normal';
-	let assessmentDetails = 'File appears to be uncompressed and unencrypted.';
-
-	if (avgEntropy > 7.5) {
-		assessment = 'Highly Encrypted/Compressed';
-		assessmentDetails = 'Very high entropy suggests encryption or strong compression.';
-	} else if (avgEntropy > 6.5) {
-		assessment = 'Possibly Packed';
-		assessmentDetails = 'Elevated entropy may indicate packing or compression.';
-	} else if (highEntropyBlocks.length > blocks.length * 0.5) {
-		assessment = 'Mixed Content';
-		assessmentDetails = 'Significant portions have high entropy - possible encrypted sections.';
-	}
-
-	// Generate ASCII graph
-	const graphWidth = 60;
-	const graphHeight = 20;
-	const graph = generateAsciiGraph(blocks, graphWidth, graphHeight);
+	const highEntropyPercentage = blocks.length > 0
+		? ((summary.highEntropyBlocks.length / blocks.length) * 100).toFixed(1)
+		: '0.0';
+	const lowEntropyPercentage = blocks.length > 0
+		? ((summary.lowEntropyBlocks.length / blocks.length) * 100).toFixed(1)
+		: '0.0';
 
 	let report = `# HexCore Entropy Analysis Report
 
@@ -144,7 +321,7 @@ function generateEntropyReport(
 | **File Name** | ${fileName} |
 | **File Path** | ${filePath} |
 | **File Size** | ${formatBytes(fileSize)} |
-| **Block Size** | 256 bytes |
+| **Block Size** | ${blockSize} bytes |
 | **Total Blocks** | ${blocks.length} |
 
 ---
@@ -153,19 +330,19 @@ function generateEntropyReport(
 
 | Metric | Value |
 |--------|-------|
-| **Average Entropy** | ${avgEntropy.toFixed(4)} / 8.00 |
-| **Maximum Entropy** | ${maxEntropy.toFixed(4)} |
-| **Minimum Entropy** | ${minEntropy.toFixed(4)} |
-| **High Entropy Blocks (>7.0)** | ${highEntropyBlocks.length} (${((highEntropyBlocks.length / blocks.length) * 100).toFixed(1)}%) |
-| **Low Entropy Blocks (<1.0)** | ${lowEntropyBlocks.length} (${((lowEntropyBlocks.length / blocks.length) * 100).toFixed(1)}%) |
+| **Average Entropy** | ${summary.averageEntropy.toFixed(4)} / 8.00 |
+| **Maximum Entropy** | ${summary.maxEntropy.toFixed(4)} |
+| **Minimum Entropy** | ${summary.minEntropy.toFixed(4)} |
+| **High Entropy Blocks (>7.0)** | ${summary.highEntropyBlocks.length} (${highEntropyPercentage}%) |
+| **Low Entropy Blocks (<1.0)** | ${summary.lowEntropyBlocks.length} (${lowEntropyPercentage}%) |
 
 ---
 
 ## Assessment
 
-**${assessment}**
+**${summary.assessment}**
 
-${assessmentDetails}
+${summary.assessmentDetails}
 
 ---
 
@@ -186,14 +363,14 @@ ${graph}
 
 `;
 
-	if (highEntropyBlocks.length > 0) {
+	if (summary.highEntropyBlocks.length > 0) {
 		report += '| Offset | Entropy |\n';
 		report += '|--------|--------|\n';
-		for (const block of highEntropyBlocks.slice(0, 20)) {
+		for (const block of summary.highEntropyBlocks.slice(0, 20)) {
 			report += `| 0x${block.offset.toString(16).toUpperCase().padStart(8, '0')} | ${block.entropy.toFixed(4)} |\n`;
 		}
-		if (highEntropyBlocks.length > 20) {
-			report += `| ... | *${highEntropyBlocks.length - 20} more regions* |\n`;
+		if (summary.highEntropyBlocks.length > 20) {
+			report += `| ... | *${summary.highEntropyBlocks.length - 20} more regions* |\n`;
 		}
 	} else {
 		report += '*No high entropy regions detected.*\n';
@@ -223,7 +400,6 @@ ${graph}
 function generateAsciiGraph(blocks: EntropyBlock[], width: number, height: number): string {
 	const lines: string[] = [];
 
-	// Sample blocks to fit width
 	const step = Math.max(1, Math.floor(blocks.length / width));
 	const sampledBlocks: number[] = [];
 
@@ -239,12 +415,10 @@ function generateAsciiGraph(blocks: EntropyBlock[], width: number, height: numbe
 		sampledBlocks.push(maxEntropy);
 	}
 
-	// Build graph rows
 	for (let row = height - 1; row >= 0; row--) {
 		const threshold = (row / height) * 8;
 		let line = '';
 
-		// Y-axis label
 		if (row === height - 1) {
 			line = '8.0|';
 		} else if (row === Math.floor(height / 2)) {
@@ -258,13 +432,13 @@ function generateAsciiGraph(blocks: EntropyBlock[], width: number, height: numbe
 		for (const entropy of sampledBlocks) {
 			if (entropy >= threshold) {
 				if (entropy > 7.0) {
-					line += '#'; // High entropy
+					line += '#';
 				} else if (entropy > 5.0) {
-					line += '='; // Medium-high
+					line += '=';
 				} else if (entropy > 3.0) {
-					line += '-'; // Medium
+					line += '-';
 				} else {
-					line += '.'; // Low
+					line += '.';
 				}
 			} else {
 				line += ' ';
@@ -273,7 +447,6 @@ function generateAsciiGraph(blocks: EntropyBlock[], width: number, height: numbe
 		lines.push(line);
 	}
 
-	// X-axis
 	lines.push('   +' + '-'.repeat(sampledBlocks.length));
 	lines.push('    0' + ' '.repeat(Math.floor(sampledBlocks.length / 2) - 3) + 'Offset' + ' '.repeat(Math.floor(sampledBlocks.length / 2) - 6) + 'EOF');
 
@@ -281,11 +454,20 @@ function generateAsciiGraph(blocks: EntropyBlock[], width: number, height: numbe
 }
 
 function formatBytes(bytes: number): string {
-	if (bytes === 0) return '0 B';
+	if (bytes === 0) {
+		return '0 B';
+	}
 	const k = 1024;
 	const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 	const i = Math.floor(Math.log(bytes) / Math.log(k));
 	return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }
 
 export function deactivate() { }

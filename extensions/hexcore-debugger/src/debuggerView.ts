@@ -11,12 +11,37 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private engine: DebugEngine;
 
+	/**
+	 * Recursively convert BigInt values to hex strings for JSON serialization.
+	 * JSON.stringify cannot handle BigInt, and webview.postMessage uses JSON internally.
+	 */
+	private static serializeForWebview(obj: any): any {
+		if (obj === null || obj === undefined) {
+			return obj;
+		}
+		if (typeof obj === 'bigint') {
+			return '0x' + obj.toString(16).toUpperCase();
+		}
+		if (Array.isArray(obj)) {
+			return obj.map(item => DebuggerViewProvider.serializeForWebview(item));
+		}
+		if (typeof obj === 'object' && !(obj instanceof Buffer)) {
+			const result: Record<string, any> = {};
+			for (const key of Object.keys(obj)) {
+				result[key] = DebuggerViewProvider.serializeForWebview(obj[key]);
+			}
+			return result;
+		}
+		return obj;
+	}
+
 	constructor(extensionUri: vscode.Uri, engine: DebugEngine) {
 		this.engine = engine;
 
 		engine.onEvent((event, data) => {
 			if (this.view) {
-				this.view.webview.postMessage({ command: event, data });
+				const safeData = DebuggerViewProvider.serializeForWebview(data);
+				this.view.webview.postMessage({ command: event, data: safeData });
 			}
 		});
 	}
@@ -160,7 +185,7 @@ export class DebuggerViewProvider implements vscode.WebviewViewProvider {
 					if (msg.data) {
 						const entry = document.createElement('div');
 						entry.className = 'api-entry';
-						const ret = '0x' + (msg.data.returnValue || 0n).toString(16);
+						const ret = msg.data.returnValue || '0x0';
 						entry.innerHTML =
 							'<span class="api-dll">' + (msg.data.dll || '') + '!</span>' +
 							'<span class="api-name">' + (msg.data.name || '') + '</span>' +

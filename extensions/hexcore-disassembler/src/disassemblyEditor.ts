@@ -9,11 +9,69 @@ import { DisassemblerEngine } from './disassemblerEngine';
 export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorProvider {
 	public static readonly viewType = 'hexcore.disassembler.editor';
 
+	private activeWebview?: vscode.Webview;
+	private currentAddress?: number;
+	private currentFunctionAddress?: number;
+
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly engine: DisassemblerEngine,
 		private readonly onDidChangeActiveEditor: vscode.EventEmitter<string | undefined>
 	) { }
+
+	/** Get the currently selected instruction address */
+	getCurrentAddress(): number | undefined {
+		return this.currentAddress;
+	}
+
+	/** Get the currently displayed function address */
+	getCurrentFunctionAddress(): number | undefined {
+		return this.currentFunctionAddress;
+	}
+
+	/** Navigate to an address and refresh the view */
+	navigateToAddress(address: number): void {
+		if (!this.activeWebview) {
+			return;
+		}
+		const funcs = this.engine.getFunctions();
+		const containing = funcs.find(f => address >= f.address && address < f.endAddress);
+		if (containing) {
+			this.currentFunctionAddress = containing.address;
+		}
+		this.currentAddress = address;
+		this.updateWebview(this.activeWebview, containing ? containing.address : address);
+	}
+
+	/** Refresh the current view */
+	refresh(): void {
+		if (this.activeWebview) {
+			this.updateWebview(this.activeWebview, this.currentFunctionAddress);
+		}
+	}
+
+	/** Show xrefs in a quick pick */
+	async showXrefs(xrefs: import('./disassemblerEngine').XRef[]): Promise<void> {
+		if (xrefs.length === 0) {
+			vscode.window.showInformationMessage('No cross-references found');
+			return;
+		}
+
+		type XrefPickItem = vscode.QuickPickItem & { address: number };
+		const items: XrefPickItem[] = xrefs.map(x => ({
+			label: `0x${x.from.toString(16).toUpperCase()}`,
+			description: x.type,
+			address: x.from
+		}));
+
+		const selected = await vscode.window.showQuickPick<XrefPickItem>(items, {
+			placeHolder: `${xrefs.length} references found`
+		});
+
+		if (selected) {
+			this.navigateToAddress(selected.address);
+		}
+	}
 
 	async openCustomDocument(
 		uri: vscode.Uri,
@@ -36,9 +94,13 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		// Track visibility to toggle context
 		webviewPanel.onDidChangeViewState(e => {
 			vscode.commands.executeCommand('setContext', 'hexcore:disassemblerActive', e.webviewPanel.active);
+			if (e.webviewPanel.active) {
+				this.activeWebview = e.webviewPanel.webview;
+			}
 		});
 
 		// Initial set
+		this.activeWebview = webviewPanel.webview;
 		vscode.commands.executeCommand('setContext', 'hexcore:disassemblerActive', webviewPanel.active);
 
 		// Load and analyze file
@@ -84,7 +146,11 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			case 'selectFunction': {
 				const func = this.engine.getFunctionAt(message.address);
 				if (func) {
+					this.currentFunctionAddress = func.address;
+					this.currentAddress = func.address;
 					this.updateWebview(webview, func.address);
+					// Auto-update graph view when switching functions
+					vscode.commands.executeCommand('hexcore.disasm.showCFG');
 				}
 				break;
 			}

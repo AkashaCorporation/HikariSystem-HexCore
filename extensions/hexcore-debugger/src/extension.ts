@@ -199,6 +199,31 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Set stdin buffer for ELF emulation
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.setStdin', async () => {
+			const state = engine.getEmulationState();
+			if (!state) {
+				vscode.window.showWarningMessage('Start emulation before setting stdin buffer');
+				return;
+			}
+
+			const input = await vscode.window.showInputBox({
+				prompt: 'STDIN buffer for emulation (use \\n for new lines)',
+				placeHolder: 'e.g. 123\\nhello\\n',
+				value: ''
+			});
+
+			if (input === undefined) {
+				return;
+			}
+
+			const decoded = decodeEscapedInput(input);
+			engine.setStdinBuffer(decoded);
+			vscode.window.showInformationMessage(`STDIN buffer set (${decoded.length} bytes)`);
+		})
+	);
+
 	// Save snapshot
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.saveSnapshot', () => {
@@ -260,4 +285,12 @@ function formatHexDump(data: Buffer, baseAddress: bigint): string {
 
 export function deactivate(): void {
 	// Cleanup
+}
+
+function decodeEscapedInput(value: string): string {
+	return value
+		.replace(/\\r/g, '\r')
+		.replace(/\\n/g, '\n')
+		.replace(/\\t/g, '\t')
+		.replace(/\\\\/g, '\\');
 }

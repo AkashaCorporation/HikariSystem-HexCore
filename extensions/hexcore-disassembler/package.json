@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.1.0",
+	"version": "1.2.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -15,9 +15,10 @@
 		"onCommand:hexcore.disasm.nativeStatus",
 		"onCommand:hexcore.disasm.showLlvmVersion",
 		"onCustomEditor:hexcore.disassembler.editor",
-		"onView:hexcore.disassembler.view",
 		"onView:hexcore.disassembler.graphView",
-		"onCommand:hexcore.disasm.analyzeAll"
+		"onCommand:hexcore.disasm.analyzeAll",
+		"onCommand:hexcore.pipeline.runJob",
+		"workspaceContains:.hexcore_job.json"
 	],
 	"extensionDependencies": [],
 	"categories": [
@@ -163,6 +164,12 @@
 				"title": "Deep Analysis (Prolog Scan + Xrefs)",
 				"category": "HexCore Disassembler",
 				"icon": "$(search)"
+			},
+			{
+				"command": "hexcore.pipeline.runJob",
+				"title": "Run HexCore Automation Job",
+				"category": "HexCore Automation",
+				"icon": "$(play)"
 			}
 		],
 		"menus": {
@@ -187,8 +194,13 @@
 			],
 			"view/title": [
 				{
-					"command": "hexcore.disasm.goToAddress",
-					"when": "view == hexcore.disassembler.view",
+					"command": "hexcore.disasm.analyzeAll",
+					"when": "view == hexcore.disassembler.functions",
+					"group": "navigation"
+				},
+				{
+					"command": "hexcore.disasm.showCFG",
+					"when": "view == hexcore.disassembler.graphView",
 					"group": "navigation"
 				}
 			]
@@ -205,12 +217,6 @@
 		},
 		"views": {
 			"hexcore-disassembler": [
-				{
-					"type": "webview",
-					"id": "hexcore.disassembler.view",
-					"name": "Disassembly",
-					"icon": "$(debug-disconnect)"
-				},
 				{
 					"type": "webview",
 					"id": "hexcore.disassembler.graphView",

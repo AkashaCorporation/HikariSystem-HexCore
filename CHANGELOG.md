@@ -5,6 +5,97 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.0-preview] - 2026-02-08 - "Linux Awakening"
+
+> **Preview Release** - Major update introducing Linux ELF emulation, headless automation pipeline,
+> and sweeping improvements across all analysis extensions. Tested against real CTF binaries (HTB).
+
+### Added
+
+#### hexcore-debugger v2.1.0: Full Linux ELF Emulation
+- **PIE binary support** - Automatic detection of ET_DYN (Position Independent Executables) with conventional base address (`0x555555554000` for x64, `0x56555000` for x86)
+- **PLT/GOT resolution** - Parse `.rela.plt` (JUMP_SLOT) and `.rela.dyn` (GLOB_DAT) relocations, create API stubs, patch GOT entries for full import interception
+- **Direct GOT call support** - Handle modern `-fno-plt` style binaries that use `call [rip+GOT]` instead of PLT stubs
+- **40+ Linux API hooks** with System V AMD64 ABI argument reading (RDI, RSI, RDX, RCX, R8, R9):
+  - I/O: `puts`, `printf`, `fprintf`, `sprintf`, `snprintf`, `write`, `read`
+  - String: `strlen`, `strcpy`, `strncpy`, `strcmp`, `strncmp`, `strstr`, `strchr`, `strrchr`, `strtok`
+  - Memory: `memcpy`, `memset`, `memcmp`, `memmove`
+  - Heap: `malloc`, `calloc`, `realloc`, `free`
+  - Conversion: `strtol`, `strtoul`, `atoi`, `atol`
+  - Process: `exit`, `abort`, `getpid`, `getuid`, `getenv`, `__libc_start_main`
+  - Time: `time`, `gettimeofday`, `clock_gettime`, `sleep`, `usleep`
+  - File stubs: `fopen`, `fclose`, `fread`, `fwrite`, `fseek`, `ftell`
+  - Security: `__stack_chk_fail`
+- **Linux syscall handler** - Intercept `syscall` instruction for: read, write, close, mmap, brk, getpid, getuid, arch_prctl, exit, exit_group
+- **TLS/FS_BASE setup** - Automatic Thread Local Storage with stack canary at `fs:[0x28]` for GCC `-fstack-protector` binaries
+- **`__libc_start_main` -> `main()` redirect** - Skip CRT init, jump directly to `main()` with argc/argv/envp
+- **stdin emulation** - Configurable input buffer for `scanf`, `read(0)`, `getchar`, `fgets` with format specifier parsing (`%d`, `%s`, `%x`, `%c`, `%u`)
+- **API redirect loop** - Transparent handling of multiple API calls during `continue()` with safety limit
+- **New modules**: `linuxApiHooks.ts`, `elfLoader.ts`, `peLoader.ts`, `memoryManager.ts`, `winApiHooks.ts`
+- **New commands**: `hexcore.debug.setStdin` for ELF stdin input, `hexcore.debug.unicornStatus` for engine diagnostics
+
+#### hexcore-debugger: Emulation Engine Fixes
+- **Fixed step stalling** - Removed `stepMode` flag, use Unicorn native `count=1` for reliable single-step
+- **Fixed continue with breakpoint** - `isFirstInstruction` flag + `notifyApiRedirect()` prevents stub corruption
+- **Fixed RIP=0x0 on continue** - `.rela.dyn` (GLOB_DAT) parsing ensures direct GOT calls are intercepted
+- **Fixed isRunning state** - `getEmulationState()` correctly reports `isRunning=true` after load with new `isReady` field
+- **RIP sync after emuStop** - `syncCurrentAddress()` reads actual RIP from Unicorn registers
+- **`fs_base`/`gs_base` register support** in `setRegister()` for TLS segment access
+- **`arch_prctl` syscall** now actually sets FS/GS base (was no-op before)
+
+#### hexcore-disassembler v1.2.0: ELF Deep Analysis & Headless Mode
+- **PIE detection** - Detect `ET_DYN` ELF type, auto-select base address
+- **PLT/GOT parsing** - Resolve import function addresses via `.rela.plt`
+- **Section/symbol address adjustment** for PIE base offset
+- **PIE characteristic flag** - File info shows `['ELF', 'PIE']`
+- **Headless `analyzeAll`** - Deep analysis with JSON/MD output for automation
+- **Function summary export** - Address, name, size, instruction count, callers/callees
+
+#### Automation Pipeline System (NEW)
+- **Pipeline Runner** (`automationPipelineRunner.ts`) - Execute `.hexcore_job.json` job files with step-by-step headless execution
+- **Command**: `hexcore.pipeline.runJob` - Run automation jobs manually or auto-trigger on file creation
+- **Workspace watcher** - Auto-detects `.hexcore_job.json` in workspace
+- **Step controls** - Per-step timeout, error handling, output validation
+- **Status tracking** - `hexcore-pipeline.status.json` and `hexcore-pipeline.log` output
+- **Extension preflight** - Auto-activates extensions before pipeline steps
+
+#### All Analysis Extensions: Headless Mode
+Every analysis tool now supports headless execution via standardized parameters:
+
+| Extension | Command | Headless Parameters |
+|-----------|---------|-------------------|
+| **File Type** | `hexcore.filetype.detect` | `file`, `output`, `quiet` |
+| **Hash Calculator** | `hexcore.hashcalc.calculate` | `file`, `algorithms`, `output`, `quiet` |
+| **Entropy** | `hexcore.entropy.analyze` | `file`, `blockSize`, `output`, `quiet` |
+| **Strings** | `hexcore.strings.extract` | `file`, `minLength`, `maxStrings`, `output`, `quiet` |
+| **PE Analyzer** | `hexcore.peanalyzer.analyze` | `file`, `output`, `quiet` |
+| **Disassembler** | `hexcore.disasm.analyzeAll` | `file`, `output`, `quiet` |
+
+- All commands support JSON and Markdown output formats
+- Backward-compatible aliases: `hexcore.hash.file`, `hexcore.hash.calculate`, `hexcore.pe.analyze`, `hexcore.disasm.open`
+
+#### SKILL.md: Complete Technical API Documentation
+- Full emulator memory layout with addresses (STUB_BASE, TEB, PEB, heap, stack, TLS)
+- Complete DebugEngine, PE Loader, ELF Loader, Memory Manager API reference
+- 25+ Windows API hooks table, 40+ Linux API hooks table, 12 syscall handlers
+- Unicorn Wrapper API with all methods and types
+- WebView message protocol and troubleshooting guides
+
+### Changed
+- `elfLoader.ts` completely rewritten with PIE support, PLT stub creation, and dual `.rela.plt`/`.rela.dyn` GOT patching
+- `unicornWrapper.ts` overhauled with API redirect loop, state sync, and `EmulationState.isReady` field
+- `debugEngine.ts` updated with ELF loading flow, TLS setup, stdin buffer, and state management
+- `disassemblerEngine.ts` updated with inline PE/ELF parsing, function prolog scan, and string xrefs
+- `capstoneWrapper.ts` improved with instruction type analysis (call/jump/ret/conditional detection)
+- `llvmMcWrapper.ts` improved with multi-arch assembly support and NOP padding
+- All analysis extensions refactored with consistent headless APIs
+
+### Known Issues (Preview)
+- Deep stepping (~400+ steps) may encounter `UC_ERR_FETCH_PROT` on some code paths
+- File I/O hooks (`fopen`, `fread`, etc.) are stubs returning error codes
+- No dynamic linker emulation (imports resolved statically via GOT patching)
+- `.hexcore_job.json` is auto-generated by AI agents - not committed to repository
+
 ## [3.1.1] - 2026-02-03 - "Stability Pass"
 
 ### Added
@@ -61,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hook system: code execution, memory access (read/write/fetch), interrupts
 - Context save/restore for snapshotting
 - ThreadSafeFunction for JavaScript callbacks from native hooks
-- **29/29 tests passing** ✅
+- **29/29 tests passing**
 - Author: **Bih** [(ThreatBih)](https://github.com/ThreatBiih)
 
 #### hexcore-keystone v1.0.0
@@ -71,35 +162,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Async assembly support (`asmAsync`)
 - Automatic build system with CMake
 - **Legacy mode**: Based on LLVM 3.8 (stable but dated)
-- Note: ARM/MIPS support requires full LLVM rebuild (coming in LLVM MC)
 
-### 🔄 Updated
+### Updated
 
 #### hexcore-capstone v1.3.0
 - **Standalone package** with async disassembly (`disasmAsync`)
 - Dual module support: ESM (`index.mjs`) + CommonJS (`index.js`)
 - Complete TypeScript definitions with JSDoc
 - Extended architecture support (Capstone v5)
-- Synced with standalone npm package structure
 - Support for detail mode across all architectures
-
-#### Extension Infrastructure
-- Updated package.json files across multiple extensions
-- Standardized build scripts and dependencies
-
-### 📝 Notes
-
-**CTF-Ready Toolkit:**
-- **Disassembly**: hexcore-capstone (analyze code)
-- **Assembly**: hexcore-keystone (create/modify code)
-- **Emulation**: hexcore-unicorn (execute and debug)
-
-Complete binary analysis pipeline for security research and CTF competitions.
-
-### ⚠️ Breaking Changes
-
-- New installation process for native modules (automated scripts)
-- Keystone is documented as "legacy" (modern replacement planned)
 
 ---
 
@@ -110,6 +181,7 @@ Complete binary analysis pipeline for security research and CTF competitions.
 - Capstone N-API binding
 - New analysis tools
 
+[3.2.0-preview]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.0-preview
 [3.1.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.1
 [3.1.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.0
 [3.0.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.0.0

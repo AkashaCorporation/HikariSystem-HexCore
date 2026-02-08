@@ -9,6 +9,7 @@ import { MemoryManager } from './memoryManager';
 import { PELoader, PEInfo } from './peLoader';
 import { ELFLoader, ELFInfo } from './elfLoader';
 import { WinApiHooks, ApiCallLog } from './winApiHooks';
+import { LinuxApiHooks, ApiCallLog as LinuxApiCallLog } from './linuxApiHooks';
 
 export interface RegisterState {
 	rax: bigint;
@@ -50,6 +51,7 @@ export class DebugEngine {
 	private peLoader?: PELoader;
 	private elfLoader?: ELFLoader;
 	private apiHooks?: WinApiHooks;
+	private linuxApiHooks?: LinuxApiHooks;
 	private emulationInitError?: string;
 	private architecture: ArchitectureType = 'x64';
 	private baseAddress: bigint = 0x400000n;
@@ -169,13 +171,19 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Load an ELF file
+	 * Load an ELF file with PLT stub creation and Linux API hooks
 	 */
 	private async loadELF(): Promise<void> {
 		this.elfLoader = new ELFLoader(this.emulator!, this.memoryManager!);
-		const elfInfo = this.elfLoader.load(this.fileBuffer!);
+		const elfInfo = this.elfLoader.load(this.fileBuffer!, this.architecture);
 
 		this.baseAddress = elfInfo.entryPoint;
+
+		// Create Linux API hooks
+		this.linuxApiHooks = new LinuxApiHooks(this.emulator!, this.memoryManager!, this.architecture);
+		this.linuxApiHooks.setImageBase(elfInfo.baseAddress);
+		const exitImport = elfInfo.imports.find(imp => imp.name === 'exit' || imp.name === '_exit');
+		this.linuxApiHooks.setMainReturnAddress(exitImport?.stubAddress ?? null);
 
 		// Initialize heap
 		this.memoryManager!.initializeHeap();
@@ -183,6 +191,19 @@ export class DebugEngine {
 		// Setup stack
 		const stackBase = 0x7FFF0000n;
 		this.emulator!.setupStack(stackBase);
+		this.initializeElfProcessStack();
+
+		// Setup TLS (Thread Local Storage) region for fs:[0x28] stack canary access.
+		// Linux x64 uses FS segment for TLS. The kernel sets FS_BASE via arch_prctl.
+		// We allocate a 4KB TLS block and set FS_BASE to point to it.
+		// fs:[0x28] is the stack canary — we write a known value there.
+		this.setupLinuxTLS();
+
+		// Install ELF API interceptor (PLT stubs → libc hooks)
+		this.installELFApiInterceptor();
+
+		// Install syscall handler for direct syscalls
+		this.installSyscallHandler();
 
 		// Set instruction pointer to entry point
 		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
@@ -191,10 +212,13 @@ export class DebugEngine {
 
 		this.emit('elf-loaded', {
 			entryPoint: elfInfo.entryPoint,
-			segments: elfInfo.programHeaders.length
+			baseAddress: elfInfo.baseAddress,
+			isPIE: elfInfo.isPIE,
+			segments: elfInfo.programHeaders.length,
+			imports: elfInfo.imports.length
 		});
 
-		console.log(`ELF loaded: entry=0x${elfInfo.entryPoint.toString(16)}`);
+		console.log(`ELF loaded: entry=0x${elfInfo.entryPoint.toString(16)}, PIE=${elfInfo.isPIE}, ${elfInfo.imports.length} imports`);
 	}
 
 	/**
@@ -218,6 +242,110 @@ export class DebugEngine {
 	}
 
 	/**
+	 * Setup Linux TLS (Thread Local Storage) region.
+	 * On Linux x64, the FS segment register base points to the TLS block.
+	 * fs:[0x28] holds the stack canary value used by GCC's -fstack-protector.
+	 * Without this, any binary compiled with stack protection will crash on
+	 * `mov rax, [fs:0x28]`.
+	 */
+	private setupLinuxTLS(): void {
+		if (!this.emulator || !this.memoryManager) {
+			return;
+		}
+
+		// Keep TLS below the default stack mapping (0x7FFF0000..0x800F0000).
+		const TLS_BASE = 0x7FFEF000n;
+		const TLS_SIZE = 0x1000;         // 4KB
+
+		try {
+			// Map TLS region as RW if it is not already mapped.
+			try {
+				this.emulator.mapMemoryRaw(TLS_BASE, TLS_SIZE, 3); // PROT_READ | PROT_WRITE
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				// If the region is already mapped, we can still write the canary and set FS base.
+				if (!/UC_ERR_MAP/.test(message)) {
+					throw error;
+				}
+			}
+			this.memoryManager.trackAllocation(TLS_BASE, TLS_SIZE, 3, 'tls');
+
+			// Write stack canary at offset 0x28 (fs:[0x28])
+			// Use a deterministic value for reproducible emulation
+			const tls = Buffer.alloc(TLS_SIZE);
+			if (this.architecture === 'x64') {
+				tls.writeBigUInt64LE(0xDEADBEEFCAFEBABEn, 0x28); // stack canary
+				// Self-pointer at offset 0x0 (some glibc versions expect this)
+				tls.writeBigUInt64LE(TLS_BASE, 0x0);
+			} else {
+				tls.writeUInt32LE(0xDEADBEEF, 0x14); // x86 stack canary at gs:[0x14]
+				tls.writeUInt32LE(Number(TLS_BASE & 0xFFFFFFFFn), 0x0);
+			}
+
+			this.emulator.writeMemory(TLS_BASE, tls);
+
+			// Set FS_BASE to point to TLS region
+			if (this.architecture === 'x64') {
+				this.emulator.setRegister('fs_base', TLS_BASE);
+			}
+
+			console.log(`Linux TLS setup: base=0x${TLS_BASE.toString(16)}, canary at fs:[0x28]`);
+		} catch (e) {
+			console.warn(`Failed to setup Linux TLS: ${e}`);
+		}
+	}
+
+	/**
+	 * Build a minimal Linux process stack layout for ELF startup.
+	 * _start expects: [argc][argv0][NULL][envp...]
+	 */
+	private initializeElfProcessStack(): void {
+		if (!this.emulator) {
+			return;
+		}
+
+		try {
+			if (this.architecture === 'x64') {
+				const regs = this.emulator.getRegistersX64();
+				let stackPtr = regs.rsp - 0x80n;
+				stackPtr = (stackPtr / 16n) * 16n;
+
+				const argv0 = Buffer.from('hexcore\0', 'ascii');
+				const argv0Addr = stackPtr - 0x40n;
+				this.emulator.writeMemory(argv0Addr, argv0);
+
+				const layout = Buffer.alloc(32);
+				layout.writeBigUInt64LE(1n, 0);      // argc
+				layout.writeBigUInt64LE(argv0Addr, 8);  // argv[0]
+				layout.writeBigUInt64LE(0n, 16);     // argv[1] = NULL
+				layout.writeBigUInt64LE(0n, 24);     // envp = NULL
+				this.emulator.writeMemory(stackPtr, layout);
+				this.emulator.setRegister('rsp', stackPtr);
+				return;
+			}
+
+			if (this.architecture === 'x86') {
+				const regs = this.emulator.getRegistersX86();
+				const stackPtr = BigInt(regs.esp - 0x60);
+				const argv0 = Buffer.from('hexcore\0', 'ascii');
+				const argv0Addr = stackPtr - 0x20n;
+				this.emulator.writeMemory(argv0Addr, argv0);
+
+				const layout = Buffer.alloc(16);
+				layout.writeUInt32LE(1, 0); // argc
+				layout.writeUInt32LE(Number(argv0Addr & 0xFFFFFFFFn), 4);
+				layout.writeUInt32LE(0, 8); // argv[1] = NULL
+				layout.writeUInt32LE(0, 12); // envp = NULL
+				this.emulator.writeMemory(stackPtr, layout);
+				this.emulator.setRegister('esp', Number(stackPtr & 0xFFFFFFFFn));
+			}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			console.warn(`[elf] Failed to initialize process stack: ${message}`);
+		}
+	}
+
+	/**
 	 * Install a code hook that intercepts API calls to stub addresses
 	 */
 	private installApiInterceptor(): void {
@@ -226,35 +354,140 @@ export class DebugEngine {
 		}
 
 		this.emulator.onCodeExecute((address, _size) => {
-			if (!this.peLoader!.isStubAddress(address)) {
-				return;
+			try {
+				if (!this.peLoader!.isStubAddress(address)) {
+					return;
+				}
+
+				// This address is in the API stub region - it's an API call
+				const importEntry = this.peLoader!.lookupStub(address);
+				if (!importEntry) {
+					return;
+				}
+
+				// Handle the API call
+				const returnValue = this.apiHooks!.handleCall(importEntry.dll, importEntry.name);
+
+				// Set return value
+				if (this.architecture === 'x64') {
+					this.emulator!.setRegister('rax', returnValue);
+				} else {
+					this.emulator!.setRegister('eax', returnValue);
+				}
+
+				// Unicorn callback in this binding runs after the stub instruction executes.
+				// For RET-based stubs, RIP/RSP are already advanced by Unicorn.
+				// We only need to stop and apply queued register updates.
+				this.emulator!.notifyApiRedirect();
+
+				// Emit API call event for the UI
+				this.emit('api-call', {
+					dll: importEntry.dll,
+					name: importEntry.name,
+					returnValue
+				});
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				console.warn(`[debugEngine] PE API hook failed at 0x${address.toString(16)}: ${message}`);
 			}
+		});
+	}
 
-			// This address is in the API stub region - it's an API call
-			const importEntry = this.peLoader!.lookupStub(address);
-			if (!importEntry) {
-				return;
+	/**
+	 * Install a code hook that intercepts ELF PLT stub calls via the ELF loader
+	 */
+	private installELFApiInterceptor(): void {
+		if (!this.emulator || !this.elfLoader || !this.linuxApiHooks) {
+			return;
+		}
+
+		this.emulator.onCodeExecute((address, _size) => {
+			try {
+				if (!this.elfLoader!.isStubAddress(address)) {
+					return;
+				}
+
+				// This address is in the API stub region - it's a libc call
+				const importEntry = this.elfLoader!.lookupStub(address);
+				if (!importEntry) {
+					return;
+				}
+
+				// Handle the libc call
+				const returnValue = this.linuxApiHooks!.handleCall(importEntry.library, importEntry.name);
+				const callName = importEntry.name.toLowerCase();
+				const isTerminatingCall = callName === 'exit' || callName === '_exit' || callName === 'abort';
+
+				if (!isTerminatingCall) {
+					// Set return value in RAX (System V AMD64 ABI)
+					if (this.architecture === 'x64') {
+						this.emulator!.setRegister('rax', returnValue);
+					} else {
+						this.emulator!.setRegister('eax', returnValue);
+					}
+				}
+
+				const redirectAddr = this.linuxApiHooks!.getRedirectAddress();
+				if (!isTerminatingCall && redirectAddr !== null) {
+					// Redirect execution to the handler-provided target (e.g. main()).
+					// Keep caller return address on stack so the redirected function can return.
+					if (this.architecture === 'x64') {
+						this.emulator!.setRegister('rip', redirectAddr);
+						this.emulator!.setCurrentAddress(redirectAddr);
+					} else {
+						this.emulator!.setRegister('eip', redirectAddr);
+						this.emulator!.setCurrentAddress(redirectAddr);
+					}
+				}
+
+				// Stop current run and apply queued state changes before continuing.
+				this.emulator!.notifyApiRedirect();
+
+				// Emit API call event for the UI
+				this.emit('api-call', {
+					dll: importEntry.library,
+					name: importEntry.name,
+					returnValue
+				});
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				console.warn(`[debugEngine] ELF API hook failed at 0x${address.toString(16)}: ${message}`);
 			}
+		});
+	}
 
-			// Handle the API call
-			const returnValue = this.apiHooks!.handleCall(importEntry.dll, importEntry.name);
+	/**
+	 * Install interrupt handler for Linux syscalls (int 0x80 / syscall instruction)
+	 */
+	private installSyscallHandler(): void {
+		if (!this.emulator || !this.linuxApiHooks) {
+			return;
+		}
 
-			// Set return value
-			if (this.architecture === 'x64') {
-				this.emulator!.setRegister('rax', returnValue);
-			} else {
-				this.emulator!.setRegister('eax', returnValue);
+		this.emulator.setInterruptHandler((intno: number) => {
+			// int 0x80 on x86 or SYSCALL instruction generates interrupt 2 in Unicorn
+			if (intno === 0x80 || intno === 2) {
+				const result = this.linuxApiHooks!.handleSyscall();
+
+				// Set return value in RAX
+				if (this.architecture === 'x64') {
+					this.emulator!.setRegister('rax', result);
+				} else {
+					this.emulator!.setRegister('eax', result);
+				}
+
+				// Emit syscall event for the UI
+				const regs = this.architecture === 'x64'
+					? this.emulator!.getRegistersX64()
+					: null;
+				const sysNum = regs ? Number(regs.rax) : 0;
+
+				this.emit('api-call', {
+					dll: 'syscall',
+					name: `sys_${sysNum}`,
+					returnValue: result
+				});
 			}
-
-			// Pop return address from stack and set IP
-			this.popReturnAddress();
-
-			// Emit API call event for the UI
-			this.emit('api-call', {
-				dll: importEntry.dll,
-				name: importEntry.name,
-				returnValue
-			});
 		});
 	}
 
@@ -358,9 +591,118 @@ export class DebugEngine {
 			throw new Error('Emulator not initialized');
 		}
 
-		await this.emulator.continue();
+		// Unicorn async continue can desync callback address vs register snapshot on
+		// some ELF flows. For ELF targets we use deterministic stepped continue.
+		if (this.fileType === 'elf') {
+			await this.continueElfSafely();
+		} else {
+			await this.emulator.continue();
+		}
 		await this.updateEmulationRegisters();
 		this.emit('continue');
+	}
+
+	/**
+	 * Deterministic continue path for ELF binaries.
+	 * Executes one instruction at a time so API hooks always observe a coherent
+	 * register state, while still honoring breakpoint semantics.
+	 */
+	private async continueElfSafely(): Promise<void> {
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
+		}
+
+		const maxInstructions = 250000;
+		const maxStagnantSteps = 5000;
+		const breakpoints = new Set(this.emulator.getBreakpoints().map(bp => bp.toString()));
+
+		let firstStep = true;
+		let stagnantSteps = 0;
+		let currentAddress = this.getCurrentInstructionPointer();
+
+		for (let step = 0; step < maxInstructions; step++) {
+			if (this.isTerminalExecutionAddress(currentAddress)) {
+				return;
+			}
+
+			// Match continue semantics: if we resumed from a breakpoint, execute one
+			// instruction first and only stop on subsequent breakpoint hits.
+			if (!firstStep && breakpoints.has(currentAddress.toString())) {
+				return;
+			}
+
+			try {
+				await this.emulator.step();
+			} catch (error: unknown) {
+				const faultAddress = this.getCurrentInstructionPointer();
+				if (this.isTerminalExecutionAddress(faultAddress) || this.hasTerminalLinuxApiCall()) {
+					return;
+				}
+				throw error;
+			}
+
+			const nextAddress = this.getCurrentInstructionPointer();
+			if (this.hasTerminalLinuxApiCall()) {
+				return;
+			}
+			if (this.isTerminalExecutionAddress(nextAddress)) {
+				return;
+			}
+
+			if (nextAddress === currentAddress) {
+				stagnantSteps += 1;
+				if (stagnantSteps >= maxStagnantSteps) {
+					throw new Error(`Safe ELF continue stalled at 0x${nextAddress.toString(16)}`);
+				}
+			} else {
+				stagnantSteps = 0;
+			}
+
+			currentAddress = nextAddress;
+			firstStep = false;
+		}
+
+		throw new Error(`Safe ELF continue hit instruction budget (${maxInstructions}) at 0x${currentAddress.toString(16)}`);
+	}
+
+	private isTerminalExecutionAddress(address: bigint): boolean {
+		return address === 0n || address === 0xDEADDEADn || address === 0xDEADDEADDEADDEADn;
+	}
+
+	private getCurrentInstructionPointer(): bigint {
+		if (!this.emulator) {
+			return 0n;
+		}
+
+		try {
+			if (this.architecture === 'x64') {
+				return this.emulator.getRegistersX64().rip;
+			}
+			if (this.architecture === 'x86') {
+				return BigInt(this.emulator.getRegistersX86().eip);
+			}
+		} catch {
+			// Fallback to wrapper state below.
+		}
+
+		return this.emulator.getState().currentAddress;
+	}
+
+	private hasTerminalLinuxApiCall(): boolean {
+		if (!this.linuxApiHooks) {
+			return false;
+		}
+
+		const lastCall = this.linuxApiHooks.getLastCall();
+		if (!lastCall) {
+			return false;
+		}
+
+		if (lastCall.name === 'exit' || lastCall.name === '_exit' || lastCall.name === 'abort') {
+			return true;
+		}
+
+		return lastCall.dll === 'syscall' && (lastCall.name === 'sys_60' || lastCall.name === 'sys_231');
 	}
 
 	/**
@@ -443,12 +785,27 @@ export class DebugEngine {
 
 	/**
 	 * Get emulation state
+	 *
+	 * After startEmulation(), isRunning reflects the debugEngine state (loaded & ready).
+	 * isReady indicates the emulator is initialized and ready to step/continue.
+	 * The wrapper's isRunning only becomes true during active emuStart calls.
 	 */
 	getEmulationState(): EmulationState | null {
 		if (!this.emulator) {
 			return null;
 		}
-		return this.emulator.getState();
+		const state = this.emulator.getState();
+		// If the debug engine has loaded a binary, report isRunning=true
+		// even if we're not actively inside an emuStart call.
+		// This tells the UI/tests "the debugger session is active and ready".
+		if (this.isRunning && !state.isRunning) {
+			state.isRunning = true;
+			// If not actively executing, we're paused at the entry point
+			if (!state.isPaused) {
+				state.isPaused = true;
+			}
+		}
+		return state;
 	}
 
 	/**
@@ -492,10 +849,27 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Get API call log
+	 * Get API call log (from Windows hooks or Linux hooks)
 	 */
 	getApiCallLog(): ApiCallLog[] {
-		return this.apiHooks?.getCallLog() ?? [];
+		if (this.apiHooks) {
+			return this.apiHooks.getCallLog();
+		}
+		if (this.linuxApiHooks) {
+			return this.linuxApiHooks.getCallLog();
+		}
+		return [];
+	}
+
+	/**
+	 * Set stdin buffer for scanf/read emulation in ELF binaries.
+	 * Multiple inputs separated by newlines.
+	 * Example: setStdinBuffer("42\nhello\n") for two scanf calls.
+	 */
+	setStdinBuffer(input: string): void {
+		if (this.linuxApiHooks) {
+			this.linuxApiHooks.setStdinBuffer(input);
+		}
 	}
 
 	/**
@@ -571,6 +945,7 @@ export class DebugEngine {
 	 * Dispose emulator resources
 	 */
 	disposeEmulation(): void {
+		this.isRunning = false;
 		if (this.memoryManager) {
 			this.memoryManager.dispose();
 			this.memoryManager = undefined;
@@ -582,5 +957,6 @@ export class DebugEngine {
 		this.peLoader = undefined;
 		this.elfLoader = undefined;
 		this.apiHooks = undefined;
+		this.linuxApiHooks = undefined;
 	}
 }

@@ -22,6 +22,7 @@
 	"main": "./out/extension.js",
 	"activationEvents": [
 		"onCommand:hexcore.peanalyzer.analyze",
+		"onCommand:hexcore.pe.analyze",
 		"onCommand:hexcore.peanalyzer.analyzeActive",
 		"onView:hexcore.peanalyzer.view"
 	],

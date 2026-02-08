@@ -8,6 +8,19 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
 
+type OutputFormat = 'json' | 'md';
+
+interface CommandOutputOptions {
+	path: string;
+	format?: OutputFormat;
+}
+
+interface DetectFileTypeCommandOptions {
+	file?: string;
+	output?: CommandOutputOptions;
+	quiet?: boolean;
+}
+
 interface FileSignature {
 	name: string;
 	extension: string;
@@ -15,6 +28,27 @@ interface FileSignature {
 	magic: number[];
 	offset?: number;
 	description: string;
+}
+
+interface DetectionMatch {
+	name: string;
+	extension: string;
+	category: string;
+	description: string;
+	magicHex: string;
+	offset: number;
+}
+
+interface FileTypeDetectionResult {
+	fileName: string;
+	filePath: string;
+	fileSize: number;
+	currentExtension: string;
+	magicBytesHex: string;
+	matches: DetectionMatch[];
+	extensionMatch: boolean;
+	suggestedExtension?: string;
+	reportMarkdown: string;
 }
 
 // Comprehensive magic bytes database
@@ -87,80 +121,181 @@ export function activate(context: vscode.ExtensionContext) {
 	console.log('HexCore File Type Detector extension activated');
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.filetype.detect', async (uri?: vscode.Uri) => {
+		vscode.commands.registerCommand('hexcore.filetype.detect', async (arg?: vscode.Uri | DetectFileTypeCommandOptions) => {
+			const options = normalizeOptions(arg);
+			const uri = await resolveTargetUri(arg, options);
 			if (!uri) {
-				const files = await vscode.window.showOpenDialog({
-					canSelectMany: false,
-					canSelectFiles: true,
-					title: 'Select file to identify'
-				});
-				if (files && files.length > 0) {
-					uri = files[0];
-				} else {
-					return;
-				}
+				return;
 			}
 
-			await detectFileType(uri);
+			try {
+				return await detectFileType(uri, options);
+			} catch (error: unknown) {
+				if (!options.quiet) {
+					vscode.window.showErrorMessage(`File type detection failed: ${toErrorMessage(error)}`);
+				}
+				throw error;
+			}
 		})
 	);
 }
 
-async function detectFileType(uri: vscode.Uri): Promise<void> {
+function normalizeOptions(arg?: vscode.Uri | DetectFileTypeCommandOptions): DetectFileTypeCommandOptions {
+	if (arg instanceof vscode.Uri || arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+async function resolveTargetUri(
+	arg: vscode.Uri | DetectFileTypeCommandOptions | undefined,
+	options: DetectFileTypeCommandOptions
+): Promise<vscode.Uri | undefined> {
+	if (arg instanceof vscode.Uri) {
+		return arg;
+	}
+
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return vscode.Uri.file(options.file);
+	}
+
+	const activeUri = getActiveFileUri();
+	if (activeUri) {
+		return activeUri;
+	}
+
+	if (options.quiet) {
+		return undefined;
+	}
+
+	const files = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		canSelectFiles: true,
+		title: 'Select file to identify'
+	});
+	return files?.[0];
+}
+
+function getActiveFileUri(): vscode.Uri | undefined {
+	const active = vscode.window.activeTextEditor?.document.uri;
+	if (!active || active.scheme !== 'file') {
+		return undefined;
+	}
+	return active;
+}
+
+async function detectFileType(uri: vscode.Uri, options: DetectFileTypeCommandOptions): Promise<FileTypeDetectionResult> {
 	const filePath = uri.fsPath;
 	const fileName = path.basename(filePath);
 	const fileExtension = path.extname(filePath).toLowerCase().replace('.', '');
 
+	const stats = fs.statSync(filePath);
+	const fd = fs.openSync(filePath, 'r');
+	const buffer = Buffer.alloc(Math.min(512, stats.size));
 	try {
-		const stats = fs.statSync(filePath);
-		const fd = fs.openSync(filePath, 'r');
-		const buffer = Buffer.alloc(Math.min(512, stats.size));
 		fs.readSync(fd, buffer, 0, buffer.length, 0);
+	} finally {
 		fs.closeSync(fd);
+	}
 
-		// Find matching signatures
-		const matches = findMatchingSignatures(buffer);
+	const matches = findMatchingSignatures(buffer);
+	let extensionMatch = true;
+	let suggestedExtension: string | undefined;
 
-		// Check for extension mismatch
-		let extensionMatch = true;
-		let suggestedExtension = '';
-
-		if (matches.length > 0) {
-			const expectedExts = matches[0].extension.split('/');
-			if (!expectedExts.includes(fileExtension) && fileExtension !== '') {
-				extensionMatch = false;
-				suggestedExtension = expectedExts[0];
-			}
+	if (matches.length > 0) {
+		const expectedExts = matches[0].extension.split('/');
+		if (!expectedExts.includes(fileExtension) && fileExtension !== '') {
+			extensionMatch = false;
+			suggestedExtension = expectedExts[0];
 		}
+	}
 
-		// Generate and show report
-		const report = generateReport(fileName, filePath, stats.size, fileExtension, buffer, matches, extensionMatch, suggestedExtension);
+	const report = generateReport(fileName, filePath, stats.size, fileExtension, buffer, matches, extensionMatch, suggestedExtension ?? '');
+	const result: FileTypeDetectionResult = {
+		fileName,
+		filePath,
+		fileSize: stats.size,
+		currentExtension: fileExtension,
+		magicBytesHex: buffer.subarray(0, 32).toString('hex').toUpperCase().match(/.{2}/g)?.join(' ') ?? '',
+		matches: matches.map(match => ({
+			name: match.name,
+			extension: match.extension,
+			category: match.category,
+			description: match.description,
+			magicHex: match.magic.map(byte => byte.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+			offset: match.offset ?? 0
+		})),
+		extensionMatch,
+		suggestedExtension,
+		reportMarkdown: report
+	};
 
+	if (options.output) {
+		writeOutput(result, options.output);
+	}
+
+	if (!options.quiet) {
 		const doc = await vscode.workspace.openTextDocument({
 			content: report,
 			language: 'markdown'
 		});
-
 		await vscode.window.showTextDocument(doc, { preview: false });
 
-		// Show warning if extension mismatch
-		if (!extensionMatch && matches.length > 0) {
+		if (!extensionMatch && matches.length > 0 && suggestedExtension) {
 			vscode.window.showWarningMessage(
 				`File extension mismatch! "${fileName}" appears to be "${matches[0].name}" (expected .${suggestedExtension})`
 			);
 		}
-
-	} catch (error: any) {
-		vscode.window.showErrorMessage(`File type detection failed: ${error.message}`);
 	}
+
+	return result;
+}
+
+function writeOutput(result: FileTypeDetectionResult, output: CommandOutputOptions): void {
+	const outputFormat = normalizeOutputFormat(output.path, output.format);
+	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	if (outputFormat === 'md') {
+		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(
+		output.path,
+		JSON.stringify(
+			{
+				fileName: result.fileName,
+				filePath: result.filePath,
+				fileSize: result.fileSize,
+				currentExtension: result.currentExtension,
+				magicBytesHex: result.magicBytesHex,
+				matches: result.matches,
+				extensionMatch: result.extensionMatch,
+				suggestedExtension: result.suggestedExtension,
+				generatedAt: new Date().toISOString()
+			},
+			null,
+			2
+		),
+		'utf8'
+	);
+}
+
+function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
+	if (format === 'json' || format === 'md') {
+		return format;
+	}
+	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
 function findMatchingSignatures(buffer: Buffer): FileSignature[] {
 	const matches: FileSignature[] = [];
 
 	for (const sig of SIGNATURES) {
-		const offset = sig.offset || 0;
-		if (offset + sig.magic.length > buffer.length) continue;
+		const offset = sig.offset ?? 0;
+		if (offset + sig.magic.length > buffer.length) {
+			continue;
+		}
 
 		let match = true;
 		for (let i = 0; i < sig.magic.length; i++) {
@@ -254,12 +389,11 @@ ${hexDump}
 | Type | Category | Extension |
 |------|----------|-----------|
 `;
-			for (const m of matches.slice(1)) {
-				report += `| ${m.name} | ${m.category} | .${m.extension} |\n`;
+			for (const match of matches.slice(1)) {
+				report += `| ${match.name} | ${match.category} | .${match.extension} |\n`;
 			}
 			report += '\n';
 		}
-
 	} else {
 		report += `### Unknown File Type
 
@@ -290,11 +424,20 @@ Categories: Executable, Archive, Image, Document, Audio, Video, Database, Script
 }
 
 function formatBytes(bytes: number): string {
-	if (bytes === 0) return '0 B';
+	if (bytes === 0) {
+		return '0 B';
+	}
 	const k = 1024;
 	const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
 	const i = Math.floor(Math.log(bytes) / Math.log(k));
 	return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+function toErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
 }
 
 export function deactivate() { }

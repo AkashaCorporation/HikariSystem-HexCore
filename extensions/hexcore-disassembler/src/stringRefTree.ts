@@ -85,9 +85,9 @@ export class StringRefProvider implements vscode.TreeDataProvider<StringTreeElem
 	getChildren(element?: StringTreeElement): Thenable<StringTreeElement[]> {
 		if (!element) {
 			const strings = this.results.length > 0 ? this.results : this.engine.getStrings();
-			// Show up to 5000 strings
+			// Show up to 10000 strings
 			return Promise.resolve(
-				strings.slice(0, 5000).map(str => new StringTreeItem(
+				strings.slice(0, 10000).map(str => new StringTreeItem(
 					str,
 					str.references.length > 0
 						? vscode.TreeItemCollapsibleState.Collapsed

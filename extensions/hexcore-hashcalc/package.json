@@ -8,7 +8,13 @@
 	"engines": {
 		"vscode": "^1.75.0"
 	},
-	"activationEvents": [],
+	"activationEvents": [
+		"onCommand:hexcore.hashcalc.calculate",
+		"onCommand:hexcore.hashcalc.quick",
+		"onCommand:hexcore.hashcalc.verify",
+		"onCommand:hexcore.hash.file",
+		"onCommand:hexcore.hash.calculate"
+	],
 	"categories": [
 		"Other"
 	],

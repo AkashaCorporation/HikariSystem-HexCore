@@ -8,7 +8,9 @@
 	"engines": {
 		"vscode": "^1.75.0"
 	},
-	"activationEvents": [],
+	"activationEvents": [
+		"onCommand:hexcore.filetype.detect"
+	],
 	"categories": [
 		"Other"
 	],
