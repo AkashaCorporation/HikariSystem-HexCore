@@ -5,6 +5,55 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.1] - 2026-02-09 - "Defender's Eye"
+
+> **Stable Release** — YARA engine rewrite with Microsoft DefenderYara integration,
+> constant decoder tooltip, pipeline automation UX, and GitHub Pages site.
+
+### Added
+
+#### hexcore-yara v2.0.0: DefenderYara Integration
+- **Real YARA rule parser** — hex patterns (with wildcards `??`), text patterns (nocase/wide/ascii), regex patterns, and weighted conditions
+- **DefenderYara integration** — index 76,000+ Microsoft Defender signatures from local `DefenderYara-main` directory
+- **On-demand category loading** — load Trojan, Backdoor, Ransom, Exploit, etc. individually without flooding memory
+- **Smart essentials loader** — `loadDefenderEssentials()` loads the top 11 threat categories for quick scans
+- **Threat scoring** — 0-100 score with severity mapping: 🔴 Critical (Trojan, Ransom, Backdoor) / 🟠 High (Exploit, PWS, Worm) / 🟡 Medium (HackTool, Spyware) / 🟢 Low/Info
+- **Threat Report** — formatted output in Output Channel with score bar, category breakdown, match offsets
+- **Auto-detect DefenderYara** — scans common paths (Desktop, Downloads) on startup
+- **New commands**:
+  - `hexcore.yara.quickScan` — load essentials + scan in one click
+  - `hexcore.yara.loadDefender` — select DefenderYara folder and index
+  - `hexcore.yara.loadCategory` — QuickPick multi-select for specific categories
+  - `hexcore.yara.threatReport` — show last scan's threat report
+- **Dynamic Rules Tree** — sidebar shows DefenderYara categories with rule counts and loaded/pending status
+- **Results Tree** — threat score header, grouped by category, severity icons with theme colors
+
+#### hexcore-disassembler: Constant Decoder Tooltip
+- **Hover tooltip** on any immediate value in the disassembly webview
+- **Representations**: Hex, Unsigned, Signed32, Signed64, Binary, ASCII, Float32
+- **Dark-themed** tooltip with copy buttons per representation
+- **Placeholder-based regex** — prevents HTML corruption when multiple regex passes highlight operands
+
+#### hexcore-disassembler: Pipeline Automation UX
+- **`hexcore.pipeline.listCapabilities`** — lists all pipeline commands with HEADLESS/INTERACTIVE status, aliases, timeouts, and owning extensions
+- **Workspace-aware banner** — pipeline runner logs workspace root, job file, target, output dir, step count, and timestamp
+
+### Changed
+- `hexcore-yara/yaraEngine.ts` — complete rewrite from simple string matching to real YARA parser with hex pattern matching engine
+- `hexcore-yara/extension.ts` — 8 commands (was 4), progress bars, auto-detect DefenderYara, threat report formatting
+- `hexcore-yara/resultsTree.ts` — threat score header, category grouping, severity-colored icons
+- `hexcore-yara/rulesTree.ts` — dynamic categories from DefenderYara catalog, stats header
+- `hexcore-yara/package.json` — bumped to v2.0.0, 4 new commands, `defenderYaraPath` config setting
+- `.gitignore` — added hexcore-keystone (legacy), unicorn/llvm-mc build artifacts, `.hexcore_job.json`, wiki/
+
+### Removed
+- `extensions/hexcore-keystone/` — 50MB of legacy build artifacts removed from tracking (superseded by LLVM MC)
+
+### Infrastructure
+- **GitHub Pages** — landing page at https://lxrdknowkill.github.io/HikariSystem-HexCore/
+- Dark theme cybersecurity design with animated threat score demo
+- Features, extensions table, engine cards, pipeline code block, install steps
+
 ## [3.2.0-preview] - 2026-02-08 - "Linux Awakening"
 
 > **Preview Release** - Major update introducing Linux ELF emulation, headless automation pipeline,
@@ -181,6 +230,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.2.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.1
 [3.2.0-preview]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.0-preview
 [3.1.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.1
 [3.1.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.0
