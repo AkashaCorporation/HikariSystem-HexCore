@@ -1,0 +1,835 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HikariSystem HexCore — Binary Analysis IDE</title>
+    <meta name="description" content="A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code with native Capstone/Unicorn/LLVM engines.">
+    <meta name="keywords" content="hexcore, reverse engineering, malware analysis, binary analysis, disassembler, debugger, CPU emulation, YARA, PE, ELF, CTF, cybersecurity">
+    <meta name="author" content="HikariSystem">
+    <meta property="og:title" content="HikariSystem HexCore">
+    <meta property="og:description" content="A specialized IDE for malware analysis, reverse engineering, and binary emulation.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="BatHexCore.png">
+    <link rel="icon" type="image/png" href="BatHexCore.png">
+    <style>
+        /* ── Reset & Variables ────────────────────────────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg-primary: #0a0a12;
+            --bg-secondary: #0f0f1a;
+            --bg-card: #141425;
+            --bg-card-hover: #1a1a30;
+            --accent: #6c5ce7;
+            --accent-glow: #a29bfe;
+            --accent-secondary: #00cec9;
+            --text-primary: #e8e8f0;
+            --text-secondary: #8888a8;
+            --text-muted: #555570;
+            --border: #2a2a40;
+            --danger: #ff4757;
+            --warning: #ffa502;
+            --success: #2ed573;
+            --info: #1e90ff;
+            --gradient-hero: linear-gradient(135deg, #0a0a12 0%, #1a1030 50%, #0a0a12 100%);
+            --gradient-accent: linear-gradient(135deg, #6c5ce7, #a29bfe);
+            --gradient-glow: radial-gradient(ellipse at center, rgba(108, 92, 231, 0.15) 0%, transparent 70%);
+            --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+            --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        }
+
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+            overflow-x: hidden;
+        }
+
+        /* ── Scrollbar ───────────────────────────────────────── */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--accent); }
+
+        /* ── Navigation ──────────────────────────────────────── */
+        nav {
+            position: fixed;
+            top: 0;
+            width: 100%;
+            background: rgba(10, 10, 18, 0.85);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border);
+            z-index: 1000;
+            padding: 0 2rem;
+        }
+        .nav-inner {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 64px;
+        }
+        .nav-logo {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            text-decoration: none;
+            color: var(--text-primary);
+            font-weight: 700;
+            font-size: 1.1rem;
+        }
+        .nav-logo img { height: 32px; width: 32px; }
+        .nav-links { display: flex; gap: 2rem; list-style: none; }
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: color 0.2s;
+        }
+        .nav-links a:hover { color: var(--accent-glow); }
+        .nav-github {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            padding: 8px 16px;
+            border-radius: 8px;
+            color: var(--text-primary);
+            text-decoration: none;
+            font-size: 0.85rem;
+            transition: all 0.2s;
+        }
+        .nav-github:hover { border-color: var(--accent); background: var(--bg-card-hover); }
+
+        /* ── Hero ────────────────────────────────────────────── */
+        .hero {
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            background: var(--gradient-hero);
+            position: relative;
+            padding: 6rem 2rem 4rem;
+        }
+        .hero::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--gradient-glow);
+            pointer-events: none;
+        }
+        .hero-grid {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-image:
+                linear-gradient(rgba(108, 92, 231, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(108, 92, 231, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            pointer-events: none;
+        }
+        .hero-content { position: relative; z-index: 1; max-width: 800px; }
+        .hero-logo {
+            width: 140px;
+            height: 140px;
+            margin-bottom: 2rem;
+            filter: drop-shadow(0 0 40px rgba(108, 92, 231, 0.4));
+            animation: float 4s ease-in-out infinite;
+        }
+        @keyframes float {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(-12px); }
+        }
+        .hero h1 {
+            font-size: 3.5rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin-bottom: 0.5rem;
+            background: var(--gradient-accent);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero h1 span {
+            -webkit-text-fill-color: var(--text-primary);
+        }
+        .hero-sub {
+            font-size: 1.25rem;
+            color: var(--text-secondary);
+            margin-bottom: 2rem;
+            max-width: 600px;
+            margin-left: auto;
+            margin-right: auto;
+        }
+        .hero-tags {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            gap: 0.5rem;
+            margin-bottom: 2.5rem;
+        }
+        .hero-tag {
+            background: rgba(108, 92, 231, 0.1);
+            border: 1px solid rgba(108, 92, 231, 0.2);
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            color: var(--accent-glow);
+            font-family: var(--font-mono);
+        }
+        .hero-buttons { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 12px 28px;
+            border-radius: 10px;
+            font-weight: 600;
+            font-size: 0.95rem;
+            text-decoration: none;
+            transition: all 0.3s;
+            cursor: pointer;
+            border: none;
+        }
+        .btn-primary {
+            background: var(--gradient-accent);
+            color: white;
+            box-shadow: 0 4px 20px rgba(108, 92, 231, 0.3);
+        }
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 8px 30px rgba(108, 92, 231, 0.5);
+        }
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+        }
+        .btn-outline:hover {
+            border-color: var(--accent);
+            background: rgba(108, 92, 231, 0.05);
+        }
+
+        /* ── Section Base ────────────────────────────────────── */
+        section { padding: 6rem 2rem; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .section-header { text-align: center; margin-bottom: 4rem; }
+        .section-label {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 0.15em;
+            margin-bottom: 0.5rem;
+        }
+        .section-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 1rem;
+        }
+        .section-desc {
+            color: var(--text-secondary);
+            font-size: 1.1rem;
+            max-width: 600px;
+            margin: 0 auto;
+        }
+
+        /* ── Features Grid ───────────────────────────────────── */
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 1.5rem;
+        }
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 2rem;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+        .feature-card::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 2px;
+            background: var(--gradient-accent);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .feature-card:hover {
+            border-color: var(--accent);
+            background: var(--bg-card-hover);
+            transform: translateY(-4px);
+        }
+        .feature-card:hover::before { opacity: 1; }
+        .feature-icon {
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            display: inline-block;
+        }
+        .feature-card h3 {
+            font-size: 1.2rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+        }
+        .feature-card p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+            line-height: 1.7;
+        }
+        .feature-badge {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-family: var(--font-mono);
+            padding: 2px 8px;
+            border-radius: 4px;
+            margin-left: 0.5rem;
+            vertical-align: middle;
+        }
+        .badge-new { background: rgba(46, 213, 115, 0.15); color: var(--success); }
+        .badge-v2 { background: rgba(108, 92, 231, 0.15); color: var(--accent-glow); }
+
+        /* ── Extensions Table ────────────────────────────────── */
+        .ext-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.9rem;
+        }
+        .ext-table th {
+            text-align: left;
+            padding: 12px 16px;
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            border-bottom: 1px solid var(--border);
+        }
+        .ext-table td {
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(42, 42, 64, 0.5);
+        }
+        .ext-table tr:hover td { background: rgba(108, 92, 231, 0.03); }
+        .ext-name { font-weight: 600; color: var(--accent-glow); }
+        .ext-version {
+            font-family: var(--font-mono);
+            font-size: 0.8rem;
+            background: var(--bg-card);
+            padding: 2px 8px;
+            border-radius: 4px;
+            color: var(--text-secondary);
+        }
+
+        /* ── Engines Section ─────────────────────────────────── */
+        .engines-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+        }
+        .engine-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            text-align: center;
+            transition: all 0.3s;
+        }
+        .engine-card:hover {
+            border-color: var(--accent-secondary);
+            transform: translateY(-2px);
+        }
+        .engine-card h4 {
+            font-family: var(--font-mono);
+            font-size: 1rem;
+            margin-bottom: 0.3rem;
+            color: var(--accent-secondary);
+        }
+        .engine-card p { color: var(--text-secondary); font-size: 0.85rem; }
+
+        /* ── Threat Score Demo ───────────────────────────────── */
+        .threat-demo {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 2rem;
+            max-width: 700px;
+            margin: 2rem auto 0;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+        }
+        .threat-header {
+            color: var(--accent-glow);
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+        .threat-bar-container {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            margin: 1rem 0;
+        }
+        .threat-bar {
+            flex: 1;
+            height: 24px;
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            overflow: hidden;
+            position: relative;
+        }
+        .threat-fill {
+            height: 100%;
+            border-radius: 12px;
+            background: linear-gradient(90deg, var(--success), var(--warning), var(--danger));
+            transition: width 1.5s ease;
+            width: 0;
+        }
+        .threat-score {
+            font-size: 1.5rem;
+            font-weight: 700;
+            min-width: 80px;
+            text-align: right;
+        }
+        .threat-categories {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 0.5rem;
+            margin-top: 1rem;
+        }
+        .threat-cat {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 8px;
+            border-radius: 4px;
+            background: rgba(255, 255, 255, 0.02);
+        }
+        .threat-cat-name { color: var(--text-secondary); }
+        .threat-cat-count { font-weight: 600; }
+        .cat-critical { color: var(--danger); }
+        .cat-high { color: var(--warning); }
+        .cat-medium { color: var(--info); }
+
+        /* ── Code Block ──────────────────────────────────────── */
+        .code-block {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            overflow-x: auto;
+            max-width: 700px;
+            margin: 2rem auto 0;
+            line-height: 1.8;
+        }
+        .code-comment { color: var(--text-muted); }
+        .code-string { color: var(--success); }
+        .code-keyword { color: var(--accent-glow); }
+        .code-cmd { color: var(--accent-secondary); }
+
+        /* ── Install Section ─────────────────────────────────── */
+        .install-steps {
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        .install-step {
+            display: flex;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        .step-num {
+            flex-shrink: 0;
+            width: 40px;
+            height: 40px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--gradient-accent);
+            border-radius: 50%;
+            font-weight: 700;
+            font-size: 0.9rem;
+        }
+        .step-content h4 { margin-bottom: 0.3rem; }
+        .step-content p { color: var(--text-secondary); font-size: 0.9rem; }
+        .step-code {
+            margin-top: 0.5rem;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px 16px;
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--accent-secondary);
+        }
+
+        /* ── Footer ──────────────────────────────────────────── */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 3rem 2rem;
+            text-align: center;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+        footer a { color: var(--accent-glow); text-decoration: none; }
+        footer a:hover { text-decoration: underline; }
+        .footer-links { display: flex; justify-content: center; gap: 2rem; margin-bottom: 1rem; }
+
+        /* ── Responsive ──────────────────────────────────────── */
+        @media (max-width: 768px) {
+            .hero h1 { font-size: 2.2rem; }
+            .hero-sub { font-size: 1rem; }
+            .nav-links { display: none; }
+            .section-title { font-size: 1.8rem; }
+            .features-grid { grid-template-columns: 1fr; }
+            .threat-categories { grid-template-columns: 1fr; }
+        }
+
+        /* ── Animations ──────────────────────────────────────── */
+        .fade-in {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+        .fade-in.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+
+    <!-- Navigation -->
+    <nav>
+        <div class="nav-inner">
+            <a href="#" class="nav-logo">
+                <img src="BatHexCore.png" alt="HexCore">
+                HexCore
+            </a>
+            <ul class="nav-links">
+                <li><a href="#features">Features</a></li>
+                <li><a href="#yara">YARA</a></li>
+                <li><a href="#extensions">Extensions</a></li>
+                <li><a href="#engines">Engines</a></li>
+                <li><a href="#install">Install</a></li>
+            </ul>
+            <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore" class="nav-github" target="_blank" rel="noopener">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                GitHub
+            </a>
+        </div>
+    </nav>
+
+    <!-- Hero -->
+    <section class="hero">
+        <div class="hero-grid"></div>
+        <div class="hero-content">
+            <img src="BatHexCore.png" alt="HexCore Logo" class="hero-logo">
+            <h1><span>Hikari</span>System HexCore</h1>
+            <p class="hero-sub">A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code.</p>
+            <div class="hero-tags">
+                <span class="hero-tag">binary analysis</span>
+                <span class="hero-tag">reverse engineering</span>
+                <span class="hero-tag">malware analysis</span>
+                <span class="hero-tag">CPU emulation</span>
+                <span class="hero-tag">PE / ELF</span>
+                <span class="hero-tag">CTF tools</span>
+                <span class="hero-tag">YARA</span>
+                <span class="hero-tag">threat scoring</span>
+            </div>
+            <div class="hero-buttons">
+                <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore" class="btn btn-primary" target="_blank" rel="noopener">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                    View on GitHub
+                </a>
+                <a href="#install" class="btn btn-outline">Get Started</a>
+            </div>
+        </div>
+    </section>
+
+    <!-- Features -->
+    <section id="features">
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// capabilities</p>
+                <h2 class="section-title">Built for Security Researchers</h2>
+                <p class="section-desc">Everything you need for binary analysis in one unified environment.</p>
+            </div>
+            <div class="features-grid">
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F50D;</span>
+                    <h3>Disassembly</h3>
+                    <p>Native multi-arch disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V) with function detection, string cross-references, and IDA-style graph view.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F3AE;</span>
+                    <h3>CPU Emulation</h3>
+                    <p>Full PE and ELF emulation via Unicorn Engine. 65+ API hooks (Windows + Linux), stdin emulation, TLS support, and syscall handling.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F6E1;</span>
+                    <h3>YARA Scanner <span class="feature-badge badge-v2">v2.0</span></h3>
+                    <p>Real YARA rule parsing with DefenderYara integration. 76,000+ Microsoft Defender signatures, threat scoring, and on-demand category loading.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F527;</span>
+                    <h3>Assembly Patching</h3>
+                    <p>Inline binary patching with LLVM MC backend. NOP sleds, instruction replacement, multi-architecture support.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F4CA;</span>
+                    <h3>Entropy Analysis</h3>
+                    <p>Block-by-block entropy visualization for packed and encrypted region detection. Identifies packers, cryptors, and obfuscated sections.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x2699;</span>
+                    <h3>Automation Pipeline</h3>
+                    <p>Headless batch analysis via JSON job files. Auto-trigger, per-step timeout, extension preflight, and structured output reports.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F4BE;</span>
+                    <h3>Hex Viewer</h3>
+                    <p>Professional binary viewer with virtual scrolling, data inspector, bookmarks, structure templates, and hex pattern search.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F9EE;</span>
+                    <h3>Constant Decoder <span class="feature-badge badge-new">NEW</span></h3>
+                    <p>Hover any immediate value in disassembly to see Hex, Unsigned, Signed32/64, Binary, ASCII, and Float32 representations.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F50F;</span>
+                    <h3>Hash + VirusTotal</h3>
+                    <p>MD5, SHA-1, SHA-256, SHA-512 with one-click VirusTotal lookup. String extraction with auto-categorization and cross-references.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- YARA / Threat Scoring -->
+    <section id="yara" style="background: var(--bg-secondary);">
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// threat intelligence</p>
+                <h2 class="section-title">YARA v2.0 + DefenderYara</h2>
+                <p class="section-desc">Scan binaries against 76,000+ Microsoft Defender signatures with real-time threat scoring.</p>
+            </div>
+
+            <div class="threat-demo fade-in">
+                <div class="threat-header">HEXCORE THREAT REPORT</div>
+                <div style="color: var(--text-secondary); margin-bottom: 0.5rem;">sample.exe &mdash; 245.3 KB &mdash; scanned in 127ms</div>
+                <div class="threat-bar-container">
+                    <span style="color: var(--text-muted);">Score</span>
+                    <div class="threat-bar">
+                        <div class="threat-fill" id="threat-fill"></div>
+                    </div>
+                    <span class="threat-score cat-critical" id="threat-score">0</span>
+                </div>
+                <div class="threat-categories">
+                    <div class="threat-cat">
+                        <span class="threat-cat-name">Trojan</span>
+                        <span class="threat-cat-count cat-critical">3</span>
+                    </div>
+                    <div class="threat-cat">
+                        <span class="threat-cat-name">Backdoor</span>
+                        <span class="threat-cat-count cat-critical">2</span>
+                    </div>
+                    <div class="threat-cat">
+                        <span class="threat-cat-name">HackTool</span>
+                        <span class="threat-cat-count cat-high">1</span>
+                    </div>
+                    <div class="threat-cat">
+                        <span class="threat-cat-name">Behavior</span>
+                        <span class="threat-cat-count cat-medium">4</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Extensions Table -->
+    <section id="extensions">
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// modules</p>
+                <h2 class="section-title">Extension Ecosystem</h2>
+                <p class="section-desc">14 purpose-built extensions for complete binary analysis.</p>
+            </div>
+            <div class="fade-in" style="overflow-x:auto;">
+                <table class="ext-table">
+                    <thead>
+                        <tr>
+                            <th>Extension</th>
+                            <th>Version</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td class="ext-name">Debugger</td><td><span class="ext-version">2.1.0</span></td><td>PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation</td></tr>
+                        <tr><td class="ext-name">Disassembler</td><td><span class="ext-version">1.2.0</span></td><td>Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs</td></tr>
+                        <tr><td class="ext-name">YARA Scanner</td><td><span class="ext-version">2.0.0</span></td><td>DefenderYara integration, threat scoring, 76k+ rules, on-demand loading</td></tr>
+                        <tr><td class="ext-name">Hex Viewer</td><td><span class="ext-version">1.2.0</span></td><td>Professional binary file viewer with virtual scrolling</td></tr>
+                        <tr><td class="ext-name">PE Analyzer</td><td><span class="ext-version">1.1.0</span></td><td>Comprehensive PE executable analysis with headless mode</td></tr>
+                        <tr><td class="ext-name">Strings Extractor</td><td><span class="ext-version">1.1.0</span></td><td>Memory-efficient string extraction with cross-references</td></tr>
+                        <tr><td class="ext-name">Hash Calculator</td><td><span class="ext-version">1.1.0</span></td><td>Fast file hashing with VirusTotal integration</td></tr>
+                        <tr><td class="ext-name">Entropy Analyzer</td><td><span class="ext-version">1.0.0</span></td><td>Visual entropy analysis for packed/encrypted regions</td></tr>
+                        <tr><td class="ext-name">File Type Detector</td><td><span class="ext-version">1.0.0</span></td><td>Magic bytes signature detection</td></tr>
+                        <tr><td class="ext-name">Base64 Decoder</td><td><span class="ext-version">1.0.0</span></td><td>Detect and decode Base64 strings</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+
+    <!-- Engines -->
+    <section id="engines" style="background: var(--bg-secondary);">
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// native engines</p>
+                <h2 class="section-title">N-API Powered</h2>
+                <p class="section-desc">Native C/C++ engines compiled as Node.js addons. No external installs required.</p>
+            </div>
+            <div class="engines-grid fade-in">
+                <div class="engine-card">
+                    <h4>hexcore-capstone</h4>
+                    <p>Capstone v5 disassembly engine. Async mode, detail output, all architectures.</p>
+                </div>
+                <div class="engine-card">
+                    <h4>hexcore-unicorn</h4>
+                    <p>Unicorn CPU emulator. Hooks, context save/restore, multi-architecture.</p>
+                </div>
+                <div class="engine-card">
+                    <h4>hexcore-llvm-mc</h4>
+                    <p>LLVM 18.1.8 MC assembler. Multi-arch assembly and binary patching.</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Pipeline -->
+    <section>
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// automation</p>
+                <h2 class="section-title">Headless Pipeline</h2>
+                <p class="section-desc">Batch binary analysis with JSON job files. Perfect for CI/CD integration.</p>
+            </div>
+            <div class="code-block fade-in">
+<span class="code-comment">// .hexcore_job.json</span>
+{
+  <span class="code-keyword">"file"</span>: <span class="code-string">"C:\\samples\\malware.exe"</span>,
+  <span class="code-keyword">"outDir"</span>: <span class="code-string">"C:\\reports\\malware"</span>,
+  <span class="code-keyword">"steps"</span>: [
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.filetype.detect"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.peanalyzer.analyze"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.hashcalc.calculate"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.yara.quickScan"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.entropy.analyze"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.disasm.analyzeAll"</span> }
+  ]
+}
+            </div>
+        </div>
+    </section>
+
+    <!-- Install -->
+    <section id="install" style="background: var(--bg-secondary);">
+        <div class="container">
+            <div class="section-header fade-in">
+                <p class="section-label">// getting started</p>
+                <h2 class="section-title">Installation</h2>
+            </div>
+            <div class="install-steps fade-in">
+                <div class="install-step">
+                    <div class="step-num">1</div>
+                    <div class="step-content">
+                        <h4>Clone the repository</h4>
+                        <div class="step-code">git clone https://github.com/LXrdKnowkill/HikariSystem-HexCore.git</div>
+                    </div>
+                </div>
+                <div class="install-step">
+                    <div class="step-num">2</div>
+                    <div class="step-content">
+                        <h4>Install dependencies</h4>
+                        <div class="step-code">cd HikariSystem-HexCore && npm install</div>
+                    </div>
+                </div>
+                <div class="install-step">
+                    <div class="step-num">3</div>
+                    <div class="step-content">
+                        <h4>Launch HexCore</h4>
+                        <div class="step-code">$env:VSCODE_SKIP_NODE_VERSION_CHECK="1"; .\scripts\code.bat</div>
+                    </div>
+                </div>
+                <div class="install-step">
+                    <div class="step-num">4</div>
+                    <div class="step-content">
+                        <h4>Open a binary and start analyzing</h4>
+                        <p>Right-click any PE/ELF file to disassemble, emulate, or scan with YARA.</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-links">
+            <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore">GitHub</a>
+            <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore/issues">Issues</a>
+            <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore/blob/main/LICENSE.txt">License</a>
+        </div>
+        <p><strong>HikariSystem</strong> &mdash; Security Tools for Professionals</p>
+        <p style="margin-top: 0.5rem;">MIT License &copy; 2025</p>
+    </footer>
+
+    <!-- Scripts -->
+    <script>
+        // Intersection Observer for fade-in animations
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                }
+            });
+        }, { threshold: 0.1, rootMargin: '0px 0px -50px 0px' });
+
+        document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+        // Threat score animation
+        function animateThreatScore() {
+            const fill = document.getElementById('threat-fill');
+            const score = document.getElementById('threat-score');
+            const target = 87;
+            let current = 0;
+
+            const interval = setInterval(() => {
+                current += 1;
+                if (current > target) {
+                    clearInterval(interval);
+                    return;
+                }
+                score.textContent = current + '/100';
+                fill.style.width = current + '%';
+            }, 20);
+        }
+
+        // Trigger score animation when section is visible
+        const yaraObserver = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    animateThreatScore();
+                    yaraObserver.unobserve(entry.target);
+                }
+            });
+        }, { threshold: 0.3 });
+
+        yaraObserver.observe(document.getElementById('yara'));
+    </script>
+</body>
+</html>
