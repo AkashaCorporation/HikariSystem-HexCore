@@ -18,6 +18,7 @@
 		"onView:hexcore.disassembler.graphView",
 		"onCommand:hexcore.disasm.analyzeAll",
 		"onCommand:hexcore.pipeline.runJob",
+		"onCommand:hexcore.pipeline.listCapabilities",
 		"workspaceContains:.hexcore_job.json"
 	],
 	"extensionDependencies": [],
@@ -170,6 +171,12 @@
 				"title": "Run HexCore Automation Job",
 				"category": "HexCore Automation",
 				"icon": "$(play)"
+			},
+			{
+				"command": "hexcore.pipeline.listCapabilities",
+				"title": "List Pipeline Command Capabilities",
+				"category": "HexCore Automation",
+				"icon": "$(list-unordered)"
 			}
 		],
 		"menus": {

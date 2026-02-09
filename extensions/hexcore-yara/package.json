@@ -1,8 +1,8 @@
 {
 	"name": "hexcore-yara",
 	"displayName": "HexCore YARA Scanner",
-	"description": "YARA rule scanner for malware detection and classification",
-	"version": "1.0.0",
+	"description": "YARA rule scanner with DefenderYara integration for malware detection and threat scoring",
+	"version": "2.0.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -17,11 +17,16 @@
 		"malware",
 		"scanner",
 		"detection",
-		"signatures"
+		"signatures",
+		"defender",
+		"threat-intelligence",
+		"reverse-engineering"
 	],
 	"activationEvents": [
 		"onCommand:hexcore.yara.scan",
-		"onCommand:hexcore.yara.updateRules"
+		"onCommand:hexcore.yara.quickScan",
+		"onCommand:hexcore.yara.updateRules",
+		"onCommand:hexcore.yara.loadDefender"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
@@ -33,19 +38,43 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.yara.quickScan",
+				"title": "YARA: Quick Threat Scan",
+				"category": "HexCore YARA",
+				"icon": "$(zap)"
+			},
+			{
 				"command": "hexcore.yara.scanWorkspace",
 				"title": "YARA: Scan Workspace",
 				"category": "HexCore YARA"
 			},
 			{
+				"command": "hexcore.yara.loadDefender",
+				"title": "YARA: Load DefenderYara Rules",
+				"category": "HexCore YARA",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "hexcore.yara.loadCategory",
+				"title": "YARA: Load Category",
+				"category": "HexCore YARA",
+				"icon": "$(folder-library)"
+			},
+			{
 				"command": "hexcore.yara.updateRules",
-				"title": "YARA: Update Rules",
+				"title": "YARA: Reload Rules",
 				"category": "HexCore YARA"
 			},
 			{
 				"command": "hexcore.yara.createRule",
 				"title": "YARA: Create Rule from Selection",
 				"category": "HexCore YARA"
+			},
+			{
+				"command": "hexcore.yara.threatReport",
+				"title": "YARA: Show Threat Report",
+				"category": "HexCore YARA",
+				"icon": "$(graph)"
 			}
 		],
 		"menus": {
@@ -53,6 +82,22 @@
 				{
 					"command": "hexcore.yara.scan",
 					"group": "hexcore@3"
+				},
+				{
+					"command": "hexcore.yara.quickScan",
+					"group": "hexcore@4"
+				}
+			],
+			"view/title": [
+				{
+					"command": "hexcore.yara.loadCategory",
+					"when": "view == hexcore.yara.rules",
+					"group": "navigation"
+				},
+				{
+					"command": "hexcore.yara.threatReport",
+					"when": "view == hexcore.yara.results",
+					"group": "navigation"
 				}
 			]
 		},
@@ -60,7 +105,7 @@
 			"activitybar": [
 				{
 					"id": "hexcore-yara",
-					"title": "YARA",
+					"title": "YARA Scanner",
 					"icon": "$(shield)"
 				}
 			]
@@ -85,12 +130,22 @@
 				"hexcore.yara.rulesPath": {
 					"type": "string",
 					"default": "",
-					"description": "Path to YARA rules directory"
+					"description": "Path to custom YARA rules directory"
+				},
+				"hexcore.yara.defenderYaraPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to DefenderYara rules directory (e.g., C:\\DefenderYara-main)"
 				},
 				"hexcore.yara.autoUpdate": {
 					"type": "boolean",
 					"default": true,
-					"description": "Auto-update rules on startup"
+					"description": "Auto-reload rules on startup"
+				},
+				"hexcore.yara.maxFileSize": {
+					"type": "number",
+					"default": 52428800,
+					"description": "Maximum file size to scan in bytes (default: 50MB)"
 				}
 			}
 		}

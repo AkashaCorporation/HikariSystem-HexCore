@@ -31,3 +31,22 @@ extensions/hexcore-capstone/build/
 extensions/hexcore-capstone/prebuilds/
 extensions/hexcore-capstone/*.log
 extensions/hexcore-capstone/*.txt
+
+# HexCore Keystone (legacy, superseded by LLVM MC)
+extensions/hexcore-keystone/
+
+# HexCore Unicorn build artifacts
+extensions/hexcore-unicorn/deps/
+extensions/hexcore-unicorn/build/
+extensions/hexcore-unicorn/prebuilds/
+
+# HexCore LLVM MC build artifacts
+extensions/hexcore-llvm-mc/deps/
+extensions/hexcore-llvm-mc/build/
+extensions/hexcore-llvm-mc/prebuilds/
+
+# HexCore automation job files (generated per-workspace)
+*.hexcore_job.json
+
+# Wiki (managed separately by GitHub)
+wiki/

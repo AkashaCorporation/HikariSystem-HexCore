@@ -70,3 +70,20 @@ Each step supports optional controls:
 - `timeoutMs`: override per-step timeout.
 - `expectOutput`: force output existence validation on/off.
 - `continueOnError`: continue remaining steps after a failure.
+
+For `hexcore.disasm.analyzeAll`, you can pass safe limits through `args`:
+
+```json
+{
+	"cmd": "hexcore.disasm.analyzeAll",
+	"args": {
+		"maxFunctions": 2500,
+		"maxFunctionSize": 65536,
+		"forceReload": true
+	}
+}
+```
+
+- `maxFunctions`: max number of discovered functions for the run.
+- `maxFunctionSize`: max bytes per function analysis.
+- `forceReload`: force reloading target binary before analysis (recommended for deterministic headless runs).

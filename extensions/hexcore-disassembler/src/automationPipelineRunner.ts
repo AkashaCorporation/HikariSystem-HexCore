@@ -122,6 +122,38 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']]
 ]);
 
+export interface PipelineCapabilityEntry {
+	command: string;
+	aliases: string[];
+	headless: boolean;
+	defaultTimeoutMs: number;
+	validateOutput: boolean;
+	reason?: string;
+	requiredExtension: string[];
+}
+
+export function listCapabilities(): PipelineCapabilityEntry[] {
+	const entries: PipelineCapabilityEntry[] = [];
+	for (const [cmd, cap] of COMMAND_CAPABILITIES.entries()) {
+		const aliases: string[] = [];
+		for (const [alias, target] of COMMAND_ALIASES.entries()) {
+			if (target === cmd) {
+				aliases.push(alias);
+			}
+		}
+		entries.push({
+			command: cmd,
+			aliases,
+			headless: cap.headless,
+			defaultTimeoutMs: cap.defaultTimeoutMs,
+			validateOutput: cap.validateOutput,
+			reason: cap.reason,
+			requiredExtension: [...(COMMAND_OWNERS.get(cmd) ?? [])]
+		});
+	}
+	return entries;
+}
+
 export class AutomationPipelineRunner {
 	public async runJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineRunStatus> {
 		const absoluteJobPath = path.resolve(jobFilePath);
@@ -152,7 +184,19 @@ export class AutomationPipelineRunner {
 		};
 
 		writeJson(statusPath, status);
-		appendLog(logPath, `Job started for file: ${job.file}`);
+
+		// Workspace-Aware Pipeline Banner
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
+		appendLog(logPath, '='.repeat(60));
+		appendLog(logPath, `HexCore Pipeline Runner`);
+		appendLog(logPath, `Workspace: ${workspaceRoot}`);
+		appendLog(logPath, `Job file:  ${jobFilePath}`);
+		appendLog(logPath, `Target:    ${job.file}`);
+		appendLog(logPath, `Output:    ${job.outDir}`);
+		appendLog(logPath, `Steps:     ${job.steps.length}`);
+		appendLog(logPath, `Started:   ${status.startedAt}`);
+		appendLog(logPath, '='.repeat(60));
+
 		let failed = false;
 
 		for (let index = 0; index < job.steps.length; index++) {

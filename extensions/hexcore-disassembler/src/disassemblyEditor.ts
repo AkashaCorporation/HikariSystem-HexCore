@@ -538,6 +538,119 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			background: var(--border-color);
 			margin: 4px 0;
 		}
+
+		/* Constant Decoder Tooltip */
+		.hexcore-tooltip {
+			position: fixed;
+			background: #1a1a2e;
+			border: 1px solid #4a4a6a;
+			border-radius: 6px;
+			padding: 0;
+			min-width: 280px;
+			max-width: 380px;
+			box-shadow: 0 8px 32px rgba(0,0,0,0.7);
+			z-index: 2000;
+			pointer-events: auto;
+			opacity: 0;
+			transform: translateY(4px);
+			transition: opacity 0.15s ease, transform 0.15s ease;
+			font-size: 12px;
+		}
+
+		.hexcore-tooltip.visible {
+			opacity: 1;
+			transform: translateY(0);
+		}
+
+		.hexcore-tooltip-header {
+			padding: 8px 12px;
+			background: #16213e;
+			border-bottom: 1px solid #4a4a6a;
+			border-radius: 6px 6px 0 0;
+			font-weight: 600;
+			color: var(--number-color);
+			font-size: 13px;
+			display: flex;
+			align-items: center;
+			gap: 8px;
+		}
+
+		.hexcore-tooltip-header::before {
+			content: '#';
+			color: var(--text-muted);
+			font-size: 11px;
+		}
+
+		.hexcore-tooltip-body {
+			padding: 6px 0;
+		}
+
+		.hexcore-tooltip-row {
+			display: flex;
+			align-items: center;
+			padding: 3px 12px;
+			gap: 8px;
+			transition: background 0.1s;
+		}
+
+		.hexcore-tooltip-row:hover {
+			background: rgba(255,255,255,0.04);
+		}
+
+		.hexcore-tooltip-label {
+			min-width: 68px;
+			color: var(--text-muted);
+			font-size: 11px;
+			text-transform: uppercase;
+			flex-shrink: 0;
+		}
+
+		.hexcore-tooltip-value {
+			flex: 1;
+			color: var(--text-primary);
+			font-family: 'Consolas', 'Monaco', monospace;
+			word-break: break-all;
+			user-select: all;
+		}
+
+		.hexcore-tooltip-copy {
+			width: 20px;
+			height: 20px;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			cursor: pointer;
+			color: var(--text-muted);
+			border-radius: 3px;
+			flex-shrink: 0;
+			font-size: 11px;
+			transition: color 0.15s, background 0.15s;
+		}
+
+		.hexcore-tooltip-copy:hover {
+			color: var(--text-primary);
+			background: rgba(255,255,255,0.1);
+		}
+
+		.hexcore-tooltip-copy.copied {
+			color: #4ec9b0;
+		}
+
+		.hexcore-tooltip-separator {
+			height: 1px;
+			background: #4a4a6a;
+			margin: 4px 12px;
+			opacity: 0.5;
+		}
+
+		.inst-operands .number[data-value] {
+			cursor: default;
+			border-bottom: 1px dotted rgba(181, 206, 168, 0.3);
+		}
+
+		.inst-operands .number[data-value]:hover {
+			border-bottom-color: var(--number-color);
+		}
 	</style>
 </head>
 <body>
@@ -667,24 +780,32 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			if (!opStr) return '';
 			let result = escapeHtml(opStr);
 
-			// Registers
-			result = result.replace(/\\b(r[a-z]x|e[a-z]x|[a-z]x|r[0-9]+|[re]?[sb]p|[re]?[sd]i|[re]?ip|xmm[0-9]+|ymm[0-9]+)\\b/gi,
-				'<span class="register">$1</span>');
-
-			// Hex numbers
-			result = result.replace(/\\b(0x[0-9a-fA-F]+|[0-9a-fA-F]+h)\\b/g,
-				'<span class="number">$1</span>');
-
-			// Decimal numbers
-			result = result.replace(/\\b([0-9]+)\\b/g,
-				'<span class="number">$1</span>');
-
-			// Target addresses
+			// 1. Target addresses FIRST (replace with placeholder to protect from other regexes)
 			if (targetAddress && targetAddress > 0) {
 				const addrHex = '0x' + targetAddress.toString(16).toUpperCase();
 				result = result.replace(new RegExp(addrHex, 'gi'),
-					\`<span class="address" onclick="jumpToAddress(\${targetAddress})">\${addrHex}</span>\`);
+					'\\x02ADDR:' + targetAddress + ':' + addrHex + '\\x02');
 			}
+
+			// 2. Registers
+			result = result.replace(/\\b(r[a-z]x|e[a-z]x|[a-z]x|r[0-9]+|[re]?[sb]p|[re]?[sd]i|[re]?ip|xmm[0-9]+|ymm[0-9]+)\\b/gi,
+				'<span class="register">$1</span>');
+
+			// 3. Hex numbers (placeholder)
+			result = result.replace(/\\b(0x[0-9a-fA-F]+|[0-9a-fA-F]+h)\\b/g,
+				(match) => '\\x01NUM:' + match + '\\x01');
+
+			// 4. Decimal numbers - skip anything already in a placeholder or tag
+			result = result.replace(/(?<![x"=>a-fA-F\\x01\\x02:])\\b([0-9]+)\\b(?![0-9a-fA-F]*[">;\\x01\\x02])/g,
+				(match) => '\\x01NUM:' + match + '\\x01');
+
+			// 5. Replace number placeholders with spans
+			result = result.replace(/\\x01NUM:([^\\x01]+)\\x01/g,
+				(_, val) => '<span class="number" data-value="' + val + '">' + val + '</span>');
+
+			// 6. Replace address placeholders with clickable spans
+			result = result.replace(/\\x02ADDR:([^:]+):([^\\x02]+)\\x02/g,
+				(_, addr, hex) => '<span class="address" onclick="jumpToAddress(' + addr + ')">' + hex + '</span>');
 
 			return result;
 		}
@@ -765,6 +886,202 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 						navigator.clipboard.writeText(bytes);
 					}
 					break;
+			}
+		});
+
+		// === Constant Decoder Tooltip ===
+		let tooltipEl = null;
+		let tooltipHideTimer = null;
+
+		function parseImmediate(str) {
+			if (!str) return null;
+			str = str.trim();
+			try {
+				if (str.toLowerCase().endsWith('h')) {
+					// NASM-style hex: 0FFh
+					return BigInt('0x' + str.slice(0, -1));
+				} else if (str.toLowerCase().startsWith('0x')) {
+					return BigInt(str);
+				} else {
+					const n = BigInt(str);
+					return n;
+				}
+			} catch (e) {
+				return null;
+			}
+		}
+
+		function computeRepresentations(value) {
+			const reps = [];
+			const absVal = value < 0n ? -value : value;
+
+			// Hex
+			const hexStr = '0x' + (value < 0n
+				? (0xFFFFFFFFFFFFFFFFn + value + 1n).toString(16).toUpperCase()
+				: value.toString(16).toUpperCase());
+			reps.push({ label: 'Hex', value: hexStr });
+
+			// Unsigned decimal
+			const unsigned = value < 0n ? (0xFFFFFFFFFFFFFFFFn + value + 1n) : value;
+			reps.push({ label: 'Unsigned', value: unsigned.toString() });
+
+			// Signed 32-bit (if value fits in 32 bits)
+			if (unsigned <= 0xFFFFFFFFn) {
+				const u32 = Number(unsigned & 0xFFFFFFFFn);
+				const s32 = u32 > 0x7FFFFFFF ? u32 - 0x100000000 : u32;
+				reps.push({ label: 'Signed32', value: s32.toString() });
+			}
+
+			// Signed 64-bit (if value is larger than 32 bits)
+			if (unsigned > 0xFFFFFFFFn) {
+				const s64 = unsigned > 0x7FFFFFFFFFFFFFFFn
+					? -(0xFFFFFFFFFFFFFFFFn - unsigned + 1n)
+					: unsigned;
+				reps.push({ label: 'Signed64', value: s64.toString() });
+			}
+
+			// Binary (grouped by 8 bits)
+			let binStr = unsigned.toString(2);
+			// Pad to nearest 8 bits
+			const padLen = Math.ceil(binStr.length / 8) * 8;
+			binStr = binStr.padStart(padLen, '0');
+			const binGrouped = binStr.match(/.{1,8}/g).join(' ');
+			reps.push({ label: 'Binary', value: binGrouped });
+
+			// ASCII (decode bytes, show printable chars)
+			if (unsigned <= 0xFFFFFFFFFFFFFFFFn) {
+				let hexForAscii = unsigned.toString(16);
+				if (hexForAscii.length % 2 !== 0) hexForAscii = '0' + hexForAscii;
+				const bytes = [];
+				for (let i = 0; i < hexForAscii.length; i += 2) {
+					bytes.push(parseInt(hexForAscii.substr(i, 2), 16));
+				}
+				// Show as little-endian (most common in x86)
+				const asciiLE = bytes.reverse().map(b =>
+					(b >= 0x20 && b <= 0x7E) ? String.fromCharCode(b) : '.'
+				).join('');
+				if (asciiLE.length > 0 && asciiLE.length <= 8) {
+					reps.push({ label: 'ASCII', value: '"' + asciiLE + '"' });
+				}
+			}
+
+			// Float32 (IEEE 754, only for 32-bit values)
+			if (unsigned <= 0xFFFFFFFFn) {
+				const buf = new ArrayBuffer(4);
+				new DataView(buf).setUint32(0, Number(unsigned), false);
+				const f32 = new DataView(buf).getFloat32(0, false);
+				if (isFinite(f32) && f32 !== 0 && Math.abs(f32) > 1e-30 && Math.abs(f32) < 1e30) {
+					reps.push({ label: 'Float32', value: f32.toPrecision(6) });
+				}
+			}
+
+			return reps;
+		}
+
+		function createTooltipElement() {
+			const el = document.createElement('div');
+			el.className = 'hexcore-tooltip';
+			el.addEventListener('mouseenter', () => {
+				if (tooltipHideTimer) {
+					clearTimeout(tooltipHideTimer);
+					tooltipHideTimer = null;
+				}
+			});
+			el.addEventListener('mouseleave', () => {
+				hideConstantTooltip();
+			});
+			document.body.appendChild(el);
+			return el;
+		}
+
+		function showConstantTooltip(targetEl, x, y) {
+			const rawValue = targetEl.getAttribute('data-value');
+			const parsed = parseImmediate(rawValue);
+			if (parsed === null) return;
+
+			if (tooltipHideTimer) {
+				clearTimeout(tooltipHideTimer);
+				tooltipHideTimer = null;
+			}
+
+			if (!tooltipEl) {
+				tooltipEl = createTooltipElement();
+			}
+
+			const reps = computeRepresentations(parsed);
+
+			tooltipEl.innerHTML = '<div class="hexcore-tooltip-header">' + escapeHtml(rawValue) + '</div>'
+				+ '<div class="hexcore-tooltip-body">'
+				+ reps.map(r =>
+					'<div class="hexcore-tooltip-row">'
+					+ '<span class="hexcore-tooltip-label">' + r.label + '</span>'
+					+ '<span class="hexcore-tooltip-value">' + escapeHtml(r.value) + '</span>'
+					+ '<span class="hexcore-tooltip-copy" data-copy="' + escapeHtml(r.value) + '" title="Copy">\\u2398</span>'
+					+ '</div>'
+				).join('')
+				+ '</div>';
+
+			// Position tooltip
+			const vw = window.innerWidth;
+			const vh = window.innerHeight;
+			let posX = x + 12;
+			let posY = y + 16;
+
+			// Measure tooltip size
+			tooltipEl.style.left = '-9999px';
+			tooltipEl.style.top = '-9999px';
+			tooltipEl.classList.add('visible');
+			const tw = tooltipEl.offsetWidth;
+			const th = tooltipEl.offsetHeight;
+
+			// Adjust if would go off-screen
+			if (posX + tw > vw - 8) posX = x - tw - 12;
+			if (posY + th > vh - 8) posY = y - th - 8;
+			if (posX < 8) posX = 8;
+			if (posY < 8) posY = 8;
+
+			tooltipEl.style.left = posX + 'px';
+			tooltipEl.style.top = posY + 'px';
+
+			// Copy button handlers
+			tooltipEl.querySelectorAll('.hexcore-tooltip-copy').forEach(btn => {
+				btn.onclick = (e) => {
+					e.stopPropagation();
+					const val = btn.getAttribute('data-copy');
+					navigator.clipboard.writeText(val).then(() => {
+						btn.classList.add('copied');
+						btn.textContent = '\\u2713';
+						setTimeout(() => {
+							btn.classList.remove('copied');
+							btn.textContent = '\\u2398';
+						}, 1200);
+					});
+				};
+			});
+		}
+
+		function hideConstantTooltip() {
+			if (tooltipHideTimer) clearTimeout(tooltipHideTimer);
+			tooltipHideTimer = setTimeout(() => {
+				if (tooltipEl) {
+					tooltipEl.classList.remove('visible');
+				}
+				tooltipHideTimer = null;
+			}, 250);
+		}
+
+		// Hover events for constant decoder (event delegation)
+		document.addEventListener('mouseover', (e) => {
+			const numberEl = e.target.closest('.number[data-value]');
+			if (numberEl) {
+				showConstantTooltip(numberEl, e.clientX, e.clientY);
+			}
+		});
+
+		document.addEventListener('mouseout', (e) => {
+			const numberEl = e.target.closest('.number[data-value]');
+			if (numberEl) {
+				hideConstantTooltip();
 			}
 		});
 

@@ -14,7 +14,7 @@ import { ExportTreeProvider } from './exportTree';
 import { DisassemblerEngine } from './disassemblerEngine';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
-import { AutomationPipelineRunner, PipelineRunStatus } from './automationPipelineRunner';
+import { AutomationPipelineRunner, PipelineRunStatus, listCapabilities } from './automationPipelineRunner';
 
 type OutputFormat = 'json' | 'md';
 
@@ -27,6 +27,9 @@ interface AnalyzeAllCommandOptions {
 	file?: string;
 	output?: AnalyzeAllOutputOptions;
 	quiet?: boolean;
+	maxFunctions?: number;
+	maxFunctionSize?: number;
+	forceReload?: boolean;
 }
 
 interface AnalyzeAllFunctionSummary {
@@ -214,6 +217,39 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.pipeline.runJob', async (arg?: vscode.Uri | string | RunJobCommandOptions) => {
 			return runPipelineJob(arg);
+		}),
+		vscode.commands.registerCommand('hexcore.pipeline.listCapabilities', async (options?: { output?: string; quiet?: boolean }) => {
+			const capabilities = listCapabilities();
+			if (options?.output) {
+				const outputPath = path.resolve(options.output);
+				fs.writeFileSync(outputPath, JSON.stringify(capabilities, null, 2), 'utf8');
+				if (!options?.quiet) {
+					vscode.window.showInformationMessage(`Pipeline capabilities written to ${outputPath}`);
+				}
+				return capabilities;
+			}
+			// Show in output channel if no file output
+			const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
+			outputChannel.clear();
+			outputChannel.appendLine('HexCore Pipeline - Command Capabilities');
+			outputChannel.appendLine('='.repeat(50));
+			outputChannel.appendLine('');
+			for (const cap of capabilities) {
+				const status = cap.headless ? 'HEADLESS' : 'INTERACTIVE';
+				outputChannel.appendLine(`[${status}] ${cap.command}`);
+				if (cap.aliases.length > 0) {
+					outputChannel.appendLine(`  Aliases:    ${cap.aliases.join(', ')}`);
+				}
+				outputChannel.appendLine(`  Timeout:    ${cap.defaultTimeoutMs}ms`);
+				outputChannel.appendLine(`  Validates:  ${cap.validateOutput}`);
+				outputChannel.appendLine(`  Extension:  ${cap.requiredExtension.join(', ')}`);
+				if (cap.reason) {
+					outputChannel.appendLine(`  Note:       ${cap.reason}`);
+				}
+				outputChannel.appendLine('');
+			}
+			outputChannel.show();
+			return capabilities;
 		})
 	);
 
@@ -645,8 +681,10 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			const runAnalysis = async (progress?: vscode.Progress<{ message?: string }>): Promise<number> => {
+				engine.reloadConfig();
 				const currentFile = engine.getFilePath();
-				if (currentFile !== targetFilePath) {
+				const forceReload = shouldForceReloadAnalyzeAll(options);
+				if (forceReload || currentFile !== targetFilePath) {
 					progress?.report({ message: `Loading ${path.basename(targetFilePath)}...` });
 					const loaded = await engine.loadFile(targetFilePath);
 					if (!loaded) {
@@ -654,8 +692,28 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 
-				progress?.report({ message: 'Scanning for function prologs and references...' });
-				return engine.analyzeAll();
+				const defaultLimits = engine.getAnalysisLimits();
+				const requestedLimits = resolveAnalyzeAllLimits(options);
+				const overrideMaxFunctions = requestedLimits.maxFunctions ?? defaultLimits.maxFunctions;
+				const overrideMaxFunctionSize = requestedLimits.maxFunctionSize ?? defaultLimits.maxFunctionSize;
+				const hasOverride = overrideMaxFunctions !== defaultLimits.maxFunctions
+					|| overrideMaxFunctionSize !== defaultLimits.maxFunctionSize;
+
+				if (hasOverride) {
+					engine.setAnalysisLimits(overrideMaxFunctions, overrideMaxFunctionSize);
+					progress?.report({
+						message: `Applying limits (maxFunctions=${overrideMaxFunctions}, maxFunctionSize=${overrideMaxFunctionSize})...`
+					});
+				}
+
+				try {
+					progress?.report({ message: 'Scanning for function prologs and references...' });
+					return engine.analyzeAll();
+				} finally {
+					if (hasOverride) {
+						engine.setAnalysisLimits(defaultLimits.maxFunctions, defaultLimits.maxFunctionSize);
+					}
+				}
 			};
 
 			const newFunctions = options.quiet
@@ -701,7 +759,33 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 	if (arg instanceof vscode.Uri || arg === undefined) {
 		return {};
 	}
-	return arg;
+
+	const raw = arg as AnalyzeAllCommandOptions;
+	const normalized: AnalyzeAllCommandOptions = {};
+
+	if (typeof raw.file === 'string') {
+		normalized.file = raw.file;
+	}
+	if (raw.output) {
+		normalized.output = raw.output;
+	}
+	if (typeof raw.quiet === 'boolean') {
+		normalized.quiet = raw.quiet;
+	}
+	if (raw.maxFunctions !== undefined) {
+		normalized.maxFunctions = parsePositiveIntegerOption(raw.maxFunctions, 'maxFunctions');
+	}
+	if (raw.maxFunctionSize !== undefined) {
+		normalized.maxFunctionSize = parsePositiveIntegerOption(raw.maxFunctionSize, 'maxFunctionSize');
+	}
+	if (raw.forceReload !== undefined) {
+		if (typeof raw.forceReload !== 'boolean') {
+			throw new Error('Invalid "forceReload" option: expected boolean.');
+		}
+		normalized.forceReload = raw.forceReload;
+	}
+
+	return normalized;
 }
 
 async function resolveAnalyzeAllTargetFilePath(
@@ -748,6 +832,31 @@ function getActiveFilePath(): string | undefined {
 		return undefined;
 	}
 	return uri.fsPath;
+}
+
+function shouldForceReloadAnalyzeAll(options: AnalyzeAllCommandOptions): boolean {
+	if (typeof options.forceReload === 'boolean') {
+		return options.forceReload;
+	}
+	return options.quiet === true;
+}
+
+function resolveAnalyzeAllLimits(options: AnalyzeAllCommandOptions): { maxFunctions?: number; maxFunctionSize?: number } {
+	return {
+		maxFunctions: options.maxFunctions,
+		maxFunctionSize: options.maxFunctionSize
+	};
+}
+
+function parsePositiveIntegerOption(value: number, optionName: string): number {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		throw new Error(`Invalid "${optionName}" option: expected finite number.`);
+	}
+	const normalized = Math.floor(value);
+	if (normalized < 1) {
+		throw new Error(`Invalid "${optionName}" option: expected value >= 1.`);
+	}
+	return normalized;
 }
 
 function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommandOptions): RunJobCommandOptions {

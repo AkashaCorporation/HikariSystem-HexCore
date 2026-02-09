@@ -141,8 +141,47 @@ export class DisassemblerEngine {
 
 	private loadConfig(): void {
 		const config = vscode.workspace.getConfiguration('hexcore.disassembler');
-		this.maxFunctions = config.get<number>('maxFunctions', 1000);
-		this.maxFunctionSize = config.get<number>('maxFunctionSize', 65536);
+		this.maxFunctions = this.normalizePositiveInteger(config.get<number>('maxFunctions', 1000), 1000, 100, 50000);
+		this.maxFunctionSize = this.normalizePositiveInteger(config.get<number>('maxFunctionSize', 65536), 65536, 1024, 1048576);
+	}
+
+	public reloadConfig(): void {
+		this.loadConfig();
+	}
+
+	public getAnalysisLimits(): { maxFunctions: number; maxFunctionSize: number } {
+		return {
+			maxFunctions: this.maxFunctions,
+			maxFunctionSize: this.maxFunctionSize
+		};
+	}
+
+	public setAnalysisLimits(maxFunctions?: number, maxFunctionSize?: number): void {
+		if (typeof maxFunctions === 'number') {
+			this.maxFunctions = this.normalizePositiveInteger(maxFunctions, this.maxFunctions, 100, 50000);
+		}
+		if (typeof maxFunctionSize === 'number') {
+			this.maxFunctionSize = this.normalizePositiveInteger(maxFunctionSize, this.maxFunctionSize, 1024, 1048576);
+		}
+	}
+
+	private normalizePositiveInteger(
+		value: number | undefined,
+		fallback: number,
+		minValue: number,
+		maxValue: number
+	): number {
+		if (typeof value !== 'number' || !Number.isFinite(value)) {
+			return fallback;
+		}
+		const normalized = Math.floor(value);
+		if (normalized < minValue) {
+			return minValue;
+		}
+		if (normalized > maxValue) {
+			return maxValue;
+		}
+		return normalized;
 	}
 
 	/**
@@ -168,6 +207,8 @@ export class DisassemblerEngine {
 
 	async loadFile(filePath: string): Promise<boolean> {
 		try {
+			this.loadConfig();
+
 			if (!fs.existsSync(filePath)) {
 				return false;
 			}
