@@ -42,6 +42,8 @@ Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
 - `hexcore.disasm.nativeStatus` - Status dos motores nativos
 - `hexcore.pipeline.runJob` - Executar pipeline `.hexcore_job.json`
 - `hexcore.pipeline.listCapabilities` - Exportar mapa de capacidades do runner
+- `hexcore.disasm.searchStringHeadless` - Buscar xrefs de string (headless, sem UI)
+- `hexcore.disasm.exportASMHeadless` - Exportar assembly para arquivo (headless, sem UI)
 
 **Arquiteturas suportadas**:
 - `x86` - Intel 32-bit

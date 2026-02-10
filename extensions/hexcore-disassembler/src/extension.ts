@@ -30,6 +30,14 @@ interface AnalyzeAllCommandOptions {
 	maxFunctions?: number;
 	maxFunctionSize?: number;
 	forceReload?: boolean;
+	includeInstructions?: boolean;
+}
+
+interface AnalyzeAllInstructionEntry {
+	address: string;
+	mnemonic: string;
+	operands: string;
+	bytes: string;
 }
 
 interface AnalyzeAllFunctionSummary {
@@ -39,6 +47,16 @@ interface AnalyzeAllFunctionSummary {
 	instructionCount: number;
 	callers: number;
 	callees: number;
+	instructions?: AnalyzeAllInstructionEntry[];
+	xrefsTo?: string[];
+	xrefsFrom?: string[];
+}
+
+interface AnalyzeAllStringEntry {
+	address: string;
+	value: string;
+	encoding: string;
+	referencedBy: string[];
 }
 
 interface AnalyzeAllResult {
@@ -53,6 +71,7 @@ interface AnalyzeAllResult {
 	imports: number;
 	exports: number;
 	functions: AnalyzeAllFunctionSummary[];
+	strings?: AnalyzeAllStringEntry[];
 	reportMarkdown: string;
 }
 
@@ -736,7 +755,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			importProvider.refresh();
 			exportProvider.refresh();
 
-			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions);
+			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions, options.includeInstructions === true);
 			if (options.output) {
 				writeAnalyzeAllOutput(result, options.output);
 			}
@@ -748,6 +767,117 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			return result;
+		})
+	);
+
+	// ============================================================================
+	// Headless Commands (Pipeline-safe, no UI prompts)
+	// ============================================================================
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.searchStringHeadless', async (arg?: Record<string, unknown>) => {
+			const query = typeof arg?.query === 'string' ? arg.query : undefined;
+			if (!query) {
+				throw new Error('searchStringHeadless requires a "query" argument.');
+			}
+
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as AnalyzeAllOutputOptions | undefined;
+
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			const results = await engine.searchStringReferences(query);
+
+			const exportData = {
+				query,
+				totalMatches: results.length,
+				matches: results.map((sr: any) => ({
+					address: toHexAddress(sr.address),
+					string: sr.string,
+					encoding: sr.encoding,
+					references: sr.references.map((addr: number) => toHexAddress(addr))
+				})),
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`String search: ${results.length} matches for "${query}"`);
+			}
+
+			return exportData;
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.exportASMHeadless', async (arg?: Record<string, unknown>) => {
+			const outputPath = typeof (arg?.output as any)?.path === 'string'
+				? (arg!.output as any).path as string
+				: undefined;
+			if (!outputPath) {
+				throw new Error('exportASMHeadless requires an "output.path" argument.');
+			}
+
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const functionAddress = typeof arg?.functionAddress === 'string'
+				? parseInt(arg.functionAddress.replace(/^0x/i, ''), 16)
+				: undefined;
+
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+			if (functionAddress !== undefined && !isNaN(functionAddress)) {
+				// Export single function
+				const func = engine.getFunctionAt(functionAddress);
+				if (!func) {
+					throw new Error(`No function found at address 0x${functionAddress.toString(16).toUpperCase()}`);
+				}
+				let asmContent = `; Function: ${func.name} @ 0x${func.address.toString(16).toUpperCase()}\n`;
+				asmContent += `; Size: ${func.size} bytes, ${func.instructions.length} instructions\n\n`;
+				for (const inst of func.instructions) {
+					const hex = inst.bytes.toString('hex').toUpperCase().padEnd(16, ' ');
+					const comment = inst.comment ? `  ; ${inst.comment}` : '';
+					asmContent += `0x${inst.address.toString(16).toUpperCase()}  ${hex}  ${inst.mnemonic} ${inst.opStr}${comment}\n`;
+				}
+				fs.writeFileSync(outputPath, asmContent, 'utf8');
+			} else {
+				// Export all functions
+				await engine.exportAssembly(outputPath);
+			}
+
+			if (!quietMode) {
+				const label = functionAddress !== undefined
+					? `function at 0x${functionAddress.toString(16).toUpperCase()}`
+					: 'all functions';
+				vscode.window.showInformationMessage(`Assembly exported (${label}) to ${outputPath}`);
+			}
+
+			return { outputPath, generatedAt: new Date().toISOString() };
 		})
 	);
 
@@ -786,6 +916,9 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 			throw new Error('Invalid "forceReload" option: expected boolean.');
 		}
 		normalized.forceReload = raw.forceReload;
+	}
+	if (raw.includeInstructions !== undefined) {
+		normalized.includeInstructions = raw.includeInstructions === true;
 	}
 
 	return normalized;
@@ -899,16 +1032,33 @@ function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | un
 	return undefined;
 }
 
-function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number): AnalyzeAllResult {
+function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false): AnalyzeAllResult {
 	const functions = engine.getFunctions();
-	const functionSummaries: AnalyzeAllFunctionSummary[] = functions.map(func => ({
-		address: toHexAddress(func.address),
-		name: func.name,
-		size: func.size,
-		instructionCount: func.instructions.length,
-		callers: func.callers.length,
-		callees: func.callees.length
-	}));
+	const MAX_INSTRUCTIONS_PER_FUNCTION = 200;
+
+	const functionSummaries: AnalyzeAllFunctionSummary[] = functions.map(func => {
+		const summary: AnalyzeAllFunctionSummary = {
+			address: toHexAddress(func.address),
+			name: func.name,
+			size: func.size,
+			instructionCount: func.instructions.length,
+			callers: func.callers.length,
+			callees: func.callees.length
+		};
+
+		if (includeInstructions) {
+			summary.instructions = func.instructions.slice(0, MAX_INSTRUCTIONS_PER_FUNCTION).map(inst => ({
+				address: toHexAddress(inst.address),
+				mnemonic: inst.mnemonic,
+				operands: inst.opStr,
+				bytes: inst.bytes.toString('hex').toUpperCase()
+			}));
+			summary.xrefsTo = func.callers.map(addr => toHexAddress(addr));
+			summary.xrefsFrom = func.callees.map(addr => toHexAddress(addr));
+		}
+
+		return summary;
+	});
 
 	const result: AnalyzeAllResult = {
 		filePath: targetFilePath,
@@ -924,6 +1074,16 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		functions: functionSummaries,
 		reportMarkdown: ''
 	};
+
+	if (includeInstructions) {
+		const stringRefs = engine.getStrings();
+		result.strings = stringRefs.slice(0, 5000).map(sr => ({
+			address: toHexAddress(sr.address),
+			value: sr.string,
+			encoding: sr.encoding,
+			referencedBy: sr.references.map(addr => toHexAddress(addr))
+		}));
+	}
 
 	result.reportMarkdown = generateAnalyzeAllReport(result);
 	return result;

@@ -98,7 +98,15 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.peanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.analyzeAll', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.yara.scan', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.ioc.extract', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.strings.extractAdvanced', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.minidump.parse', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.minidump.threads', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.minidump.modules', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.minidump.memory', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.pipeline.listCapabilities', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.exportASMHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
 	['hexcore.yara.scanWorkspace', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command depends on workspace UI flow.' }],
 	['hexcore.yara.loadDefender', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command opens folder picker.' }],
@@ -123,6 +131,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.peanalyzer.analyze', ['hikarisystem.hexcore-peanalyzer']],
 	['hexcore.disasm.analyzeAll', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.yara.scan', ['hikarisystem.hexcore-yara']],
+	['hexcore.ioc.extract', ['hikarisystem.hexcore-ioc']],
 	['hexcore.pipeline.listCapabilities', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.yara.quickScan', ['hikarisystem.hexcore-yara']],
 	['hexcore.yara.scanWorkspace', ['hikarisystem.hexcore-yara']],
@@ -137,7 +146,14 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.exportASM', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.debug.emulate', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.emulateWithArch', ['hikarisystem.hexcore-debugger']],
-	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']]
+	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.strings.extractAdvanced', ['hikarisystem.hexcore-strings']],
+	['hexcore.minidump.parse', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.threads', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.modules', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.memory', ['hikarisystem.hexcore-minidump']],
+	['hexcore.disasm.searchStringHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.exportASMHeadless', ['hikarisystem.hexcore-disassembler']]
 ]);
 
 export interface PipelineCapabilityEntry {

@@ -9,29 +9,8 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
-		"onCommand:hexcore.disasm.openFile",
-		"onCommand:hexcore.disasm.open",
-		"onCommand:hexcore.disasm.analyzeFile",
-		"onCommand:hexcore.disasm.goToAddress",
-		"onCommand:hexcore.disasm.findXrefs",
-		"onCommand:hexcore.disasm.addComment",
-		"onCommand:hexcore.disasm.renameFunction",
-		"onCommand:hexcore.disasm.showCFG",
-		"onCommand:hexcore.disasm.searchString",
-		"onCommand:hexcore.disasm.exportASM",
-		"onCommand:hexcore.disasm.patchInstruction",
-		"onCommand:hexcore.disasm.nopInstruction",
-		"onCommand:hexcore.disasm.assemble",
-		"onCommand:hexcore.disasm.assembleMultiple",
-		"onCommand:hexcore.disasm.savePatchedFile",
-		"onCommand:hexcore.disasm.setSyntax",
-		"onCommand:hexcore.disasm.nativeStatus",
-		"onCommand:hexcore.disasm.showLlvmVersion",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
-		"onCommand:hexcore.disasm.analyzeAll",
-		"onCommand:hexcore.pipeline.runJob",
-		"onCommand:hexcore.pipeline.listCapabilities",
 		"workspaceContains:.hexcore_job.json"
 	],
 	"extensionDependencies": [],
@@ -190,6 +169,16 @@
 				"title": "List Pipeline Command Capabilities",
 				"category": "HexCore Automation",
 				"icon": "$(list-unordered)"
+			},
+			{
+				"command": "hexcore.disasm.searchStringHeadless",
+				"title": "Search String References (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.exportASMHeadless",
+				"title": "Export Assembly (Headless)",
+				"category": "HexCore Automation"
 			}
 		],
 		"menus": {
@@ -321,7 +310,7 @@
 				},
 				"hexcore.disassembler.maxFunctions": {
 					"type": "number",
-					"default": 1000,
+					"default": 5000,
 					"description": "Maximum number of functions to discover during analysis"
 				}
 			}

@@ -130,7 +130,7 @@ export class DisassemblerEngine {
 	private llvmMcError?: string;
 
 	// Configurable limits
-	private maxFunctions: number = 1000;
+	private maxFunctions: number = 5000;
 	private maxFunctionSize: number = 65536;
 
 	constructor() {
@@ -141,7 +141,7 @@ export class DisassemblerEngine {
 
 	private loadConfig(): void {
 		const config = vscode.workspace.getConfiguration('hexcore.disassembler');
-		this.maxFunctions = this.normalizePositiveInteger(config.get<number>('maxFunctions', 1000), 1000, 100, 50000);
+		this.maxFunctions = this.normalizePositiveInteger(config.get<number>('maxFunctions', 5000), 5000, 100, 50000);
 		this.maxFunctionSize = this.normalizePositiveInteger(config.get<number>('maxFunctionSize', 65536), 65536, 1024, 1048576);
 	}
 
@@ -1468,7 +1468,7 @@ export class DisassemblerEngine {
 			if (instructions[i].isJump && !instructions[i].isConditional) {
 				if (instructions[i].targetAddress &&
 					(instructions[i].targetAddress! < address ||
-					 instructions[i].targetAddress! > address + this.maxFunctionSize)) {
+						instructions[i].targetAddress! > address + this.maxFunctionSize)) {
 					// Check if there are more reachable instructions after
 					if (i + 1 < instructions.length) {
 						const nextIsTarget = instructions.slice(0, i).some(

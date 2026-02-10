@@ -1,0 +1,62 @@
+{
+  "name": "hexcore-better-sqlite3",
+  "version": "1.0.0",
+  "description": "HexCore wrapper for better-sqlite3 with deterministic prebuild packaging",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "npm rebuild better-sqlite3 --build-from-source",
+    "build:debug": "npm rebuild better-sqlite3 --build-from-source --debug",
+    "prebuild": "node ./scripts/prebuild.js",
+    "test": "node ./test/smoke-test.js"
+  },
+  "keywords": [
+    "hexcore",
+    "sqlite",
+    "better-sqlite3",
+    "database",
+    "native",
+    "napi"
+  ],
+  "author": "HikariSystem",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3/issues"
+  },
+  "homepage": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3#readme",
+  "engines": {
+    "vscode": "^1.0.0",
+    "node": ">=18.0.0"
+  },
+  "activationEvents": [],
+  "files": [
+    "scripts/",
+    "test/",
+    "prebuilds/",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "dependencies": {
+    "better-sqlite3": "^11.9.1"
+  },
+  "binary": {
+    "napi_versions": [
+      8
+    ]
+  }
+}
+

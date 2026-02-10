@@ -1,8 +1,8 @@
 {
 	"name": "hexcore-strings",
 	"displayName": "HexCore Strings Extractor",
-	"description": "Extract ASCII and Unicode strings from binary files for malware analysis",
-	"version": "1.1.0",
+	"description": "Extract ASCII/Unicode strings with XOR deobfuscation and stack-string detection",
+	"version": "1.2.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -16,24 +16,36 @@
 		"binary",
 		"malware",
 		"reverse engineering",
-		"forensics"
+		"forensics",
+		"xor",
+		"deobfuscation",
+		"stack strings"
 	],
 	"main": "./out/extension.js",
-	"activationEvents": [
-		"onCommand:hexcore.strings.extract"
-	],
 	"contributes": {
 		"commands": [
 			{
 				"command": "hexcore.strings.extract",
-				"title": "HexCore: Extract Strings"
+				"title": "HexCore: Extract Strings",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.strings.extractAdvanced",
+				"title": "HexCore: Extract Strings (Advanced — XOR + Stack)",
+				"category": "HexCore"
 			}
 		],
 		"menus": {
 			"explorer/context": [
 				{
 					"command": "hexcore.strings.extract",
-					"group": "hexcore@3"
+					"group": "hexcore@3",
+					"when": "resourceScheme == file"
+				},
+				{
+					"command": "hexcore.strings.extractAdvanced",
+					"group": "hexcore@3",
+					"when": "resourceScheme == file"
 				}
 			]
 		}

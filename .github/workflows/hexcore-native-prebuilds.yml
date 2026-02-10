@@ -25,6 +25,8 @@ jobs:
             repo: LXrdKnowkill/hexcore-unicorn
           - name: hexcore-llvm-mc
             repo: LXrdKnowkill/hexcore-llvm-mc
+          - name: hexcore-better-sqlite3
+            repo: LXrdKnowkill/hexcore-better-sqlite3
     steps:
       - name: Checkout Engine Repository
         uses: actions/checkout@v4

@@ -5,6 +5,52 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.3.0] - 2026-02-10 - "Deep Analysis"
+
+> **Feature Release** — Windows Minidump forensic analysis, XOR brute-force deobfuscation, stack string detection, deep headless disassembly, and IOC SQLite backend.
+
+### Added
+
+#### hexcore-minidump v1.0.0 (NEW)
+- **MDMP binary parser** — pure TypeScript implementation for Windows Minidump files (.dmp/.mdmp).
+- **Stream parsing** — ThreadListStream, ThreadInfoListStream, ModuleListStream, MemoryInfoListStream, MemoryListStream, Memory64ListStream, SystemInfoStream.
+- **Threat heuristics** — RWX memory region detection (shellcode indicators), non-system DLL identification, recently-created thread flagging, non-image thread start address detection.
+- **4 headless commands** — `hexcore.minidump.parse`, `.threads`, `.modules`, `.memory` with JSON/Markdown output.
+- **Pipeline integration** — all 4 commands registered as headless-capable with appropriate timeouts.
+
+#### hexcore-strings v1.2.0 (UPGRADE)
+- **XOR brute-force scanner** — single-byte key deobfuscation (0x01–0xFF) with quick-reject, printable run extraction, and English frequency confidence scoring.
+- **Stack string detector** — x86/x64 opcode pattern matching for MOV-to-stack sequences (C6 45, C6 44 24, C7 45, C7 44 24), displacement-ordered reconstruction.
+- **New command** — `hexcore.strings.extractAdvanced` for combined standard + deobfuscated extraction.
+- **Report upgrade** — deobfuscated strings section with XOR key, confidence percentages, and instruction counts.
+
+#### hexcore-ioc v1.1.0 (NEW)
+- **IOC Extraction Engine** — automatic extraction of 11 IOC categories from binaries: IPv4/IPv6, URLs, domains, emails, file paths, registry keys, named pipes, mutexes, user agents, and crypto wallets.
+- **Binary-aware noise reduction** — printable context validation rejects ghost matches from opcode byte sequences (e.g., `E8 2E 63 6F 6D` → `.com`), domain TLD whitelisting, and Set-based deduplication.
+- **UTF-16LE dual-pass** — decodes Windows wide strings before regex matching for complete coverage.
+- **Threat assessment** — automated severity tagging: suspicious URLs (raw IP hosts, C2 paths), persistence registry keys, ransomware wallet indicators.
+- **SQLite persistence backend** — dual-mode storage (memory/sqlite) for IOC match deduplication via `hexcore-better-sqlite3`.
+- **Auto-mode switching** — transparent upgrade to SQLite when file size ≥ 64 MB or match count ≥ 20,000.
+- **Graceful fallback** — if `better-sqlite3` isn't available, automatically degrades to in-memory mode.
+- **Headless pipeline support** — `hexcore.ioc.extract` registered as headless-safe with `file`, `output`, `quiet` contract.
+
+#### hexcore-disassembler — Deep Headless Commands
+- **`hexcore.disasm.searchStringHeadless`** — programmatic string xref search without UI prompts.
+- **`hexcore.disasm.exportASMHeadless`** — assembly export to file without save dialog, single-function or all-functions mode.
+- **`analyzeAll` instruction-level export** — `includeInstructions: true` flag enables per-function instruction listing (capped at 200), xref arrays, and string entries.
+- **`maxFunctions` default raised** — 1000 → 5000 for large binary analysis.
+
+#### hexcore-better-sqlite3 v1.0.0 (NEW)
+- **SQLite wrapper** — deterministic prebuild packaging for `better-sqlite3@11.9.1`.
+- **N-API v8** — prebuilt native addon for win32-x64.
+
+### Changed
+- Extension version bumps:
+  - `hexcore-strings`: `1.1.0` -> `1.2.0`
+  - `hexcore-ioc`: `1.0.0` -> `1.1.0`
+- Pipeline capability map expanded with 8 new entries (5 Minidump + 1 Advanced Strings + 2 Deep Headless).
+- GitHub Actions workflows updated to include IOC, YARA, minidump, and better-sqlite3 in build/installer pipelines.
+
 ## [3.2.2] - 2026-02-10 - "Pipeline Stabilization Hotfix"
 
 > **Hotfix Release** — command registration consistency for packaged builds, YARA headless pipeline support, and entropy analyzer refactor.

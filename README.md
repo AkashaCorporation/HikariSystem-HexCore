@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest stability update (2026-02-10):** `v3.2.2` pipeline hotfix release.
+**Latest release (2026-02-10):** `v3.3.0 "Deep Analysis"` — deep headless disassembly, IOC SQLite backend, minidump forensics, XOR deobfuscation.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
@@ -46,9 +46,11 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
 - **Hex Viewer** — Virtual scrolling, data inspector, bookmarks, structure templates
 - **Hash Calculator** — MD5, SHA-1, SHA-256, SHA-512 with VirusTotal integration
-- **String Extraction** — ASCII/UTF-16, auto-categorization, cross-reference tracking
+- **String Extraction** — ASCII/UTF-16, auto-categorization, XOR deobfuscation, stack strings
 - **Entropy Analysis** — Block-by-block entropy with packer/encryption detection
 - **YARA Scanning** — Rule loading, match highlighting, custom rules
+- **IOC Extraction** — Binary-aware IOC detection (IPs, URLs, domains, pipes, wallets)
+- **Minidump Analysis** — Windows crash dump forensics with thread/module/memory parsing
 - **Automation** — Headless pipeline system for batch binary analysis
 
 ---
@@ -63,12 +65,14 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 | **Disassembler** | 1.3.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs |
 | **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
-| **Strings Extractor** | 1.1.0 | Memory-efficient string extraction with cross-references |
+| **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
 | **Hash Calculator** | 1.1.0 | Fast file hashing with VirusTotal integration |
 | **Entropy Analyzer** | 1.1.0 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
 | **File Type Detector** | 1.0.0 | Magic bytes signature detection |
 | **Base64 Decoder** | 1.0.0 | Detect and decode Base64 strings |
 | **YARA Scanner** | 2.1.0 | YARA scanning with DefenderYara integration and headless pipeline support |
+| **IOC Extractor** | 1.1.0 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
+| **Minidump Parser** | 1.0.0 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
 
 ### Native Engines (Standalone N-API Packages)
 
@@ -79,6 +83,7 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-capstone** | 1.3.0 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
 | **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding — CPU emulation, hooks, context save/restore |
 | **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
+| **hexcore-better-sqlite3** | 1.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
 ---
@@ -142,7 +147,8 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
     { "cmd": "hexcore.entropy.analyze" },
     { "cmd": "hexcore.strings.extract", "args": { "minLength": 5 } },
     { "cmd": "hexcore.disasm.analyzeAll" },
-    { "cmd": "hexcore.yara.scan" }
+    { "cmd": "hexcore.yara.scan" },
+    { "cmd": "hexcore.ioc.extract" }
   ]
 }
 ```
@@ -216,6 +222,7 @@ HikariSystem-HexCore/
 │   ├── hexcore-unicorn/        # Unicorn N-API binding
 │   ├── hexcore-keystone/       # Legacy assembler binding
 │   ├── hexcore-yara/           # YARA scanner
+│   ├── hexcore-ioc/            # IOC extractor
 │   ├── hexcore-hashcalc/       # Hash calculator
 │   ├── hexcore-strings/        # Strings extractor
 │   ├── hexcore-entropy/        # Entropy analyzer
