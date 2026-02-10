@@ -15,6 +15,8 @@ permissions:
 
 env:
   VSCODE_SKIP_NODE_VERSION_CHECK: 1
+  npm_config_maxsockets: 8
+  npm_config_loglevel: warn
 
 jobs:
   build-windows:
@@ -28,6 +30,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.21.1"
+
+      - name: HexCore Preflight (Command/Build Coverage)
+        run: node scripts/verify-hexcore-preflight.cjs
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -156,6 +161,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.21.1"
+
+      - name: HexCore Preflight (Command/Build Coverage)
+        run: node scripts/verify-hexcore-preflight.cjs
+
+      - name: Raise File Descriptor Limit
+        run: ulimit -n 65535 || true
 
       - name: Install Linux dependencies
         run: |

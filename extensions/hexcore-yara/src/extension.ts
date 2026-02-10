@@ -31,48 +31,81 @@ export function activate(context: vscode.ExtensionContext): void {
 	const resultsProvider = new ResultsTreeProvider();
 	const rulesProvider = new RulesTreeProvider();
 	outputChannel = vscode.window.createOutputChannel('HexCore YARA');
+	let defenderIndexTask: Promise<number> | undefined;
+	const logActivationError = (scope: string, error: unknown): void => {
+		outputChannel.appendLine(`[YARA] ${scope} failed: ${formatError(error)}`);
+	};
+	const ensureDefenderCatalogIndexed = async (basePath: string, forceReindex: boolean): Promise<number> => {
+		if (defenderIndexTask) {
+			outputChannel.appendLine('[YARA] DefenderYara indexing already running, waiting for completion...');
+			return defenderIndexTask;
+		}
+
+		defenderIndexTask = (async () => {
+			const count = engine.indexDefenderYara(basePath, forceReindex);
+			rulesProvider.updateFromEngine(engine);
+			return count;
+		})();
+
+		try {
+			return await defenderIndexTask;
+		} finally {
+			defenderIndexTask = undefined;
+		}
+	};
 
 	// Wire progress to output channel
 	engine.setProgressCallback((msg: string) => {
 		outputChannel.appendLine(`[YARA] ${msg}`);
 	});
 
-	context.subscriptions.push(
-		vscode.window.registerTreeDataProvider('hexcore.yara.results', resultsProvider),
-		vscode.window.registerTreeDataProvider('hexcore.yara.rules', rulesProvider)
-	);
+	try {
+		context.subscriptions.push(
+			vscode.window.registerTreeDataProvider('hexcore.yara.results', resultsProvider),
+			vscode.window.registerTreeDataProvider('hexcore.yara.rules', rulesProvider)
+		);
+	} catch (error) {
+		logActivationError('Tree provider registration', error);
+	}
 
 	// ── Load built-in rules ──────────────────────────────────────────────
 	const rulesDir = path.join(context.extensionPath, 'rules');
-	if (fs.existsSync(rulesDir)) {
-		engine.loadRulesFromDirectory(rulesDir);
+	try {
+		if (fs.existsSync(rulesDir)) {
+			engine.loadRulesFromDirectory(rulesDir);
+		}
+	} catch (error) {
+		logActivationError('Built-in rules load', error);
 	}
 
 	// ── Auto-detect DefenderYara ─────────────────────────────────────────
 	const config = vscode.workspace.getConfiguration('hexcore.yara');
 	const defenderPath = config.get<string>('defenderYaraPath', '');
 
-	if (defenderPath && fs.existsSync(defenderPath)) {
-		const count = engine.indexDefenderYara(defenderPath);
-		outputChannel.appendLine(`[YARA] DefenderYara indexed: ${count} rules`);
-		rulesProvider.updateFromEngine(engine);
-	} else {
-		// Try common locations
-		const commonPaths = [
-			path.join(process.env.USERPROFILE || '', 'Desktop', 'DefenderYara-main'),
-			path.join(process.env.USERPROFILE || '', 'Downloads', 'DefenderYara-main'),
-			'C:\\DefenderYara-main',
-		];
-		for (const p of commonPaths) {
-			if (fs.existsSync(p)) {
-				outputChannel.appendLine(`[YARA] Auto-detected DefenderYara at: ${p}`);
-				const count = engine.indexDefenderYara(p);
-				outputChannel.appendLine(`[YARA] DefenderYara indexed: ${count} rules`);
-				rulesProvider.updateFromEngine(engine);
-				break;
+	const autoDetectDefenderYara = async (): Promise<void> => {
+		if (defenderPath && fs.existsSync(defenderPath)) {
+			const count = await ensureDefenderCatalogIndexed(defenderPath, false);
+			outputChannel.appendLine(`[YARA] DefenderYara indexed: ${count} rules`);
+		} else {
+			// Try common locations
+			const commonPaths = [
+				path.join(process.env.USERPROFILE || '', 'Desktop', 'DefenderYara-main'),
+				path.join(process.env.USERPROFILE || '', 'Downloads', 'DefenderYara-main'),
+				'C:\\DefenderYara-main',
+			];
+			for (const p of commonPaths) {
+				if (fs.existsSync(p)) {
+					outputChannel.appendLine(`[YARA] Auto-detected DefenderYara at: ${p}`);
+					const count = await ensureDefenderCatalogIndexed(p, false);
+					outputChannel.appendLine(`[YARA] DefenderYara indexed: ${count} rules`);
+					break;
+				}
 			}
 		}
-	}
+	};
+	void autoDetectDefenderYara().catch(error => {
+		logActivationError('DefenderYara indexing', error);
+	});
 
 	// ── Command: Scan File ───────────────────────────────────────────────
 	context.subscriptions.push(
@@ -181,8 +214,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				title: 'Indexing DefenderYara...',
 				cancellable: false
 			}, async () => {
-				const count = engine.indexDefenderYara(selectedPath);
-				rulesProvider.updateFromEngine(engine);
+				const count = await ensureDefenderCatalogIndexed(selectedPath, false);
 
 				vscode.window.showInformationMessage(
 					`DefenderYara: Indexed ${count} rules. Use "Load Category" to load specific rule sets.`
@@ -197,6 +229,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// ── Command: Load Category ───────────────────────────────────────────
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.yara.loadCategory', async () => {
+			if (defenderIndexTask) {
+				vscode.window.showInformationMessage('DefenderYara indexing is in progress. Please wait and try again.');
+				await defenderIndexTask;
+			}
+
 			const stats = engine.getCatalogStats();
 
 			if (stats.total === 0) {
@@ -337,7 +374,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// ── Auto-update on startup ───────────────────────────────────────────
 	if (config.get<boolean>('autoUpdate', true)) {
-		engine.updateRules();
+		engine.updateRules().catch(error => logActivationError('Auto-update rules', error));
 	}
 
 	outputChannel.appendLine('[YARA] HexCore YARA v2.1 activated');
@@ -552,4 +589,11 @@ function showThreatReport(filePath: string, result: { matches: RuleMatch[]; thre
 
 export function deactivate(): void {
 	// Cleanup
+}
+
+function formatError(error: unknown): string {
+	if (error instanceof Error) {
+		return error.stack || error.message;
+	}
+	return String(error);
 }

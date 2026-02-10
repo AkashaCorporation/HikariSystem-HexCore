@@ -75,12 +75,17 @@ const compilations = [
 	// HexCore extensions
 	'extensions/hexcore-base64/tsconfig.json',
 	'extensions/hexcore-common/tsconfig.json',
+	'extensions/hexcore-debugger/tsconfig.json',
+	'extensions/hexcore-disassembler/tsconfig.json',
 	'extensions/hexcore-entropy/tsconfig.json',
 	'extensions/hexcore-filetype/tsconfig.json',
 	'extensions/hexcore-hashcalc/tsconfig.json',
 	'extensions/hexcore-hexviewer/tsconfig.json',
+	'extensions/hexcore-ioc/tsconfig.json',
+	'extensions/hexcore-minidump/tsconfig.json',
 	'extensions/hexcore-peanalyzer/tsconfig.json',
 	'extensions/hexcore-strings/tsconfig.json',
+	'extensions/hexcore-yara/tsconfig.json',
 
 	'.vscode/extensions/vscode-selfhost-test-provider/tsconfig.json',
 	'.vscode/extensions/vscode-selfhost-import-aid/tsconfig.json',
