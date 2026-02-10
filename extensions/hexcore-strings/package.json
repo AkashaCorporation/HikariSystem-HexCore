@@ -21,6 +21,10 @@
 		"deobfuscation",
 		"stack strings"
 	],
+	"activationEvents": [
+		"onCommand:hexcore.strings.extract",
+		"onCommand:hexcore.strings.extractAdvanced"
+	],
 	"main": "./out/extension.js",
 	"contributes": {
 		"commands": [

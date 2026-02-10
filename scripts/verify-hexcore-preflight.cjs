@@ -101,9 +101,36 @@ function verifyBuildCoverage() {
 	assertIncludes(npmDirs, "'extensions/hexcore-yara'", 'build/npm/dirs.ts');
 }
 
+function verifyManifestActivationEvents() {
+	const extensionsDir = path.join(root, 'extensions');
+	if (!fs.existsSync(extensionsDir)) {
+		errors.push('Missing directory: extensions');
+		return;
+	}
+
+	const extensionDirs = fs.readdirSync(extensionsDir, { withFileTypes: true })
+		.filter(entry => entry.isDirectory() && entry.name.startsWith('hexcore-'))
+		.map(entry => entry.name);
+
+	for (const extensionName of extensionDirs) {
+		const packagePath = path.join('extensions', extensionName, 'package.json');
+		const packageJson = readJson(packagePath);
+		if (!packageJson) {
+			continue;
+		}
+
+		if (typeof packageJson.main === 'string' && packageJson.main.length > 0) {
+			if (!Array.isArray(packageJson.activationEvents)) {
+				errors.push(`${packagePath} has "main" but is missing "activationEvents"`);
+			}
+		}
+	}
+}
+
 verifyYaraCommands();
 verifyPipelineCapabilities();
 verifyBuildCoverage();
+verifyManifestActivationEvents();
 
 if (errors.length > 0) {
 	console.error('HexCore preflight checks failed:\n');
