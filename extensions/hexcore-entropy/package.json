@@ -2,7 +2,7 @@
 	"name": "hexcore-entropy",
 	"displayName": "HexCore Entropy Analyzer",
 	"description": "Visual entropy analysis with graph for detecting packed or encrypted regions",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

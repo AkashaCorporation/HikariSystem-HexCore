@@ -28,6 +28,8 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
+**Latest stability update (2026-02-10):** `v3.2.2` pipeline hotfix release.
+
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
 - Native Capstone/Unicorn/LLVM MC engines via N-API (no external installs)
@@ -57,16 +59,16 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.0 | PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation |
-| **Disassembler** | 1.2.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs |
-| **Hex Viewer** | 1.2.0 | Professional binary file viewer with virtual scrolling |
+| **Debugger** | 2.0.1 | PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation |
+| **Disassembler** | 1.3.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs |
+| **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
 | **Strings Extractor** | 1.1.0 | Memory-efficient string extraction with cross-references |
 | **Hash Calculator** | 1.1.0 | Fast file hashing with VirusTotal integration |
-| **Entropy Analyzer** | 1.0.0 | Visual entropy analysis for packed/encrypted regions |
+| **Entropy Analyzer** | 1.1.0 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
 | **File Type Detector** | 1.0.0 | Magic bytes signature detection |
 | **Base64 Decoder** | 1.0.0 | Detect and decode Base64 strings |
-| **YARA Scanner** | 1.0.0 | YARA rule scanning and matching |
+| **YARA Scanner** | 2.1.0 | YARA scanning with DefenderYara integration and headless pipeline support |
 
 ### Native Engines (Standalone N-API Packages)
 
@@ -139,7 +141,8 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
     { "cmd": "hexcore.hashcalc.calculate" },
     { "cmd": "hexcore.entropy.analyze" },
     { "cmd": "hexcore.strings.extract", "args": { "minLength": 5 } },
-    { "cmd": "hexcore.disasm.analyzeAll" }
+    { "cmd": "hexcore.disasm.analyzeAll" },
+    { "cmd": "hexcore.yara.scan" }
   ]
 }
 ```
@@ -147,6 +150,8 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
 - **Auto-trigger** — Workspace watcher detects `.hexcore_job.json` on creation
 - **Step controls** — Per-step timeout, error handling, output validation
 - **Extension preflight** — Auto-activates required extensions before each step
+- **Capability audit** — `hexcore.pipeline.listCapabilities` exports headless/interactive capability map
+- **Safety model** — Interactive commands are explicitly blocked in pipeline mode with clear errors
 - **Output** — JSON/Markdown reports + `hexcore-pipeline.status.json` + `hexcore-pipeline.log`
 
 All analysis extensions support headless execution with `file`, `output`, and `quiet` parameters.

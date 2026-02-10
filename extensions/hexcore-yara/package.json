@@ -2,7 +2,7 @@
 	"name": "hexcore-yara",
 	"displayName": "HexCore YARA Scanner",
 	"description": "YARA rule scanner with DefenderYara integration for malware detection and threat scoring",
-	"version": "2.0.0",
+	"version": "2.1.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -25,8 +25,14 @@
 	"activationEvents": [
 		"onCommand:hexcore.yara.scan",
 		"onCommand:hexcore.yara.quickScan",
+		"onCommand:hexcore.yara.scanWorkspace",
+		"onCommand:hexcore.yara.loadDefender",
+		"onCommand:hexcore.yara.loadCategory",
 		"onCommand:hexcore.yara.updateRules",
-		"onCommand:hexcore.yara.loadDefender"
+		"onCommand:hexcore.yara.createRule",
+		"onCommand:hexcore.yara.threatReport",
+		"onView:hexcore.yara.results",
+		"onView:hexcore.yara.rules"
 	],
 	"main": "./out/extension.js",
 	"contributes": {

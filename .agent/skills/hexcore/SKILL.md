@@ -11,6 +11,11 @@ HexCore é um conjunto de extensões para análise de binários e engenharia rev
 
 > **IMPORTANTE**: As ferramentas HexCore são extensões do VS Code. Elas geram outputs visuais (webviews, documentos markdown). Como agente, você pode sugerir que o usuário execute comandos específicos e ajudar a interpretar os resultados descritos.
 
+> **UPDATE 2026-02-10 (v3.2.2 Hotfix)**:
+> - Pipeline capabilities estabilizadas para builds empacotadas.
+> - `hexcore.yara.scan` com suporte headless (`file`, `quiet`, `output`).
+> - `hexcore.pipeline.listCapabilities` disponível para auditoria de comandos headless/interativos.
+
 ---
 
 ## Available Extensions
@@ -22,6 +27,7 @@ Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
 
 **Commands**:
 - `hexcore.disasm.analyzeFile` - Disassemblar um binário
+- `hexcore.disasm.analyzeAll` - Deep analysis (headless/export)
 - `hexcore.disasm.goToAddress` - Navegar para endereço específico
 - `hexcore.disasm.findXrefs` - Encontrar referências cruzadas
 - `hexcore.disasm.addComment` - Adicionar comentário em um endereço
@@ -34,6 +40,8 @@ Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
 - `hexcore.disasm.assemble` - Montar instrução
 - `hexcore.disasm.assembleMultiple` - Montar várias instruções
 - `hexcore.disasm.nativeStatus` - Status dos motores nativos
+- `hexcore.pipeline.runJob` - Executar pipeline `.hexcore_job.json`
+- `hexcore.pipeline.listCapabilities` - Exportar mapa de capacidades do runner
 
 **Arquiteturas suportadas**:
 - `x86` - Intel 32-bit
@@ -87,6 +95,9 @@ Análise visual de entropia para detectar regiões compactadas ou criptografadas
 **Command**:
 - `hexcore.entropy.analyze` - Gerar gráfico de entropia
 
+**Headless options**:
+- `file`, `quiet`, `output`, `blockSize`, `sampleRatio`
+
 **Interpretação**:
 - Entropia alta (>7.5) = provavelmente criptografado ou compactado
 - Entropia média (4-7) = código ou dados normais
@@ -124,9 +135,10 @@ Detecta o tipo real de arquivo usando magic bytes.
 
 Calcula hashes de arquivos ou seleções.
 
-**Commands** (prováveis, verificar package.json):
-- `hexcore.hash.file` - Calcular hash de arquivo
-- `hexcore.hash.selection` - Calcular hash de seleção
+**Commands**:
+- `hexcore.hashcalc.calculate` - Calcular hashes de arquivo
+- `hexcore.hash.file` - Alias para automação
+- `hexcore.hash.calculate` - Alias para automação
 
 **Algoritmos**: MD5, SHA1, SHA256, SHA512
 
@@ -149,10 +161,18 @@ Decodificação Base64 de strings em binários.
 
 Integração com regras YARA para detecção de malware.
 
-**Features**:
-- Criação e edição de regras YARA
-- Scanning de arquivos com regras
-- Syntax highlighting para `.yar`/`.yara`
+**Commands**:
+- `hexcore.yara.scan` - Scanning de arquivo (UI/headless)
+- `hexcore.yara.quickScan` - Scan rápido com regras essenciais
+- `hexcore.yara.scanWorkspace` - Scan de workspace (interativo)
+- `hexcore.yara.loadDefender` - Indexar DefenderYara
+- `hexcore.yara.loadCategory` - Carregar categorias específicas
+- `hexcore.yara.updateRules` - Recarregar regras
+- `hexcore.yara.createRule` - Criar regra por seleção
+- `hexcore.yara.threatReport` - Exibir relatório da última varredura
+
+**Headless options (`hexcore.yara.scan`)**:
+- `file`, `quiet`, `output`
 
 ---
 
@@ -169,7 +189,7 @@ Debugger integrado para análise dinâmica.
 - Emulação via Unicorn (x86/x64/ARM/ARM64/MIPS/RISC-V)
 
 **Commands úteis**:
-- `hexcore.debug.nativeStatus` - Status do Unicorn
+- `hexcore.debug.unicornStatus` - Status do Unicorn
 
 ---
 
@@ -177,28 +197,35 @@ Debugger integrado para análise dinâmica.
 
 Quando o usuário pedir para analisar um binário, sugira este workflow:
 
-1. **Identificação Inicial**
+1. **(Opcional) Pipeline Headless**
+   ```
+   Comando: hexcore.pipeline.runJob
+   ```
+   - Executar fluxo batch com `.hexcore_job.json`
+   - Validar capacidades com `hexcore.pipeline.listCapabilities`
+
+2. **Identificação Inicial**
    ```
    Comando: hexcore.filetype.detect
    ```
    - Verificar o tipo real do arquivo
    - Detectar possíveis extensões incorretas
 
-2. **Análise de Entropia**
+3. **Análise de Entropia**
    ```
    Comando: hexcore.entropy.analyze
    ```
    - Identificar regiões criptografadas/compactadas
    - Determinar se o binário está packed
 
-3. **Extração de Strings**
+4. **Extração de Strings**
    ```
    Comando: hexcore.strings.extract
    ```
    - Identificar URLs, IPs, paths, APIs
    - Procurar indicadores de comportamento
 
-4. **Análise de Headers** (para PE/ELF)
+5. **Análise de Headers** (para PE/ELF)
    ```
    Comando: hexcore.peanalyzer.analyze
    ```
@@ -206,7 +233,7 @@ Quando o usuário pedir para analisar um binário, sugira este workflow:
    - Analisar sections
    - Identificar anomalias
 
-5. **Disassembly**
+6. **Disassembly**
    ```
    Comando: hexcore.disasm.analyzeFile
    ```
@@ -230,9 +257,14 @@ Quando o usuário pedir para analisar um binário, sugira este workflow:
 
 ### O que você (agente) NÃO pode fazer diretamente:
 
-1. Executar os comandos HexCore (são extensões visuais do VS Code)
+1. Assumir que comandos interativos funcionam sem UI (prompts, file pickers e quick-picks)
 2. Ver o conteúdo das webviews diretamente
 3. Modificar binários através das ferramentas
+
+### Observação prática
+
+- Em ambientes com Extension Host ativo e automação habilitada, comandos headless podem ser executados via pipeline.
+- Para fluxo determinístico, priorize comandos marcados como headless e valide com `hexcore.pipeline.listCapabilities`.
 
 ### Exemplo de Interação
 

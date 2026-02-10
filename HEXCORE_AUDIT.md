@@ -2,7 +2,26 @@
 **Data:** 03/02/2026  
 **Auditores:** Agente (Skills: `cpp-pro`, `reverse-engineer`)
 
-## Resumo Executivo
+---
+
+## Atualizacao de Status - 10/02/2026 (v3.2.2 Hotfix)
+
+### Melhorias Confirmadas
+- Pipeline runner com mapa de capacidades atualizado para `hexcore.yara.scan` e `hexcore.pipeline.listCapabilities`.
+- Comandos headless padronizados para automacao (`file`, `quiet`, `output`) com validacao de saida por passo.
+- Cobertura de `activationEvents` expandida em extensoes criticas, reduzindo erro de `Command '...' not found` em build empacotada.
+- Entropy Analyzer refatorado para arquitetura modular e streaming com bloco adaptativo (mais estavel em arquivos grandes).
+
+### Riscos Ainda Acompanhar
+- Debugger em cenarios de execucao profunda (step/continue prolongado) ainda exige hardening adicional.
+- Parte de hooks de I/O de libc continua em modo stub em cenarios Linux mais complexos.
+
+### Veredito Atual
+**MELHOROU PARA USO PRATICO / AINDA EM EVOLUCAO**
+
+O projeto saiu de falhas estruturais de automacao e entrou em um estado mais confiavel para analise real. Ainda nao e "final", mas ja e apresentavel para uso tecnico com transparencia sobre limites.
+
+## Resumo Executivo (Snapshot 03/02/2026)
 **Veredito:** **INSTAVEL / NAO PRONTO PARA PRODUCAO**
 
 Os motores HexCore (`hexcore-capstone`, `hexcore-unicorn`, `hexcore-llvm-mc`) tem base funcional, mas o build e a distribuicao de binarios nativos ainda quebram facilmente em clones limpos. Isso explica o "funciona na minha maquina".

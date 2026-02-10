@@ -218,10 +218,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('hexcore.pipeline.runJob', async (arg?: vscode.Uri | string | RunJobCommandOptions) => {
 			return runPipelineJob(arg);
 		}),
-		vscode.commands.registerCommand('hexcore.pipeline.listCapabilities', async (options?: { output?: string; quiet?: boolean }) => {
+		vscode.commands.registerCommand('hexcore.pipeline.listCapabilities', async (options?: { output?: string | { path?: string }; quiet?: boolean }) => {
 			const capabilities = listCapabilities();
-			if (options?.output) {
-				const outputPath = path.resolve(options.output);
+			const outputPath = typeof options?.output === 'string'
+				? path.resolve(options.output)
+				: (typeof options?.output?.path === 'string' ? path.resolve(options.output.path) : undefined);
+
+			if (outputPath) {
 				fs.writeFileSync(outputPath, JSON.stringify(capabilities, null, 2), 'utf8');
 				if (!options?.quiet) {
 					vscode.window.showInformationMessage(`Pipeline capabilities written to ${outputPath}`);

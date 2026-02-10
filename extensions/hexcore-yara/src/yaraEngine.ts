@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA Engine v2.0
+ *  HexCore YARA Engine v2.1
  *  Real YARA rule parser + DefenderYara integration
  *  Supports hex patterns, string patterns, and weighted conditions
  *  Copyright (c) HikariSystem. All rights reserved.

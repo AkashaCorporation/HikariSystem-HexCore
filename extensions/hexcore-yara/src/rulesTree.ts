@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA - Rules Tree Provider v2.0
+ *  HexCore YARA - Rules Tree Provider v2.1
  *  Dynamic categories from DefenderYara + built-in rules
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/

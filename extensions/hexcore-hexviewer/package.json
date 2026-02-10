@@ -2,7 +2,7 @@
 	"name": "hexcore-hexviewer",
 	"displayName": "HexCore Hex Viewer",
 	"description": "Binary file viewer and editor for malware analysis and reverse engineering",
-	"version": "1.2.0",
+	"version": "1.2.1",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -20,7 +20,18 @@
 		"reverse engineering",
 		"analysis"
 	],
-	"activationEvents": [],
+	"activationEvents": [
+		"onCommand:hexcore.addBookmark",
+		"onCommand:hexcore.applyTemplate",
+		"onCommand:hexcore.toggleEdit",
+		"onCommand:hexcore.openHexView",
+		"onCommand:hexcore.goToOffset",
+		"onCommand:hexcore.searchHex",
+		"onCommand:hexcore.copyAsHex",
+		"onCommand:hexcore.copyAsC",
+		"onCommand:hexcore.copyAsPython",
+		"onCustomEditor:hexcore.hexEditor"
+	],
 	"main": "./out/extension.js",
 	"browser": "./out/extension.js",
 	"contributes": {

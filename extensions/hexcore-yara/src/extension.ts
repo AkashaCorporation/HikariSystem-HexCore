@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA Scanner Extension v2.0
+ *  HexCore YARA Scanner Extension v2.1
  *  YARA rule-based malware detection with DefenderYara integration
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
@@ -7,11 +7,24 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { YaraEngine, RuleMatch } from './yaraEngine';
+import { YaraEngine, RuleMatch, ScanResult } from './yaraEngine';
 import { ResultsTreeProvider } from './resultsTree';
 import { RulesTreeProvider } from './rulesTree';
 
 let outputChannel: vscode.OutputChannel;
+
+type OutputFormat = 'json' | 'md';
+
+interface CommandOutputOptions {
+	path: string;
+	format?: OutputFormat;
+}
+
+interface YaraScanCommandOptions {
+	file?: string;
+	output?: CommandOutputOptions;
+	quiet?: boolean;
+}
 
 export function activate(context: vscode.ExtensionContext): void {
 	const engine = new YaraEngine();
@@ -63,17 +76,25 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// ── Command: Scan File ───────────────────────────────────────────────
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.yara.scan', async (uri?: vscode.Uri) => {
+		vscode.commands.registerCommand('hexcore.yara.scan', async (arg?: vscode.Uri | YaraScanCommandOptions) => {
+			const options = normalizeScanOptions(arg);
+			const uri = await resolveScanTargetUri(arg, options);
 			if (!uri) {
-				const uris = await vscode.window.showOpenDialog({
-					canSelectMany: false,
-					openLabel: 'Scan with YARA'
-				});
-				if (uris && uris.length > 0) {
-					uri = uris[0];
-				}
+				return undefined;
 			}
-			if (!uri) { return; }
+
+			const executeScan = async (): Promise<ScanResult> => {
+				const result = await engine.scanFileWithResult(uri.fsPath);
+				resultsProvider.setScanResult(result);
+				if (options.output) {
+					writeScanOutput(result, options.output);
+				}
+				return result;
+			};
+
+			if (options.quiet) {
+				return executeScan();
+			}
 
 			outputChannel.show(true);
 
@@ -81,11 +102,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				location: vscode.ProgressLocation.Notification,
 				title: 'YARA Scanning...',
 				cancellable: false
-			}, async (progress) => {
-				progress.report({ message: path.basename(uri!.fsPath) });
-
-				const result = await engine.scanFileWithResult(uri!.fsPath);
-				resultsProvider.setScanResult(result);
+			}, async progress => {
+				progress.report({ message: path.basename(uri.fsPath) });
+				const result = await executeScan();
 
 				if (result.matches.length > 0) {
 					const severity = result.threatScore >= 75 ? '🔴' :
@@ -107,6 +126,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					);
 				}
 			});
+
+			return undefined;
 		})
 	);
 
@@ -319,9 +340,151 @@ export function activate(context: vscode.ExtensionContext): void {
 		engine.updateRules();
 	}
 
-	outputChannel.appendLine('[YARA] HexCore YARA v2.0 activated');
+	outputChannel.appendLine('[YARA] HexCore YARA v2.1 activated');
 	outputChannel.appendLine(`[YARA] Built-in rules: ${engine.getAllRules().length}`);
 	outputChannel.appendLine(`[YARA] DefenderYara catalog: ${engine.getCatalogStats().total} rules indexed`);
+}
+
+function normalizeScanOptions(arg?: vscode.Uri | YaraScanCommandOptions): YaraScanCommandOptions {
+	if (!arg || arg instanceof vscode.Uri) {
+		return {};
+	}
+	return arg;
+}
+
+async function resolveScanTargetUri(
+	arg: vscode.Uri | YaraScanCommandOptions | undefined,
+	options: YaraScanCommandOptions
+): Promise<vscode.Uri | undefined> {
+	if (arg instanceof vscode.Uri) {
+		return arg;
+	}
+
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return vscode.Uri.file(options.file);
+	}
+
+	const activeUri = vscode.window.activeTextEditor?.document.uri;
+	if (activeUri && activeUri.scheme === 'file') {
+		return activeUri;
+	}
+
+	if (options.quiet) {
+		return undefined;
+	}
+
+	const uris = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		openLabel: 'Scan with YARA'
+	});
+	if (!uris || uris.length === 0) {
+		return undefined;
+	}
+	return uris[0];
+}
+
+function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void {
+	const format = normalizeOutputFormat(output.path, output.format);
+	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	if (format === 'md') {
+		fs.writeFileSync(output.path, buildScanMarkdown(result), 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(
+		output.path,
+		JSON.stringify(
+			{
+				file: result.file,
+				threatScore: result.threatScore,
+				scanTime: result.scanTime,
+				fileSize: result.fileSize,
+				categories: result.categories,
+				matchCount: result.matches.length,
+				matches: result.matches,
+				generatedAt: new Date().toISOString()
+			},
+			null,
+			2
+		),
+		'utf8'
+	);
+}
+
+function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
+	if (format === 'json' || format === 'md') {
+		return format;
+	}
+	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
+}
+
+function buildScanMarkdown(result: ScanResult): string {
+	const lines: string[] = [];
+	lines.push('# YARA Scan Report');
+	lines.push('');
+	lines.push(`- File: \`${path.basename(result.file)}\``);
+	lines.push(`- Path: \`${result.file}\``);
+	lines.push(`- Size: ${formatBytes(result.fileSize)}`);
+	lines.push(`- Scan Time: ${result.scanTime} ms`);
+	lines.push(`- Threat Score: ${result.threatScore}/100`);
+	lines.push(`- Match Count: ${result.matches.length}`);
+	lines.push('');
+
+	if (Object.keys(result.categories).length > 0) {
+		lines.push('## Categories');
+		lines.push('');
+		for (const [category, count] of Object.entries(result.categories).sort((a, b) => b[1] - a[1])) {
+			lines.push(`- ${category}: ${count}`);
+		}
+		lines.push('');
+	}
+
+	lines.push('## Matches');
+	lines.push('');
+	if (result.matches.length === 0) {
+		lines.push('- No matches');
+		lines.push('');
+		return lines.join('\n');
+	}
+
+	for (const match of result.matches) {
+		lines.push(`### ${match.ruleName}`);
+		lines.push(`- Namespace: ${match.namespace}`);
+		lines.push(`- Severity: ${match.severity}`);
+		lines.push(`- Score: ${match.score}`);
+		lines.push(`- Family: ${match.meta.family ?? 'unknown'}`);
+		lines.push(`- Platform: ${match.meta.platform ?? 'unknown'}`);
+		if (match.strings.length > 0) {
+			lines.push('- Strings:');
+			for (const str of match.strings.slice(0, 20)) {
+				lines.push(`  - ${str.identifier} @ 0x${str.offset.toString(16).toUpperCase()}: ${str.data}`);
+			}
+			if (match.strings.length > 20) {
+				lines.push(`  - ... and ${match.strings.length - 20} more`);
+			}
+		}
+		lines.push('');
+	}
+
+	return lines.join('\n');
+}
+
+function formatBytes(bytes: number): string {
+	if (!Number.isFinite(bytes) || bytes < 0) {
+		return '0 B';
+	}
+	if (bytes < 1024) {
+		return `${bytes} B`;
+	}
+	const units = ['KB', 'MB', 'GB', 'TB'];
+	let value = bytes / 1024;
+	let index = 0;
+	while (value >= 1024 && index < units.length - 1) {
+		value /= 1024;
+		index++;
+	}
+	return `${value.toFixed(2)} ${units[index]}`;
 }
 
 // ── Threat Report ────────────────────────────────────────────────────────

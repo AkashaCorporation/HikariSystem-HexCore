@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA - Results Tree Provider v2.0
+ *  HexCore YARA - Results Tree Provider v2.1
  *  Scan results with threat scoring and severity icons
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/

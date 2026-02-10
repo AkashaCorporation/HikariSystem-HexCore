@@ -5,6 +5,53 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.2.2] - 2026-02-10 - "Pipeline Stabilization Hotfix"
+
+> **Hotfix Release** — command registration consistency for packaged builds, YARA headless pipeline support, and entropy analyzer refactor.
+
+### Added
+
+#### hexcore-yara v2.1.0
+- **Headless command contract** for `hexcore.yara.scan` with `file`, `quiet`, and `output` options.
+- **Pipeline-safe exports** for YARA scan output in JSON or Markdown formats.
+- **Expanded activation coverage** for all contributed commands and YARA views to avoid packaged-build activation gaps.
+
+#### hexcore-entropy v1.1.0
+- **Modular architecture** split into:
+  - `types.ts` (contracts)
+  - `entropyAnalyzer.ts` (streaming engine + entropy math)
+  - `graphGenerator.ts` (ASCII graph)
+  - `reportGenerator.ts` (report output)
+  - `extension.ts` (command orchestration)
+- **Sampling support** via `sampleRatio` option for large-file quick analysis.
+- **Future crypto hook** via `cryptoSignals` (preview field, conservative stub for now).
+
+### Fixed
+- **Pipeline capability map** now includes:
+  - `hexcore.yara.scan` (headless)
+  - `hexcore.pipeline.listCapabilities` (headless)
+- **Pipeline command args compatibility**:
+  - `hexcore.pipeline.listCapabilities` now accepts `output.path` in runner options format.
+- **Packaged-build "Command not found" reliability issues** addressed by expanding `activationEvents` coverage in:
+  - `hexcore-yara`
+  - `hexcore-debugger`
+  - `hexcore-disassembler`
+  - `hexcore-hexviewer`
+- **Entropy large-file stability** improved with streaming/chunked analysis and adaptive block sizing.
+
+### Changed
+- Extension version bumps:
+  - `hexcore-disassembler`: `1.2.0` -> `1.3.0`
+  - `hexcore-yara`: `2.0.0` -> `2.1.0`
+  - `hexcore-entropy`: `1.0.0` -> `1.1.0`
+  - `hexcore-debugger`: `2.0.0` -> `2.0.1`
+  - `hexcore-hexviewer`: `1.2.0` -> `1.2.1`
+- Updated docs:
+  - `docs/HEXCORE_AUTOMATION.md`
+  - `README.md`
+  - `.agent/skills/hexcore/SKILL.md`
+  - `HEXCORE_AUDIT.md`
+
 ## [3.2.1] - 2026-02-09 - "Defender's Eye"
 
 > **Stable Release** — YARA engine rewrite with Microsoft DefenderYara integration,
@@ -230,6 +277,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.2.2]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.2
 [3.2.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.1
 [3.2.0-preview]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.0-preview
 [3.1.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.1.1

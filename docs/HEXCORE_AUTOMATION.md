@@ -11,6 +11,13 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 	- `hexcore-pipeline.status.json`
 - Both files are written to the job `outDir`.
 
+## 3.2.2 Hotfix Notes
+
+- Fixed pipeline capability gap for `hexcore.yara.scan`.
+- Added pipeline-safe support for `hexcore.pipeline.listCapabilities`.
+- Runner now handles command capability checks more explicitly, including interactive command blocking.
+- Extension activation reliability was improved for packaged builds to reduce `Command '...' not found`.
+
 ## Example Job
 
 ```json
@@ -23,7 +30,8 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 		{ "cmd": "hexcore.hash.file" },
 		{ "cmd": "hexcore.entropy.analyze" },
 		{ "cmd": "hexcore.strings.extract", "args": { "minLength": 5 } },
-		{ "cmd": "hexcore.disasm.analyzeAll" }
+		{ "cmd": "hexcore.disasm.analyzeAll" },
+		{ "cmd": "hexcore.yara.scan" }
 	]
 }
 ```
@@ -35,6 +43,8 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 - `hexcore.pe.analyze` is supported as an alias and resolves to `hexcore.peanalyzer.analyze`.
 - `hexcore.disasm.open` is supported as an alias and resolves to `hexcore.disasm.openFile`.
 - `hexcore.peanalyzer.analyze` now supports headless execution with `file`, `quiet`, and `output`.
+- `hexcore.yara.scan` now supports headless execution with `file`, `quiet`, and `output`.
+- `hexcore.pipeline.listCapabilities` can run in pipeline mode and export capability JSON.
 - Every step runs in headless mode (`quiet: true`) and receives `file`.
 - If a step does not define output, HexCore auto-generates output files inside `outDir`.
 - Commands marked as interactive are blocked in pipeline mode with a clear error.
@@ -87,3 +97,18 @@ For `hexcore.disasm.analyzeAll`, you can pass safe limits through `args`:
 - `maxFunctions`: max number of discovered functions for the run.
 - `maxFunctionSize`: max bytes per function analysis.
 - `forceReload`: force reloading target binary before analysis (recommended for deterministic headless runs).
+
+## Troubleshooting
+
+- `Command '...' not found`:
+	- Confirm you are on HexCore release with hotfix `3.2.2+`.
+	- Run `hexcore.pipeline.listCapabilities` and confirm the command appears.
+	- Reload window after update to refresh extension activation.
+
+- `Command is not declared in pipeline capability map`:
+	- Use the exact command name from capabilities export.
+	- For YARA pipeline step, use `hexcore.yara.scan`.
+
+- `Command is not headless-safe for pipeline`:
+	- This is expected for interactive commands (file pickers/prompts/UI-only actions).
+	- Replace with a headless command variant in `.hexcore_job.json`.
