@@ -179,7 +179,10 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.pipeline.listCapabilities', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.validateJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.validateWorkspace', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.createPresetJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.saveJobAsProfile', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.pipeline.doctor', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.disasm.buildFormula', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.exportASMHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
@@ -229,8 +232,11 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.minidump.memory', ['hikarisystem.hexcore-minidump']],
 	['hexcore.disasm.searchStringHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.exportASMHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.buildFormula', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.validateJob', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.validateWorkspace', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.createPresetJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.saveJobAsProfile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.doctor', ['hikarisystem.hexcore-disassembler']]
 ]);
 

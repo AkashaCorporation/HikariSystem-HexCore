@@ -11,7 +11,7 @@ import { StringRefProvider } from './stringRefTree';
 import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
-import { DisassemblerEngine } from './disassemblerEngine';
+import { DisassemblerEngine, Instruction } from './disassemblerEngine';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
 import {
@@ -22,6 +22,17 @@ import {
 	listCapabilities,
 	runPipelineDoctor
 } from './automationPipelineRunner';
+import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
+import {
+	PipelineJobTemplate,
+	PipelinePreset,
+	getBuiltInPipelinePresets,
+	getWorkspacePresetFilePath,
+	loadWorkspacePipelinePresets,
+	materializePresetJob,
+	normalizeJobTemplateFromExistingJob,
+	saveWorkspacePipelinePreset
+} from './pipelineProfiles';
 
 type OutputFormat = 'json' | 'md';
 
@@ -38,6 +49,16 @@ interface AnalyzeAllCommandOptions {
 	maxFunctionSize?: number;
 	forceReload?: boolean;
 	includeInstructions?: boolean;
+}
+
+interface BuildFormulaCommandOptions {
+	file?: string;
+	startAddress?: string | number;
+	endAddress?: string | number;
+	addresses?: Array<string | number>;
+	targetRegister?: string;
+	output?: AnalyzeAllOutputOptions;
+	quiet?: boolean;
 }
 
 interface AnalyzeAllInstructionEntry {
@@ -82,6 +103,21 @@ interface AnalyzeAllResult {
 	reportMarkdown: string;
 }
 
+interface BuildFormulaResult {
+	filePath: string;
+	fileName: string;
+	startAddress: string;
+	endAddress: string;
+	instructionCount: number;
+	targetRegister: string;
+	expression: string;
+	registerExpressions: Record<string, string>;
+	steps: FormulaBuildResult['steps'];
+	unsupportedInstructions: FormulaBuildResult['unsupportedInstructions'];
+	reportMarkdown: string;
+	generatedAt: string;
+}
+
 interface RunJobCommandOptions {
 	jobFile?: string;
 	quiet?: boolean;
@@ -118,6 +154,21 @@ interface WorkspaceValidationReport {
 	passedJobs: number;
 	failedJobs: number;
 	entries: WorkspaceValidationEntry[];
+}
+
+interface CreatePresetJobCommandOptions {
+	preset?: string;
+	file?: string;
+	outDir?: string;
+	jobPath?: string;
+	quiet?: boolean;
+}
+
+interface SaveJobAsProfileCommandOptions {
+	name?: string;
+	description?: string;
+	jobFile?: string;
+	quiet?: boolean;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -401,6 +452,106 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			return report;
 		}),
+		vscode.commands.registerCommand('hexcore.pipeline.createPresetJob', async (arg?: CreatePresetJobCommandOptions) => {
+			const options = normalizeCreatePresetJobCommandOptions(arg);
+			const quiet = options.quiet === true;
+			const workspaceRoot = getWorkspaceRootPath();
+			if (!workspaceRoot) {
+				throw new Error('No workspace folder is open.');
+			}
+
+			const presets = [
+				...getBuiltInPipelinePresets(),
+				...loadWorkspacePipelinePresets(workspaceRoot)
+			];
+			if (presets.length === 0) {
+				throw new Error('No pipeline presets are available.');
+			}
+
+			let selectedPreset = resolvePipelinePreset(presets, options.preset);
+			if (!selectedPreset && !quiet) {
+				const picked = await vscode.window.showQuickPick(
+					presets.map(preset => ({
+						label: preset.name,
+						description: preset.source === 'builtin' ? 'Built-in' : 'Workspace',
+						detail: preset.description,
+						preset
+					})),
+					{ placeHolder: 'Select a pipeline preset to generate .hexcore_job.json' }
+				);
+				selectedPreset = picked?.preset;
+			}
+			if (!selectedPreset) {
+				throw new Error('No preset selected. Pass "preset" in options or choose one interactively.');
+			}
+
+			const filePath = await resolvePresetTargetFilePath(options, quiet, workspaceRoot);
+			if (!filePath) {
+				throw new Error('No target file selected for preset job generation.');
+			}
+
+			const outDir = resolvePresetOutDirPath(options, workspaceRoot, selectedPreset.id);
+			const jobPath = resolvePresetJobFilePath(options, workspaceRoot);
+			const job = materializePresetJob(selectedPreset.template, filePath, outDir);
+
+			writeJsonFile(jobPath, job);
+			if (!quiet) {
+				vscode.window.showInformationMessage(`Preset job created (${selectedPreset.name}) at ${jobPath}`);
+			}
+
+			return {
+				presetId: selectedPreset.id,
+				presetName: selectedPreset.name,
+				jobFile: jobPath,
+				file: filePath,
+				outDir,
+				steps: job.steps.length
+			};
+		}),
+		vscode.commands.registerCommand('hexcore.pipeline.saveJobAsProfile', async (arg?: SaveJobAsProfileCommandOptions) => {
+			const options = normalizeSaveJobAsProfileCommandOptions(arg);
+			const quiet = options.quiet === true;
+			const workspaceRoot = getWorkspaceRootPath();
+			if (!workspaceRoot) {
+				throw new Error('No workspace folder is open.');
+			}
+
+			const jobFilePath = resolveSaveProfileJobFilePath(options, workspaceRoot);
+			if (!fs.existsSync(jobFilePath)) {
+				throw new Error(`Job file not found: ${jobFilePath}`);
+			}
+
+			const raw = JSON.parse(fs.readFileSync(jobFilePath, 'utf8')) as PipelineJobTemplate;
+			validatePipelineJobTemplate(raw, jobFilePath);
+
+			let name = options.name?.trim();
+			if (!name && !quiet) {
+				name = (await vscode.window.showInputBox({
+					prompt: 'Profile name',
+					placeHolder: 'ctf-reverse-custom'
+				}))?.trim();
+			}
+			if (!name) {
+				throw new Error('Profile name is required.');
+			}
+
+			const description = options.description?.trim()
+				?? `Saved from ${path.basename(jobFilePath)}`;
+			const template = normalizeJobTemplateFromExistingJob(raw);
+			const preset = saveWorkspacePipelinePreset(workspaceRoot, name, description, template);
+			const presetFilePath = getWorkspacePresetFilePath(workspaceRoot);
+
+			if (!quiet) {
+				vscode.window.showInformationMessage(`Workspace profile saved (${preset.name}) to ${presetFilePath}`);
+			}
+
+			return {
+				id: preset.id,
+				name: preset.name,
+				presetFile: presetFilePath,
+				jobFile: jobFilePath
+			};
+		}),
 		vscode.commands.registerCommand('hexcore.pipeline.doctor', async (options?: DoctorCommandOptions) => {
 			const report = await runPipelineDoctor();
 			const quiet = options?.quiet === true;
@@ -628,6 +779,44 @@ export function activate(context: vscode.ExtensionContext): void {
 				const results = await engine.searchStringReferences(query);
 				stringRefProvider.setResults(results);
 			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.buildFormula', async (arg?: BuildFormulaCommandOptions) => {
+			const options = normalizeBuildFormulaCommandOptions(arg);
+			const targetFilePath = await resolveAnalyzeAllTargetFilePath(undefined, options, engine);
+			if (!targetFilePath) {
+				throw new Error('No binary file is selected for formula extraction.');
+			}
+
+			const currentFile = engine.getFilePath();
+			if (currentFile !== targetFilePath) {
+				const loaded = await engine.loadFile(targetFilePath);
+				if (!loaded) {
+					throw new Error(`Failed to load file: ${targetFilePath}`);
+				}
+				await engine.analyzeAll();
+			}
+
+			const instructions = await resolveFormulaInstructions(engine, disasmEditorProvider, options);
+			if (instructions.length === 0) {
+				throw new Error('No instructions were resolved for formula extraction.');
+			}
+
+			const formula = buildInstructionFormula(instructions, options.targetRegister);
+			const result = createBuildFormulaResult(targetFilePath, instructions, formula);
+			if (options.output) {
+				writeBuildFormulaOutput(result, options.output);
+			}
+
+			if (!options.quiet) {
+				vscode.window.showInformationMessage(
+					`Formula extracted (${result.targetRegister}): ${result.expression}`
+				);
+			}
+
+			return result;
 		})
 	);
 
@@ -1153,6 +1342,31 @@ function parsePositiveIntegerOption(value: number, optionName: string): number {
 	return normalized;
 }
 
+function normalizeBuildFormulaCommandOptions(arg?: BuildFormulaCommandOptions): BuildFormulaCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+
+	const normalized: BuildFormulaCommandOptions = {
+		file: arg.file,
+		targetRegister: typeof arg.targetRegister === 'string' ? arg.targetRegister : undefined,
+		output: arg.output,
+		quiet: arg.quiet === true
+	};
+
+	if (arg.startAddress !== undefined) {
+		normalized.startAddress = arg.startAddress;
+	}
+	if (arg.endAddress !== undefined) {
+		normalized.endAddress = arg.endAddress;
+	}
+	if (Array.isArray(arg.addresses)) {
+		normalized.addresses = [...arg.addresses];
+	}
+
+	return normalized;
+}
+
 function normalizeValidateJobCommandOptions(arg?: vscode.Uri | string | ValidateJobCommandOptions): ValidateJobCommandOptions {
 	if (arg === undefined) {
 		return {};
@@ -1184,6 +1398,112 @@ function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommand
 		return { jobFile: arg };
 	}
 	return arg;
+}
+
+function normalizeCreatePresetJobCommandOptions(arg?: CreatePresetJobCommandOptions): CreatePresetJobCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+function normalizeSaveJobAsProfileCommandOptions(arg?: SaveJobAsProfileCommandOptions): SaveJobAsProfileCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
+function resolvePipelinePreset(presets: PipelinePreset[], hint?: string): PipelinePreset | undefined {
+	if (!hint) {
+		return undefined;
+	}
+	const normalizedHint = hint.trim().toLowerCase();
+	return presets.find(preset =>
+		preset.id.toLowerCase() === normalizedHint ||
+		preset.name.toLowerCase() === normalizedHint
+	);
+}
+
+async function resolvePresetTargetFilePath(
+	options: CreatePresetJobCommandOptions,
+	quiet: boolean,
+	workspaceRoot: string
+): Promise<string | undefined> {
+	if (typeof options.file === 'string' && options.file.length > 0) {
+		return resolveRelativeOrAbsolutePath(workspaceRoot, options.file);
+	}
+
+	const activeFilePath = getActiveFilePath();
+	if (activeFilePath) {
+		return activeFilePath;
+	}
+
+	if (quiet) {
+		return undefined;
+	}
+
+	const uris = await vscode.window.showOpenDialog({
+		canSelectMany: false,
+		openLabel: 'Select Target Binary for Preset Job',
+		filters: {
+			'Executables': ['exe', 'dll', 'elf', 'so', 'bin'],
+			'All Files': ['*']
+		}
+	});
+
+	return uris?.[0]?.fsPath;
+}
+
+function resolvePresetOutDirPath(
+	options: CreatePresetJobCommandOptions,
+	workspaceRoot: string,
+	presetId: string
+): string {
+	if (typeof options.outDir === 'string' && options.outDir.length > 0) {
+		return resolveRelativeOrAbsolutePath(workspaceRoot, options.outDir);
+	}
+	const safePreset = sanitizeFileName(presetId);
+	return path.join(workspaceRoot, 'hexcore-reports', safePreset);
+}
+
+function resolvePresetJobFilePath(options: CreatePresetJobCommandOptions, workspaceRoot: string): string {
+	if (typeof options.jobPath === 'string' && options.jobPath.length > 0) {
+		return resolveRelativeOrAbsolutePath(workspaceRoot, options.jobPath);
+	}
+	return path.join(workspaceRoot, '.hexcore_job.json');
+}
+
+function resolveSaveProfileJobFilePath(options: SaveJobAsProfileCommandOptions, workspaceRoot: string): string {
+	if (typeof options.jobFile === 'string' && options.jobFile.length > 0) {
+		return resolveRelativeOrAbsolutePath(workspaceRoot, options.jobFile);
+	}
+	return path.join(workspaceRoot, '.hexcore_job.json');
+}
+
+function validatePipelineJobTemplate(template: unknown, jobFilePath: string): asserts template is PipelineJobTemplate {
+	if (!isRecord(template)) {
+		throw new Error(`Invalid job format in ${jobFilePath}: expected JSON object`);
+	}
+	if (typeof template.file !== 'string' || template.file.trim().length === 0) {
+		throw new Error(`Invalid job format in ${jobFilePath}: missing "file"`);
+	}
+	if (typeof template.outDir !== 'string' || template.outDir.trim().length === 0) {
+		throw new Error(`Invalid job format in ${jobFilePath}: missing "outDir"`);
+	}
+	if (!Array.isArray(template.steps) || template.steps.length === 0) {
+		throw new Error(`Invalid job format in ${jobFilePath}: "steps" must be a non-empty array`);
+	}
+}
+
+function resolveRelativeOrAbsolutePath(baseDir: string, candidate: string): string {
+	return path.isAbsolute(candidate)
+		? candidate
+		: path.resolve(baseDir, candidate);
+}
+
+function getWorkspaceRootPath(): string | undefined {
+	return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
 }
 
 function resolveOptionalOutputPath(output?: string | { path?: string }): string | undefined {
@@ -1484,6 +1804,162 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 	);
 }
 
+async function resolveFormulaInstructions(
+	engine: DisassemblerEngine,
+	disasmEditorProvider: DisassemblyEditorProvider,
+	options: BuildFormulaCommandOptions
+): Promise<Instruction[]> {
+	if (options.addresses && options.addresses.length > 0) {
+		const parsedAddresses = options.addresses
+			.map(address => parseAddressValue(address))
+			.filter((address): address is number => address !== undefined);
+		if (parsedAddresses.length === 0) {
+			throw new Error('No valid instruction addresses were provided.');
+		}
+
+		const instructions: Instruction[] = [];
+		for (const address of parsedAddresses) {
+			const instruction = findInstructionByAddress(engine, address);
+			if (!instruction) {
+				throw new Error(`Instruction not found at ${toHexAddress(address)}.`);
+			}
+			instructions.push(instruction);
+		}
+		return instructions.sort((left, right) => left.address - right.address);
+	}
+
+	let startAddress = parseAddressValue(options.startAddress);
+	let endAddress = parseAddressValue(options.endAddress);
+	if (startAddress === undefined && !options.quiet) {
+		const defaultStart = disasmEditorProvider.getCurrentAddress();
+		const input = await vscode.window.showInputBox({
+			prompt: 'Formula Start Address (hex or decimal)',
+			placeHolder: defaultStart !== undefined ? toHexAddress(defaultStart) : '0x401000',
+			value: defaultStart !== undefined ? toHexAddress(defaultStart) : undefined,
+			validateInput: value => parseAddressValue(value) === undefined ? 'Invalid address' : null
+		});
+		if (input) {
+			startAddress = parseAddressValue(input);
+		}
+	}
+
+	if (startAddress === undefined) {
+		startAddress = disasmEditorProvider.getCurrentAddress();
+	}
+	if (startAddress === undefined) {
+		throw new Error('Formula extraction requires a start address.');
+	}
+
+	if (endAddress === undefined && !options.quiet) {
+		const startHex = toHexAddress(startAddress);
+		const input = await vscode.window.showInputBox({
+			prompt: 'Formula End Address (hex or decimal)',
+			placeHolder: startHex,
+			value: startHex,
+			validateInput: value => parseAddressValue(value) === undefined ? 'Invalid address' : null
+		});
+		if (input) {
+			endAddress = parseAddressValue(input);
+		}
+	}
+
+	if (endAddress === undefined) {
+		endAddress = startAddress;
+	}
+
+	return collectInstructionsInRange(engine, startAddress, endAddress);
+}
+
+function collectInstructionsInRange(engine: DisassemblerEngine, startAddress: number, endAddress: number): Instruction[] {
+	const from = Math.min(startAddress, endAddress);
+	const to = Math.max(startAddress, endAddress);
+
+	const containing = engine.getFunctions().find(func =>
+		from >= func.address && from < func.endAddress
+	);
+	if (!containing) {
+		throw new Error(`No containing function found for ${toHexAddress(from)}.`);
+	}
+
+	const instructions = containing.instructions
+		.filter(instruction => instruction.address >= from && instruction.address <= to)
+		.sort((left, right) => left.address - right.address);
+	if (instructions.length === 0) {
+		throw new Error(`No instructions found in range ${toHexAddress(from)}..${toHexAddress(to)}.`);
+	}
+	return instructions;
+}
+
+function findInstructionByAddress(engine: DisassemblerEngine, address: number): Instruction | undefined {
+	for (const func of engine.getFunctions()) {
+		const instruction = func.instructions.find(item => item.address === address);
+		if (instruction) {
+			return instruction;
+		}
+	}
+	return undefined;
+}
+
+function createBuildFormulaResult(
+	filePath: string,
+	instructions: Instruction[],
+	formula: FormulaBuildResult
+): BuildFormulaResult {
+	const sorted = [...instructions].sort((left, right) => left.address - right.address);
+	const startAddress = sorted[0]?.address ?? 0;
+	const endAddress = sorted[sorted.length - 1]?.address ?? 0;
+
+	return {
+		filePath,
+		fileName: path.basename(filePath),
+		startAddress: toHexAddress(startAddress),
+		endAddress: toHexAddress(endAddress),
+		instructionCount: formula.instructionCount,
+		targetRegister: formula.targetRegister,
+		expression: formula.expression,
+		registerExpressions: formula.registerExpressions,
+		steps: formula.steps,
+		unsupportedInstructions: formula.unsupportedInstructions,
+		reportMarkdown: formula.reportMarkdown,
+		generatedAt: new Date().toISOString()
+	};
+}
+
+function writeBuildFormulaOutput(result: BuildFormulaResult, output: AnalyzeAllOutputOptions): void {
+	const outputPath = path.resolve(output.path);
+	const format = normalizeOutputFormat(outputPath, output.format);
+	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+	if (format === 'md') {
+		fs.writeFileSync(outputPath, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+}
+
+function parseAddressValue(value: string | number | undefined): number | undefined {
+	if (typeof value === 'number' && Number.isFinite(value)) {
+		const normalized = Math.floor(value);
+		return normalized >= 0 ? normalized : undefined;
+	}
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+
+	const text = value.trim();
+	if (text.length === 0) {
+		return undefined;
+	}
+	if (/^-?0x[0-9a-f]+$/i.test(text)) {
+		return parseInt(text, 16);
+	}
+	if (/^[0-9]+$/i.test(text)) {
+		return parseInt(text, 10);
+	}
+	return undefined;
+}
+
 function normalizeOutputFormat(outputPath: string, format?: OutputFormat): OutputFormat {
 	if (format === 'json' || format === 'md') {
 		return format;
@@ -1493,6 +1969,18 @@ function normalizeOutputFormat(outputPath: string, format?: OutputFormat): Outpu
 
 function toHexAddress(address: number): string {
 	return `0x${address.toString(16).toUpperCase()}`;
+}
+
+function sanitizeFileName(value: string): string {
+	return value
+		.replace(/[^a-zA-Z0-9._-]+/g, '-')
+		.replace(/-+/g, '-')
+		.replace(/^-|-$/g, '')
+		.toLowerCase() || 'default';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toErrorMessage(error: unknown): string {
