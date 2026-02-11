@@ -20,6 +20,8 @@ export interface PipelineStep {
 	continueOnError?: boolean;
 	timeoutMs?: number;
 	expectOutput?: boolean;
+	retryCount?: number;
+	retryDelayMs?: number;
 }
 
 export interface PipelineJobFile {
@@ -46,6 +48,7 @@ export interface PipelineStepStatus {
 	startedAt: string;
 	finishedAt: string;
 	durationMs: number;
+	attemptCount: number;
 	outputPath?: string;
 	error?: string;
 }
@@ -76,6 +79,8 @@ export interface PipelineValidationStep {
 	headless: boolean;
 	registered: boolean;
 	timeoutMs: number;
+	retryCount: number;
+	retryDelayMs: number;
 	continueOnError: boolean;
 	expectOutput: boolean;
 	provideOutput: boolean;
@@ -148,6 +153,8 @@ interface CommandCapability {
 const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
 const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
 const DEFAULT_TIMEOUT_MS = 60000;
+const DEFAULT_RETRY_COUNT = 0;
+const DEFAULT_RETRY_DELAY_MS = 1000;
 const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hash.file', 'hexcore.hashcalc.calculate'],
 	['hexcore.hash.calculate', 'hexcore.hashcalc.calculate'],
@@ -171,6 +178,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.minidump.memory', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.pipeline.listCapabilities', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.validateJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.validateWorkspace', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.doctor', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.exportASMHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
@@ -222,6 +230,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.searchStringHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.exportASMHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.validateJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.validateWorkspace', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.doctor', ['hikarisystem.hexcore-disassembler']]
 ]);
 
@@ -373,10 +382,14 @@ export class AutomationPipelineRunner {
 			const provideOutput = shouldProvideOutput(step, capability);
 			const output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
 			const timeoutMs = resolveStepTimeout(step, capability);
+			const retryCount = resolveRetryCount(step);
+			const retryDelayMs = resolveRetryDelayMs(step);
+			const maxAttempts = retryCount + 1;
 			const startedAt = new Date();
 
 			appendLog(logPath, `[Step ${index + 1}] ${step.cmd} -> ${resolvedCommand}`);
 			appendLog(logPath, `[Step ${index + 1}] Timeout: ${timeoutMs}ms`);
+			appendLog(logPath, `[Step ${index + 1}] Retries: ${retryCount} (delay=${retryDelayMs}ms)`);
 
 			if (!capability) {
 				const errorMessage = `Command is not declared in pipeline capability map: ${resolvedCommand}`;
@@ -384,6 +397,7 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
+					1,
 					output?.path,
 					'error',
 					errorMessage
@@ -405,6 +419,7 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
+					1,
 					output?.path,
 					'error',
 					errorMessage
@@ -427,6 +442,7 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
+					1,
 					output?.path,
 					'error',
 					errorMessage
@@ -443,51 +459,78 @@ export class AutomationPipelineRunner {
 
 			const commandOptions = buildCommandOptions(job.file, step, output, job.quiet);
 
-			try {
-				await withTimeout(
-					vscode.commands.executeCommand(resolvedCommand, commandOptions),
-					timeoutMs,
-					`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
-				);
+			let attemptCount = 0;
+			let executionError: unknown;
+			let completed = false;
 
-				if (validateOutput) {
-					if (!output) {
-						throw new Error(`Expected output validation for ${resolvedCommand}, but no output path was assigned.`);
+			while (attemptCount < maxAttempts) {
+				attemptCount++;
+				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
+
+				try {
+					await withTimeout(
+						vscode.commands.executeCommand(resolvedCommand, commandOptions),
+						timeoutMs,
+						`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
+					);
+
+					if (validateOutput) {
+						if (!output) {
+							throw new Error(`Expected output validation for ${resolvedCommand}, but no output path was assigned.`);
+						}
+						validateStepOutput(output.path);
 					}
-					validateStepOutput(output.path);
-				}
 
-				const stepStatus = createStepStatus(
-					step,
-					resolvedCommand,
-					startedAt,
-					output?.path,
-					'ok'
-				);
-				status.steps.push(stepStatus);
-				appendLog(logPath, `[Step ${index + 1}] OK (${stepStatus.durationMs}ms)`);
-				writeJson(statusPath, status);
-			} catch (error: unknown) {
-				const errorMessage = normalizeExecutionError(error, resolvedCommand);
-				if (error instanceof TimeoutError) {
-					await tryCancelOnTimeout(capability, logPath, index);
-				}
-
-				const stepStatus = createStepStatus(
-					step,
-					resolvedCommand,
-					startedAt,
-					output?.path,
-					'error',
-					errorMessage
-				);
-				status.steps.push(stepStatus);
-				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
-				writeJson(statusPath, status);
-				failed = true;
-				if (!step.continueOnError) {
+					const stepStatus = createStepStatus(
+						step,
+						resolvedCommand,
+						startedAt,
+						attemptCount,
+						output?.path,
+						'ok'
+					);
+					status.steps.push(stepStatus);
+					appendLog(logPath, `[Step ${index + 1}] OK (${stepStatus.durationMs}ms, attempts=${attemptCount})`);
+					writeJson(statusPath, status);
+					completed = true;
 					break;
+				} catch (error: unknown) {
+					executionError = error;
+					const errorMessage = normalizeExecutionError(error, resolvedCommand);
+					if (error instanceof TimeoutError) {
+						await tryCancelOnTimeout(capability, logPath, index);
+					}
+
+					if (attemptCount < maxAttempts) {
+						appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount} failed: ${errorMessage}`);
+						appendLog(logPath, `[Step ${index + 1}] Retrying after ${retryDelayMs}ms...`);
+						if (retryDelayMs > 0) {
+							await delay(retryDelayMs);
+						}
+						continue;
+					}
+
+					const stepStatus = createStepStatus(
+						step,
+						resolvedCommand,
+						startedAt,
+						attemptCount,
+						output?.path,
+						'error',
+						errorMessage
+					);
+					status.steps.push(stepStatus);
+					appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
+					writeJson(statusPath, status);
+					failed = true;
+					if (!step.continueOnError) {
+						break;
+					}
 				}
+			}
+
+			if (!completed && executionError && !step.continueOnError) {
+				break;
 			}
 		}
 
@@ -524,6 +567,8 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 		const expectOutput = shouldValidateOutput(step, capability);
 		const provideOutput = shouldProvideOutput(step, capability);
 		const timeoutMs = resolveStepTimeout(step, capability);
+		const retryCount = resolveRetryCount(step);
+		const retryDelayMs = resolveRetryDelayMs(step);
 		const output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
 
 		steps.push({
@@ -534,6 +579,8 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 			headless: capability?.headless ?? false,
 			registered,
 			timeoutMs,
+			retryCount,
+			retryDelayMs,
 			continueOnError: step.continueOnError === true,
 			expectOutput,
 			provideOutput,
@@ -653,6 +700,8 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 	const args = isRecord(step.args) ? step.args : undefined;
 	const continueOnError = typeof step.continueOnError === 'boolean' ? step.continueOnError : false;
 	const timeoutMs = parseTimeoutMs(step.timeoutMs, index, cmd, jobFilePath);
+	const retryCount = parseRetryCount(step.retryCount, index, cmd, jobFilePath);
+	const retryDelayMs = parseRetryDelayMs(step.retryDelayMs, index, cmd, jobFilePath);
 	const expectOutput = typeof step.expectOutput === 'boolean' ? step.expectOutput : undefined;
 
 	let output: PipelineOutputOptions | undefined;
@@ -674,7 +723,9 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 		output,
 		continueOnError,
 		timeoutMs,
-		expectOutput
+		expectOutput,
+		retryCount,
+		retryDelayMs
 	};
 }
 
@@ -697,6 +748,44 @@ function parseTimeoutMs(
 	const normalized = Math.floor(rawValue);
 	if (normalized < 1) {
 		throw new Error(`Invalid "timeoutMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 1`);
+	}
+	return normalized;
+}
+
+function parseRetryCount(
+	rawValue: unknown,
+	index: number,
+	cmd: string,
+	jobFilePath: string
+): number | undefined {
+	if (rawValue === undefined) {
+		return undefined;
+	}
+	if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) {
+		throw new Error(`Invalid "retryCount" in step ${index} (${cmd}) of ${jobFilePath}: expected finite number`);
+	}
+	const normalized = Math.floor(rawValue);
+	if (normalized < 0) {
+		throw new Error(`Invalid "retryCount" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 0`);
+	}
+	return normalized;
+}
+
+function parseRetryDelayMs(
+	rawValue: unknown,
+	index: number,
+	cmd: string,
+	jobFilePath: string
+): number | undefined {
+	if (rawValue === undefined) {
+		return undefined;
+	}
+	if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) {
+		throw new Error(`Invalid "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: expected finite number`);
+	}
+	const normalized = Math.floor(rawValue);
+	if (normalized < 0) {
+		throw new Error(`Invalid "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 0`);
 	}
 	return normalized;
 }
@@ -774,6 +863,20 @@ function resolveStepTimeout(step: PipelineStep, capability?: CommandCapability):
 	return DEFAULT_TIMEOUT_MS;
 }
 
+function resolveRetryCount(step: PipelineStep): number {
+	if (typeof step.retryCount === 'number') {
+		return step.retryCount;
+	}
+	return DEFAULT_RETRY_COUNT;
+}
+
+function resolveRetryDelayMs(step: PipelineStep): number {
+	if (typeof step.retryDelayMs === 'number') {
+		return step.retryDelayMs;
+	}
+	return DEFAULT_RETRY_DELAY_MS;
+}
+
 function validateStepOutput(outputPath: string): void {
 	if (!fs.existsSync(outputPath)) {
 		throw new Error(`Expected output file was not created: ${outputPath}`);
@@ -805,6 +908,7 @@ function createStepStatus(
 	step: PipelineStep,
 	resolvedCmd: string,
 	startedAt: Date,
+	attemptCount: number,
 	outputPath: string | undefined,
 	status: 'ok' | 'error' | 'skipped',
 	error?: string
@@ -817,6 +921,7 @@ function createStepStatus(
 		startedAt: startedAt.toISOString(),
 		finishedAt: finishedAt.toISOString(),
 		durationMs: finishedAt.getTime() - startedAt.getTime(),
+		attemptCount,
 		outputPath,
 		error
 	};

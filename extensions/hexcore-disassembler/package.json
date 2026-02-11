@@ -12,6 +12,7 @@
 		"onCommand:hexcore.pipeline.runJob",
 		"onCommand:hexcore.pipeline.listCapabilities",
 		"onCommand:hexcore.pipeline.validateJob",
+		"onCommand:hexcore.pipeline.validateWorkspace",
 		"onCommand:hexcore.pipeline.doctor",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
@@ -181,6 +182,12 @@
 				"icon": "$(check)"
 			},
 			{
+				"command": "hexcore.pipeline.validateWorkspace",
+				"title": "Validate HexCore Jobs in Workspace",
+				"category": "HexCore Automation",
+				"icon": "$(check-all)"
+			},
+			{
 				"command": "hexcore.pipeline.doctor",
 				"title": "Run HexCore Pipeline Doctor",
 				"category": "HexCore Automation",
@@ -280,6 +287,15 @@
 				}
 			]
 		},
+		"jsonValidation": [
+			{
+				"fileMatch": [
+					"/.hexcore_job.json",
+					"**/.hexcore_job.json"
+				],
+				"url": "./schemas/hexcore-job.schema.json"
+			}
+		],
 		"configuration": {
 			"title": "HexCore Disassembler",
 			"properties": {

@@ -97,6 +97,29 @@ interface DoctorCommandOptions extends CommandOutputOptions {
 	quiet?: boolean;
 }
 
+interface ValidateWorkspaceCommandOptions extends CommandOutputOptions {
+	quiet?: boolean;
+	glob?: string;
+}
+
+interface WorkspaceValidationEntry {
+	jobFile: string;
+	ok: boolean;
+	totalSteps: number;
+	errors: number;
+	warnings: number;
+	error?: string;
+}
+
+interface WorkspaceValidationReport {
+	generatedAt: string;
+	workspaceRoots: string[];
+	totalJobs: number;
+	passedJobs: number;
+	failedJobs: number;
+	entries: WorkspaceValidationEntry[];
+}
+
 export function activate(context: vscode.ExtensionContext): void {
 	// Use Factory to get the initial global engine (or specific if we knew context)
 	const factory = DisassemblerFactory.getInstance();
@@ -297,6 +320,82 @@ export function activate(context: vscode.ExtensionContext): void {
 					const errors = report.issues.filter(issue => issue.level === 'error').length;
 					const warnings = report.issues.filter(issue => issue.level === 'warning').length;
 					vscode.window.showWarningMessage(`Pipeline validation found issues (${errors} errors, ${warnings} warnings).`);
+				}
+			}
+
+			return report;
+		}),
+		vscode.commands.registerCommand('hexcore.pipeline.validateWorkspace', async (arg?: ValidateWorkspaceCommandOptions) => {
+			const options = normalizeValidateWorkspaceCommandOptions(arg);
+			const quiet = options.quiet ?? false;
+			const includePattern = options.glob ?? '**/.hexcore_job.json';
+			const excludePattern = '**/{node_modules,.git,out,dist}/**';
+			const jobFiles = await vscode.workspace.findFiles(includePattern, excludePattern);
+
+			const workspaceRoots = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
+			const report: WorkspaceValidationReport = {
+				generatedAt: new Date().toISOString(),
+				workspaceRoots,
+				totalJobs: 0,
+				passedJobs: 0,
+				failedJobs: 0,
+				entries: []
+			};
+
+			if (jobFiles.length === 0) {
+				const outputPath = resolveOptionalOutputPath(options.output);
+				if (outputPath) {
+					writeJsonFile(outputPath, report);
+				}
+				if (!quiet) {
+					vscode.window.showWarningMessage('No .hexcore_job.json files were found in this workspace.');
+				}
+				return report;
+			}
+
+			for (const jobFile of jobFiles.sort((left, right) => left.fsPath.localeCompare(right.fsPath))) {
+				try {
+					const validation = await pipelineRunner.validateJobFile(jobFile.fsPath, true);
+					const errors = validation.issues.filter(issue => issue.level === 'error').length;
+					const warnings = validation.issues.filter(issue => issue.level === 'warning').length;
+					report.entries.push({
+						jobFile: jobFile.fsPath,
+						ok: validation.ok,
+						totalSteps: validation.totalSteps,
+						errors,
+						warnings
+					});
+				} catch (error: unknown) {
+					report.entries.push({
+						jobFile: jobFile.fsPath,
+						ok: false,
+						totalSteps: 0,
+						errors: 1,
+						warnings: 0,
+						error: toErrorMessage(error)
+					});
+				}
+			}
+
+			report.totalJobs = report.entries.length;
+			report.passedJobs = report.entries.filter(entry => entry.ok).length;
+			report.failedJobs = report.totalJobs - report.passedJobs;
+
+			const outputPath = resolveOptionalOutputPath(options.output);
+			if (outputPath) {
+				writeJsonFile(outputPath, report);
+				if (!quiet) {
+					vscode.window.showInformationMessage(`Workspace pipeline validation written to ${outputPath}`);
+				}
+			} else if (!quiet) {
+				showWorkspaceValidationInOutputChannel(report);
+			}
+
+			if (!quiet) {
+				if (report.failedJobs > 0) {
+					vscode.window.showWarningMessage(`Workspace pipeline validation found issues in ${report.failedJobs}/${report.totalJobs} job files.`);
+				} else {
+					vscode.window.showInformationMessage(`Workspace pipeline validation passed for ${report.totalJobs} job files.`);
 				}
 			}
 
@@ -1067,6 +1166,13 @@ function normalizeValidateJobCommandOptions(arg?: vscode.Uri | string | Validate
 	return arg;
 }
 
+function normalizeValidateWorkspaceCommandOptions(arg?: ValidateWorkspaceCommandOptions): ValidateWorkspaceCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+	return arg;
+}
+
 function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommandOptions): RunJobCommandOptions {
 	if (arg === undefined) {
 		return {};
@@ -1169,6 +1275,29 @@ function showValidationReportInOutputChannel(report: PipelineJobValidationReport
 			`- #${step.index} ${step.cmd} -> ${step.resolvedCmd} | declared=${step.declared} | headless=${step.headless} | registered=${step.registered} | output=${step.outputPath ?? '(none)'}`
 		);
 	}
+	outputChannel.show();
+}
+
+function showWorkspaceValidationInOutputChannel(report: WorkspaceValidationReport): void {
+	const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
+	outputChannel.clear();
+	outputChannel.appendLine('HexCore Pipeline - Workspace Validation');
+	outputChannel.appendLine('='.repeat(50));
+	outputChannel.appendLine(`Generated: ${report.generatedAt}`);
+	outputChannel.appendLine(`Workspaces: ${report.workspaceRoots.length > 0 ? report.workspaceRoots.join(' | ') : '(none)'}`);
+	outputChannel.appendLine(`Jobs: ${report.totalJobs} | Passed: ${report.passedJobs} | Failed: ${report.failedJobs}`);
+	outputChannel.appendLine('');
+
+	for (const entry of report.entries) {
+		const status = entry.ok ? 'OK' : 'FAIL';
+		outputChannel.appendLine(`[${status}] ${entry.jobFile}`);
+		outputChannel.appendLine(`  Steps: ${entry.totalSteps} | Errors: ${entry.errors} | Warnings: ${entry.warnings}`);
+		if (entry.error) {
+			outputChannel.appendLine(`  Error: ${entry.error}`);
+		}
+		outputChannel.appendLine('');
+	}
+
 	outputChannel.show();
 }
 
