@@ -179,7 +179,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.pipeline.listCapabilities', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.validateJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.validateWorkspace', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
-	['hexcore.pipeline.createPresetJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.createPresetJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.pipeline.saveJobAsProfile', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.pipeline.doctor', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.disasm.buildFormula', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
