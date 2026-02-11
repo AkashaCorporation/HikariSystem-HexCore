@@ -1631,13 +1631,111 @@ function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | un
 
 	const folders = vscode.workspace.workspaceFolders ?? [];
 	for (const folder of folders) {
-		const candidate = path.join(folder.uri.fsPath, '.hexcore_job.json');
-		if (fs.existsSync(candidate)) {
-			return candidate;
+		const workspaceRoot = folder.uri.fsPath;
+		const rootCandidate = path.join(workspaceRoot, '.hexcore_job.json');
+		if (fs.existsSync(rootCandidate)) {
+			return rootCandidate;
+		}
+
+		const activeNearest = findNearestJobFileFromActiveEditor(workspaceRoot);
+		if (activeNearest) {
+			return activeNearest;
+		}
+
+		const nestedCandidate = findNestedJobFile(workspaceRoot, 3);
+		if (nestedCandidate) {
+			return nestedCandidate;
 		}
 	}
 
 	return undefined;
+}
+
+function findNearestJobFileFromActiveEditor(workspaceRoot: string): string | undefined {
+	const activeFilePath = getActiveFilePath();
+	if (!activeFilePath) {
+		return undefined;
+	}
+
+	const normalizedRoot = path.resolve(workspaceRoot);
+	let currentDir = path.dirname(path.resolve(activeFilePath));
+	if (!isPathWithin(normalizedRoot, currentDir)) {
+		return undefined;
+	}
+
+	while (true) {
+		const candidate = path.join(currentDir, '.hexcore_job.json');
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+
+		if (currentDir === normalizedRoot) {
+			break;
+		}
+
+		const parent = path.dirname(currentDir);
+		if (parent === currentDir) {
+			break;
+		}
+		currentDir = parent;
+	}
+
+	return undefined;
+}
+
+function findNestedJobFile(workspaceRoot: string, maxDepth: number): string | undefined {
+	const skipDirectories = new Set([
+		'.git',
+		'node_modules',
+		'out',
+		'dist',
+		'hexcore-reports'
+	]);
+
+	const visit = (dir: string, depth: number): string | undefined => {
+		const candidate = path.join(dir, '.hexcore_job.json');
+		if (fs.existsSync(candidate)) {
+			return candidate;
+		}
+
+		if (depth >= maxDepth) {
+			return undefined;
+		}
+
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return undefined;
+		}
+
+		for (const entry of entries) {
+			if (!entry.isDirectory()) {
+				continue;
+			}
+			if (skipDirectories.has(entry.name)) {
+				continue;
+			}
+
+			const nextDir = path.join(dir, entry.name);
+			const nested = visit(nextDir, depth + 1);
+			if (nested) {
+				return nested;
+			}
+		}
+
+		return undefined;
+	};
+
+	return visit(path.resolve(workspaceRoot), 0);
+}
+
+function isPathWithin(parentPath: string, childPath: string): boolean {
+	const relative = path.relative(parentPath, childPath);
+	if (relative.length === 0) {
+		return true;
+	}
+	return !relative.startsWith('..') && !path.isAbsolute(relative);
 }
 
 function writeJsonFile(outputPath: string, data: unknown): void {
