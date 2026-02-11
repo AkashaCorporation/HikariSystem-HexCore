@@ -9,6 +9,10 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
+		"onCommand:hexcore.pipeline.runJob",
+		"onCommand:hexcore.pipeline.listCapabilities",
+		"onCommand:hexcore.pipeline.validateJob",
+		"onCommand:hexcore.pipeline.doctor",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -169,6 +173,18 @@
 				"title": "List Pipeline Command Capabilities",
 				"category": "HexCore Automation",
 				"icon": "$(list-unordered)"
+			},
+			{
+				"command": "hexcore.pipeline.validateJob",
+				"title": "Validate HexCore Automation Job",
+				"category": "HexCore Automation",
+				"icon": "$(check)"
+			},
+			{
+				"command": "hexcore.pipeline.doctor",
+				"title": "Run HexCore Pipeline Doctor",
+				"category": "HexCore Automation",
+				"icon": "$(heart)"
 			},
 			{
 				"command": "hexcore.disasm.searchStringHeadless",
