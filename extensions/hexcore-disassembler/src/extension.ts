@@ -23,6 +23,7 @@ import {
 	runPipelineDoctor
 } from './automationPipelineRunner';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
+import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import {
 	PipelineJobTemplate,
 	PipelinePreset,
@@ -57,6 +58,14 @@ interface BuildFormulaCommandOptions {
 	endAddress?: string | number;
 	addresses?: Array<string | number>;
 	targetRegister?: string;
+	output?: AnalyzeAllOutputOptions;
+	quiet?: boolean;
+}
+
+interface CheckConstantsCommandOptions {
+	file?: string;
+	notesFile?: string;
+	maxFindings?: number;
 	output?: AnalyzeAllOutputOptions;
 	quiet?: boolean;
 }
@@ -115,6 +124,12 @@ interface BuildFormulaResult {
 	steps: FormulaBuildResult['steps'];
 	unsupportedInstructions: FormulaBuildResult['unsupportedInstructions'];
 	reportMarkdown: string;
+	generatedAt: string;
+}
+
+interface ConstantSanityResult extends ConstantSanityAnalysis {
+	filePath: string;
+	fileName: string;
 	generatedAt: string;
 }
 
@@ -835,6 +850,58 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.checkConstants', async (arg?: CheckConstantsCommandOptions) => {
+			const options = normalizeCheckConstantsCommandOptions(arg);
+			const targetFilePath = await resolveAnalyzeAllTargetFilePath(undefined, options, engine);
+			if (!targetFilePath) {
+				throw new Error('No binary file is selected for constant sanity check.');
+			}
+
+			const currentFile = engine.getFilePath();
+			if (currentFile !== targetFilePath) {
+				const loaded = await engine.loadFile(targetFilePath);
+				if (!loaded) {
+					throw new Error(`Failed to load file: ${targetFilePath}`);
+				}
+			}
+
+			if (engine.getFunctions().length === 0 || currentFile !== targetFilePath) {
+				await engine.analyzeAll();
+			}
+
+			const notesFilePath = resolveOptionalNotesFilePath(options.notesFile, targetFilePath);
+			const instructions = collectAnalyzedInstructions(engine);
+			const analysis = analyzeConstantSanity(instructions, {
+				notesFilePath,
+				maxFindings: options.maxFindings
+			});
+
+			const result: ConstantSanityResult = {
+				filePath: targetFilePath,
+				fileName: path.basename(targetFilePath),
+				generatedAt: new Date().toISOString(),
+				...analysis
+			};
+
+			if (options.output) {
+				writeConstantSanityOutput(result, options.output);
+			}
+
+			if (!options.quiet) {
+				if (result.mismatchedAnnotations > 0) {
+					vscode.window.showWarningMessage(
+						`Constant sanity checker found ${result.mismatchedAnnotations} mismatches.`
+					);
+				} else {
+					vscode.window.showInformationMessage('Constant sanity checker found no mismatches.');
+				}
+			}
+
+			return result;
+		})
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.exportASM', async () => {
 			const uri = await vscode.window.showSaveDialog({
 				filters: { 'Assembly': ['asm', 's'], 'Text': ['txt'] }
@@ -1376,6 +1443,25 @@ function normalizeBuildFormulaCommandOptions(arg?: BuildFormulaCommandOptions): 
 	}
 	if (Array.isArray(arg.addresses)) {
 		normalized.addresses = [...arg.addresses];
+	}
+
+	return normalized;
+}
+
+function normalizeCheckConstantsCommandOptions(arg?: CheckConstantsCommandOptions): CheckConstantsCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+
+	const normalized: CheckConstantsCommandOptions = {
+		file: arg.file,
+		notesFile: arg.notesFile,
+		output: arg.output,
+		quiet: arg.quiet === true
+	};
+
+	if (arg.maxFindings !== undefined) {
+		normalized.maxFindings = parsePositiveIntegerOption(arg.maxFindings, 'maxFindings');
 	}
 
 	return normalized;
@@ -1950,6 +2036,49 @@ function writeBuildFormulaOutput(result: BuildFormulaResult, output: AnalyzeAllO
 	}
 
 	fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+}
+
+function writeConstantSanityOutput(result: ConstantSanityResult, output: AnalyzeAllOutputOptions): void {
+	const outputPath = path.resolve(output.path);
+	const format = normalizeOutputFormat(outputPath, output.format);
+	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+
+	if (format === 'md') {
+		fs.writeFileSync(outputPath, result.reportMarkdown, 'utf8');
+		return;
+	}
+
+	fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+}
+
+function collectAnalyzedInstructions(engine: DisassemblerEngine): Instruction[] {
+	const byAddress = new Map<number, Instruction>();
+	for (const func of engine.getFunctions()) {
+		for (const instruction of func.instructions) {
+			if (!byAddress.has(instruction.address)) {
+				byAddress.set(instruction.address, instruction);
+			}
+		}
+	}
+	return Array.from(byAddress.values()).sort((left, right) => left.address - right.address);
+}
+
+function resolveOptionalNotesFilePath(candidate: string | undefined, targetFilePath: string): string | undefined {
+	if (typeof candidate !== 'string' || candidate.trim().length === 0) {
+		return undefined;
+	}
+
+	const normalizedCandidate = candidate.trim();
+	if (path.isAbsolute(normalizedCandidate)) {
+		return normalizedCandidate;
+	}
+
+	const workspaceRoot = getWorkspaceRootPath();
+	if (workspaceRoot) {
+		return path.resolve(workspaceRoot, normalizedCandidate);
+	}
+
+	return path.resolve(path.dirname(targetFilePath), normalizedCandidate);
 }
 
 function parseAddressValue(value: string | number | undefined): number | undefined {

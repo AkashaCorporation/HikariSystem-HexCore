@@ -17,6 +17,7 @@
 		"onCommand:hexcore.pipeline.saveJobAsProfile",
 		"onCommand:hexcore.pipeline.doctor",
 		"onCommand:hexcore.disasm.buildFormula",
+		"onCommand:hexcore.disasm.checkConstants",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -171,6 +172,12 @@
 				"title": "Build Formula from Instructions",
 				"category": "HexCore Disassembler",
 				"icon": "$(symbol-operator)"
+			},
+			{
+				"command": "hexcore.disasm.checkConstants",
+				"title": "Check Constant Annotation Sanity",
+				"category": "HexCore Disassembler",
+				"icon": "$(check)"
 			},
 			{
 				"command": "hexcore.pipeline.runJob",

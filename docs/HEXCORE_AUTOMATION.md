@@ -60,6 +60,7 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 - `hexcore.pipeline.saveJobAsProfile` stores custom profiles in workspace file `.hexcore_profiles.json`.
 - `hexcore.pipeline.doctor` returns environment diagnostics (registered commands, owner extension state, undeclared `hexcore.*` commands).
 - `hexcore.disasm.buildFormula` supports headless extraction of arithmetic expressions from instruction ranges (`startAddress`/`endAddress` or explicit `addresses`).
+- `hexcore.disasm.checkConstants` validates numeric literals in comments/notes against instruction immediates and exports mismatch report.
 - Every step runs in headless mode (`quiet: true`) and receives `file`.
 - If a step does not define output, HexCore auto-generates output files inside `outDir`.
 - Commands marked as interactive are blocked in pipeline mode with a clear error.
@@ -130,6 +131,22 @@ For `hexcore.disasm.buildFormula`, pass range or explicit addresses:
 	},
 	"output": {
 		"path": "formula-main-check.json"
+	}
+}
+```
+
+For `hexcore.disasm.checkConstants`, optionally provide a notes file and output report:
+
+```json
+{
+	"cmd": "hexcore.disasm.checkConstants",
+	"args": {
+		"notesFile": "ANALYST_NOTES.md",
+		"maxFindings": 200
+	},
+	"output": {
+		"path": "constant-sanity-report.md",
+		"format": "md"
 	}
 }
 ```
