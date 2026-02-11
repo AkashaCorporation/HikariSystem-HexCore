@@ -11,7 +11,7 @@
 
 ## Current Snapshot (2026-02-11)
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
-- P1 delivered: **0/4**
+- P1 delivered: **1/4** (`#8`)
 - P2 delivered: **0/2**
 - Pipeline hardening added beyond original backlog:
   - `.hexcore_job.json` schema validation
@@ -89,10 +89,12 @@
 - **Target**: v3.3.0
 
 ### 8. Constant Sanity Checker
-- **Status**: `PENDING`
+- **Status**: `DONE`
 - **Feature**: Warn when a decoded immediate mismatch appears in comments/docs.
 - **Acceptance**:
-  - If user comment says one decimal value, tool can validate against literal.
+  - `hexcore.disasm.checkConstants` validates inline comments and optional notes file against instruction immediates.
+  - Single decimal literal annotations are normalized and checked against immediate literal value.
+  - Export report as JSON/Markdown for pipeline usage.
 - **Target**: v3.3.0
 
 ### 9. Report Composer
