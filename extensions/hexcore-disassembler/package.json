@@ -13,7 +13,10 @@
 		"onCommand:hexcore.pipeline.listCapabilities",
 		"onCommand:hexcore.pipeline.validateJob",
 		"onCommand:hexcore.pipeline.validateWorkspace",
+		"onCommand:hexcore.pipeline.createPresetJob",
+		"onCommand:hexcore.pipeline.saveJobAsProfile",
 		"onCommand:hexcore.pipeline.doctor",
+		"onCommand:hexcore.disasm.buildFormula",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -164,6 +167,12 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.disasm.buildFormula",
+				"title": "Build Formula from Instructions",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-operator)"
+			},
+			{
 				"command": "hexcore.pipeline.runJob",
 				"title": "Run HexCore Automation Job",
 				"category": "HexCore Automation",
@@ -186,6 +195,18 @@
 				"title": "Validate HexCore Jobs in Workspace",
 				"category": "HexCore Automation",
 				"icon": "$(check-all)"
+			},
+			{
+				"command": "hexcore.pipeline.createPresetJob",
+				"title": "Create HexCore Job from Preset",
+				"category": "HexCore Automation",
+				"icon": "$(new-file)"
+			},
+			{
+				"command": "hexcore.pipeline.saveJobAsProfile",
+				"title": "Save Current Job as Workspace Profile",
+				"category": "HexCore Automation",
+				"icon": "$(save)"
 			},
 			{
 				"command": "hexcore.pipeline.doctor",

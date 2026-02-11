@@ -10,7 +10,7 @@
 - `PENDING`: not implemented yet
 
 ## Current Snapshot (2026-02-11)
-- P0 delivered: **3/5** (`#1`, `#3`, `#4`)
+- P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **0/4**
 - P2 delivered: **0/2**
 - Pipeline hardening added beyond original backlog:
@@ -34,7 +34,7 @@
 - **Target**: v3.2.1
 
 ### 2. Expression Evaluator for Instruction Math
-- **Status**: `PENDING`
+- **Status**: `DONE`
 - **Problem**: Analysts manually compute formulas from instruction chains.
 - **Feature**: "Build Formula" from selected instructions (`imul`/`add`/`sub`/`lea`).
 - **Acceptance**:
@@ -60,7 +60,7 @@
 - **Target**: v3.2.1
 
 ### 5. Built-in Run Profile Presets
-- **Status**: `PENDING`
+- **Status**: `DONE`
 - **Problem**: Manual JSON tuning each time.
 - **Feature**: Presets: quick triage / full static / ctf reverse.
 - **Acceptance**:
@@ -150,8 +150,8 @@ Binary → Remill lift stage → LLVM IR → Rellic (C code)
 ```
 
 ## Delivery Gate Before Remill/Rellic Integration
-- Finish P0 `#2` (Expression Evaluator)
-- Finish P0 `#5` (Run Profile Presets)
+- `DONE`: P0 `#2` (Expression Evaluator)
+- `DONE`: P0 `#5` (Run Profile Presets)
 - Keep Windows installer/build green for 3 consecutive runs
 - Keep pipeline contract stable (`file`, `quiet`, `output`) during native-engine integration
 
