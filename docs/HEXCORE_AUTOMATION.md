@@ -6,6 +6,8 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 
 - If `.hexcore_job.json` exists in the workspace, HexCore watches it and runs it automatically on create/change.
 - You can also run manually with command: `Run HexCore Automation Job` (`hexcore.pipeline.runJob`).
+- Validate job contract without executing steps: `Validate HexCore Automation Job` (`hexcore.pipeline.validateJob`).
+- Diagnose command registration/capability health: `Run HexCore Pipeline Doctor` (`hexcore.pipeline.doctor`).
 - Job execution writes:
 	- `hexcore-pipeline.log`
 	- `hexcore-pipeline.status.json`
@@ -45,9 +47,12 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 - `hexcore.peanalyzer.analyze` now supports headless execution with `file`, `quiet`, and `output`.
 - `hexcore.yara.scan` now supports headless execution with `file`, `quiet`, and `output`.
 - `hexcore.pipeline.listCapabilities` can run in pipeline mode and export capability JSON.
+- `hexcore.pipeline.validateJob` returns a preflight report with declared/headless/registration checks per step.
+- `hexcore.pipeline.doctor` returns environment diagnostics (registered commands, owner extension state, undeclared `hexcore.*` commands).
 - Every step runs in headless mode (`quiet: true`) and receives `file`.
 - If a step does not define output, HexCore auto-generates output files inside `outDir`.
 - Commands marked as interactive are blocked in pipeline mode with a clear error.
+- `outputPath` is now only reported for steps that actually request/provide output, avoiding false "OK + missing file" status noise.
 - Before each step, the runner verifies command registration in Extension Host and attempts to activate the owner extension when needed.
 - If command activation fails, `hexcore-pipeline.status.json` now includes owner-extension diagnostics (active/missing/activation-failed).
 - To override output file/format per step:

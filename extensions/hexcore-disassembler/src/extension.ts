@@ -14,7 +14,14 @@ import { ExportTreeProvider } from './exportTree';
 import { DisassemblerEngine } from './disassemblerEngine';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
-import { AutomationPipelineRunner, PipelineRunStatus, listCapabilities } from './automationPipelineRunner';
+import {
+	AutomationPipelineRunner,
+	PipelineDoctorReport,
+	PipelineJobValidationReport,
+	PipelineRunStatus,
+	listCapabilities,
+	runPipelineDoctor
+} from './automationPipelineRunner';
 
 type OutputFormat = 'json' | 'md';
 
@@ -77,6 +84,16 @@ interface AnalyzeAllResult {
 
 interface RunJobCommandOptions {
 	jobFile?: string;
+	quiet?: boolean;
+}
+
+interface CommandOutputOptions {
+	output?: string | { path?: string };
+}
+
+interface ValidateJobCommandOptions extends RunJobCommandOptions, CommandOutputOptions { }
+
+interface DoctorCommandOptions extends CommandOutputOptions {
 	quiet?: boolean;
 }
 
@@ -239,9 +256,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.listCapabilities', async (options?: { output?: string | { path?: string }; quiet?: boolean }) => {
 			const capabilities = listCapabilities();
-			const outputPath = typeof options?.output === 'string'
-				? path.resolve(options.output)
-				: (typeof options?.output?.path === 'string' ? path.resolve(options.output.path) : undefined);
+			const outputPath = resolveOptionalOutputPath(options?.output);
 
 			if (outputPath) {
 				fs.writeFileSync(outputPath, JSON.stringify(capabilities, null, 2), 'utf8');
@@ -250,28 +265,68 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 				return capabilities;
 			}
-			// Show in output channel if no file output
-			const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
-			outputChannel.clear();
-			outputChannel.appendLine('HexCore Pipeline - Command Capabilities');
-			outputChannel.appendLine('='.repeat(50));
-			outputChannel.appendLine('');
-			for (const cap of capabilities) {
-				const status = cap.headless ? 'HEADLESS' : 'INTERACTIVE';
-				outputChannel.appendLine(`[${status}] ${cap.command}`);
-				if (cap.aliases.length > 0) {
-					outputChannel.appendLine(`  Aliases:    ${cap.aliases.join(', ')}`);
-				}
-				outputChannel.appendLine(`  Timeout:    ${cap.defaultTimeoutMs}ms`);
-				outputChannel.appendLine(`  Validates:  ${cap.validateOutput}`);
-				outputChannel.appendLine(`  Extension:  ${cap.requiredExtension.join(', ')}`);
-				if (cap.reason) {
-					outputChannel.appendLine(`  Note:       ${cap.reason}`);
-				}
-				outputChannel.appendLine('');
-			}
-			outputChannel.show();
+			showCapabilitiesInOutputChannel(capabilities);
 			return capabilities;
+		}),
+		vscode.commands.registerCommand('hexcore.pipeline.validateJob', async (arg?: vscode.Uri | string | ValidateJobCommandOptions) => {
+			const options = normalizeValidateJobCommandOptions(arg);
+			const quiet = options.quiet ?? false;
+			const jobFilePath = resolveJobFilePath(arg, options.jobFile);
+			if (!jobFilePath) {
+				if (!quiet) {
+					vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
+				}
+				return undefined;
+			}
+
+			const report = await pipelineRunner.validateJobFile(jobFilePath, true);
+			const outputPath = resolveOptionalOutputPath(options.output);
+			if (outputPath) {
+				writeJsonFile(outputPath, report);
+				if (!quiet) {
+					vscode.window.showInformationMessage(`Pipeline validation report written to ${outputPath}`);
+				}
+			} else if (!quiet) {
+				showValidationReportInOutputChannel(report);
+			}
+
+			if (!quiet) {
+				if (report.ok) {
+					vscode.window.showInformationMessage(`Pipeline validation passed: ${report.totalSteps} steps checked.`);
+				} else {
+					const errors = report.issues.filter(issue => issue.level === 'error').length;
+					const warnings = report.issues.filter(issue => issue.level === 'warning').length;
+					vscode.window.showWarningMessage(`Pipeline validation found issues (${errors} errors, ${warnings} warnings).`);
+				}
+			}
+
+			return report;
+		}),
+		vscode.commands.registerCommand('hexcore.pipeline.doctor', async (options?: DoctorCommandOptions) => {
+			const report = await runPipelineDoctor();
+			const quiet = options?.quiet === true;
+			const outputPath = resolveOptionalOutputPath(options?.output);
+
+			if (outputPath) {
+				writeJsonFile(outputPath, report);
+				if (!quiet) {
+					vscode.window.showInformationMessage(`Pipeline doctor report written to ${outputPath}`);
+				}
+			} else if (!quiet) {
+				showDoctorReportInOutputChannel(report);
+			}
+
+			if (!quiet) {
+				if (report.missingCommands > 0 || report.degradedCommands > 0) {
+					vscode.window.showWarningMessage(
+						`Pipeline doctor found ${report.missingCommands} missing and ${report.degradedCommands} degraded commands.`
+					);
+				} else {
+					vscode.window.showInformationMessage(`Pipeline doctor is healthy: ${report.readyCommands}/${report.totalCapabilities} commands ready.`);
+				}
+			}
+
+			return report;
 		})
 	);
 
@@ -825,8 +880,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.exportASMHeadless', async (arg?: Record<string, unknown>) => {
-			const outputPath = typeof (arg?.output as any)?.path === 'string'
-				? (arg!.output as any).path as string
+			const rawOutput = arg?.output;
+			const outputObject = typeof rawOutput === 'object' && rawOutput !== null
+				? rawOutput as { path?: unknown }
+				: undefined;
+			const outputPath = typeof outputObject?.path === 'string'
+				? outputObject.path
 				: undefined;
 			if (!outputPath) {
 				throw new Error('exportASMHeadless requires an "output.path" argument.');
@@ -995,6 +1054,19 @@ function parsePositiveIntegerOption(value: number, optionName: string): number {
 	return normalized;
 }
 
+function normalizeValidateJobCommandOptions(arg?: vscode.Uri | string | ValidateJobCommandOptions): ValidateJobCommandOptions {
+	if (arg === undefined) {
+		return {};
+	}
+	if (arg instanceof vscode.Uri) {
+		return { jobFile: arg.fsPath };
+	}
+	if (typeof arg === 'string') {
+		return { jobFile: arg };
+	}
+	return arg;
+}
+
 function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommandOptions): RunJobCommandOptions {
 	if (arg === undefined) {
 		return {};
@@ -1006,6 +1078,16 @@ function normalizeRunJobCommandOptions(arg?: vscode.Uri | string | RunJobCommand
 		return { jobFile: arg };
 	}
 	return arg;
+}
+
+function resolveOptionalOutputPath(output?: string | { path?: string }): string | undefined {
+	if (typeof output === 'string' && output.length > 0) {
+		return path.resolve(output);
+	}
+	if (typeof output === 'object' && output !== null && typeof output.path === 'string' && output.path.length > 0) {
+		return path.resolve(output.path);
+	}
+	return undefined;
 }
 
 function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | undefined, explicitPath?: string): string | undefined {
@@ -1030,6 +1112,108 @@ function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | un
 	}
 
 	return undefined;
+}
+
+function writeJsonFile(outputPath: string, data: unknown): void {
+	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+	fs.writeFileSync(outputPath, JSON.stringify(data, null, 2), 'utf8');
+}
+
+function showCapabilitiesInOutputChannel(capabilities: ReturnType<typeof listCapabilities>): void {
+	const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
+	outputChannel.clear();
+	outputChannel.appendLine('HexCore Pipeline - Command Capabilities');
+	outputChannel.appendLine('='.repeat(50));
+	outputChannel.appendLine('');
+	for (const cap of capabilities) {
+		const status = cap.headless ? 'HEADLESS' : 'INTERACTIVE';
+		outputChannel.appendLine(`[${status}] ${cap.command}`);
+		if (cap.aliases.length > 0) {
+			outputChannel.appendLine(`  Aliases:    ${cap.aliases.join(', ')}`);
+		}
+		outputChannel.appendLine(`  Timeout:    ${cap.defaultTimeoutMs}ms`);
+		outputChannel.appendLine(`  Validates:  ${cap.validateOutput}`);
+		outputChannel.appendLine(`  Extension:  ${cap.requiredExtension.join(', ')}`);
+		if (cap.reason) {
+			outputChannel.appendLine(`  Note:       ${cap.reason}`);
+		}
+		outputChannel.appendLine('');
+	}
+	outputChannel.show();
+}
+
+function showValidationReportInOutputChannel(report: PipelineJobValidationReport): void {
+	const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
+	outputChannel.clear();
+	outputChannel.appendLine('HexCore Pipeline - Job Validation');
+	outputChannel.appendLine('='.repeat(50));
+	outputChannel.appendLine(`Job file:   ${report.jobFile}`);
+	outputChannel.appendLine(`Target:     ${report.file}`);
+	outputChannel.appendLine(`Output dir: ${report.outDir}`);
+	outputChannel.appendLine(`Steps:      ${report.totalSteps}`);
+	outputChannel.appendLine(`Result:     ${report.ok ? 'OK' : 'ISSUES FOUND'}`);
+	outputChannel.appendLine('');
+
+	if (report.issues.length > 0) {
+		outputChannel.appendLine('Issues:');
+		for (const issue of report.issues) {
+			const stepInfo = issue.stepIndex ? ` (step ${issue.stepIndex})` : '';
+			outputChannel.appendLine(`- [${issue.level.toUpperCase()}] ${issue.code}${stepInfo}: ${issue.message}`);
+		}
+		outputChannel.appendLine('');
+	}
+
+	outputChannel.appendLine('Step Matrix:');
+	for (const step of report.steps) {
+		outputChannel.appendLine(
+			`- #${step.index} ${step.cmd} -> ${step.resolvedCmd} | declared=${step.declared} | headless=${step.headless} | registered=${step.registered} | output=${step.outputPath ?? '(none)'}`
+		);
+	}
+	outputChannel.show();
+}
+
+function showDoctorReportInOutputChannel(report: PipelineDoctorReport): void {
+	const outputChannel = vscode.window.createOutputChannel('HexCore Pipeline');
+	outputChannel.clear();
+	outputChannel.appendLine('HexCore Pipeline - Doctor');
+	outputChannel.appendLine('='.repeat(50));
+	outputChannel.appendLine(`Workspace:            ${report.workspaceRoot}`);
+	outputChannel.appendLine(`Capabilities:         ${report.totalCapabilities}`);
+	outputChannel.appendLine(`Ready:                ${report.readyCommands}`);
+	outputChannel.appendLine(`Degraded:             ${report.degradedCommands}`);
+	outputChannel.appendLine(`Missing:              ${report.missingCommands}`);
+	outputChannel.appendLine(`Registered hexcore.*: ${report.registeredHexcoreCommands}`);
+	outputChannel.appendLine('');
+
+	if (report.undeclaredHexcoreCommands.length > 0) {
+		outputChannel.appendLine('Undeclared registered commands (hexcore.*):');
+		for (const command of report.undeclaredHexcoreCommands) {
+			outputChannel.appendLine(`- ${command}`);
+		}
+		outputChannel.appendLine('');
+	}
+
+	for (const entry of report.entries) {
+		outputChannel.appendLine(`[${entry.readiness.toUpperCase()}] ${entry.command}`);
+		if (entry.aliases.length > 0) {
+			outputChannel.appendLine(`  Aliases:    ${entry.aliases.join(', ')}`);
+		}
+		outputChannel.appendLine(`  Headless:   ${entry.headless}`);
+		outputChannel.appendLine(`  Registered: ${entry.registered}`);
+		outputChannel.appendLine(`  Timeout:    ${entry.defaultTimeoutMs}ms`);
+		outputChannel.appendLine(`  Validate:   ${entry.validateOutput}`);
+		if (entry.reason) {
+			outputChannel.appendLine(`  Note:       ${entry.reason}`);
+		}
+		if (entry.ownerExtensions.length > 0) {
+			outputChannel.appendLine(
+				`  Owners:     ${entry.ownerExtensions.map(owner => `${owner.id} (installed=${owner.installed}, active=${owner.active})`).join('; ')}`
+			);
+		}
+		outputChannel.appendLine('');
+	}
+
+	outputChannel.show();
 }
 
 function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false): AnalyzeAllResult {
