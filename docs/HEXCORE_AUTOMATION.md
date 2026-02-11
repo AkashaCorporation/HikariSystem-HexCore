@@ -7,11 +7,13 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 - If `.hexcore_job.json` exists in the workspace, HexCore watches it and runs it automatically on create/change.
 - You can also run manually with command: `Run HexCore Automation Job` (`hexcore.pipeline.runJob`).
 - Validate job contract without executing steps: `Validate HexCore Automation Job` (`hexcore.pipeline.validateJob`).
+- Validate all workspace jobs in one pass: `Validate HexCore Jobs in Workspace` (`hexcore.pipeline.validateWorkspace`).
 - Diagnose command registration/capability health: `Run HexCore Pipeline Doctor` (`hexcore.pipeline.doctor`).
 - Job execution writes:
 	- `hexcore-pipeline.log`
 	- `hexcore-pipeline.status.json`
 - Both files are written to the job `outDir`.
+- `.hexcore_job.json` now has JSON Schema validation in editor via `hexcore-disassembler/schemas/hexcore-job.schema.json`.
 
 ## 3.2.2 Hotfix Notes
 
@@ -48,6 +50,7 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 - `hexcore.yara.scan` now supports headless execution with `file`, `quiet`, and `output`.
 - `hexcore.pipeline.listCapabilities` can run in pipeline mode and export capability JSON.
 - `hexcore.pipeline.validateJob` returns a preflight report with declared/headless/registration checks per step.
+- `hexcore.pipeline.validateWorkspace` aggregates validation for every `.hexcore_job.json` found in the current workspace.
 - `hexcore.pipeline.doctor` returns environment diagnostics (registered commands, owner extension state, undeclared `hexcore.*` commands).
 - Every step runs in headless mode (`quiet: true`) and receives `file`.
 - If a step does not define output, HexCore auto-generates output files inside `outDir`.
@@ -77,12 +80,16 @@ Each step supports optional controls:
 {
 	"cmd": "hexcore.filetype.detect",
 	"timeoutMs": 30000,
+	"retryCount": 2,
+	"retryDelayMs": 1500,
 	"expectOutput": true,
 	"continueOnError": false
 }
 ```
 
 - `timeoutMs`: override per-step timeout.
+- `retryCount`: number of retries after an initial failure (default `0`).
+- `retryDelayMs`: delay between retry attempts in milliseconds (default `1000`).
 - `expectOutput`: force output existence validation on/off.
 - `continueOnError`: continue remaining steps after a failure.
 
