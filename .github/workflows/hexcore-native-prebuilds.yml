@@ -2,6 +2,12 @@ name: HexCore Native Prebuilds
 
 on:
   workflow_dispatch:
+    inputs:
+      include_experimental_engines:
+        description: "Also build experimental engines (hexcore-remill, hexcore-rellic)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -53,6 +59,99 @@ jobs:
           Invoke-WebRequest -Uri $url -OutFile $asset
           New-Item -ItemType Directory -Force engine/deps/llvm | Out-Null
           Expand-Archive -Path $asset -DestinationPath engine/deps/llvm
+
+      - name: Install Dependencies
+        working-directory: engine
+        run: npm ci --ignore-scripts
+
+      - name: Build Prebuilds
+        working-directory: engine
+        run: npm run prebuild
+
+      - name: Read Engine Version
+        id: engine-version
+        working-directory: engine
+        run: |
+          $version = node -p "require('./package.json').version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Read N-API Version
+        id: napi-version
+        working-directory: engine
+        run: |
+          $napi = node -p "((require('./package.json').binary || {}).napi_versions || [8])[0]"
+          "napi=$napi" >> $env:GITHUB_OUTPUT
+
+      - name: Pack Prebuilds
+        id: pack-prebuilds
+        working-directory: engine
+        run: |
+          $name = node -p "require('./package.json').name"
+          $version = "${{ steps.engine-version.outputs.version }}"
+          $napi = "${{ steps.napi-version.outputs.napi }}"
+          $asset = "$name-v$version-napi-v$napi-win32-x64.tar.gz"
+          if (-not (Test-Path prebuilds)) {
+            throw "prebuilds/ directory not found"
+          }
+          tar -czf $asset prebuilds
+          "asset=$asset" >> $env:GITHUB_OUTPUT
+
+      - name: Upload Prebuild Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.engine.name }}-prebuilds-win32
+          path: |
+            engine/prebuilds/**
+            engine/${{ steps.pack-prebuilds.outputs.asset }}
+
+      - name: Upload Prebuilds to Release
+        if: ${{ env.HEXCORE_RELEASE_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
+          GH_REPO: ${{ matrix.engine.repo }}
+          ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
+        run: |
+          $tag = "v$env:ENGINE_VERSION"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title $tag --notes "Automated native prebuilds for $env:ENGINE_VERSION"
+          }
+          $asset = "engine/${{ steps.pack-prebuilds.outputs.asset }}"
+          if (-not (Test-Path $asset)) {
+            throw "Prebuild package not found: $asset"
+          }
+          gh release upload $tag $asset --clobber
+
+  prebuild-windows-experimental:
+    name: Build Native Prebuilds (Windows, Experimental)
+    if: ${{ inputs.include_experimental_engines }}
+    runs-on: windows-latest
+    env:
+      HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
+    strategy:
+      fail-fast: false
+      matrix:
+        engine:
+          - name: hexcore-remill
+            repo: LXrdKnowkill/hexcore-remill
+          - name: hexcore-rellic
+            repo: LXrdKnowkill/hexcore-rellic
+    steps:
+      - name: Checkout Engine Repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.engine.repo }}
+          path: engine
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
       - name: Install Dependencies
         working-directory: engine
