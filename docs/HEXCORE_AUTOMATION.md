@@ -5,12 +5,14 @@ HexCore now supports running analysis pipelines from a workspace job file named 
 ## How It Works
 
 - If `.hexcore_job.json` exists in the workspace, HexCore watches it and runs it automatically on create/change.
+- Auto-run serializes repeated triggers for the same job file to avoid overlapping heavy runs.
 - You can also run manually with command: `Run HexCore Automation Job` (`hexcore.pipeline.runJob`).
 - Generate `.hexcore_job.json` from built-in/workspace profiles: `Create HexCore Job from Preset` (`hexcore.pipeline.createPresetJob`).
 - Save current `.hexcore_job.json` as reusable workspace profile: `Save Current Job as Workspace Profile` (`hexcore.pipeline.saveJobAsProfile`).
 - Validate job contract without executing steps: `Validate HexCore Automation Job` (`hexcore.pipeline.validateJob`).
 - Validate all workspace jobs in one pass: `Validate HexCore Jobs in Workspace` (`hexcore.pipeline.validateWorkspace`).
 - Diagnose command registration/capability health: `Run HexCore Pipeline Doctor` (`hexcore.pipeline.doctor`).
+- Recommended baseline templates: `docs/HEXCORE_JOB_TEMPLATES.md`.
 - Job execution writes:
 	- `hexcore-pipeline.log`
 	- `hexcore-pipeline.status.json`

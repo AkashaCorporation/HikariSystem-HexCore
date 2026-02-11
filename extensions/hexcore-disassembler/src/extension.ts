@@ -244,20 +244,29 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const pipelineRunner = new AutomationPipelineRunner();
 	const pendingJobRuns = new Map<string, NodeJS.Timeout>();
+	const activeJobRuns = new Set<string>();
+	const queuedAutoRuns = new Set<string>();
 
-	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<PipelineRunStatus | undefined> => {
-		const options = normalizeRunJobCommandOptions(arg);
-		const quiet = options.quiet ?? false;
-		const jobFilePath = resolveJobFilePath(arg, options.jobFile);
-		if (!jobFilePath) {
+	const executePipelineJob = async (
+		jobFilePath: string,
+		quiet: boolean,
+		autoTriggered: boolean
+	): Promise<PipelineRunStatus | undefined> => {
+		const normalizedPath = path.resolve(jobFilePath);
+		if (activeJobRuns.has(normalizedPath)) {
+			if (autoTriggered) {
+				queuedAutoRuns.add(normalizedPath);
+				return undefined;
+			}
 			if (!quiet) {
-				vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
+				vscode.window.showWarningMessage(`A HexCore job is already running: ${normalizedPath}`);
 			}
 			return undefined;
 		}
 
+		activeJobRuns.add(normalizedPath);
 		try {
-			const status = await pipelineRunner.runJobFile(jobFilePath, true);
+			const status = await pipelineRunner.runJobFile(normalizedPath, true);
 			if (!quiet) {
 				if (status.status === 'ok') {
 					vscode.window.showInformationMessage(`Pipeline completed successfully. Status file: ${path.join(status.outDir, 'hexcore-pipeline.status.json')}`);
@@ -271,7 +280,26 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showErrorMessage(`Pipeline execution failed: ${toErrorMessage(error)}`);
 			}
 			throw error;
+		} finally {
+			activeJobRuns.delete(normalizedPath);
+			if (queuedAutoRuns.delete(normalizedPath)) {
+				scheduleJobRun(normalizedPath);
+			}
 		}
+	};
+
+	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<PipelineRunStatus | undefined> => {
+		const options = normalizeRunJobCommandOptions(arg);
+		const quiet = options.quiet ?? false;
+		const jobFilePath = resolveJobFilePath(arg, options.jobFile);
+		if (!jobFilePath) {
+			if (!quiet) {
+				vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
+			}
+			return undefined;
+		}
+
+		return executePipelineJob(jobFilePath, quiet, false);
 	};
 
 	const scheduleJobRun = (jobFilePath: string): void => {
@@ -280,10 +308,14 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (existing) {
 			clearTimeout(existing);
 		}
+		if (activeJobRuns.has(normalizedPath)) {
+			queuedAutoRuns.add(normalizedPath);
+			return;
+		}
 
 		const timeoutHandle = setTimeout(() => {
 			pendingJobRuns.delete(normalizedPath);
-			runPipelineJob({ jobFile: normalizedPath, quiet: true }).catch(error => {
+			executePipelineJob(normalizedPath, true, true).catch(error => {
 				console.error('HexCore pipeline auto-run failed:', error);
 			});
 		}, 350);
