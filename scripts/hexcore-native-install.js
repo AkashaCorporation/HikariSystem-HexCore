@@ -102,21 +102,33 @@ function copyUnicornRuntimeDeps(binaryDir) {
 
 console.log(`[hexcore-native-install] Installing native module: ${moduleName}`);
 
+// Check if prebuild already exists
+const binaryDir = findBinaryDir();
+if (binaryDir) {
+	console.log(`[hexcore-native-install] Found prebuilt binary in ${binaryDir}`);
+	
+	// Copy runtime dependencies if needed
+	if (moduleName === 'hexcore-unicorn') {
+		copyUnicornRuntimeDeps(binaryDir);
+	}
+	
+	console.log(`[hexcore-native-install] Skipping build - using prebuilt binary`);
+	process.exit(0);
+}
+
+// No prebuild found, try to download or build
 const useNapiRuntime = Boolean(pkg.binary && Array.isArray(pkg.binary.napi_versions) && pkg.binary.napi_versions.length > 0);
 const prebuildArgs = useNapiRuntime ? ['--verbose', '--runtime', 'napi'] : ['--verbose'];
 const prebuildCmd = resolveBin('prebuild-install');
 const prebuildResult = run(prebuildCmd, prebuildArgs);
 if (!prebuildResult.ok) {
 	console.warn(`[hexcore-native-install] prebuild-install failed: ${prebuildResult.error}`);
-	const nodeGypCmd = resolveBin('node-gyp');
-	const buildResult = run(nodeGypCmd, ['rebuild']);
-	if (!buildResult.ok) {
-		console.error(`[hexcore-native-install] node-gyp rebuild failed: ${buildResult.error}`);
-		process.exit(1);
-	}
+	console.warn(`[hexcore-native-install] Skipping node-gyp rebuild - no source available`);
+	process.exit(0);
 }
 
-const binaryDir = findBinaryDir();
-if (binaryDir && moduleName === 'hexcore-unicorn') {
-	copyUnicornRuntimeDeps(binaryDir);
+// Copy runtime dependencies if needed
+const finalBinaryDir = findBinaryDir();
+if (finalBinaryDir && moduleName === 'hexcore-unicorn') {
+	copyUnicornRuntimeDeps(finalBinaryDir);
 }
