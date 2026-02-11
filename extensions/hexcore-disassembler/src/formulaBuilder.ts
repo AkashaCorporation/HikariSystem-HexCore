@@ -193,7 +193,7 @@ function normalizeRegister(value: string): string | undefined {
 }
 
 function isRegisterToken(token: string): boolean {
-	return /^(r(?:[a-d]x|[sb]p|[sd]i|ip)|e(?:[a-d]x|[sb]p|[sd]i|ip)|[abcd][hl]|[abcd]x|[sd]i|[sb]p|r(?:[0-9]|1[0-5])|xmm[0-9]+|ymm[0-9]+)$/.test(token);
+	return /^(?:r(?:[a-d]x|[sb]p|[sd]i|ip)|e(?:[a-d]x|[sb]p|[sd]i|ip)|[abcd][hl]|[abcd]x|[sd]i|[sb]p|sil|dil|spl|bpl|r(?:[0-9]|1[0-5])(?:d|w|b)?|xmm[0-9]+|ymm[0-9]+)$/.test(token);
 }
 
 function resolveOperandExpression(

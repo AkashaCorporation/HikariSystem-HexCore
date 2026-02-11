@@ -156,7 +156,7 @@ interface WorkspaceValidationReport {
 	entries: WorkspaceValidationEntry[];
 }
 
-interface CreatePresetJobCommandOptions {
+interface CreatePresetJobCommandOptions extends CommandOutputOptions {
 	preset?: string;
 	file?: string;
 	outDir?: string;
@@ -164,7 +164,7 @@ interface CreatePresetJobCommandOptions {
 	quiet?: boolean;
 }
 
-interface SaveJobAsProfileCommandOptions {
+interface SaveJobAsProfileCommandOptions extends CommandOutputOptions {
 	name?: string;
 	description?: string;
 	jobFile?: string;
@@ -499,7 +499,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Preset job created (${selectedPreset.name}) at ${jobPath}`);
 			}
 
-			return {
+			const result = {
 				presetId: selectedPreset.id,
 				presetName: selectedPreset.name,
 				jobFile: jobPath,
@@ -507,6 +507,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				outDir,
 				steps: job.steps.length
 			};
+
+			const outputPath = resolveOptionalOutputPath(options.output);
+			if (outputPath) {
+				writeJsonFile(outputPath, result);
+			}
+
+			return result;
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.saveJobAsProfile', async (arg?: SaveJobAsProfileCommandOptions) => {
 			const options = normalizeSaveJobAsProfileCommandOptions(arg);
@@ -545,12 +552,19 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Workspace profile saved (${preset.name}) to ${presetFilePath}`);
 			}
 
-			return {
+			const result = {
 				id: preset.id,
 				name: preset.name,
 				presetFile: presetFilePath,
 				jobFile: jobFilePath
 			};
+
+			const outputPath = resolveOptionalOutputPath(options.output);
+			if (outputPath) {
+				writeJsonFile(outputPath, result);
+			}
+
+			return result;
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.doctor', async (options?: DoctorCommandOptions) => {
 			const report = await runPipelineDoctor();
