@@ -91,7 +91,7 @@ jobs:
           "asset=$asset" >> $env:GITHUB_OUTPUT
 
       - name: Upload Prebuild Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.engine.name }}-prebuilds-win32
           path: |
