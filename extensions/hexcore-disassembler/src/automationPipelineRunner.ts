@@ -20,6 +20,8 @@ export interface PipelineStep {
 	continueOnError?: boolean;
 	timeoutMs?: number;
 	expectOutput?: boolean;
+	retryCount?: number;
+	retryDelayMs?: number;
 }
 
 export interface PipelineJobFile {
@@ -46,6 +48,7 @@ export interface PipelineStepStatus {
 	startedAt: string;
 	finishedAt: string;
 	durationMs: number;
+	attemptCount: number;
 	outputPath?: string;
 	error?: string;
 }
@@ -58,6 +61,73 @@ export interface PipelineRunStatus {
 	startedAt: string;
 	finishedAt?: string;
 	steps: PipelineStepStatus[];
+}
+
+export interface PipelineValidationIssue {
+	level: 'error' | 'warning';
+	code: string;
+	message: string;
+	stepIndex?: number;
+	command?: string;
+}
+
+export interface PipelineValidationStep {
+	index: number;
+	cmd: string;
+	resolvedCmd: string;
+	declared: boolean;
+	headless: boolean;
+	registered: boolean;
+	timeoutMs: number;
+	retryCount: number;
+	retryDelayMs: number;
+	continueOnError: boolean;
+	expectOutput: boolean;
+	provideOutput: boolean;
+	outputPath?: string;
+	ownerExtensions: PipelineDoctorExtensionState[];
+}
+
+export interface PipelineJobValidationReport {
+	jobFile: string;
+	file: string;
+	outDir: string;
+	quiet: boolean;
+	ok: boolean;
+	generatedAt: string;
+	totalSteps: number;
+	issues: PipelineValidationIssue[];
+	steps: PipelineValidationStep[];
+}
+
+export interface PipelineDoctorExtensionState {
+	id: string;
+	installed: boolean;
+	active: boolean;
+}
+
+export interface PipelineDoctorEntry {
+	command: string;
+	aliases: string[];
+	headless: boolean;
+	validateOutput: boolean;
+	defaultTimeoutMs: number;
+	registered: boolean;
+	readiness: 'ready' | 'degraded' | 'missing';
+	reason?: string;
+	ownerExtensions: PipelineDoctorExtensionState[];
+}
+
+export interface PipelineDoctorReport {
+	generatedAt: string;
+	workspaceRoot: string;
+	totalCapabilities: number;
+	registeredHexcoreCommands: number;
+	readyCommands: number;
+	degradedCommands: number;
+	missingCommands: number;
+	undeclaredHexcoreCommands: string[];
+	entries: PipelineDoctorEntry[];
 }
 
 interface NormalizedPipelineJob {
@@ -83,6 +153,8 @@ interface CommandCapability {
 const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
 const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
 const DEFAULT_TIMEOUT_MS = 60000;
+const DEFAULT_RETRY_COUNT = 0;
+const DEFAULT_RETRY_DELAY_MS = 1000;
 const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hash.file', 'hexcore.hashcalc.calculate'],
 	['hexcore.hash.calculate', 'hexcore.hashcalc.calculate'],
@@ -98,7 +170,22 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.peanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.analyzeAll', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.yara.scan', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.ioc.extract', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.strings.extractAdvanced', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.minidump.parse', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.minidump.threads', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.minidump.modules', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.minidump.memory', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.pipeline.listCapabilities', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.validateJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.validateWorkspace', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.createPresetJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.pipeline.saveJobAsProfile', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.pipeline.doctor', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.disasm.buildFormula', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
+	['hexcore.disasm.checkConstants', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
+	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.exportASMHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
 	['hexcore.yara.scanWorkspace', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command depends on workspace UI flow.' }],
 	['hexcore.yara.loadDefender', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command opens folder picker.' }],
@@ -123,6 +210,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.peanalyzer.analyze', ['hikarisystem.hexcore-peanalyzer']],
 	['hexcore.disasm.analyzeAll', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.yara.scan', ['hikarisystem.hexcore-yara']],
+	['hexcore.ioc.extract', ['hikarisystem.hexcore-ioc']],
 	['hexcore.pipeline.listCapabilities', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.yara.quickScan', ['hikarisystem.hexcore-yara']],
 	['hexcore.yara.scanWorkspace', ['hikarisystem.hexcore-yara']],
@@ -137,7 +225,21 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.exportASM', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.debug.emulate', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.emulateWithArch', ['hikarisystem.hexcore-debugger']],
-	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']]
+	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.strings.extractAdvanced', ['hikarisystem.hexcore-strings']],
+	['hexcore.minidump.parse', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.threads', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.modules', ['hikarisystem.hexcore-minidump']],
+	['hexcore.minidump.memory', ['hikarisystem.hexcore-minidump']],
+	['hexcore.disasm.searchStringHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.exportASMHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.buildFormula', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.checkConstants', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.validateJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.validateWorkspace', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.createPresetJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.saveJobAsProfile', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.doctor', ['hikarisystem.hexcore-disassembler']]
 ]);
 
 export interface PipelineCapabilityEntry {
@@ -172,6 +274,57 @@ export function listCapabilities(): PipelineCapabilityEntry[] {
 	return entries;
 }
 
+export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
+	const commands = new Set(await vscode.commands.getCommands(true));
+	const knownCommands = new Set<string>([
+		...COMMAND_CAPABILITIES.keys(),
+		...COMMAND_ALIASES.keys()
+	]);
+
+	const capabilities = listCapabilities();
+	const entries: PipelineDoctorEntry[] = capabilities.map(capability => {
+		const ownerExtensions = getExtensionStates(capability.requiredExtension);
+		const registered = commands.has(capability.command);
+		const hasMissingOwner = ownerExtensions.some(owner => !owner.installed);
+		const readiness: PipelineDoctorEntry['readiness'] = hasMissingOwner
+			? 'missing'
+			: (registered ? 'ready' : 'degraded');
+
+		return {
+			command: capability.command,
+			aliases: capability.aliases,
+			headless: capability.headless,
+			validateOutput: capability.validateOutput,
+			defaultTimeoutMs: capability.defaultTimeoutMs,
+			registered,
+			readiness,
+			reason: capability.reason,
+			ownerExtensions
+		};
+	});
+
+	const registeredHexcoreCommands = [...commands].filter(command => command.startsWith('hexcore.'));
+	const undeclaredHexcoreCommands = registeredHexcoreCommands
+		.filter(command => !knownCommands.has(command))
+		.sort();
+	const readyCommands = entries.filter(entry => entry.readiness === 'ready').length;
+	const degradedCommands = entries.filter(entry => entry.readiness === 'degraded').length;
+	const missingCommands = entries.filter(entry => entry.readiness === 'missing').length;
+	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
+
+	return {
+		generatedAt: new Date().toISOString(),
+		workspaceRoot,
+		totalCapabilities: entries.length,
+		registeredHexcoreCommands: registeredHexcoreCommands.length,
+		readyCommands,
+		degradedCommands,
+		missingCommands,
+		undeclaredHexcoreCommands,
+		entries
+	};
+}
+
 export class AutomationPipelineRunner {
 	public async runJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineRunStatus> {
 		const absoluteJobPath = path.resolve(jobFilePath);
@@ -184,6 +337,18 @@ export class AutomationPipelineRunner {
 		const normalized = normalizeJob(parsed, absoluteJobPath, quietOverride);
 
 		return this.run(normalized, absoluteJobPath);
+	}
+
+	public async validateJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineJobValidationReport> {
+		const absoluteJobPath = path.resolve(jobFilePath);
+		if (!fs.existsSync(absoluteJobPath)) {
+			throw new Error(`Job file not found: ${absoluteJobPath}`);
+		}
+
+		const rawContent = fs.readFileSync(absoluteJobPath, 'utf8');
+		const parsed = parseJsonFile(rawContent, absoluteJobPath);
+		const normalized = normalizeJob(parsed, absoluteJobPath, quietOverride);
+		return createValidationReport(normalized, absoluteJobPath);
 	}
 
 	private async run(job: NormalizedPipelineJob, jobFilePath: string): Promise<PipelineRunStatus> {
@@ -221,13 +386,18 @@ export class AutomationPipelineRunner {
 			const step = job.steps[index];
 			const resolvedCommand = resolveCommand(step.cmd);
 			const capability = COMMAND_CAPABILITIES.get(resolvedCommand);
-			const output = resolveStepOutput(job.outDir, step, index);
 			const validateOutput = shouldValidateOutput(step, capability);
+			const provideOutput = shouldProvideOutput(step, capability);
+			const output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
 			const timeoutMs = resolveStepTimeout(step, capability);
+			const retryCount = resolveRetryCount(step);
+			const retryDelayMs = resolveRetryDelayMs(step);
+			const maxAttempts = retryCount + 1;
 			const startedAt = new Date();
 
 			appendLog(logPath, `[Step ${index + 1}] ${step.cmd} -> ${resolvedCommand}`);
 			appendLog(logPath, `[Step ${index + 1}] Timeout: ${timeoutMs}ms`);
+			appendLog(logPath, `[Step ${index + 1}] Retries: ${retryCount} (delay=${retryDelayMs}ms)`);
 
 			if (!capability) {
 				const errorMessage = `Command is not declared in pipeline capability map: ${resolvedCommand}`;
@@ -235,7 +405,8 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
-					output.path,
+					1,
+					output?.path,
 					'error',
 					errorMessage
 				);
@@ -256,7 +427,8 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
-					output.path,
+					1,
+					output?.path,
 					'error',
 					errorMessage
 				);
@@ -278,7 +450,8 @@ export class AutomationPipelineRunner {
 					step,
 					resolvedCommand,
 					startedAt,
-					output.path,
+					1,
+					output?.path,
 					'error',
 					errorMessage
 				);
@@ -294,48 +467,78 @@ export class AutomationPipelineRunner {
 
 			const commandOptions = buildCommandOptions(job.file, step, output, job.quiet);
 
-			try {
-				await withTimeout(
-					vscode.commands.executeCommand(resolvedCommand, commandOptions),
-					timeoutMs,
-					`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
-				);
+			let attemptCount = 0;
+			let executionError: unknown;
+			let completed = false;
 
-				if (validateOutput) {
-					validateStepOutput(output.path);
-				}
+			while (attemptCount < maxAttempts) {
+				attemptCount++;
+				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
 
-				const stepStatus = createStepStatus(
-					step,
-					resolvedCommand,
-					startedAt,
-					output.path,
-					'ok'
-				);
-				status.steps.push(stepStatus);
-				appendLog(logPath, `[Step ${index + 1}] OK (${stepStatus.durationMs}ms)`);
-				writeJson(statusPath, status);
-			} catch (error: unknown) {
-				const errorMessage = normalizeExecutionError(error, resolvedCommand);
-				if (error instanceof TimeoutError) {
-					await tryCancelOnTimeout(capability, logPath, index);
-				}
+				try {
+					await withTimeout(
+						vscode.commands.executeCommand(resolvedCommand, commandOptions),
+						timeoutMs,
+						`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
+					);
 
-				const stepStatus = createStepStatus(
-					step,
-					resolvedCommand,
-					startedAt,
-					output.path,
-					'error',
-					errorMessage
-				);
-				status.steps.push(stepStatus);
-				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
-				writeJson(statusPath, status);
-				failed = true;
-				if (!step.continueOnError) {
+					if (validateOutput) {
+						if (!output) {
+							throw new Error(`Expected output validation for ${resolvedCommand}, but no output path was assigned.`);
+						}
+						validateStepOutput(output.path);
+					}
+
+					const stepStatus = createStepStatus(
+						step,
+						resolvedCommand,
+						startedAt,
+						attemptCount,
+						output?.path,
+						'ok'
+					);
+					status.steps.push(stepStatus);
+					appendLog(logPath, `[Step ${index + 1}] OK (${stepStatus.durationMs}ms, attempts=${attemptCount})`);
+					writeJson(statusPath, status);
+					completed = true;
 					break;
+				} catch (error: unknown) {
+					executionError = error;
+					const errorMessage = normalizeExecutionError(error, resolvedCommand);
+					if (error instanceof TimeoutError) {
+						await tryCancelOnTimeout(capability, logPath, index);
+					}
+
+					if (attemptCount < maxAttempts) {
+						appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount} failed: ${errorMessage}`);
+						appendLog(logPath, `[Step ${index + 1}] Retrying after ${retryDelayMs}ms...`);
+						if (retryDelayMs > 0) {
+							await delay(retryDelayMs);
+						}
+						continue;
+					}
+
+					const stepStatus = createStepStatus(
+						step,
+						resolvedCommand,
+						startedAt,
+						attemptCount,
+						output?.path,
+						'error',
+						errorMessage
+					);
+					status.steps.push(stepStatus);
+					appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
+					writeJson(statusPath, status);
+					failed = true;
+					if (!step.continueOnError) {
+						break;
+					}
 				}
+			}
+
+			if (!completed && executionError && !step.continueOnError) {
+				break;
 			}
 		}
 
@@ -346,6 +549,119 @@ export class AutomationPipelineRunner {
 
 		return status;
 	}
+}
+
+async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: string): Promise<PipelineJobValidationReport> {
+	const issues: PipelineValidationIssue[] = [];
+	const steps: PipelineValidationStep[] = [];
+	const registeredCommands = new Set(await vscode.commands.getCommands(true));
+
+	if (!fs.existsSync(job.file)) {
+		issues.push({
+			level: 'error',
+			code: 'TARGET_FILE_NOT_FOUND',
+			message: `Target file does not exist: ${job.file}`
+		});
+	}
+
+	for (let index = 0; index < job.steps.length; index++) {
+		const step = job.steps[index];
+		const resolvedCmd = resolveCommand(step.cmd);
+		const capability = COMMAND_CAPABILITIES.get(resolvedCmd);
+		const declared = capability !== undefined;
+		const ownerIds = COMMAND_OWNERS.get(resolvedCmd) ?? [];
+		const ownerExtensions = getExtensionStates(ownerIds);
+		const registered = registeredCommands.has(resolvedCmd);
+		const expectOutput = shouldValidateOutput(step, capability);
+		const provideOutput = shouldProvideOutput(step, capability);
+		const timeoutMs = resolveStepTimeout(step, capability);
+		const retryCount = resolveRetryCount(step);
+		const retryDelayMs = resolveRetryDelayMs(step);
+		const output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
+
+		steps.push({
+			index: index + 1,
+			cmd: step.cmd,
+			resolvedCmd,
+			declared,
+			headless: capability?.headless ?? false,
+			registered,
+			timeoutMs,
+			retryCount,
+			retryDelayMs,
+			continueOnError: step.continueOnError === true,
+			expectOutput,
+			provideOutput,
+			outputPath: output?.path,
+			ownerExtensions
+		});
+
+		if (!declared) {
+			issues.push({
+				level: 'error',
+				code: 'COMMAND_NOT_DECLARED',
+				message: `Command is not declared in pipeline capability map: ${resolvedCmd}`,
+				stepIndex: index + 1,
+				command: resolvedCmd
+			});
+			continue;
+		}
+
+		if (!capability.headless) {
+			const reason = capability.reason ?? 'Command requires UI interaction.';
+			issues.push({
+				level: 'error',
+				code: 'COMMAND_NOT_HEADLESS',
+				message: `Command is not headless-safe for pipeline: ${resolvedCmd}. ${reason}`,
+				stepIndex: index + 1,
+				command: resolvedCmd
+			});
+		}
+
+		if (ownerIds.length === 0) {
+			issues.push({
+				level: 'warning',
+				code: 'OWNER_NOT_MAPPED',
+				message: `No owner extension mapping found for command: ${resolvedCmd}`,
+				stepIndex: index + 1,
+				command: resolvedCmd
+			});
+		}
+
+		const missingOwners = ownerExtensions.filter(extension => !extension.installed);
+		if (missingOwners.length > 0) {
+			issues.push({
+				level: 'error',
+				code: 'OWNER_EXTENSION_MISSING',
+				message: `Owner extension is not installed for ${resolvedCmd}: ${missingOwners.map(extension => extension.id).join(', ')}`,
+				stepIndex: index + 1,
+				command: resolvedCmd
+			});
+		}
+
+		if (!registered && ownerExtensions.length > 0 && missingOwners.length === 0) {
+			issues.push({
+				level: 'warning',
+				code: 'COMMAND_NOT_REGISTERED_YET',
+				message: `Command is currently not registered in Extension Host: ${resolvedCmd}. It may register after extension activation.`,
+				stepIndex: index + 1,
+				command: resolvedCmd
+			});
+		}
+	}
+
+	const hasErrors = issues.some(issue => issue.level === 'error');
+	return {
+		jobFile: jobFilePath,
+		file: job.file,
+		outDir: job.outDir,
+		quiet: job.quiet,
+		ok: !hasErrors,
+		generatedAt: new Date().toISOString(),
+		totalSteps: job.steps.length,
+		issues,
+		steps
+	};
 }
 
 function parseJsonFile(content: string, jobFilePath: string): unknown {
@@ -392,6 +708,8 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 	const args = isRecord(step.args) ? step.args : undefined;
 	const continueOnError = typeof step.continueOnError === 'boolean' ? step.continueOnError : false;
 	const timeoutMs = parseTimeoutMs(step.timeoutMs, index, cmd, jobFilePath);
+	const retryCount = parseRetryCount(step.retryCount, index, cmd, jobFilePath);
+	const retryDelayMs = parseRetryDelayMs(step.retryDelayMs, index, cmd, jobFilePath);
 	const expectOutput = typeof step.expectOutput === 'boolean' ? step.expectOutput : undefined;
 
 	let output: PipelineOutputOptions | undefined;
@@ -413,7 +731,9 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 		output,
 		continueOnError,
 		timeoutMs,
-		expectOutput
+		expectOutput,
+		retryCount,
+		retryDelayMs
 	};
 }
 
@@ -436,6 +756,44 @@ function parseTimeoutMs(
 	const normalized = Math.floor(rawValue);
 	if (normalized < 1) {
 		throw new Error(`Invalid "timeoutMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 1`);
+	}
+	return normalized;
+}
+
+function parseRetryCount(
+	rawValue: unknown,
+	index: number,
+	cmd: string,
+	jobFilePath: string
+): number | undefined {
+	if (rawValue === undefined) {
+		return undefined;
+	}
+	if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) {
+		throw new Error(`Invalid "retryCount" in step ${index} (${cmd}) of ${jobFilePath}: expected finite number`);
+	}
+	const normalized = Math.floor(rawValue);
+	if (normalized < 0) {
+		throw new Error(`Invalid "retryCount" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 0`);
+	}
+	return normalized;
+}
+
+function parseRetryDelayMs(
+	rawValue: unknown,
+	index: number,
+	cmd: string,
+	jobFilePath: string
+): number | undefined {
+	if (rawValue === undefined) {
+		return undefined;
+	}
+	if (typeof rawValue !== 'number' || !Number.isFinite(rawValue)) {
+		throw new Error(`Invalid "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: expected finite number`);
+	}
+	const normalized = Math.floor(rawValue);
+	if (normalized < 0) {
+		throw new Error(`Invalid "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 0`);
 	}
 	return normalized;
 }
@@ -463,7 +821,7 @@ function resolveOutputFormat(outputPath: string, format?: PipelineOutputFormat):
 	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
-function buildCommandOptions(filePath: string, step: PipelineStep, output: StepOutputPath, quietMode: boolean): PipelineCommandOptions {
+function buildCommandOptions(filePath: string, step: PipelineStep, output: StepOutputPath | undefined, quietMode: boolean): PipelineCommandOptions {
 	const merged: PipelineCommandOptions = {};
 	if (step.args) {
 		for (const [key, value] of Object.entries(step.args)) {
@@ -476,12 +834,27 @@ function buildCommandOptions(filePath: string, step: PipelineStep, output: StepO
 	}
 	merged.file = filePath;
 	merged.quiet = quietMode;
-	merged.output = output;
+	if (output) {
+		merged.output = output;
+	}
 
 	return merged;
 }
 
 function shouldValidateOutput(step: PipelineStep, capability?: CommandCapability): boolean {
+	if (typeof step.expectOutput === 'boolean') {
+		return step.expectOutput;
+	}
+	if (step.output !== undefined) {
+		return true;
+	}
+	return capability?.validateOutput ?? false;
+}
+
+function shouldProvideOutput(step: PipelineStep, capability: CommandCapability | undefined): boolean {
+	if (step.output !== undefined) {
+		return true;
+	}
 	if (typeof step.expectOutput === 'boolean') {
 		return step.expectOutput;
 	}
@@ -496,6 +869,20 @@ function resolveStepTimeout(step: PipelineStep, capability?: CommandCapability):
 		return capability.defaultTimeoutMs;
 	}
 	return DEFAULT_TIMEOUT_MS;
+}
+
+function resolveRetryCount(step: PipelineStep): number {
+	if (typeof step.retryCount === 'number') {
+		return step.retryCount;
+	}
+	return DEFAULT_RETRY_COUNT;
+}
+
+function resolveRetryDelayMs(step: PipelineStep): number {
+	if (typeof step.retryDelayMs === 'number') {
+		return step.retryDelayMs;
+	}
+	return DEFAULT_RETRY_DELAY_MS;
 }
 
 function validateStepOutput(outputPath: string): void {
@@ -529,6 +916,7 @@ function createStepStatus(
 	step: PipelineStep,
 	resolvedCmd: string,
 	startedAt: Date,
+	attemptCount: number,
 	outputPath: string | undefined,
 	status: 'ok' | 'error' | 'skipped',
 	error?: string
@@ -541,6 +929,7 @@ function createStepStatus(
 		startedAt: startedAt.toISOString(),
 		finishedAt: finishedAt.toISOString(),
 		durationMs: finishedAt.getTime() - startedAt.getTime(),
+		attemptCount,
 		outputPath,
 		error
 	};
@@ -552,6 +941,17 @@ function normalizeExecutionError(error: unknown, resolvedCommand: string): strin
 		return `Command is not available: ${resolvedCommand}`;
 	}
 	return base;
+}
+
+function getExtensionStates(ownerIds: readonly string[]): PipelineDoctorExtensionState[] {
+	return ownerIds.map(id => {
+		const extension = vscode.extensions.getExtension(id);
+		return {
+			id,
+			installed: extension !== undefined,
+			active: extension?.isActive === true
+		};
+	});
 }
 
 async function ensureCommandReady(command: string, logPath: string, index: number): Promise<void> {

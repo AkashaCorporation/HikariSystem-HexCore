@@ -412,6 +412,7 @@ export class YaraEngine {
 	private loadedRules: YaraRule[] = [];
 	private catalog: RuleCatalogEntry[] = [];
 	private defenderYaraPath: string = '';
+	private indexedCatalogPath: string = '';
 	private _onProgress: ((msg: string) => void) | undefined;
 
 	constructor() {
@@ -475,26 +476,41 @@ export class YaraEngine {
 	 * Index DefenderYara directory — builds a catalog without loading all rules into memory.
 	 * With 76k+ rules, we only load on-demand per category or platform.
 	 */
-	indexDefenderYara(basePath: string): number {
+	indexDefenderYara(basePath: string, forceReindex: boolean = false): number {
+		const normalizedBasePath = this.normalizeCatalogPath(basePath);
 		this.defenderYaraPath = basePath;
-		this.catalog = [];
+
+		if (!forceReindex && this.catalog.length > 0 && this.indexedCatalogPath === normalizedBasePath) {
+			this.log(`DefenderYara catalog already indexed (${this.catalog.length} rules), skipping reindex`);
+			return this.catalog.length;
+		}
 
 		if (!fs.existsSync(basePath)) {
 			this.log(`DefenderYara not found at: ${basePath}`);
 			return 0;
 		}
 
+		this.catalog = [];
+		this.indexedCatalogPath = normalizedBasePath;
 		this.log('Indexing DefenderYara rules...');
 		const categories = fs.readdirSync(basePath, { withFileTypes: true })
 			.filter(d => d.isDirectory() && !d.name.startsWith('#') && !d.name.startsWith('.'));
 
+		let categoryIndex = 0;
 		for (const cat of categories) {
+			categoryIndex++;
+			this.log(`Indexing category ${categoryIndex}/${categories.length}: ${cat.name}`);
 			const catPath = path.join(basePath, cat.name);
 			this.indexCategory(catPath, cat.name);
 		}
 
 		this.log(`Indexed ${this.catalog.length} rules across ${categories.length} categories`);
 		return this.catalog.length;
+	}
+
+	private normalizeCatalogPath(basePath: string): string {
+		const resolved = path.resolve(basePath);
+		return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 	}
 
 	private indexCategory(catPath: string, category: string): void {
@@ -534,10 +550,12 @@ export class YaraEngine {
 	loadDefenderCategory(category: string): number {
 		const entries = this.catalog.filter(e => e.category === category && !e.loaded);
 		let count = 0;
+		let processed = 0;
 
 		this.log(`Loading ${entries.length} rules from category: ${category}`);
 
 		for (const entry of entries) {
+			processed++;
 			try {
 				const content = fs.readFileSync(entry.filePath, 'utf-8');
 				const rules = parseYaraFile(content, entry.filePath);
@@ -545,6 +563,10 @@ export class YaraEngine {
 				entry.loaded = true;
 				count += rules.length;
 			} catch { /* skip */ }
+
+			if (processed % 500 === 0) {
+				this.log(`Loaded ${processed}/${entries.length} files from ${category}...`);
+			}
 		}
 
 		this.log(`Loaded ${count} rules from ${category}`);
@@ -810,7 +832,7 @@ export class YaraEngine {
 
 		// Re-index if DefenderYara path is set
 		if (this.defenderYaraPath) {
-			this.indexDefenderYara(this.defenderYaraPath);
+			this.indexDefenderYara(this.defenderYaraPath, true);
 		}
 	}
 

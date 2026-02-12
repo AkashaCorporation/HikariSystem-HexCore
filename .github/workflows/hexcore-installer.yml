@@ -15,6 +15,8 @@ permissions:
 
 env:
   VSCODE_SKIP_NODE_VERSION_CHECK: 1
+  npm_config_maxsockets: 8
+  npm_config_loglevel: warn
 
 jobs:
   build-windows:
@@ -28,6 +30,9 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.21.1"
+
+      - name: HexCore Preflight (Command/Build Coverage)
+        run: node scripts/verify-hexcore-preflight.cjs
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -102,6 +107,7 @@ jobs:
           cd extensions/hexcore-capstone && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-better-sqlite3 && npm ci
 
       - name: Compile HexCore Extensions
         env:
@@ -115,6 +121,9 @@ jobs:
           cd ../hexcore-base64 && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-filetype && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-common && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-ioc && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-yara && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-minidump && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
 
@@ -152,6 +161,12 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: "22.21.1"
+
+      - name: HexCore Preflight (Command/Build Coverage)
+        run: node scripts/verify-hexcore-preflight.cjs
+
+      - name: Raise File Descriptor Limit
+        run: ulimit -n 65535 || true
 
       - name: Install Linux dependencies
         run: |
@@ -220,6 +235,10 @@ jobs:
           cd ../tunnel-forwarding && npm ci --ignore-scripts
           cd ../typescript-language-features && npm ci --ignore-scripts
 
+      - name: Fetch HexCore Native Dependencies
+        run: |
+          cd extensions/hexcore-better-sqlite3 && npm ci
+
       - name: Compile HexCore Extensions
         run: |
           cd extensions/hexcore-hexviewer && npm ci && npm run compile
@@ -230,6 +249,9 @@ jobs:
           cd ../hexcore-base64 && npm ci && npm run compile
           cd ../hexcore-filetype && npm ci && npm run compile
           cd ../hexcore-common && npm ci && npm run compile
+          cd ../hexcore-ioc && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-yara && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-minidump && npm ci --ignore-scripts && npm run compile
 
       - name: Build VS Code
         run: npm run gulp vscode-linux-x64-min

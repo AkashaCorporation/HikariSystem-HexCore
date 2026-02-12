@@ -14,6 +14,9 @@ Part of the **HikariSystem HexCore** binary analysis IDE.
 - Support for all architectures: x86, ARM, ARM64, MIPS, SPARC, PPC, M68K, RISC-V
 - Context save/restore
 - Memory mapping and protection
+- **Native Breakpoints (O(1) lookup)**
+- **Shared Memory Support (GC Safe)**
+- **State Snapshotting (Save/Restore)**
 
 ## Installation
 
@@ -161,6 +164,41 @@ uc.contextRestore(ctx);
 ctx.free();
 ```
 
+### Native Breakpoints (High Performance)
+
+```javascript
+// Add a native breakpoint (Zero overhead until hit)
+uc.breakpointAdd(0x1000n);
+
+// Remove breakpoint
+uc.breakpointDel(0x1000n);
+```
+
+### Shared Memory (Zero-Copy & GC Safe)
+
+```javascript
+// Create shared buffer
+const sab = new SharedArrayBuffer(4096);
+const buffer = Buffer.from(sab);
+
+// Map it (Unicorn keeps a reference to prevent GC)
+uc.memMapPtr(0x10000n, buffer, PROT.ALL);
+
+// usage: write to 'buffer' in JS, read instanly in Unicorn
+```
+
+### State Snapshotting (Time Travel)
+
+```javascript
+// Save full state (Context + RAM)
+const snapshot = uc.stateSave();
+
+// ... execute more code ...
+
+// Restore state (Rewind)
+uc.stateRestore(snapshot);
+```
+
 ### Utility Functions
 
 ```javascript
@@ -265,5 +303,5 @@ Contributions are welcome! Please open an issue or submit a pull request.
 ## Related Projects
 
 - [hexcore-capstone](https://www.npmjs.com/package/hexcore-capstone) - Capstone disassembler bindings
-- [hexcore-keystone](https://www.npmjs.com/package/hexcore-keystone) - Keystone assembler bindings
+- [hexcore-keystone](https://www.npmjs.com/package/hexcore-keystone) - Keystone assembler bindings (Older version, No Working)
 - [Unicorn Engine](https://www.unicorn-engine.org/) - The underlying emulation framework

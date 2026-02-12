@@ -9,29 +9,17 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
-		"onCommand:hexcore.disasm.openFile",
-		"onCommand:hexcore.disasm.open",
-		"onCommand:hexcore.disasm.analyzeFile",
-		"onCommand:hexcore.disasm.goToAddress",
-		"onCommand:hexcore.disasm.findXrefs",
-		"onCommand:hexcore.disasm.addComment",
-		"onCommand:hexcore.disasm.renameFunction",
-		"onCommand:hexcore.disasm.showCFG",
-		"onCommand:hexcore.disasm.searchString",
-		"onCommand:hexcore.disasm.exportASM",
-		"onCommand:hexcore.disasm.patchInstruction",
-		"onCommand:hexcore.disasm.nopInstruction",
-		"onCommand:hexcore.disasm.assemble",
-		"onCommand:hexcore.disasm.assembleMultiple",
-		"onCommand:hexcore.disasm.savePatchedFile",
-		"onCommand:hexcore.disasm.setSyntax",
-		"onCommand:hexcore.disasm.nativeStatus",
-		"onCommand:hexcore.disasm.showLlvmVersion",
-		"onCustomEditor:hexcore.disassembler.editor",
-		"onView:hexcore.disassembler.graphView",
-		"onCommand:hexcore.disasm.analyzeAll",
 		"onCommand:hexcore.pipeline.runJob",
 		"onCommand:hexcore.pipeline.listCapabilities",
+		"onCommand:hexcore.pipeline.validateJob",
+		"onCommand:hexcore.pipeline.validateWorkspace",
+		"onCommand:hexcore.pipeline.createPresetJob",
+		"onCommand:hexcore.pipeline.saveJobAsProfile",
+		"onCommand:hexcore.pipeline.doctor",
+		"onCommand:hexcore.disasm.buildFormula",
+		"onCommand:hexcore.disasm.checkConstants",
+		"onCustomEditor:hexcore.disassembler.editor",
+		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
 	],
 	"extensionDependencies": [],
@@ -180,6 +168,18 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.disasm.buildFormula",
+				"title": "Build Formula from Instructions",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-operator)"
+			},
+			{
+				"command": "hexcore.disasm.checkConstants",
+				"title": "Check Constant Annotation Sanity",
+				"category": "HexCore Disassembler",
+				"icon": "$(check)"
+			},
+			{
 				"command": "hexcore.pipeline.runJob",
 				"title": "Run HexCore Automation Job",
 				"category": "HexCore Automation",
@@ -190,6 +190,46 @@
 				"title": "List Pipeline Command Capabilities",
 				"category": "HexCore Automation",
 				"icon": "$(list-unordered)"
+			},
+			{
+				"command": "hexcore.pipeline.validateJob",
+				"title": "Validate HexCore Automation Job",
+				"category": "HexCore Automation",
+				"icon": "$(check)"
+			},
+			{
+				"command": "hexcore.pipeline.validateWorkspace",
+				"title": "Validate HexCore Jobs in Workspace",
+				"category": "HexCore Automation",
+				"icon": "$(check-all)"
+			},
+			{
+				"command": "hexcore.pipeline.createPresetJob",
+				"title": "Create HexCore Job from Preset",
+				"category": "HexCore Automation",
+				"icon": "$(new-file)"
+			},
+			{
+				"command": "hexcore.pipeline.saveJobAsProfile",
+				"title": "Save Current Job as Workspace Profile",
+				"category": "HexCore Automation",
+				"icon": "$(save)"
+			},
+			{
+				"command": "hexcore.pipeline.doctor",
+				"title": "Run HexCore Pipeline Doctor",
+				"category": "HexCore Automation",
+				"icon": "$(heart)"
+			},
+			{
+				"command": "hexcore.disasm.searchStringHeadless",
+				"title": "Search String References (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.exportASMHeadless",
+				"title": "Export Assembly (Headless)",
+				"category": "HexCore Automation"
 			}
 		],
 		"menus": {
@@ -275,6 +315,15 @@
 				}
 			]
 		},
+		"jsonValidation": [
+			{
+				"fileMatch": [
+					"/.hexcore_job.json",
+					"**/.hexcore_job.json"
+				],
+				"url": "./schemas/hexcore-job.schema.json"
+			}
+		],
 		"configuration": {
 			"title": "HexCore Disassembler",
 			"properties": {
@@ -321,7 +370,7 @@
 				},
 				"hexcore.disassembler.maxFunctions": {
 					"type": "number",
-					"default": 1000,
+					"default": 5000,
 					"description": "Maximum number of functions to discover during analysis"
 				}
 			}

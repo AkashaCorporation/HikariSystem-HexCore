@@ -1,0 +1,97 @@
+{
+	"$schema": "http://json-schema.org/draft-07/schema#",
+	"title": "HexCore Automation Job",
+	"description": "Schema for .hexcore_job.json pipeline jobs.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": [
+		"file",
+		"outDir",
+		"steps"
+	],
+	"properties": {
+		"file": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Target binary path."
+		},
+		"outDir": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Directory where pipeline outputs/logs are written."
+		},
+		"quiet": {
+			"type": "boolean",
+			"default": true,
+			"description": "Suppress UI notifications during pipeline execution."
+		},
+		"steps": {
+			"type": "array",
+			"minItems": 1,
+			"items": {
+				"type": "object",
+				"additionalProperties": false,
+				"required": [
+					"cmd"
+				],
+				"properties": {
+					"cmd": {
+						"type": "string",
+						"minLength": 1,
+						"description": "Command ID to execute via vscode.commands.executeCommand."
+					},
+					"args": {
+						"type": "object",
+						"description": "Additional command arguments merged into headless options.",
+						"additionalProperties": true
+					},
+					"output": {
+						"type": "object",
+						"additionalProperties": false,
+						"properties": {
+							"path": {
+								"type": "string",
+								"minLength": 1,
+								"description": "Output file path (absolute or relative to outDir)."
+							},
+							"format": {
+								"type": "string",
+								"enum": [
+									"json",
+									"md"
+								],
+								"description": "Output file format override."
+							}
+						}
+					},
+					"continueOnError": {
+						"type": "boolean",
+						"default": false,
+						"description": "Continue pipeline execution after this step fails."
+					},
+					"timeoutMs": {
+						"type": "integer",
+						"minimum": 1,
+						"description": "Per-step timeout in milliseconds."
+					},
+					"expectOutput": {
+						"type": "boolean",
+						"description": "Force output existence validation on/off for this step."
+					},
+					"retryCount": {
+						"type": "integer",
+						"minimum": 0,
+						"default": 0,
+						"description": "Number of retry attempts after an initial failure."
+					},
+					"retryDelayMs": {
+						"type": "integer",
+						"minimum": 0,
+						"default": 1000,
+						"description": "Delay between retry attempts in milliseconds."
+					}
+				}
+			}
+		}
+	}
+}

@@ -28,6 +28,7 @@ $env:npm_command = "ci"
 
 Invoke-Step "npm ci"
 Invoke-Step "npm ci --prefix build"
+Invoke-Step "node scripts/verify-hexcore-preflight.cjs"
 
 if (-not $SkipExtensionInstalls) {
 	Invoke-Step "npm ci --prefix extensions --ignore-scripts"
@@ -93,6 +94,9 @@ $hexcoreExtensions = @(
 	"extensions/hexcore-base64",
 	"extensions/hexcore-filetype",
 	"extensions/hexcore-common",
+	"extensions/hexcore-ioc",
+	"extensions/hexcore-minidump",
+	"extensions/hexcore-yara",
 	"extensions/hexcore-disassembler",
 	"extensions/hexcore-debugger"
 )

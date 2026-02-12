@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+env:
+  npm_config_maxsockets: 8
+  npm_config_loglevel: warn
+
 jobs:
   build-extensions:
     name: Build HexCore Extensions
@@ -32,6 +36,15 @@ jobs:
             extensions/hexcore-entropy/package-lock.json
             extensions/hexcore-base64/package-lock.json
             extensions/hexcore-filetype/package-lock.json
+            extensions/hexcore-ioc/package-lock.json
+            extensions/hexcore-yara/package-lock.json
+            extensions/hexcore-minidump/package-lock.json
+
+      - name: HexCore Preflight (Command/Build Coverage)
+        run: node scripts/verify-hexcore-preflight.cjs
+
+      - name: Raise File Descriptor Limit
+        run: ulimit -n 65535 || true
 
       - name: Build Hex Viewer
         working-directory: extensions/hexcore-hexviewer
@@ -81,6 +94,24 @@ jobs:
           npm ci
           npm run compile
 
+      - name: Build IOC Extractor
+        working-directory: extensions/hexcore-ioc
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+
+      - name: Build YARA Scanner
+        working-directory: extensions/hexcore-yara
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+
+      - name: Build Minidump Parser
+        working-directory: extensions/hexcore-minidump
+        run: |
+          npm ci --ignore-scripts
+          npm run compile
+
       - name: Build Summary
         run: |
           echo "## HexCore Extensions Build Summary" >> $GITHUB_STEP_SUMMARY
@@ -95,6 +126,9 @@ jobs:
           echo "| hexcore-base64 | ✅ Built |" >> $GITHUB_STEP_SUMMARY
           echo "| hexcore-filetype | ✅ Built |" >> $GITHUB_STEP_SUMMARY
           echo "| hexcore-common | ✅ Built |" >> $GITHUB_STEP_SUMMARY
+          echo "| hexcore-ioc | ✅ Built |" >> $GITHUB_STEP_SUMMARY
+          echo "| hexcore-yara | ✅ Built |" >> $GITHUB_STEP_SUMMARY
+          echo "| hexcore-minidump | ✅ Built |" >> $GITHUB_STEP_SUMMARY
 
   lint:
     name: Lint TypeScript

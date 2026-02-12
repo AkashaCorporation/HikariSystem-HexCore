@@ -1,0 +1,62 @@
+{
+	"name": "hexcore-ioc",
+	"displayName": "HexCore IOC Extractor",
+	"description": "Automatic extraction of Indicators of Compromise from binary files",
+	"version": "1.1.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"activationEvents": [
+		"onCommand:hexcore.ioc.extract",
+		"onCommand:hexcore.ioc.extractActive"
+	],
+	"categories": [
+		"Other"
+	],
+	"keywords": [
+		"hexcore",
+		"ioc",
+		"indicator of compromise",
+		"malware",
+		"threat intelligence",
+		"binary analysis"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.ioc.extract",
+				"title": "HexCore: Extract IOCs",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.ioc.extractActive",
+				"title": "HexCore: Extract IOCs from Active File",
+				"category": "HexCore"
+			}
+		],
+		"menus": {
+			"explorer/context": [
+				{
+					"command": "hexcore.ioc.extract",
+					"group": "hexcore@5",
+					"when": "resourceScheme == file"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"hexcore-better-sqlite3": "file:../hexcore-better-sqlite3"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.75.0",
+		"typescript": "^5.1.0"
+	}
+}

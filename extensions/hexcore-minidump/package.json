@@ -1,0 +1,71 @@
+{
+	"name": "hexcore-minidump",
+	"displayName": "HexCore Minidump Parser",
+	"description": "Windows Minidump (MDMP) analysis with thread, module, and memory region parsing",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"activationEvents": [
+		"onCommand:hexcore.minidump.parse",
+		"onCommand:hexcore.minidump.threads",
+		"onCommand:hexcore.minidump.modules",
+		"onCommand:hexcore.minidump.memory"
+	],
+	"categories": [
+		"Other"
+	],
+	"keywords": [
+		"hexcore",
+		"minidump",
+		"mdmp",
+		"memory forensics",
+		"crash dump",
+		"malware analysis"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.minidump.parse",
+				"title": "HexCore: Analyze Minidump",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.minidump.threads",
+				"title": "HexCore: List Minidump Threads",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.minidump.modules",
+				"title": "HexCore: List Minidump Modules",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.minidump.memory",
+				"title": "HexCore: List Minidump Memory Regions",
+				"category": "HexCore"
+			}
+		],
+		"menus": {
+			"explorer/context": [
+				{
+					"command": "hexcore.minidump.parse",
+					"group": "hexcore@6",
+					"when": "resourceScheme == file"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.75.0",
+		"typescript": "^5.1.0"
+	}
+}
