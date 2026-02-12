@@ -1,0 +1,80 @@
+{
+  "name": "hexcore-remill",
+  "version": "0.1.0",
+  "description": "N-API bindings for Remill — lifts machine code to LLVM IR bitcode",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js",
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "prebuild": "prebuildify --napi --strip",
+    "test": "node test/test.js",
+    "clean": "node-gyp clean"
+  },
+  "keywords": [
+    "remill",
+    "lifter",
+    "llvm",
+    "llvm-ir",
+    "bitcode",
+    "binary-lifting",
+    "decompilation",
+    "reverse-engineering",
+    "binary-analysis",
+    "x86",
+    "x64",
+    "arm",
+    "arm64",
+    "aarch64",
+    "sparc",
+    "native",
+    "napi",
+    "async"
+  ],
+  "author": "HikariSystem <hikarisystem@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LXrdKnowkill/hexcore-remill.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LXrdKnowkill/hexcore-remill/issues"
+  },
+  "homepage": "https://github.com/LXrdKnowkill/hexcore-remill#readme",
+  "engines": {
+    "vscode": "^1.0.0",
+    "node": ">=18.0.0"
+  },
+  "activationEvents": [],
+  "files": [
+    "src/",
+    "deps/remill/include/",
+    "deps/remill/lib/",
+    "deps/llvm/include/",
+    "deps/llvm/lib/",
+    "prebuilds/",
+    "binding.gyp",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "binary": {
+    "napi_versions": [8]
+  },
+  "devDependencies": {
+    "prebuildify": "^6.0.0",
+    "prebuild-install": "^7.1.0",
+    "node-addon-api": "^7.0.0",
+    "node-gyp": "^10.0.0"
+  }
+}

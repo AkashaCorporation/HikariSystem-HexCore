@@ -1,0 +1,14 @@
+node_modules/
+build/
+prebuilds/
+*.node
+*.obj
+*.o
+*.lib
+*.a
+*.so
+*.dylib
+*.dll
+*.exp
+*.pdb
+.vs/

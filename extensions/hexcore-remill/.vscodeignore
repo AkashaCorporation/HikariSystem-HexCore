@@ -1,0 +1,9 @@
+src/**
+deps/**
+test/**
+build/**
+binding.gyp
+.gitignore
+.eslintrc*
+tsconfig.json
+**/*.map
