@@ -1,6 +1,6 @@
 {
   "name": "hexcore-unicorn",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "description": "Modern Node.js bindings for Unicorn CPU emulator engine using N-API",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -51,11 +51,11 @@
     "url": "https://github.com/LXrdKnowkill/hexcore-unicorn/issues"
   },
   "homepage": "https://github.com/LXrdKnowkill/hexcore-unicorn#readme",
-	"engines": {
-		"vscode": "^1.0.0",
-		"node": ">=18.0.0"
-	},
-	"activationEvents": [],
+  "engines": {
+    "vscode": "^1.0.0",
+    "node": ">=18.0.0"
+  },
+  "activationEvents": [],
   "files": [
     "src/",
     "deps/unicorn/*.dll",
@@ -71,6 +71,8 @@
     "README.md"
   ],
   "binary": {
-    "napi_versions": [8]
+    "napi_versions": [
+      8
+    ]
   }
 }

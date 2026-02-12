@@ -687,6 +687,20 @@ export declare class Unicorn {
      */
     hookDel(hookHandle: number): void;
 
+    /**
+     * Add a native breakpoint at the specified address.
+     * Stops emulation immediately when execution reaches this address.
+     * Much faster than using a JS hook.
+     * @param address Address to break at
+     */
+    breakpointAdd(address: bigint | number): void;
+
+    /**
+     * Remove a native breakpoint.
+     * @param address Address to remove
+     */
+    breakpointDel(address: bigint | number): void;
+
     // ============== Context Operations ==============
 
     /**
@@ -700,6 +714,19 @@ export declare class Unicorn {
      * @param context - UnicornContext object
      */
     contextRestore(context: UnicornContext): void;
+
+    /**
+     * Save full emulation state (Context + Memory)
+     * Useful for taking snapshots.
+     * Note: Context is an opaque object, Memory is array of buffers.
+     */
+    stateSave(): { context: UnicornContext, memory: Array<{ address: bigint, size: number, perms: number, data: Buffer }> };
+
+    /**
+     * Restore full emulation state
+     * @param state - The object returned by stateSave
+     */
+    stateRestore(state: { context: UnicornContext, memory: Array<{ address: bigint, size: number, perms: number, data: Buffer }> }): void;
 
     // ============== Query & Control ==============
 
