@@ -10,7 +10,7 @@ author: "HikariSystem"
 
 ## Overview
 
-Este Power documenta o padrão oficial para wrappers nativos N-API no projeto HikariSystem HexCore. O HexCore é uma IDE de análise de malware e engenharia reversa baseada no VS Code, que integra engines nativas como Capstone (disassembler), Unicorn (emulador), LLVM MC (assembler) e better-sqlite3 (banco de dados).
+Este Power documenta o padrão oficial para wrappers nativos N-API no projeto HikariSystem HexCore. O HexCore é uma IDE de análise de malware e engenharia reversa baseada no VS Code, que integra engines nativas como Capstone (disassembler), Unicorn (emulador), LLVM MC (assembler), better-sqlite3 (banco de dados) e Remill (lifter de machine code para LLVM IR).
 
 Todos os wrappers nativos devem seguir um padrão consistente para garantir builds reproduzíveis, prebuilds automatizados e integração limpa com o monorepo do HexCore.
 
@@ -34,7 +34,8 @@ HikariSystem-HexCore/
 │   ├── hexcore-capstone/       # Wrapper Capstone (referência)
 │   ├── hexcore-unicorn/        # Wrapper Unicorn (referência)
 │   ├── hexcore-llvm-mc/        # Wrapper LLVM MC (referência)
-│   ├── hexcore-better-sqlite3/ # SQLite (precisa migração)
+│   ├── hexcore-better-sqlite3/ # SQLite (migrado v2.0.0)
+│   ├── hexcore-remill/         # Remill lifter (experimental)
 │   └── hexcore-ioc/            # Usa better-sqlite3 como dependência
 ├── scripts/
 │   └── hexcore-native-install.js  # Script compartilhado de install
@@ -51,6 +52,7 @@ Cada engine nativa tem um repo standalone onde o código-fonte e as releases de 
 - `LXrdKnowkill/hexcore-unicorn`
 - `LXrdKnowkill/hexcore-llvm-mc`
 - `LXrdKnowkill/hexcore-better-sqlite3`
+- `LXrdKnowkill/hexcore-remill` (experimental)
 
 O monorepo contém uma cópia sincronizada de cada engine em `extensions/hexcore-{name}/`.
 
@@ -306,42 +308,29 @@ Exemplo: `hexcore-capstone-v1.3.1-napi-v8-win32-x64.tar.gz`
 
 ## Migração do better-sqlite3
 
-### Estado Atual (Não-Conforme)
+### Estado Atual (v3.3.0 — MIGRADO)
 
-O `hexcore-better-sqlite3` atualmente diverge do padrão em vários pontos:
+O `hexcore-better-sqlite3` foi completamente reescrito na v3.3.0 e agora segue o padrão:
 
-| Aspecto | Padrão | better-sqlite3 (atual) |
-|---------|--------|----------------------|
-| Install script | `hexcore-native-install.js` | `node-gyp-build` |
-| Loading | Fallback manual 3 níveis | `bindings` + `node-gyp-build` |
-| Source | `main.cpp` + wrapper separado | Monolítico (`better_sqlite3.cpp`) |
-| TypeScript defs | Tipos próprios inline | Importa de `better-sqlite3` npm |
-| Runtime deps | Zero | `bindings`, `node-gyp-build` |
-| Exports field | Dual CJS/ESM | Parcial |
-| Entry point | `./index.js` | `lib/index.js` → `lib/database.js` |
+| Aspecto | Padrão | better-sqlite3 (v2.0.0) |
+|---------|--------|------------------------|
+| Install script | `hexcore-native-install.js` | ✅ Conforme |
+| Loading | Fallback manual 3 níveis | ✅ Conforme |
+| Source | `main.cpp` + wrapper separado | ✅ `main.cpp` + `sqlite3_wrapper.cpp` |
+| TypeScript defs | Tipos próprios inline | ✅ Conforme |
+| Runtime deps | Zero | ✅ Zero deps |
+| Exports field | Dual CJS/ESM | ✅ Conforme |
+| Entry point | `./index.js` | ✅ Conforme |
+
+### Exceção Documentada
+
+A pasta `lib/` é mantida por compatibilidade com a API `new Database()` (transactions, aggregates, etc.).
+Isso é uma exceção aceita ao padrão que proíbe `lib/` como diretório JS intermediário.
 
 ### Dependentes
 
 - `hexcore-ioc` usa `hexcore-better-sqlite3` via `file:../hexcore-better-sqlite3`
-- A interface usada pelo IOC é mínima: `openDatabase(filename, options)` retornando um objeto com `exec()`, `prepare()`, `close()`
-
-### Estratégia de Migração Recomendada
-
-Dado que o better-sqlite3 tem uma estrutura interna complexa (`lib/database.js`, `lib/methods/`, etc.), a recomendação é:
-
-1. Manter o C++ existente (`better_sqlite3.cpp` + `.hpp`) - funciona e é estável
-2. Criar um `src/main.cpp` que re-exporta o módulo nativo existente (ou manter o binding atual se o refactor C++ for muito arriscado)
-3. Reescrever `index.js` com o padrão de fallback loading
-4. Reescrever `index.d.ts` com tipos próprios inline (sem importar de `better-sqlite3` npm)
-5. Adicionar `"exports"` field no `package.json`
-6. Trocar `"install"` para `node ../../scripts/hexcore-native-install.js`
-7. Remover `bindings` e `node-gyp-build` das dependencies
-8. Testar que `hexcore-ioc` continua funcionando
-
-### Risco: Reverter vs Refazer
-
-- Reverter o fork inteiro e recomeçar do zero é arriscado porque o C++ nativo já funciona
-- Melhor abordagem: manter o core C++ e refatorar apenas a camada JavaScript/TypeScript de interface
+- Interface mínima: `openDatabase(filename, options)` → `exec()`, `prepare()`, `close()`
 
 ## Troubleshooting
 
@@ -402,5 +391,69 @@ node ../../scripts/hexcore-native-install.js
 
 ---
 
-**Engines**: Capstone, Unicorn, LLVM MC, better-sqlite3
+**Engines**: Capstone, Unicorn, LLVM MC, better-sqlite3, Remill (experimental)
 **N-API**: v8 | **C++**: 17+ | **Node**: 18+
+
+---
+
+## Checklist de CI / Preflight
+
+Antes de submeter um PR com mudanças em extensões nativas, verificar:
+
+### package.json
+- [ ] `"name"` segue o padrão `hexcore-{name}` (hyphen, não underscore)
+- [ ] `"version"` foi bumpada se houve mudança no código nativo
+- [ ] `"main"` aponta para `"./index.js"`
+- [ ] `"module"` aponta para `"./index.mjs"`
+- [ ] `"types"` aponta para `"./index.d.ts"`
+- [ ] `"exports"` tem dual CJS/ESM com types
+- [ ] `"activationEvents": []` está presente (obrigatório pelo preflight)
+- [ ] `"install"` usa `"node ../../scripts/hexcore-native-install.js"`
+- [ ] `"binary.napi_versions"` é `[8]`
+- [ ] Zero dependências runtime (sem `bindings`, sem `node-gyp-build`)
+- [ ] `devDependencies` inclui: `node-addon-api`, `node-gyp`, `prebuildify`, `prebuild-install`
+
+### package-lock.json
+- [ ] Está sincronizado com package.json (`npm install --package-lock-only`)
+- [ ] Não contém deps removidas (rodar `npm ci` localmente para validar)
+
+### binding.gyp
+- [ ] `target_name` usa underscore: `hexcore_{name}` (não hyphen)
+- [ ] `NAPI_VERSION=8` nos defines
+- [ ] C++17 configurado para todas as plataformas
+- [ ] Include dirs apontam para `deps/{lib}/include`
+
+### index.js
+- [ ] Fallback chain: prebuilds → Release → Debug
+- [ ] Nome do .node no prebuild path corresponde ao `target_name` do binding.gyp
+- [ ] Nenhum `require('bindings')` ou `require('node-gyp-build')`
+
+### Código C++
+- [ ] Copyright header HikariSystem presente
+- [ ] `NODE_API_MODULE(hexcore_{name}, Init)` no main.cpp
+- [ ] Classes usam `Napi::ObjectWrap`
+- [ ] Destrutor não faz double-free (usar padrão Finalize)
+
+---
+
+## Convenções de Naming
+
+| Contexto | Formato | Exemplo |
+|----------|---------|---------|
+| Nome do pacote npm | `hexcore-{name}` (hyphen) | `hexcore-better-sqlite3` |
+| Diretório no monorepo | `extensions/hexcore-{name}/` | `extensions/hexcore-capstone/` |
+| target_name (binding.gyp) | `hexcore_{name}` (underscore) | `hexcore_sqlite3` |
+| Arquivo .node | `hexcore-{name}.node` ou `hexcore_{name}.node` | `hexcore-capstone.node` |
+| Repo standalone | `LXrdKnowkill/hexcore-{name}` | `LXrdKnowkill/hexcore-unicorn` |
+| Release tag | `v{semver}` | `v1.2.0` |
+| Asset de prebuild | `{pkg}-v{ver}-napi-v{n}-{os}-{arch}.tar.gz` | `hexcore-capstone-v1.3.1-napi-v8-win32-x64.tar.gz` |
+| Classe C++ principal | `{Name}Wrapper` (PascalCase) | `DatabaseWrapper`, `CapstoneWrapper` |
+| Header C++ | `{name}_wrapper.h` | `sqlite3_wrapper.h` |
+| Entry point N-API | `main.cpp` | `main.cpp` |
+
+### Regras Importantes
+
+1. **Nunca** usar hyphen no `target_name` do binding.gyp — node-gyp não aceita
+2. **Sempre** usar hyphen no nome do pacote npm — convenção npm
+3. O nome do `.node` gerado pelo prebuildify segue o `target_name`
+4. O path de fallback no `index.js` deve corresponder ao `target_name`
