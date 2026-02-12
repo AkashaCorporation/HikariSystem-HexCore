@@ -33,6 +33,21 @@
 	"nodejsRepository": "https://nodejs.org",
 	"urlProtocol": "hexcore",
 	"webviewContentExternalBaseUrlTemplate": "https://{{uuid}}.vscode-cdn.net/insider/ef65ac1ba57f57f2a3961bfe94aa20481caca4c6/out/vs/workbench/contrib/webview/browser/pre/",
+	"extensionsGallery": {
+		"serviceUrl": "https://open-vsx.org/vscode/gallery",
+		"itemUrl": "https://open-vsx.org/vscode/item",
+		"resourceUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}",
+		"controlUrl": "",
+		"nlsBaseUrl": "",
+		"publisherUrl": "https://open-vsx.org/namespace/{publisher}",
+		"extensionUrlTemplate": "https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}"
+	},
+	"linkProtectionTrustedDomains": [
+		"https://open-vsx.org"
+	],
+	"configurationDefaults": {
+		"extensions.verifySignature": false
+	},
 	"builtInExtensions": [],
 	"defaultChatAgent": {
 		"extensionId": "GitHub.copilot",

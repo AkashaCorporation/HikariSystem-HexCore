@@ -39,6 +39,20 @@ extensions/hexcore-keystone/
 extensions/hexcore-unicorn/deps/
 extensions/hexcore-unicorn/build/
 extensions/hexcore-unicorn/prebuilds/
+extensions/hexcore-unicorn/build_locked/
+extensions/hexcore-unicorn/build_log.txt
+extensions/hexcore-unicorn/sync_script.bat
+
+# HexCore better-sqlite3 build artifacts
+extensions/hexcore-better-sqlite3/deps/
+extensions/hexcore-better-sqlite3/build/
+extensions/hexcore-better-sqlite3/prebuilds/
+extensions/hexcore-better-sqlite3/sync_sqlite.bat
+
+# HexCore Remill build artifacts
+extensions/hexcore-remill/deps/
+extensions/hexcore-remill/build/
+extensions/hexcore-remill/prebuilds/
 
 # HexCore LLVM MC build artifacts
 extensions/hexcore-llvm-mc/deps/
