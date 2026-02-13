@@ -1254,9 +1254,21 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			// Extract bytes from engine buffer (addressToOffset handles VA→file offset)
+			if (!engine.isFileLoaded()) {
+				const errorMsg = 'No binary file is loaded. Open a file in the disassembler first.';
+				if (quiet) {
+					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
 			const bytes = engine.getBytes(startAddress, size);
 			if (!bytes || bytes.length === 0) {
-				const errorMsg = `Address 0x${startAddress.toString(16)} could not be resolved in the loaded binary.`;
+				const loadedFile = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
+				const base = engine.getBaseAddress();
+				const bufSize = engine.getBufferSize();
+				const errorMsg = `Address 0x${startAddress.toString(16)} is outside the loaded binary "${loadedFile}" (base=0x${base.toString(16)}, size=0x${bufSize.toString(16)}).`;
 				if (quiet) {
 					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
 				}
