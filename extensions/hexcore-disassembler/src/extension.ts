@@ -1253,32 +1253,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 
-			// Validate address bounds
-			const bufferSize = engine.getBufferSize();
-			if (startAddress < 0 || startAddress >= bufferSize) {
-				const errorMsg = `Address 0x${startAddress.toString(16)} is out of bounds (file size: ${bufferSize} bytes).`;
-				if (quiet) {
-					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
-				}
-				vscode.window.showErrorMessage(errorMsg);
-				return undefined;
-			}
-
-			// Truncate range if it exceeds file bounds
-			if (startAddress + size > bufferSize) {
-				size = bufferSize - startAddress;
-			}
-
-			// Extract bytes from engine buffer
+			// Extract bytes from engine buffer (addressToOffset handles VA→file offset)
 			const bytes = engine.getBytes(startAddress, size);
 			if (!bytes || bytes.length === 0) {
-				const errorMsg = 'Failed to extract bytes from the loaded binary.';
+				const errorMsg = `Address 0x${startAddress.toString(16)} could not be resolved in the loaded binary.`;
 				if (quiet) {
 					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
 			}
+			// Update size to actual bytes extracted (may be truncated at file boundary)
+			size = bytes.length;
 
 			// Perform lifting with progress indicator
 			const liftResult = await vscode.window.withProgress(
