@@ -394,8 +394,7 @@
 	"dependencies": {
 		"hexcore-capstone": "file:../hexcore-capstone",
 		"hexcore-common": "file:../hexcore-common",
-		"hexcore-llvm-mc": "file:../hexcore-llvm-mc",
-		"hexcore-remill": "file:../hexcore-remill"
+		"hexcore-llvm-mc": "file:../hexcore-llvm-mc"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",
