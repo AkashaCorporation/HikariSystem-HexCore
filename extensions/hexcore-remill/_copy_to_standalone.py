@@ -28,7 +28,6 @@ EXCLUDE_FILES = {
     "_write_gyp.py",
     "_pack_deps.py",
     "_copy_to_standalone.py",
-    "package-lock.json",
 }
 
 
