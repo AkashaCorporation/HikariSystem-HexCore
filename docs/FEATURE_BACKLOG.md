@@ -9,11 +9,12 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-12)
+## Current Snapshot (2026-02-13)
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **2/4** (`#7b`, `#8`)
 - P2 delivered: **0/2**
 - Infrastructure delivered: **6/6** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`)
+- Future Engines delivered: **1/3** (hexcore-remill `DONE` in v3.4.0)
 - Pipeline hardening added beyond original backlog:
   - `.hexcore_job.json` schema validation
   - `hexcore.pipeline.validateJob`
@@ -225,10 +226,11 @@
 ### hexcore-remill
 - Lift semantics into LLVM IR (foundation stage for decompilation)
 - N-API bindings, Windows build
-- **Status**: `IN_PROGRESS`
-- **Scaffold**: `extensions/hexcore-remill/` — wrapper C++, types, tests, binding.gyp
-- **Pending**: Build Remill + LLVM 15+ + XED as static libs, populate `deps/`
-- **Target**: v4.0.0
+- **Status**: `DONE`
+- **Version**: 0.1.0
+- **Delivered**: v3.4.0 — full N-API wrapper, 168 static libs (/MT), liftToIR integration in disassembler
+- **Standalone repo**: [hexcore-remill](https://github.com/LXrdKnowkill/hexcore-remill)
+- **Target**: v3.4.0 ✅
 
 ### hexcore-rellic
 - LLVM bitcode → goto-free C output (lifting-bits/rellic)
@@ -254,6 +256,7 @@ Binary → Remill lift stage → LLVM IR → Rellic (C code)
 - `DONE`: P0 `#5` (Run Profile Presets)
 - `DONE`: Infra `#12`–`#15` (All 4 native engines with prebuilds)
 - `DONE`: Infra `#18` (CI/CD pipeline for prebuilds)
+- `DONE`: hexcore-remill v0.1.0 (N-API wrapper + disassembler integration)
 - Keep Windows installer/build green for 3 consecutive runs
 - Keep pipeline contract stable (`file`, `quiet`, `output`) during native-engine integration
 

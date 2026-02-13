@@ -5,6 +5,44 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.0] - 2026-02-13 - "IR Horizon"
+
+> **Feature Release** — Remill IR Lifting engine, N-API wrapper for machine code → LLVM IR translation, improved disassembler error handling, and native prebuild CI expansion.
+
+### Added
+
+#### hexcore-remill v0.1.0 (NEW)
+- **Remill N-API wrapper** — lifts machine code to LLVM IR via the Remill library (Trail of Bits).
+- **Static linking** — 168 static libs (LLVM 18, XED, glog, gflags, Remill) compiled with `/MT` via clang-cl x64.
+- **API surface** — `liftToIR(buffer, arch, address)`, `getSupportedArchitectures()`, `getVersion()`.
+- **Architecture support** — x86, x86_64 (amd64), aarch32, aarch64, sparc32, sparc64.
+- **Build tooling** — `_rebuild_mt.py` (full /MT rebuild), `_write_gyp.py` (auto-generate binding.gyp from deps), `_pack_deps.py` (deps zip for CI), `_copy_to_standalone.py` (standalone repo sync).
+- **Standalone repo** — [hexcore-remill](https://github.com/LXrdKnowkill/hexcore-remill) with prebuild releases and CI integration.
+- **16/16 tests passing** — arch listing, version check, x86/x64 lifting, error handling, edge cases.
+
+#### hexcore-disassembler: Remill IR Lifting Integration
+- **`hexcore.disasm.liftToIR` command** — lift selected address range to LLVM IR from the disassembler UI.
+- **`remillWrapper.ts`** — TypeScript wrapper with `liftToIR()`, `isAvailable()`, `getSupportedArchitectures()`, `getVersion()`.
+- **`archMapper.ts`** — maps HexCore `ArchitectureConfig` to Remill architecture strings.
+- **`buildIRHeader()`** — generates metadata header (file, arch, address range, timestamp) for IR output.
+- **VA-aware address resolution** — uses loaded file's base address and buffer size for bounds checking.
+- **Improved error messages** — shows loaded file name, base address, and buffer size when address resolution fails.
+- **`isFileLoaded()` guard** — prevents confusing errors when no file is loaded.
+- **Headless API** — `hexcore.disasm.liftToIR` registered as headless-capable with `file`, `address`, `size`, `output` contract.
+- **Engine status** — "Capstone + LLVM MC + Remill" shown in status bar when all three engines are available.
+
+### Changed
+- Extension version bumps:
+  - `hexcore-disassembler`: `1.3.0` -> `1.4.0`
+- Native prebuilds CI (`hexcore-native-prebuilds.yml`) updated with experimental Remill engine job.
+- `docs/FEATURE_BACKLOG.md` updated with Infrastructure entries #12–#19.
+- `docs/RUNBOOK_NATIVE_PREBUILDS.md` updated with Remill build instructions.
+- `powers/hexcore-native-engines/POWER.md` updated with Remill wrapper documentation.
+
+### Fixed
+- **liftToIR address resolution** — was failing when user tested with addresses from a different binary than the one loaded. Now shows clear error with loaded file context.
+- **Remill `GetSemanticsDir()` build conflict** — resolved `windows.h` / Sleigh `CHAR` macro collision in `remill_wrapper.cpp`.
+
 ## [3.3.0] - 2026-02-10 - "Deep Analysis"
 
 > **Feature Release** — Windows Minidump forensic analysis, XOR brute-force deobfuscation, stack string detection, deep headless disassembly, and IOC SQLite backend.
@@ -323,6 +361,8 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.4.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.0
+[3.3.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.3.0
 [3.2.2]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.2
 [3.2.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.1
 [3.2.0-preview]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.0-preview

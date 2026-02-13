@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-10):** `v3.3.0 "Deep Analysis"` — deep headless disassembly, IOC SQLite backend, minidump forensics, XOR deobfuscation.
+**Latest release (2026-02-13):** `v3.4.0 "IR Horizon"` — Remill IR Lifting engine, machine code → LLVM IR translation, improved disassembler error handling.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
@@ -41,6 +41,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 ## Features
 
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
+- **IR Lifting** — Machine code → LLVM IR translation via Remill engine (experimental)
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
@@ -62,7 +63,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 | Extension | Version | Description |
 |-----------|---------|-------------|
 | **Debugger** | 2.0.1 | PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation |
-| **Disassembler** | 1.3.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs |
+| **Disassembler** | 1.4.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting |
 | **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
 | **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
@@ -121,9 +122,10 @@ Kernel32, user32, msvcrt emulation for common PE analysis scenarios.
 
 ## Disassembler
 
-Native multi-architecture disassembler powered by **Capstone Engine v5.0** with assembly patching via **LLVM MC**.
+Native multi-architecture disassembler powered by **Capstone Engine v5.0** with assembly patching via **LLVM MC** and IR lifting via **Remill**.
 
 - **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
+- **IR Lifting** — Lift machine code to LLVM IR via Remill engine (experimental)
 - **Inline PE/ELF parsing** — Imports, exports, sections without external dependencies
 - **Function detection** — Prolog scanning, call target analysis, up to 1000 functions
 - **String cross-references** — Track which instructions reference which strings
@@ -131,7 +133,7 @@ Native multi-architecture disassembler powered by **Capstone Engine v5.0** with 
 - **Patching** — Assemble, patch instructions, NOP sleds (LLVM MC)
 - **Headless mode** — `hexcore.disasm.analyzeAll` for automation with JSON/MD output
 
-> Powered by [hexcore-capstone](extensions/hexcore-capstone) and [hexcore-llvm-mc](extensions/hexcore-llvm-mc).
+> Powered by [hexcore-capstone](extensions/hexcore-capstone), [hexcore-llvm-mc](extensions/hexcore-llvm-mc), and [hexcore-remill](extensions/hexcore-remill).
 
 ---
 

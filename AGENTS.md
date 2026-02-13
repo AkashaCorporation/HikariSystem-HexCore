@@ -64,6 +64,7 @@ HexCore-specific extensions for malware analysis:
 - `hexcore-hexviewer/` - Binary file viewer with virtual scrolling and data inspector
 - `hexcore-peanalyzer/` - PE file analyzer with header parsing and packer detection
 - `hexcore-disassembler/` - **NEW v2.0** - Professional disassembly with Capstone engine
+- `hexcore-remill/` - **NEW v3.4.0** - Machine code → LLVM IR lifting via Remill engine
 
 #### Security Tools
 - `hexcore-hashcalc/` - File hash calculator (MD5, SHA-1, SHA-256, SHA-512)
@@ -94,6 +95,7 @@ HexCore-specific extensions for malware analysis:
 
 ### v2.0 Additions
 - **Disassembly**: Capstone engine bindings
+- **IR Lifting**: Remill + LLVM 18 (machine code → LLVM IR)
 - **Debug**: WinDbg Engine / GDB-MI
 - **YARA**: Custom rule engine (wasm bindings planned)
 
@@ -306,6 +308,7 @@ The project uses GitHub Actions for continuous integration:
 ### Workflows
 - `.github/workflows/hexcore-build.yml` - Builds all HexCore extensions and runs linting
 - `.github/workflows/hexcore-installer.yml` - Creates Windows installer packages
+- `.github/workflows/hexcore-native-prebuilds.yml` - Builds native engine prebuilds (Capstone, Unicorn, LLVM MC, better-sqlite3, Remill)
 - `.github/workflows/telemetry.yml` - Telemetry-related checks
 
 ### Build Matrix
@@ -349,6 +352,7 @@ The `product.json` file defines the product branding:
 | **Disassembler** | ❌ | ✅ | **NEW** |
 | **Debugger** | ❌ | ✅ | **NEW** |
 | **YARA Scanner** | ❌ | ✅ | **NEW** |
+| **IR Lifter (Remill)** | ❌ | ✅ | **NEW** (v3.4.0) |
 | Sandbox | ❌ | 🚧 | Planned |
 | Decompiler | ❌ | 🚧 | Planned |
 | Collaboration | ❌ | 🚧 | Planned |
