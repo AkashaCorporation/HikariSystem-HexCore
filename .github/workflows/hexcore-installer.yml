@@ -35,7 +35,7 @@ jobs:
         run: node scripts/verify-hexcore-preflight.cjs
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
