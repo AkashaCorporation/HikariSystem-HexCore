@@ -75,6 +75,15 @@ Para cada engine na matrix:
 | hexcore-llvm-mc | LXrdKnowkill/hexcore-llvm-mc | 1.0.0 |
 | hexcore-better-sqlite3 | LXrdKnowkill/hexcore-better-sqlite3 | 2.0.0 |
 
+### 2.4 Engines experimentais
+
+Só rodam quando "Include experimental engines" está marcado no dispatch.
+
+| Engine | Repo | Versão Atual | Nota |
+|--------|------|-------------|------|
+| hexcore-remill | LXrdKnowkill/hexcore-remill | 0.1.0 | Requer deps zip da release (131 MB) |
+| hexcore-rellic | LXrdKnowkill/hexcore-rellic | — | Planejado |
+
 ---
 
 ## 3. Configurar HEXCORE_RELEASE_TOKEN

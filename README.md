@@ -84,7 +84,10 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding — CPU emulation, hooks, context save/restore |
 | **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 1.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
+| **hexcore-remill** | 0.1.0 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
+
+> **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and the Remill library itself (168 static libs, ~131 MB of pre-compiled dependencies). Building from source requires clang-cl, VS2022, and a dedicated build pipeline (`_rebuild_mt.py`). For development, download the pre-compiled deps from the [standalone repo releases](https://github.com/LXrdKnowkill/hexcore-remill/releases). End users receive the pre-built `.node` binary via CI — no compilation needed.
 
 ---
 
@@ -221,6 +224,7 @@ HikariSystem-HexCore/
 │   ├── hexcore-llvm-mc/        # LLVM MC N-API binding
 │   ├── hexcore-unicorn/        # Unicorn N-API binding
 │   ├── hexcore-keystone/       # Legacy assembler binding
+│   ├── hexcore-remill/         # Remill lifter (machine code → LLVM IR)
 │   ├── hexcore-yara/           # YARA scanner
 │   ├── hexcore-ioc/            # IOC extractor
 │   ├── hexcore-hashcalc/       # Hash calculator

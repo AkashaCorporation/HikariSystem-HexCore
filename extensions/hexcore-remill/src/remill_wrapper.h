@@ -15,7 +15,7 @@
 #include <memory>
 #include <cstdint>
 
-// Forward declarations — real Remill/LLVM types resolved at link time
+// Forward declarations
 namespace llvm {
 class LLVMContext;
 class Module;
@@ -52,41 +52,26 @@ public:
 	explicit RemillLifter(const Napi::CallbackInfo& info);
 	~RemillLifter();
 
-private:
-	// --- JS-visible methods ---------------------------------------------------
-
-	/** Lift raw bytes synchronously → { success, ir, error, address, bytesConsumed } */
-	Napi::Value LiftBytes(const Napi::CallbackInfo& info);
-
-	/** Lift raw bytes asynchronously (runs in worker thread) */
-	Napi::Value LiftBytesAsync(const Napi::CallbackInfo& info);
-
-	/** Get the architecture name this lifter was created with */
-	Napi::Value GetArch(const Napi::CallbackInfo& info);
-
-	/** Get supported architectures list */
-	static Napi::Value GetSupportedArchs(const Napi::CallbackInfo& info);
-
-	/** Release native resources */
-	Napi::Value Close(const Napi::CallbackInfo& info);
-
-	/** Check if the lifter is still open */
-	Napi::Value IsOpen(const Napi::CallbackInfo& info);
-
-	// --- Internal helpers -----------------------------------------------------
-
+	// Public for AsyncWorker access
 	LiftResult DoLift(const uint8_t* bytes, size_t length, uint64_t address);
 	Napi::Object LiftResultToJS(Napi::Env env, const LiftResult& result);
 
-	// --- State ----------------------------------------------------------------
+private:
+	// --- JS-visible methods ---
+	Napi::Value LiftBytes(const Napi::CallbackInfo& info);
+	Napi::Value LiftBytesAsync(const Napi::CallbackInfo& info);
+	Napi::Value GetArch(const Napi::CallbackInfo& info);
+	static Napi::Value GetSupportedArchs(const Napi::CallbackInfo& info);
+	Napi::Value Close(const Napi::CallbackInfo& info);
+	Napi::Value IsOpen(const Napi::CallbackInfo& info);
 
+	// --- State ---
 	std::string archName_;
 	bool closed_ = false;
 
-	// Opaque pointers — allocated in constructor, freed in destructor / Close()
 	std::unique_ptr<llvm::LLVMContext> context_;
 	std::unique_ptr<llvm::Module> semanticsModule_;
-	const remill::Arch* arch_ = nullptr;  // non-owning, managed by Remill
+	std::unique_ptr<const remill::Arch> arch_;  // Arch::Get returns unique_ptr
 	std::unique_ptr<remill::IntrinsicTable> intrinsics_;
 };
 
@@ -104,6 +89,8 @@ public:
 	void Execute() override;
 	void OnOK() override;
 	void OnError(const Napi::Error& error) override;
+
+	Napi::Promise::Deferred& GetDeferred() { return deferred_; }
 
 private:
 	RemillLifter* lifter_;

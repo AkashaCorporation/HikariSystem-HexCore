@@ -334,6 +334,34 @@ Isso é uma exceção aceita ao padrão que proíbe `lib/` como diretório JS in
 
 ## Troubleshooting
 
+### Caso Especial: Remill (Deps Pesadas)
+
+O Remill é diferente das outras engines porque depende de LLVM 18 inteiro + XED + glog + gflags + Sleigh (168 libs estáticas, ~131 MB comprimido). As deps não cabem no git e não podem ser compiladas no CI em tempo razoável.
+
+**Solução adotada:**
+1. As deps são compiladas localmente com `_rebuild_mt.py` (requer clang-cl + VS2022)
+2. Empacotadas com `_pack_deps.py` → `remill-deps-win32-x64.zip`
+3. Uploaded como release asset no repo standalone (`LXrdKnowkill/hexcore-remill`, tag `v0.1.0`)
+4. O workflow experimental baixa esse zip antes de rodar `prebuildify`
+
+**Para desenvolvedores que querem testar localmente:**
+```powershell
+cd extensions/hexcore-remill
+# Baixar deps da release
+gh release download v0.1.0 -p "remill-deps-win32-x64.zip" -R LXrdKnowkill/hexcore-remill
+Expand-Archive remill-deps-win32-x64.zip -DestinationPath . -Force
+# Instalar devDeps e compilar
+npm install --ignore-scripts
+npm run build
+npm test
+```
+
+**Conflito windows.h vs Sleigh:**
+O Remill usa Sleigh (Ghidra) que define `ghidra::sleightokentype::CHAR`. Isso conflita com `winnt.h` que faz `typedef char CHAR`. A solução é forward-declarar `GetModuleHandleA` e `GetModuleFileNameA` via `extern "C" __declspec(dllimport)` em vez de incluir `<windows.h>`.
+
+**Workflow CI:**
+O Remill está no job `prebuild-windows-experimental`, que só roda quando o workflow é disparado manualmente com "Include experimental engines" marcado. Isso evita builds desnecessários no CI normal.
+
 ### Prebuild não encontrado no install
 
 - Verifique se existe uma release no repo standalone com o asset correto

@@ -1,0 +1,275 @@
+{
+  "targets": [
+    {
+      "target_name": "hexcore_remill",
+      "cflags!": [
+        "-fno-exceptions"
+      ],
+      "cflags_cc!": [
+        "-fno-exceptions"
+      ],
+      "sources": [
+        "src/main.cpp",
+        "src/remill_wrapper.cpp"
+      ],
+      "include_dirs": [
+        "<!@(node -p \"require('node-addon-api').include\")",
+        "deps/remill/include",
+        "deps/llvm/include",
+        "deps/xed/include",
+        "deps/glog/include",
+        "deps/gflags/include"
+      ],
+      "defines": [
+        "NAPI_VERSION=8",
+        "NAPI_DISABLE_CPP_EXCEPTIONS"
+      ],
+      "conditions": [
+        [
+          "OS=='win'",
+          {
+            "libraries": [
+              "<(module_root_dir)/deps/remill/lib/remill_bc.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_os.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch_x86.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch_aarch64.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch_sparc32.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch_sparc64.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_arch_sleigh.lib",
+              "<(module_root_dir)/deps/remill/lib/remill_version.lib",
+              "<(module_root_dir)/deps/remill/lib/decomp.lib",
+              "<(module_root_dir)/deps/remill/lib/sla.lib",
+              "<(module_root_dir)/deps/remill/lib/slaSupport.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64AsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64CodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64Desc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64Disassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64Info.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAArch64Utils.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMARMUtils.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAggressiveInstCombine.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAnalysis.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMAsmPrinter.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBPFAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBPFCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBPFDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBPFDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBPFInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBinaryFormat.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBitReader.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBitWriter.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMBitstreamReader.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCFGuard.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCodeGenTypes.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCore.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCoroutines.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMCoverage.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDWARFLinker.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDWARFLinkerClassic.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDWARFLinkerParallel.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDWP.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoBTF.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoCodeView.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoDWARF.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoGSYM.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoLogicalView.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoMSF.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebugInfoPDB.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDebuginfod.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDemangle.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMDlltoolDriver.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMExecutionEngine.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMExtensions.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFileCheck.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFrontendDriver.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFrontendHLSL.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFrontendOffloading.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFrontendOpenACC.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFrontendOpenMP.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFuzzMutate.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMFuzzerCLI.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMGlobalISel.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHexagonAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHexagonCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHexagonDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHexagonDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHexagonInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMHipStdPar.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMIRPrinter.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMIRReader.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMInstCombine.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMInstrumentation.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMInterfaceStub.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMInterpreter.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMJITLink.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLTO.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLibDriver.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLineEditor.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLinker.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLoongArchAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLoongArchCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLoongArchDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLoongArchDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMLoongArchInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMC.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMCA.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMCDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMCJIT.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMCParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMIRParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMipsAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMipsCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMipsDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMipsDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMMipsInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMObjCARCOpts.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMObjCopy.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMObject.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMObjectYAML.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMOption.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMOrcDebugging.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMOrcJIT.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMOrcShared.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMOrcTargetProcess.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPasses.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPowerPCAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPowerPCCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPowerPCDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPowerPCDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMPowerPCInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMProfileData.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRISCVTargetMCA.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRemarks.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMRuntimeDyld.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMScalarOpts.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSelectionDAG.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSparcAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSparcCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSparcDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSparcDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSparcInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSupport.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSymbolize.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSystemZAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSystemZCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSystemZDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSystemZDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMSystemZInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTableGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTableGenCommon.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTableGenGlobalISel.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTarget.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTargetParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTextAPI.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTextAPIBinaryReader.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMTransformUtils.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMVectorize.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyAsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyCodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyDesc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyDisassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyInfo.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWebAssemblyUtils.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWindowsDriver.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMWindowsManifest.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86AsmParser.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86CodeGen.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86Desc.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86Disassembler.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86Info.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMX86TargetMCA.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMXRay.lib",
+              "<(module_root_dir)/deps/llvm/lib/LLVMipo.lib",
+              "<(module_root_dir)/deps/xed/lib/xed.lib",
+              "<(module_root_dir)/deps/xed/lib/xed-ild.lib",
+              "<(module_root_dir)/deps/glog/lib/glog.lib",
+              "<(module_root_dir)/deps/gflags/lib/gflags_static.lib"
+            ],
+            "msvs_settings": {
+              "VCCLCompilerTool": {
+                "ExceptionHandling": 1,
+                "RuntimeLibrary": 0,
+                "AdditionalOptions": [
+                  "/EHsc",
+                  "/std:c++17",
+                  "/bigobj"
+                ]
+              },
+              "VCLinkerTool": {
+                "AdditionalDependencies": [
+                  "Advapi32.lib",
+                  "Shell32.lib",
+                  "Ole32.lib",
+                  "Uuid.lib",
+                  "ws2_32.lib",
+                  "psapi.lib",
+                  "dbghelp.lib",
+                  "version.lib",
+                  "ntdll.lib",
+                  "synchronization.lib",
+                  "bcrypt.lib",
+                  "Shlwapi.lib"
+                ]
+              }
+            },
+            "defines": [
+              "_CRT_SECURE_NO_WARNINGS",
+              "_SCL_SECURE_NO_WARNINGS",
+              "_SILENCE_CXX17_ITERATOR_BASE_CLASS_DEPRECATION_WARNING",
+              "NOMINMAX",
+              "GLOG_NO_ABBREVIATED_SEVERITIES",
+              "GOOGLE_GLOG_DLL_DECL=",
+              "GFLAGS_IS_A_DLL=0",
+              "GLOG_USE_GLOG_EXPORT",
+              "GLOG_STATIC_DEFINE"
+            ]
+          }
+        ],
+        [
+          "OS=='linux'",
+          {
+            "libraries": [
+              "-lpthread",
+              "-ldl",
+              "-lz"
+            ],
+            "cflags": [
+              "-fPIC"
+            ],
+            "cflags_cc": [
+              "-fPIC",
+              "-std=c++17",
+              "-fexceptions"
+            ]
+          }
+        ],
+        [
+          "OS=='mac'",
+          {
+            "xcode_settings": {
+              "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+              "CLANG_CXX_LIBRARY": "libc++",
+              "MACOSX_DEPLOYMENT_TARGET": "10.15",
+              "OTHER_CPLUSPLUSFLAGS": [
+                "-std=c++17"
+              ]
+            }
+          }
+        ]
+      ]
+    }
+  ]
+}

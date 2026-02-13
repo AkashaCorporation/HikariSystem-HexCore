@@ -8,6 +8,28 @@
 
 #include "remill_wrapper.h"
 
+// MSVC doesn't define __x86_64__, so Remill's Name.h #error fires.
+// Define REMILL_ARCH before including any Remill headers.
+#if defined(_M_X64) && !defined(REMILL_ARCH)
+#define REMILL_ARCH "amd64_avx"
+#define REMILL_ON_AMD64 1
+#define REMILL_ON_X86 0
+#define REMILL_ON_AARCH64 0
+#define REMILL_ON_AARCH32 0
+#define REMILL_ON_SPARC64 0
+#define REMILL_ON_SPARC32 0
+#define REMILL_ON_PPC 0
+#elif defined(_M_IX86) && !defined(REMILL_ARCH)
+#define REMILL_ARCH "x86"
+#define REMILL_ON_AMD64 0
+#define REMILL_ON_X86 1
+#define REMILL_ON_AARCH64 0
+#define REMILL_ON_AARCH32 0
+#define REMILL_ON_SPARC64 0
+#define REMILL_ON_SPARC32 0
+#define REMILL_ON_PPC 0
+#endif
+
 #include <remill/Arch/Arch.h>
 #include <remill/Arch/Name.h>
 #include <remill/BC/IntrinsicTable.h>
@@ -21,6 +43,64 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <sstream>
+#include <filesystem>
+
+// Forward-declare Win32 functions to avoid #include <windows.h> which
+// conflicts with Sleigh's CHAR token (ghidra::sleightokentype::CHAR
+// vs winnt.h typedef char CHAR).
+#ifdef _WIN32
+extern "C" {
+__declspec(dllimport) void* __stdcall GetModuleHandleA(const char*);
+__declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void*, char*, unsigned long);
+}
+#endif
+
+// Helper: resolve the semantics directory at runtime.
+//
+// Priority:
+//   1. REMILL_SEMANTICS_DIR env var (explicit override)
+//   2. Relative to the .node binary: ../../deps/remill/share/semantics/
+//      (binary lives in build/Release/hexcore_remill.node)
+//   3. Relative to CWD as last resort
+//
+// On Windows we use GetModuleHandleA("hexcore_remill.node") +
+// GetModuleFileNameA to find the DLL path at runtime.
+static std::filesystem::path GetSemanticsDir() {
+	// 1. Environment variable override
+	const char* envDir = std::getenv("REMILL_SEMANTICS_DIR");
+	if (envDir && envDir[0] != '\0') {
+		return std::filesystem::path(envDir);
+	}
+
+	// 2. Resolve from the .node binary location
+#ifdef _WIN32
+	void* hMod = GetModuleHandleA("hexcore_remill.node");
+	if (hMod) {
+		char dllPath[260] = {0};  // MAX_PATH = 260
+		if (GetModuleFileNameA(hMod, dllPath, 260) > 0) {
+			// dllPath = .../extensions/hexcore-remill/build/Release/hexcore_remill.node
+			// Go up 2 dirs (Release → build → module root)
+			auto moduleRoot = std::filesystem::path(dllPath)
+				.parent_path()   // Release/
+				.parent_path();  // build/
+			auto semDir = moduleRoot / "deps" / "remill" / "share" / "semantics";
+			if (std::filesystem::is_directory(semDir)) {
+				return semDir;
+			}
+		}
+	}
+#endif
+
+	// 3. Fallback: relative to CWD (works when running from module root)
+	auto cwdSem = std::filesystem::current_path() / "deps" / "remill" / "share" / "semantics";
+	if (std::filesystem::is_directory(cwdSem)) {
+		return cwdSem;
+	}
+
+	// 4. Last resort: compile-time path (may work in dev)
+	std::filesystem::path srcFile(__FILE__);
+	return srcFile.parent_path().parent_path() / "deps" / "remill" / "share" / "semantics";
+}
 
 // ---------------------------------------------------------------------------
 // RemillLifter
@@ -67,9 +147,9 @@ RemillLifter::RemillLifter(const Napi::CallbackInfo& info)
 	// Create LLVM context
 	context_ = std::make_unique<llvm::LLVMContext>();
 
-	// Get the architecture
-	auto archName = remill::GetArchName(archName_);
-	if (archName == remill::kArchInvalid) {
+	// Validate architecture name
+	auto archEnum = remill::GetArchName(archName_);
+	if (archEnum == remill::kArchInvalid) {
 		Napi::Error::New(env,
 			"Unsupported architecture: " + archName_ +
 			". Use RemillLifter.getSupportedArchs() for valid names.")
@@ -77,9 +157,10 @@ RemillLifter::RemillLifter(const Napi::CallbackInfo& info)
 		return;
 	}
 
-	auto osName_e = remill::GetOSName(osName);
+	auto osEnum = remill::GetOSName(osName);
 
-	arch_ = remill::Arch::Get(*context_, osName_e, archName);
+	// Arch::Get returns unique_ptr<const Arch>
+	arch_ = remill::Arch::Get(*context_, osEnum, archEnum);
 	if (!arch_) {
 		Napi::Error::New(env, "Failed to initialize Remill arch: " + archName_)
 			.ThrowAsJavaScriptException();
@@ -87,7 +168,8 @@ RemillLifter::RemillLifter(const Napi::CallbackInfo& info)
 	}
 
 	// Load semantics module (contains instruction implementations as LLVM IR)
-	semanticsModule_ = remill::LoadArchSemantics(arch_);
+	std::vector<std::filesystem::path> semDirs = { GetSemanticsDir() };
+	semanticsModule_ = remill::LoadArchSemantics(arch_.get(), semDirs);
 	if (!semanticsModule_) {
 		Napi::Error::New(env,
 			"Failed to load semantics module for arch: " + archName_)
@@ -103,8 +185,8 @@ RemillLifter::~RemillLifter() {
 	closed_ = true;
 	intrinsics_.reset();
 	semanticsModule_.reset();
+	arch_.reset();
 	context_.reset();
-	arch_ = nullptr;
 }
 
 Napi::Value RemillLifter::LiftBytes(const Napi::CallbackInfo& info) {
@@ -193,12 +275,9 @@ Napi::Value RemillLifter::LiftBytesAsync(const Napi::CallbackInfo& info) {
 	}
 
 	auto* worker = new LiftBytesWorker(env, this, std::move(bytesCopy), address);
+	auto promise = worker->GetDeferred().Promise();
 	worker->Queue();
-
-	// The worker creates and returns the promise deferred
-	// We return the promise from the deferred stored in the worker
-	// Note: actual promise return is handled by the worker pattern
-	return env.Undefined();  // TODO: return deferred.Promise() from worker
+	return promise;
 }
 
 Napi::Value RemillLifter::GetArch(const Napi::CallbackInfo& info) {
@@ -230,8 +309,8 @@ Napi::Value RemillLifter::Close(const Napi::CallbackInfo& info) {
 		closed_ = true;
 		intrinsics_.reset();
 		semanticsModule_.reset();
+		arch_.reset();
 		context_.reset();
-		arch_ = nullptr;
 	}
 	return info.Env().Undefined();
 }
@@ -257,8 +336,14 @@ LiftResult RemillLifter::DoLift(
 		return result;
 	}
 
+	if (length == 0) {
+		result.error = "Empty buffer";
+		return result;
+	}
+
 	// Create a fresh module for this lift operation
-	auto liftModule = remill::LoadArchSemantics(arch_);
+	std::vector<std::filesystem::path> semDirs = { GetSemanticsDir() };
+	auto liftModule = remill::LoadArchSemantics(arch_.get(), semDirs);
 	if (!liftModule) {
 		result.error = "Failed to create lift module";
 		return result;
@@ -266,8 +351,13 @@ LiftResult RemillLifter::DoLift(
 
 	auto intrinsics = std::make_unique<remill::IntrinsicTable>(liftModule.get());
 
-	// Create the instruction lifter
+	// DefaultLifter returns shared_ptr<OperandLifter>
 	auto lifter = arch_->DefaultLifter(*intrinsics);
+
+	// DefaultLifter always returns an InstructionLifterIntf-derived object.
+	// Use static_pointer_cast (dynamic_pointer_cast requires RTTI which is
+	// disabled by NAPI_DISABLE_CPP_EXCEPTIONS).
+	auto instLifter = std::static_pointer_cast<remill::InstructionLifterIntf>(lifter);
 
 	// Decode and lift each instruction
 	remill::Instruction inst;
@@ -281,9 +371,15 @@ LiftResult RemillLifter::DoLift(
 
 	auto block = &func->getEntryBlock();
 
+	// Create initial decoding context for this architecture
+	auto context = arch_->CreateInitialContext();
+
 	while (offset < length) {
-		// Decode the instruction
-		if (!arch_->DecodeInstruction(pc, {bytes + offset, length - offset}, inst)) {
+		std::string_view instrBytes(
+			reinterpret_cast<const char*>(bytes + offset), length - offset);
+
+		// DecodeInstruction requires DecodingContext as 4th parameter
+		if (!arch_->DecodeInstruction(pc, instrBytes, inst, context)) {
 			if (offset == 0) {
 				result.error = "Failed to decode instruction at 0x" +
 					std::to_string(address);
@@ -292,9 +388,9 @@ LiftResult RemillLifter::DoLift(
 			break;  // Stop at first undecoded instruction
 		}
 
-		// Lift the instruction into the block
-		auto status = lifter->LiftIntoBlock(inst, block, false);
-		if (status != remill::LiftStatus::kLiftedInstruction) {
+		// LiftIntoBlock with 2-arg overload (inst, block)
+		auto status = instLifter->LiftIntoBlock(inst, block, false);
+		if (status != remill::kLiftedInstruction) {
 			if (offset == 0) {
 				result.error = "Failed to lift instruction at 0x" +
 					std::to_string(pc);
@@ -309,7 +405,7 @@ LiftResult RemillLifter::DoLift(
 
 	result.bytesConsumed = offset;
 
-	// Print the module IR to string
+	// Print the function IR to string
 	std::string irStr;
 	llvm::raw_string_ostream os(irStr);
 	func->print(os);
