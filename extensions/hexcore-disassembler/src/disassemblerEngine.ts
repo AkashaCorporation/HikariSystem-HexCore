@@ -1709,6 +1709,36 @@ export class DisassemblerEngine {
 		return this.baseAddress;
 	}
 
+	/**
+	 * Returns true when a file has been loaded into the engine.
+	 */
+	isFileLoaded(): boolean {
+		return this.fileBuffer !== undefined && this.fileBuffer.length > 0;
+	}
+
+	/**
+	 * Returns the size of the loaded file buffer in bytes, or 0 if no file is loaded.
+	 */
+	getBufferSize(): number {
+		return this.fileBuffer?.length ?? 0;
+	}
+
+	/**
+	 * Extract raw bytes from the loaded file at the given virtual address.
+	 * Returns undefined if no file is loaded or the address is out of bounds.
+	 */
+	getBytes(address: number, size: number): Buffer | undefined {
+		if (!this.fileBuffer) {
+			return undefined;
+		}
+		const offset = this.addressToOffset(address);
+		if (offset < 0 || offset >= this.fileBuffer.length) {
+			return undefined;
+		}
+		const end = Math.min(offset + size, this.fileBuffer.length);
+		return this.fileBuffer.subarray(offset, end);
+	}
+
 	private addressToOffset(address: number): number {
 		const rva = address - this.baseAddress;
 

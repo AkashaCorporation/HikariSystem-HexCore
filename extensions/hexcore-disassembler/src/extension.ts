@@ -24,6 +24,8 @@ import {
 } from './automationPipelineRunner';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
+import { RemillWrapper, buildIRHeader, type LiftResult } from './remillWrapper';
+import { mapCapstoneToRemill } from './archMapper';
 import {
 	PipelineJobTemplate,
 	PipelinePreset,
@@ -215,12 +217,20 @@ export function activate(context: vscode.ExtensionContext): void {
 		return false;
 	};
 
+	const remillWrapper = new RemillWrapper();
+	context.subscriptions.push({ dispose: () => remillWrapper.dispose() });
+	vscode.commands.executeCommand('setContext', 'hexcore:remillAvailable', remillWrapper.isAvailable());
+
+	let shownExperimentalNotice = false;
+
 	const showNativeStatus = async (): Promise<void> => {
 		const disassembler = await engine.getDisassemblerAvailability();
 		const assembler = await engine.getAssemblerAvailability();
-		if (disassembler.available && assembler.available) {
+		const remillAvailable = remillWrapper.isAvailable();
+
+		if (disassembler.available && assembler.available && remillAvailable) {
 			vscode.window.showInformationMessage(
-				vscode.l10n.t('Native engines are available for this session.')
+				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill).')
 			);
 			return;
 		}
@@ -234,6 +244,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (!assembler.available) {
 			parts.push(
 				vscode.l10n.t('LLVM MC: {0}', assembler.error ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+		if (!remillAvailable) {
+			parts.push(
+				vscode.l10n.t('Remill: {0}', remillWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
 			);
 		}
 
@@ -1142,6 +1157,214 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.nativeStatus', async () => {
 			await showNativeStatus();
+		})
+	);
+
+	// -----------------------------------------------------------------------
+	// [Experimental] Lift to LLVM IR
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.liftToIR', async (arg?: unknown) => {
+			// Headless mode: arg is an options object with file/startAddress/size
+			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
+				&& !((arg as any) instanceof vscode.Uri)
+				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>));
+
+			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const quiet = options.quiet === true;
+
+			if (!remillWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-remill is not available. Install the prebuild or build from source.';
+				if (quiet) {
+					return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const arch = engine.getArchitecture();
+			const mapping = mapCapstoneToRemill(arch);
+			if (!mapping.supported) {
+				const errorMsg = `Architecture '${arch}' is not supported by Remill. Supported: x86, x64, arm64.`;
+				if (quiet) {
+					return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: arch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			let startAddress: number;
+			let size: number;
+			let functionName: string | undefined;
+
+			// Resolve bytes: from headless options, selected function, or user input
+			if (isHeadless && options.file) {
+				// Headless: load file if needed
+				const filePath = String(options.file);
+				if (!engine.isFileLoaded() || engine.getFilePath() !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						const errorMsg = `Failed to load file: ${filePath}`;
+						if (quiet) {
+							return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: '', error: errorMsg };
+						}
+						vscode.window.showErrorMessage(errorMsg);
+						return undefined;
+					}
+				}
+				startAddress = parseAddressValue(options.startAddress as string | number | undefined) ?? engine.getBaseAddress();
+				size = typeof options.size === 'number' ? options.size : engine.getBufferSize();
+			} else if (isHeadless && options.functionAddress !== undefined) {
+				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
+				const func = engine.getFunctionAt(startAddress);
+				if (func) {
+					size = func.endAddress - func.address;
+					functionName = func.name;
+				} else {
+					size = typeof options.size === 'number' ? options.size : 256;
+				}
+			} else {
+				// Interactive: ask user for address and size
+				const addrInput = await vscode.window.showInputBox({
+					prompt: 'Start address (hex, e.g. 0x401000)',
+					placeHolder: '0x401000',
+				});
+				if (!addrInput) {
+					return undefined;
+				}
+				startAddress = parseInt(addrInput, 16);
+				if (isNaN(startAddress)) {
+					vscode.window.showErrorMessage(`Invalid address: ${addrInput}`);
+					return undefined;
+				}
+
+				const sizeInput = await vscode.window.showInputBox({
+					prompt: 'Size in bytes',
+					placeHolder: '256',
+					value: '256',
+				});
+				if (!sizeInput) {
+					return undefined;
+				}
+				size = parseInt(sizeInput, 10);
+				if (isNaN(size) || size <= 0) {
+					vscode.window.showErrorMessage(`Invalid size: ${sizeInput}`);
+					return undefined;
+				}
+			}
+
+			// Validate address bounds
+			const bufferSize = engine.getBufferSize();
+			if (startAddress < 0 || startAddress >= bufferSize) {
+				const errorMsg = `Address 0x${startAddress.toString(16)} is out of bounds (file size: ${bufferSize} bytes).`;
+				if (quiet) {
+					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			// Truncate range if it exceeds file bounds
+			if (startAddress + size > bufferSize) {
+				size = bufferSize - startAddress;
+			}
+
+			// Extract bytes from engine buffer
+			const bytes = engine.getBytes(startAddress, size);
+			if (!bytes || bytes.length === 0) {
+				const errorMsg = 'Failed to extract bytes from the loaded binary.';
+				if (quiet) {
+					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			// Perform lifting with progress indicator
+			const liftResult = await vscode.window.withProgress(
+				{
+					location: vscode.ProgressLocation.Notification,
+					title: '[Experimental] Lifting to LLVM IR...',
+					cancellable: false,
+				},
+				async () => {
+					return remillWrapper.liftBytes(bytes, startAddress, arch);
+				}
+			);
+
+			if (!liftResult.success) {
+				const errorMsg = `Lift failed: ${liftResult.error}`;
+				if (quiet) {
+					return { success: false, ir: '', address: startAddress, bytesConsumed: liftResult.bytesConsumed, architecture: mapping.remillArch, error: liftResult.error };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const fileName = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
+			const header = buildIRHeader({
+				fileName,
+				address: startAddress,
+				size,
+				architecture: mapping.remillArch,
+				functionName,
+			});
+
+			const fullIR = header + liftResult.ir;
+
+			// Headless: write to file if output specified
+			if (isHeadless && options.output) {
+				const outputPath = typeof options.output === 'string'
+					? options.output
+					: (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, fullIR, 'utf-8');
+				return {
+					success: true,
+					ir: fullIR,
+					address: startAddress,
+					bytesConsumed: liftResult.bytesConsumed,
+					architecture: mapping.remillArch,
+					functionName,
+				};
+			}
+
+			if (quiet) {
+				return {
+					success: true,
+					ir: fullIR,
+					address: startAddress,
+					bytesConsumed: liftResult.bytesConsumed,
+					architecture: mapping.remillArch,
+					functionName,
+				};
+			}
+
+			// Interactive: open IR in a new editor tab (readonly)
+			const doc = await vscode.workspace.openTextDocument({
+				content: fullIR,
+				language: 'llvm',
+			});
+			await vscode.window.showTextDocument(doc, { preview: false });
+
+			// Mark the editor as readonly for this session
+			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
+
+			// Show experimental notice once per session
+			if (!shownExperimentalNotice) {
+				shownExperimentalNotice = true;
+				vscode.window.showInformationMessage(
+					'[Experimental] LLVM IR lifting is experimental. Output may be incomplete or inaccurate.'
+				);
+			}
+
+			return {
+				success: true,
+				ir: fullIR,
+				address: startAddress,
+				bytesConsumed: liftResult.bytesConsumed,
+				architecture: mapping.remillArch,
+				functionName,
+			};
 		})
 	);
 

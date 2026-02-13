@@ -230,6 +230,12 @@
 				"command": "hexcore.disasm.exportASMHeadless",
 				"title": "Export Assembly (Headless)",
 				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.liftToIR",
+				"title": "[Experimental] Lift to LLVM IR",
+				"category": "HexCore Disassembler",
+				"icon": "$(beaker)"
 			}
 		],
 		"menus": {
@@ -250,6 +256,11 @@
 					"command": "hexcore.disasm.findXrefs",
 					"group": "navigation",
 					"when": "activeWebviewPanelId == hexcore.disassembler"
+				},
+				{
+					"command": "hexcore.disasm.liftToIR",
+					"group": "navigation",
+					"when": "activeWebviewPanelId == hexcore.disassembler && hexcore:remillAvailable"
 				}
 			],
 			"view/title": [
@@ -383,7 +394,8 @@
 	"dependencies": {
 		"hexcore-capstone": "file:../hexcore-capstone",
 		"hexcore-common": "file:../hexcore-common",
-		"hexcore-llvm-mc": "file:../hexcore-llvm-mc"
+		"hexcore-llvm-mc": "file:../hexcore-llvm-mc",
+		"hexcore-remill": "file:../hexcore-remill"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",
