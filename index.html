@@ -4,14 +4,14 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>HikariSystem HexCore — Binary Analysis IDE</title>
-    <meta name="description" content="A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code with native Capstone/Unicorn/LLVM engines.">
-    <meta name="keywords" content="hexcore, reverse engineering, malware analysis, binary analysis, disassembler, debugger, CPU emulation, YARA, PE, ELF, CTF, cybersecurity">
+    <meta name="description" content="A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code with native Capstone/Unicorn/LLVM/Remill engines.">
+    <meta name="keywords" content="hexcore, reverse engineering, malware analysis, binary analysis, disassembler, debugger, CPU emulation, YARA, PE, ELF, CTF, cybersecurity, IR lifting, IOC, minidump">
     <meta name="author" content="HikariSystem">
     <meta property="og:title" content="HikariSystem HexCore">
     <meta property="og:description" content="A specialized IDE for malware analysis, reverse engineering, and binary emulation.">
     <meta property="og:type" content="website">
-    <meta property="og:image" content="BatHexCore.png">
-    <link rel="icon" type="image/png" href="BatHexCore.png">
+    <meta property="og:image" content="BatHexCoreTransparente.png">
+    <link rel="icon" type="image/png" href="BatHexCoreTransparente.png">
     <style>
         /* ── Reset & Variables ────────────────────────────────── */
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -331,7 +331,7 @@
         /* ── Engines Section ─────────────────────────────────── */
         .engines-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
             gap: 1.5rem;
         }
         .engine-card {
@@ -509,7 +509,7 @@
     <nav>
         <div class="nav-inner">
             <a href="#" class="nav-logo">
-                <img src="BatHexCore.png" alt="HexCore">
+                <img src="BatHexCoreTransparente.png" alt="HexCore">
                 HexCore
             </a>
             <ul class="nav-links">
@@ -530,18 +530,20 @@
     <section class="hero">
         <div class="hero-grid"></div>
         <div class="hero-content">
-            <img src="BatHexCore.png" alt="HexCore Logo" class="hero-logo">
+            <img src="BatHexCoreTransparente.png" alt="HexCore Logo" class="hero-logo">
             <h1><span>Hikari</span>System HexCore</h1>
-            <p class="hero-sub">A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code.</p>
+            <p class="hero-sub">A specialized IDE for malware analysis, reverse engineering, and binary emulation. Built on VS Code with native analysis engines.</p>
             <div class="hero-tags">
                 <span class="hero-tag">binary analysis</span>
                 <span class="hero-tag">reverse engineering</span>
                 <span class="hero-tag">malware analysis</span>
                 <span class="hero-tag">CPU emulation</span>
+                <span class="hero-tag">IR lifting</span>
                 <span class="hero-tag">PE / ELF</span>
                 <span class="hero-tag">CTF tools</span>
                 <span class="hero-tag">YARA</span>
                 <span class="hero-tag">threat scoring</span>
+                <span class="hero-tag">IOC extraction</span>
             </div>
             <div class="hero-buttons">
                 <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore" class="btn btn-primary" target="_blank" rel="noopener">
@@ -573,9 +575,24 @@
                     <p>Full PE and ELF emulation via Unicorn Engine. 65+ API hooks (Windows + Linux), stdin emulation, TLS support, and syscall handling.</p>
                 </div>
                 <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F9EC;</span>
+                    <h3>IR Lifting <span class="feature-badge badge-new">NEW</span></h3>
+                    <p>Machine code to LLVM IR translation via Remill engine. Analyze binary semantics at the intermediate representation level.</p>
+                </div>
+                <div class="feature-card fade-in">
                     <span class="feature-icon">&#x1F6E1;</span>
-                    <h3>YARA Scanner <span class="feature-badge badge-v2">v2.0</span></h3>
-                    <p>Real YARA rule parsing with DefenderYara integration. 76,000+ Microsoft Defender signatures, threat scoring, and on-demand category loading.</p>
+                    <h3>YARA Scanner <span class="feature-badge badge-v2">v2.1</span></h3>
+                    <p>Real YARA rule parsing with DefenderYara integration. 76,000+ Microsoft Defender signatures, threat scoring, headless pipeline support.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F30D;</span>
+                    <h3>IOC Extractor <span class="feature-badge badge-new">NEW</span></h3>
+                    <p>Binary-aware IOC detection: IPs, URLs, domains, named pipes, crypto wallets. SQLite backend with noise reduction and threat assessment.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F4DD;</span>
+                    <h3>Minidump Parser <span class="feature-badge badge-new">NEW</span></h3>
+                    <p>Windows crash dump forensics with thread/module/memory parsing. Thread injection and RWX detection with threat heuristics.</p>
                 </div>
                 <div class="feature-card fade-in">
                     <span class="feature-icon">&#x1F527;</span>
@@ -585,7 +602,12 @@
                 <div class="feature-card fade-in">
                     <span class="feature-icon">&#x1F4CA;</span>
                     <h3>Entropy Analysis</h3>
-                    <p>Block-by-block entropy visualization for packed and encrypted region detection. Identifies packers, cryptors, and obfuscated sections.</p>
+                    <p>Streaming entropy analysis with adaptive block sizing. Identifies packers, cryptors, and obfuscated sections with modular report pipeline.</p>
+                </div>
+                <div class="feature-card fade-in">
+                    <span class="feature-icon">&#x1F50F;</span>
+                    <h3>Strings &amp; XOR <span class="feature-badge badge-v2">v1.2</span></h3>
+                    <p>Memory-efficient string extraction with XOR deobfuscation and stack string detection. Auto-categorization and cross-references.</p>
                 </div>
                 <div class="feature-card fade-in">
                     <span class="feature-icon">&#x2699;</span>
@@ -599,13 +621,8 @@
                 </div>
                 <div class="feature-card fade-in">
                     <span class="feature-icon">&#x1F9EE;</span>
-                    <h3>Constant Decoder <span class="feature-badge badge-new">NEW</span></h3>
+                    <h3>Constant Decoder</h3>
                     <p>Hover any immediate value in disassembly to see Hex, Unsigned, Signed32/64, Binary, ASCII, and Float32 representations.</p>
-                </div>
-                <div class="feature-card fade-in">
-                    <span class="feature-icon">&#x1F50F;</span>
-                    <h3>Hash + VirusTotal</h3>
-                    <p>MD5, SHA-1, SHA-256, SHA-512 with one-click VirusTotal lookup. String extraction with auto-categorization and cross-references.</p>
                 </div>
             </div>
         </div>
@@ -616,8 +633,8 @@
         <div class="container">
             <div class="section-header fade-in">
                 <p class="section-label">// threat intelligence</p>
-                <h2 class="section-title">YARA v2.0 + DefenderYara</h2>
-                <p class="section-desc">Scan binaries against 76,000+ Microsoft Defender signatures with real-time threat scoring.</p>
+                <h2 class="section-title">YARA v2.1 + DefenderYara</h2>
+                <p class="section-desc">Scan binaries against 76,000+ Microsoft Defender signatures with real-time threat scoring and headless pipeline support.</p>
             </div>
 
             <div class="threat-demo fade-in">
@@ -658,7 +675,7 @@
             <div class="section-header fade-in">
                 <p class="section-label">// modules</p>
                 <h2 class="section-title">Extension Ecosystem</h2>
-                <p class="section-desc">14 purpose-built extensions for complete binary analysis.</p>
+                <p class="section-desc">16 purpose-built extensions for complete binary analysis.</p>
             </div>
             <div class="fade-in" style="overflow-x:auto;">
                 <table class="ext-table">
@@ -670,14 +687,16 @@
                         </tr>
                     </thead>
                     <tbody>
-                        <tr><td class="ext-name">Debugger</td><td><span class="ext-version">2.1.0</span></td><td>PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation</td></tr>
-                        <tr><td class="ext-name">Disassembler</td><td><span class="ext-version">1.2.0</span></td><td>Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs</td></tr>
-                        <tr><td class="ext-name">YARA Scanner</td><td><span class="ext-version">2.0.0</span></td><td>DefenderYara integration, threat scoring, 76k+ rules, on-demand loading</td></tr>
-                        <tr><td class="ext-name">Hex Viewer</td><td><span class="ext-version">1.2.0</span></td><td>Professional binary file viewer with virtual scrolling</td></tr>
+                        <tr><td class="ext-name">Debugger</td><td><span class="ext-version">2.0.1</span></td><td>PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation</td></tr>
+                        <tr><td class="ext-name">Disassembler</td><td><span class="ext-version">1.4.0</span></td><td>Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting</td></tr>
+                        <tr><td class="ext-name">YARA Scanner</td><td><span class="ext-version">2.1.0</span></td><td>DefenderYara integration, threat scoring, 76k+ rules, headless pipeline support</td></tr>
+                        <tr><td class="ext-name">IOC Extractor</td><td><span class="ext-version">1.1.0</span></td><td>Binary-aware IOC extraction with noise reduction, SQLite backend, threat assessment</td></tr>
+                        <tr><td class="ext-name">Minidump Parser</td><td><span class="ext-version">1.0.0</span></td><td>Windows MDMP forensics with thread injection/RWX detection and threat heuristics</td></tr>
+                        <tr><td class="ext-name">Hex Viewer</td><td><span class="ext-version">1.2.1</span></td><td>Professional binary file viewer with virtual scrolling</td></tr>
                         <tr><td class="ext-name">PE Analyzer</td><td><span class="ext-version">1.1.0</span></td><td>Comprehensive PE executable analysis with headless mode</td></tr>
-                        <tr><td class="ext-name">Strings Extractor</td><td><span class="ext-version">1.1.0</span></td><td>Memory-efficient string extraction with cross-references</td></tr>
+                        <tr><td class="ext-name">Strings Extractor</td><td><span class="ext-version">1.2.0</span></td><td>String extraction with XOR deobfuscation and stack string detection</td></tr>
                         <tr><td class="ext-name">Hash Calculator</td><td><span class="ext-version">1.1.0</span></td><td>Fast file hashing with VirusTotal integration</td></tr>
-                        <tr><td class="ext-name">Entropy Analyzer</td><td><span class="ext-version">1.0.0</span></td><td>Visual entropy analysis for packed/encrypted regions</td></tr>
+                        <tr><td class="ext-name">Entropy Analyzer</td><td><span class="ext-version">1.1.0</span></td><td>Streaming entropy analysis with adaptive block sizing</td></tr>
                         <tr><td class="ext-name">File Type Detector</td><td><span class="ext-version">1.0.0</span></td><td>Magic bytes signature detection</td></tr>
                         <tr><td class="ext-name">Base64 Decoder</td><td><span class="ext-version">1.0.0</span></td><td>Detect and decode Base64 strings</td></tr>
                     </tbody>
@@ -707,6 +726,14 @@
                     <h4>hexcore-llvm-mc</h4>
                     <p>LLVM 18.1.8 MC assembler. Multi-arch assembly and binary patching.</p>
                 </div>
+                <div class="engine-card">
+                    <h4>hexcore-remill</h4>
+                    <p>Remill IR lifting engine. Machine code to LLVM IR translation. 168 static libs.</p>
+                </div>
+                <div class="engine-card">
+                    <h4>hexcore-better-sqlite3</h4>
+                    <p>SQLite N-API wrapper for IOC persistence, caching, and structured data storage.</p>
+                </div>
             </div>
         </div>
     </section>
@@ -728,8 +755,10 @@
     { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.filetype.detect"</span> },
     { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.peanalyzer.analyze"</span> },
     { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.hashcalc.calculate"</span> },
-    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.yara.quickScan"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.yara.scan"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.ioc.extract"</span> },
     { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.entropy.analyze"</span> },
+    { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.strings.extract"</span> },
     { <span class="code-keyword">"cmd"</span>: <span class="code-cmd">"hexcore.disasm.analyzeAll"</span> }
   ]
 }
@@ -770,7 +799,7 @@
                     <div class="step-num">4</div>
                     <div class="step-content">
                         <h4>Open a binary and start analyzing</h4>
-                        <p>Right-click any PE/ELF file to disassemble, emulate, or scan with YARA.</p>
+                        <p>Right-click any PE/ELF file to disassemble, emulate, scan with YARA, or extract IOCs.</p>
                     </div>
                 </div>
             </div>
@@ -785,7 +814,7 @@
             <a href="https://github.com/LXrdKnowkill/HikariSystem-HexCore/blob/main/LICENSE.txt">License</a>
         </div>
         <p><strong>HikariSystem</strong> &mdash; Security Tools for Professionals</p>
-        <p style="margin-top: 0.5rem;">MIT License &copy; 2025</p>
+        <p style="margin-top: 0.5rem;">MIT License &copy; 2026</p>
     </footer>
 
     <!-- Scripts -->
