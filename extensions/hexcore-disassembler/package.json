@@ -9,6 +9,15 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
+		"onCommand:hexcore.pipeline.runJob",
+		"onCommand:hexcore.pipeline.listCapabilities",
+		"onCommand:hexcore.pipeline.validateJob",
+		"onCommand:hexcore.pipeline.validateWorkspace",
+		"onCommand:hexcore.pipeline.createPresetJob",
+		"onCommand:hexcore.pipeline.saveJobAsProfile",
+		"onCommand:hexcore.pipeline.doctor",
+		"onCommand:hexcore.disasm.buildFormula",
+		"onCommand:hexcore.disasm.checkConstants",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -159,6 +168,18 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.disasm.buildFormula",
+				"title": "Build Formula from Instructions",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-operator)"
+			},
+			{
+				"command": "hexcore.disasm.checkConstants",
+				"title": "Check Constant Annotation Sanity",
+				"category": "HexCore Disassembler",
+				"icon": "$(check)"
+			},
+			{
 				"command": "hexcore.pipeline.runJob",
 				"title": "Run HexCore Automation Job",
 				"category": "HexCore Automation",
@@ -169,6 +190,36 @@
 				"title": "List Pipeline Command Capabilities",
 				"category": "HexCore Automation",
 				"icon": "$(list-unordered)"
+			},
+			{
+				"command": "hexcore.pipeline.validateJob",
+				"title": "Validate HexCore Automation Job",
+				"category": "HexCore Automation",
+				"icon": "$(check)"
+			},
+			{
+				"command": "hexcore.pipeline.validateWorkspace",
+				"title": "Validate HexCore Jobs in Workspace",
+				"category": "HexCore Automation",
+				"icon": "$(check-all)"
+			},
+			{
+				"command": "hexcore.pipeline.createPresetJob",
+				"title": "Create HexCore Job from Preset",
+				"category": "HexCore Automation",
+				"icon": "$(new-file)"
+			},
+			{
+				"command": "hexcore.pipeline.saveJobAsProfile",
+				"title": "Save Current Job as Workspace Profile",
+				"category": "HexCore Automation",
+				"icon": "$(save)"
+			},
+			{
+				"command": "hexcore.pipeline.doctor",
+				"title": "Run HexCore Pipeline Doctor",
+				"category": "HexCore Automation",
+				"icon": "$(heart)"
 			},
 			{
 				"command": "hexcore.disasm.searchStringHeadless",
@@ -264,6 +315,15 @@
 				}
 			]
 		},
+		"jsonValidation": [
+			{
+				"fileMatch": [
+					"/.hexcore_job.json",
+					"**/.hexcore_job.json"
+				],
+				"url": "./schemas/hexcore-job.schema.json"
+			}
+		],
 		"configuration": {
 			"title": "HexCore Disassembler",
 			"properties": {

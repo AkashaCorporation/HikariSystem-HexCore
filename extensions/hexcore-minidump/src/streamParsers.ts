@@ -60,8 +60,8 @@ export function parseThreadListStream(fd: number, rva: number, _size: number): T
 			teb: dataBuf.readBigUInt64LE(off + 16),
 			stackStartOfMemoryRange: dataBuf.readBigUInt64LE(off + 24),
 			stackDataSize: dataBuf.readUInt32LE(off + 32),
-			contextRva: dataBuf.readUInt32LE(off + 40),
-			contextSize: dataBuf.readUInt32LE(off + 36),
+			contextSize: dataBuf.readUInt32LE(off + 40),
+			contextRva: dataBuf.readUInt32LE(off + 44),
 		});
 	}
 
@@ -116,7 +116,7 @@ export function parseThreadInfoListStream(fd: number, rva: number, _size: number
 			kernelTime: dataBuf.readBigUInt64LE(off + 32),
 			userTime: dataBuf.readBigUInt64LE(off + 40),
 			startAddress: dataBuf.readBigUInt64LE(off + 48),
-			affinity: off + 64 <= dataBuf.length ? dataBuf.readBigUInt64LE(off + 56) : 0n,
+			affinity: sizeOfEntry >= 64 && off + 64 <= dataBuf.length ? dataBuf.readBigUInt64LE(off + 56) : 0n,
 		});
 	}
 

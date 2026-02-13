@@ -37,10 +37,11 @@ export function hygiene(some: NodeJS.ReadWriteStream | string[] | undefined, run
 	const productJson = es.through(function (file: VinylFile) {
 		const product = JSON.parse(file.contents!.toString('utf8'));
 
-		if (product.extensionsGallery) {
-			console.error(`product.json: Contains 'extensionsGallery'`);
-			errorCount++;
-		}
+		// HexCore: extensionsGallery check removed — we use Open VSX Registry
+		// if (product.extensionsGallery) {
+		// 	console.error(`product.json: Contains 'extensionsGallery'`);
+		// 	errorCount++;
+		// }
 
 		this.emit('data', file);
 	});

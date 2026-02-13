@@ -1,0 +1,316 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
+
+import { Instruction } from './disassemblerEngine';
+
+export interface FormulaStep {
+	address: string;
+	mnemonic: string;
+	operands: string;
+	updatedRegister?: string;
+	expression?: string;
+}
+
+export interface FormulaBuildResult {
+	targetRegister: string;
+	expression: string;
+	instructionCount: number;
+	supportedInstructionCount: number;
+	unsupportedInstructions: FormulaStep[];
+	steps: FormulaStep[];
+	registerExpressions: Record<string, string>;
+	reportMarkdown: string;
+}
+
+export function buildInstructionFormula(
+	instructions: Instruction[],
+	targetRegister?: string
+): FormulaBuildResult {
+	const state = new Map<string, string>();
+	const steps: FormulaStep[] = [];
+	const unsupported: FormulaStep[] = [];
+	const touchedRegisters: string[] = [];
+
+	for (const instruction of instructions) {
+		const mnemonic = instruction.mnemonic.toLowerCase();
+		const operands = splitOperands(instruction.opStr);
+		let updatedRegister: string | undefined;
+		let updatedExpression: string | undefined;
+
+		if (mnemonic === 'mov' && operands.length >= 2) {
+			const dst = normalizeRegister(operands[0]);
+			if (dst) {
+				updatedRegister = dst;
+				updatedExpression = resolveOperandExpression(operands[1], state, false);
+			}
+		} else if (mnemonic === 'lea' && operands.length >= 2) {
+			const dst = normalizeRegister(operands[0]);
+			if (dst) {
+				updatedRegister = dst;
+				updatedExpression = resolveOperandExpression(operands[1], state, true);
+			}
+		} else if (mnemonic === 'add' && operands.length >= 2) {
+			const dst = normalizeRegister(operands[0]);
+			if (dst) {
+				updatedRegister = dst;
+				const left = state.get(dst) ?? dst;
+				const right = resolveOperandExpression(operands[1], state, false);
+				updatedExpression = `(${left} + ${right})`;
+			}
+		} else if (mnemonic === 'sub' && operands.length >= 2) {
+			const dst = normalizeRegister(operands[0]);
+			if (dst) {
+				updatedRegister = dst;
+				const left = state.get(dst) ?? dst;
+				const right = resolveOperandExpression(operands[1], state, false);
+				updatedExpression = `(${left} - ${right})`;
+			}
+		} else if (mnemonic === 'imul') {
+			if (operands.length >= 3) {
+				const dst = normalizeRegister(operands[0]);
+				if (dst) {
+					updatedRegister = dst;
+					const left = resolveOperandExpression(operands[1], state, false);
+					const right = resolveOperandExpression(operands[2], state, false);
+					updatedExpression = `(${left} * ${right})`;
+				}
+			} else if (operands.length >= 2) {
+				const dst = normalizeRegister(operands[0]);
+				if (dst) {
+					updatedRegister = dst;
+					const left = state.get(dst) ?? dst;
+					const right = resolveOperandExpression(operands[1], state, false);
+					updatedExpression = `(${left} * ${right})`;
+				}
+			}
+		} else if (mnemonic === 'xor' && operands.length >= 2) {
+			const dst = normalizeRegister(operands[0]);
+			const src = normalizeRegister(operands[1]);
+			if (dst && src && dst === src) {
+				updatedRegister = dst;
+				updatedExpression = '0';
+			}
+		}
+
+		const step: FormulaStep = {
+			address: toHexAddress(instruction.address),
+			mnemonic: instruction.mnemonic,
+			operands: instruction.opStr
+		};
+
+		if (updatedRegister && updatedExpression) {
+			state.set(updatedRegister, normalizeExpression(updatedExpression));
+			if (!touchedRegisters.includes(updatedRegister)) {
+				touchedRegisters.push(updatedRegister);
+			}
+			step.updatedRegister = updatedRegister;
+			step.expression = state.get(updatedRegister);
+		} else if (isPotentialMathInstruction(mnemonic)) {
+			unsupported.push(step);
+		}
+
+		steps.push(step);
+	}
+
+	const registerExpressions: Record<string, string> = {};
+	for (const [register, expression] of state.entries()) {
+		registerExpressions[register] = expression;
+	}
+
+	const preferredTarget = normalizeRegister(targetRegister ?? '');
+	let primaryRegister = preferredTarget && registerExpressions[preferredTarget]
+		? preferredTarget
+		: undefined;
+	if (!primaryRegister && touchedRegisters.length > 0) {
+		primaryRegister = touchedRegisters[touchedRegisters.length - 1];
+	}
+	if (!primaryRegister && instructions.length > 0) {
+		const firstOperands = splitOperands(instructions[instructions.length - 1].opStr);
+		primaryRegister = normalizeRegister(firstOperands[0]) ?? 'result';
+	}
+	if (!primaryRegister) {
+		primaryRegister = 'result';
+	}
+
+	const expression = registerExpressions[primaryRegister] ?? primaryRegister;
+	const reportMarkdown = generateFormulaReport(primaryRegister, expression, steps, unsupported);
+
+	return {
+		targetRegister: primaryRegister,
+		expression,
+		instructionCount: instructions.length,
+		supportedInstructionCount: steps.filter(step => step.updatedRegister !== undefined).length,
+		unsupportedInstructions: unsupported,
+		steps,
+		registerExpressions,
+		reportMarkdown
+	};
+}
+
+function isPotentialMathInstruction(mnemonic: string): boolean {
+	return ['mov', 'lea', 'imul', 'add', 'sub', 'xor'].includes(mnemonic);
+}
+
+function splitOperands(opStr: string): string[] {
+	const operands: string[] = [];
+	let current = '';
+	let bracketDepth = 0;
+
+	for (const ch of opStr) {
+		if (ch === '[') {
+			bracketDepth++;
+		} else if (ch === ']') {
+			bracketDepth = Math.max(0, bracketDepth - 1);
+		}
+
+		if (ch === ',' && bracketDepth === 0) {
+			const token = current.trim();
+			if (token.length > 0) {
+				operands.push(token);
+			}
+			current = '';
+		} else {
+			current += ch;
+		}
+	}
+
+	const last = current.trim();
+	if (last.length > 0) {
+		operands.push(last);
+	}
+
+	return operands;
+}
+
+function normalizeRegister(value: string): string | undefined {
+	const token = value
+		.trim()
+		.toLowerCase()
+		.replace(/^(byte|word|dword|qword|xmmword)\s+ptr\s+/, '');
+	return isRegisterToken(token) ? token : undefined;
+}
+
+function isRegisterToken(token: string): boolean {
+	return /^(?:r(?:[a-d]x|[sb]p|[sd]i|ip)|e(?:[a-d]x|[sb]p|[sd]i|ip)|[abcd][hl]|[abcd]x|[sd]i|[sb]p|sil|dil|spl|bpl|r(?:[0-9]|1[0-5])(?:d|w|b)?|xmm[0-9]+|ymm[0-9]+)$/.test(token);
+}
+
+function resolveOperandExpression(
+	operand: string,
+	state: Map<string, string>,
+	allowLeaMemory: boolean
+): string {
+	const cleaned = stripPointerPrefix(operand.trim());
+	const normalizedRegister = normalizeRegister(cleaned);
+	if (normalizedRegister) {
+		return state.get(normalizedRegister) ?? normalizedRegister;
+	}
+
+	const immediate = normalizeImmediate(cleaned);
+	if (immediate) {
+		return immediate;
+	}
+
+	const memMatch = cleaned.match(/^(?:[a-z]{1,3}:)?\[(.*)\]$/i);
+	if (memMatch) {
+		const inner = normalizeMathRegisters(memMatch[1], state);
+		return allowLeaMemory ? `(${inner})` : `[${inner}]`;
+	}
+
+	return normalizeMathRegisters(cleaned, state);
+}
+
+function stripPointerPrefix(operand: string): string {
+	return operand.replace(/^(byte|word|dword|qword|xmmword)\s+ptr\s+/i, '');
+}
+
+function normalizeImmediate(token: string): string | undefined {
+	if (/^-?(0x[0-9a-f]+)$/i.test(token)) {
+		const sign = token.startsWith('-') ? '-' : '';
+		const raw = token.replace(/^-?0x/i, '');
+		return `${sign}0x${raw.toUpperCase()}`;
+	}
+	if (/^-?[0-9a-f]+h$/i.test(token)) {
+		const sign = token.startsWith('-') ? '-' : '';
+		const raw = token.replace(/^-?/, '').replace(/h$/i, '');
+		return `${sign}0x${raw.toUpperCase()}`;
+	}
+	if (/^-?\d+$/.test(token)) {
+		return token;
+	}
+	return undefined;
+}
+
+function normalizeMathRegisters(expression: string, state: Map<string, string>): string {
+	const replaced = expression.replace(/\b([a-z][a-z0-9]+)\b/gi, (_, candidate: string) => {
+		const reg = normalizeRegister(candidate);
+		if (!reg) {
+			return candidate;
+		}
+		return `(${state.get(reg) ?? reg})`;
+	});
+	return normalizeExpression(replaced);
+}
+
+function normalizeExpression(expression: string): string {
+	return expression
+		.replace(/\s+/g, ' ')
+		.replace(/\s*([\+\-\*\/])\s*/g, ' $1 ')
+		.replace(/\(\s+/g, '(')
+		.replace(/\s+\)/g, ')')
+		.trim();
+}
+
+function generateFormulaReport(
+	targetRegister: string,
+	expression: string,
+	steps: FormulaStep[],
+	unsupported: FormulaStep[]
+): string {
+	let markdown = `# HexCore Formula Extraction Report
+
+## Result
+
+- Target register: \`${targetRegister}\`
+- Normalized expression: \`${expression}\`
+- Processed instructions: \`${steps.length}\`
+- Unsupported math instructions: \`${unsupported.length}\`
+
+## Step Trace
+
+| Address | Instruction | Update |
+|---------|-------------|--------|
+`;
+
+	for (const step of steps) {
+		const instruction = `${step.mnemonic} ${step.operands}`.trim();
+		const update = step.updatedRegister && step.expression
+			? `${step.updatedRegister} = ${step.expression}`
+			: '-';
+		markdown += `| ${step.address} | \`${escapeMarkdown(instruction)}\` | \`${escapeMarkdown(update)}\` |\n`;
+	}
+
+	if (unsupported.length > 0) {
+		markdown += `
+## Unsupported Math Instructions
+
+| Address | Instruction |
+|---------|-------------|
+`;
+		for (const step of unsupported) {
+			const instruction = `${step.mnemonic} ${step.operands}`.trim();
+			markdown += `| ${step.address} | \`${escapeMarkdown(instruction)}\` |\n`;
+		}
+	}
+
+	return markdown;
+}
+
+function escapeMarkdown(value: string): string {
+	return value.replace(/\|/g, '\\|').replace(/`/g, '\\`');
+}
+
+function toHexAddress(address: number): string {
+	return `0x${address.toString(16).toUpperCase()}`;
+}

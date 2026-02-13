@@ -1,0 +1,118 @@
+FILE CHANGESET — HexCore v3.3.0
+================================
+Branch: akasha-main-sync → stable
+Date: 2026-02-12
+PRs: #10, #11
+
+Legend: A = Added, M = Modified, D = Deleted
+
+--- Core / Config ---
+M  .agent/skills/hexcore/SKILL.md
+M  .github/workflows/hexcore-build.yml
+M  .github/workflows/hexcore-installer.yml
+M  .github/workflows/hexcore-native-prebuilds.yml
+M  CHANGELOG.md
+M  README.md
+M  build/gulpfile.extensions.ts
+M  build/npm/dirs.ts
+
+--- Documentation ---
+M  docs/FEATURE_BACKLOG.md
+M  docs/HEXCORE_AUTOMATION.md
+A  docs/HEXCORE_JOB_TEMPLATES.md
+A  docs/REMILL_RELLIC_BOOTSTRAP.md
+
+--- Scripts ---
+M  scripts/build-hexcore-win.ps1
+A  scripts/patch-vsce-npm.js
+A  scripts/verify-hexcore-preflight.cjs
+
+--- hexcore-better-sqlite3 (REWRITE) ---
+A  extensions/hexcore-better-sqlite3/.gitignore
+A  extensions/hexcore-better-sqlite3/LICENSE
+A  extensions/hexcore-better-sqlite3/README.md
+A  extensions/hexcore-better-sqlite3/binding.gyp
+A  extensions/hexcore-better-sqlite3/deps/patches/1208.patch
+A  extensions/hexcore-better-sqlite3/deps/sqlite3/include/sqlite3.h
+A  extensions/hexcore-better-sqlite3/deps/sqlite3/include/sqlite3ext.h
+A  extensions/hexcore-better-sqlite3/deps/sqlite3/sqlite3.h
+A  extensions/hexcore-better-sqlite3/deps/sqlite3/sqlite3ext.h
+A  extensions/hexcore-better-sqlite3/index.d.ts
+A  extensions/hexcore-better-sqlite3/index.js
+A  extensions/hexcore-better-sqlite3/index.mjs
+A  extensions/hexcore-better-sqlite3/lib/database.js
+A  extensions/hexcore-better-sqlite3/lib/index.js
+A  extensions/hexcore-better-sqlite3/lib/methods/aggregate.js
+A  extensions/hexcore-better-sqlite3/lib/methods/backup.js
+A  extensions/hexcore-better-sqlite3/lib/methods/function.js
+A  extensions/hexcore-better-sqlite3/lib/methods/inspect.js
+A  extensions/hexcore-better-sqlite3/lib/methods/pragma.js
+A  extensions/hexcore-better-sqlite3/lib/methods/serialize.js
+A  extensions/hexcore-better-sqlite3/lib/methods/table.js
+A  extensions/hexcore-better-sqlite3/lib/methods/transaction.js
+A  extensions/hexcore-better-sqlite3/lib/methods/wrappers.js
+A  extensions/hexcore-better-sqlite3/lib/sqlite-error.js
+A  extensions/hexcore-better-sqlite3/lib/util.js
+A  extensions/hexcore-better-sqlite3/package-lock.json
+A  extensions/hexcore-better-sqlite3/package.json
+A  extensions/hexcore-better-sqlite3/src/main.cpp
+A  extensions/hexcore-better-sqlite3/src/sqlite3_wrapper.cpp
+A  extensions/hexcore-better-sqlite3/src/sqlite3_wrapper.h
+A  extensions/hexcore-better-sqlite3/test/test.js
+
+--- hexcore-unicorn (BUMP 1.2.0) ---
+M  extensions/hexcore-unicorn/.gitignore
+M  extensions/hexcore-unicorn/README.md
+M  extensions/hexcore-unicorn/index.d.ts
+M  extensions/hexcore-unicorn/package-lock.json
+M  extensions/hexcore-unicorn/package.json
+M  extensions/hexcore-unicorn/src/unicorn_wrapper.cpp
+M  extensions/hexcore-unicorn/src/unicorn_wrapper.h
+A  extensions/hexcore-unicorn/test/test_bps.js
+A  extensions/hexcore-unicorn/test/test_shared_mem.js
+A  extensions/hexcore-unicorn/test/test_snapshot.js
+
+--- hexcore-ioc (NEW) ---
+A  extensions/hexcore-ioc/package-lock.json
+A  extensions/hexcore-ioc/package.json
+A  extensions/hexcore-ioc/src/extension.ts
+A  extensions/hexcore-ioc/src/iocExtractor.ts
+A  extensions/hexcore-ioc/src/iocMatchStore.ts
+A  extensions/hexcore-ioc/src/reportGenerator.ts
+A  extensions/hexcore-ioc/src/types.ts
+A  extensions/hexcore-ioc/tsconfig.json
+
+--- hexcore-minidump (NEW) ---
+A  extensions/hexcore-minidump/package-lock.json
+A  extensions/hexcore-minidump/package.json
+A  extensions/hexcore-minidump/src/extension.ts
+A  extensions/hexcore-minidump/src/mdmpParser.ts
+A  extensions/hexcore-minidump/src/reportGenerator.ts
+A  extensions/hexcore-minidump/src/streamParsers.ts
+A  extensions/hexcore-minidump/src/types.ts
+A  extensions/hexcore-minidump/tsconfig.json
+
+--- hexcore-disassembler (IMPROVED) ---
+M  extensions/hexcore-disassembler/package.json
+A  extensions/hexcore-disassembler/schemas/hexcore-job.schema.json
+M  extensions/hexcore-disassembler/src/automationPipelineRunner.ts
+A  extensions/hexcore-disassembler/src/constantSanityChecker.ts
+M  extensions/hexcore-disassembler/src/disassemblerEngine.ts
+M  extensions/hexcore-disassembler/src/extension.ts
+A  extensions/hexcore-disassembler/src/formulaBuilder.ts
+A  extensions/hexcore-disassembler/src/pipelineProfiles.ts
+
+--- hexcore-strings (IMPROVED) ---
+M  extensions/hexcore-strings/package.json
+M  extensions/hexcore-strings/src/extension.ts
+A  extensions/hexcore-strings/src/stackStringDetector.ts
+A  extensions/hexcore-strings/src/xorScanner.ts
+
+--- hexcore-yara (IMPROVED) ---
+M  extensions/hexcore-yara/src/extension.ts
+M  extensions/hexcore-yara/src/yaraEngine.ts
+
+--- Powers ---
+A  powers/hexcore-native-engines/POWER.md
+
+TOTAL: 82 files (48 added, 34 modified)

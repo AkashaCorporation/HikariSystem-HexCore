@@ -73,9 +73,16 @@ Napi::Object UnicornWrapper::Init(Napi::Env env, Napi::Object exports) {
 		InstanceMethod<&UnicornWrapper::HookAdd>("hookAdd"),
 		InstanceMethod<&UnicornWrapper::HookDel>("hookDel"),
 
-		// Context operations
+		// Native Breakpoints
+		InstanceMethod<&UnicornWrapper::BreakpointAdd>("breakpointAdd"),
+		InstanceMethod<&UnicornWrapper::BreakpointDel>("breakpointDel"),
+
 		InstanceMethod<&UnicornWrapper::ContextSave>("contextSave"),
 		InstanceMethod<&UnicornWrapper::ContextRestore>("contextRestore"),
+
+		// Snapshot operations
+		InstanceMethod<&UnicornWrapper::StateSave>("stateSave"),
+		InstanceMethod<&UnicornWrapper::StateRestore>("stateRestore"),
 
 		// Query & control
 		InstanceMethod<&UnicornWrapper::Query>("query"),
@@ -104,7 +111,9 @@ UnicornWrapper::UnicornWrapper(const Napi::CallbackInfo& info)
 	, mode_(UC_MODE_64)
 	, closed_(false)
 	, emulating_(false)
-	, nextHookId_(1) {
+	, nextHookId_(1)
+	, hasBreakpointHook_(false) {
+
 
 	Napi::Env env = info.Env();
 
@@ -388,6 +397,10 @@ Napi::Value UnicornWrapper::MemMapPtr(const Napi::CallbackInfo& info) {
 		ThrowUnicornError(env, err, "Failed to map memory with pointer");
 	}
 
+	// Keep reference to buffer prevents GC while mapped
+	Napi::Object bufferObj = info[1].As<Napi::Object>();
+	mappedBuffers_[address] = Napi::Persistent(bufferObj);
+
 	return env.Undefined();
 }
 
@@ -426,6 +439,9 @@ Napi::Value UnicornWrapper::MemUnmap(const Napi::CallbackInfo& info) {
 	if (err != UC_ERR_OK) {
 		ThrowUnicornError(env, err, "Failed to unmap memory");
 	}
+
+	// Remove reference if it exists
+	mappedBuffers_.erase(address);
 
 	return env.Undefined();
 }
@@ -1120,7 +1136,130 @@ Napi::Value UnicornWrapper::ContextRestore(const Napi::CallbackInfo& info) {
 	return env.Undefined();
 }
 
-// ============== Query & Control ==============
+// ============== Snapshot Operations ==============
+
+Napi::Value UnicornWrapper::StateSave(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_ || emulating_) {
+		Napi::Error::New(env, "Cannot save state: Engine closed or running").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Object state = Napi::Object::New(env);
+
+	// 1. Save Registers/Context
+	uc_context* ctx = nullptr;
+	uc_context_alloc(engine_, &ctx);
+	uc_context_save(engine_, ctx);
+
+	// Create context buffer (serialize context)
+	// Note: Unicorn doesn't have a direct "serialize context to buffer" API exposed easily
+	// except via binding specific hacks or just saving individual registers.
+	// Check if we can use uc_context_reg_read/write or loop.
+	// Actually, for simplicity/portability, we might rely on the user leveraging `contextSave`.
+	// BUT, a full snapshot usually implies serialization.
+	// Since we are inside the binding, we can expose a "serialize" method or
+	// just return the opaque Context object?
+	// The request was for "Snapshotting". Returning a UnicornContext object (which wraps uc_context*)
+	// is valid for runtime snapshotting. But if they want to save to disk...
+	// Unicorn doesn't support context serialization natively easily (opaque struct).
+	// Let's stick to returning a JS object with Memory Regions contents + we will try to safe 'Context'
+	// as a JS structure of all registers? No, too many.
+	//
+	// Wait, we already have `UnicornContext` wrapper. Let's just create one and attach it.
+	// Saving to disk might require extracting all regs, which is arch specific.
+	// Let's assume Runtime Snapshot for now (Visualizing/Rewind in memory).
+
+	Napi::Object contextObj = UnicornContext::constructor.New({});
+	UnicornContext* wrapper = Napi::ObjectWrap<UnicornContext>::Unwrap(contextObj);
+	wrapper->SetContext(ctx); // Takes ownership
+
+	state.Set("context", contextObj);
+
+	// 2. Save Memory
+	uc_mem_region* regions = nullptr;
+	uint32_t count = 0;
+	if (uc_mem_regions(engine_, &regions, &count) == UC_ERR_OK) {
+		Napi::Array memArray = Napi::Array::New(env, count);
+		for (uint32_t i = 0; i < count; i++) {
+			Napi::Object region = Napi::Object::New(env);
+			region.Set("address", Napi::BigInt::New(env, regions[i].begin));
+			uint64_t size = regions[i].end - regions[i].begin + 1;
+			region.Set("size", Napi::Number::New(env, size));
+			region.Set("perms", Napi::Number::New(env, regions[i].perms));
+
+			// Read content
+			Napi::Buffer<uint8_t> buffer = Napi::Buffer<uint8_t>::New(env, size);
+			if (uc_mem_read(engine_, regions[i].begin, buffer.Data(), size) == UC_ERR_OK) {
+				region.Set("data", buffer);
+			}
+
+			memArray.Set(i, region);
+		}
+		uc_free(regions);
+		state.Set("memory", memArray);
+	}
+
+	return state;
+}
+
+Napi::Value UnicornWrapper::StateRestore(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_ || emulating_) {
+		Napi::Error::New(env, "Cannot restore state: Engine closed or running").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (info.Length() < 1 || !info[0].IsObject()) {
+		Napi::TypeError::New(env, "Expected state object").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	Napi::Object state = info[0].As<Napi::Object>();
+
+	// 1. Restore Memory
+	// Unmap everything first?
+	// Calling mem_unmap for all regions.
+	// Or we can just start fresh.
+	// Let's assume we map over what's needed.
+	if (state.Has("memory")) {
+		Napi::Array memArray = state.Get("memory").As<Napi::Array>();
+		uint32_t count = memArray.Length();
+		for (uint32_t i = 0; i < count; i++) {
+			Napi::Value val = memArray.Get(i);
+			if (val.IsObject()) {
+				Napi::Object region = val.As<Napi::Object>();
+				bool lossless;
+				uint64_t address = region.Get("address").As<Napi::BigInt>().Uint64Value(&lossless);
+				size_t size = region.Get("size").As<Napi::Number>().Uint32Value();
+				uint32_t perms = region.Get("perms").As<Napi::Number>().Uint32Value();
+
+				// Try map (might fail if already mapped, so we ignore mapping error and just write?)
+				// Better approach: Unmap specific region if overlaps?
+				// Simple approach: Map. If fails, assume mapped. Then Write.
+				uc_mem_map(engine_, address, size, perms);
+
+				if (region.Has("data")) {
+					Napi::Buffer<uint8_t> buffer = region.Get("data").As<Napi::Buffer<uint8_t>>();
+					uc_mem_write(engine_, address, buffer.Data(), buffer.Length());
+				}
+			}
+		}
+	}
+
+	// 2. Restore Context
+	if (state.Has("context")) {
+		Napi::Object contextObj = state.Get("context").As<Napi::Object>();
+		UnicornContext* contextWrapper = Napi::ObjectWrap<UnicornContext>::Unwrap(contextObj);
+		if (contextWrapper && contextWrapper->GetContext()) {
+			uc_context_restore(engine_, contextWrapper->GetContext());
+		}
+	}
+
+	return env.Undefined();
+}
 
 Napi::Value UnicornWrapper::Query(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
@@ -1223,6 +1362,101 @@ Napi::Value UnicornWrapper::Close(const Napi::CallbackInfo& info) {
 
 	engine_ = nullptr;
 	closed_ = true;
+
+	return env.Undefined();
+}
+
+// ============== Native Breakpoints ==============
+
+void BreakpointHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data) {
+	UnicornWrapper* wrapper = static_cast<UnicornWrapper*>(user_data);
+	// Direct C++ check using the helper method we added to header
+	if (wrapper->IsBreakpointHit(address)) {
+		uc_emu_stop(uc);
+	}
+}
+
+Napi::Value UnicornWrapper::BreakpointAdd(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_) {
+		Napi::Error::New(env, "Engine is closed").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (info.Length() < 1) {
+		Napi::TypeError::New(env, "Expected 1 argument: address").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	uint64_t address;
+	if (info[0].IsBigInt()) {
+		bool lossless;
+		address = info[0].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[0].IsNumber()) {
+		address = static_cast<uint64_t>(info[0].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "address must be a BigInt or Number").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Add to set
+	{
+		std::lock_guard<std::mutex> lock(hookMutex_);
+		breakpoints_.insert(address);
+
+		// Enable global hook if first breakpoint
+		if (!hasBreakpointHook_) {
+			uc_err err = uc_hook_add(engine_, &breakpointHookHandle_, UC_HOOK_CODE,
+				(void*)BreakpointHookCB, this, 1, 0);
+
+			if (err != UC_ERR_OK) {
+				ThrowUnicornError(env, err, "Failed to enable native breakpoint hook");
+				return env.Undefined();
+			}
+			hasBreakpointHook_ = true;
+		}
+	}
+
+	return env.Undefined();
+}
+
+Napi::Value UnicornWrapper::BreakpointDel(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_) {
+		Napi::Error::New(env, "Engine is closed").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (info.Length() < 1) {
+		Napi::TypeError::New(env, "Expected 1 argument: address").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	uint64_t address;
+	if (info[0].IsBigInt()) {
+		bool lossless;
+		address = info[0].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[0].IsNumber()) {
+		address = static_cast<uint64_t>(info[0].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "address must be a BigInt or Number").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Remove from set
+	{
+		std::lock_guard<std::mutex> lock(hookMutex_);
+		breakpoints_.erase(address);
+
+		// Disable global hook if no breakpoints left
+		if (breakpoints_.empty() && hasBreakpointHook_) {
+			uc_hook_del(engine_, breakpointHookHandle_);
+			hasBreakpointHook_ = false;
+			breakpointHookHandle_ = 0;
+		}
+	}
 
 	return env.Undefined();
 }

@@ -10,3 +10,5 @@ deps/unicorn/*.dll
 deps/unicorn/*.lib
 deps/unicorn/*.so
 deps/unicorn/*.dylib
+build_locked/
+*.log

@@ -8,6 +8,8 @@
 #include <napi.h>
 #include <unicorn/unicorn.h>
 #include <unordered_map>
+#include <unordered_set>
+#include <map>
 #include <memory>
 #include <vector>
 #include <mutex>
@@ -46,6 +48,14 @@ private:
 	// Map of active hooks: hook handle -> HookData
 	std::unordered_map<uc_hook, std::unique_ptr<HookData>> hooks_;
 	uc_hook nextHookId_;
+
+	// Native Breakpoints
+	std::unordered_set<uint64_t> breakpoints_;
+	uc_hook breakpointHookHandle_ = 0;
+	bool hasBreakpointHook_ = false;
+
+	// Shared Memory References (Keep buffers alive)
+	std::map<uint64_t, Napi::ObjectReference> mappedBuffers_;
 
 	// ============== Emulation Control ==============
 
@@ -167,6 +177,20 @@ private:
 	 */
 	Napi::Value HookDel(const Napi::CallbackInfo& info);
 
+	// ============== Native Breakpoints ==============
+
+	/**
+	 * Add a native breakpoint
+	 * @param address - Address to break at
+	 */
+	Napi::Value BreakpointAdd(const Napi::CallbackInfo& info);
+
+	/**
+	 * Remove a native breakpoint
+	 * @param address - Address to remove
+	 */
+	Napi::Value BreakpointDel(const Napi::CallbackInfo& info);
+
 	// ============== Context Operations ==============
 
 	/**
@@ -180,6 +204,20 @@ private:
 	 * @param context - UnicornContext object
 	 */
 	Napi::Value ContextRestore(const Napi::CallbackInfo& info);
+
+	// ============== Snapshot Operations ==============
+
+	/**
+	 * Save full emulation state (Context + Memory)
+	 * @return { context: Buffer, memory: [ { address, size, perms, data } ] }
+	 */
+	Napi::Value StateSave(const Napi::CallbackInfo& info);
+
+	/**
+	 * Restore full emulation state
+	 * @param state - The object returned by StateSave
+	 */
+	Napi::Value StateRestore(const Napi::CallbackInfo& info);
 
 	// ============== Query & Control ==============
 
@@ -226,6 +264,23 @@ private:
 
 	// Check if register is 64-bit
 	bool Is64BitRegister(int regId);
+
+public:
+	// Helper for checking breakpoints from static callback
+	bool IsBreakpointHit(uint64_t address) {
+		// No lock needed here as we only read, and it's called from the same thread as emulation
+		// strict consistency isn't critical for a breakpoint check
+		// (if we miss one cycle due to race during add, it's fine)
+		// But for correctness with the defined mutex:
+		// std::lock_guard<std::mutex> lock(hookMutex_);
+		// Locking every instruction IS expensive.
+		// Since emulation is single-threaded usually, and JS calls add/del from main thread,
+		// there IS a race if we add/del while running async.
+		// However, standard use case is add/del while paused.
+		// If async, we might need a lockless atomic check or read-copy-update.
+		// For now, avoiding lock for perf.
+		return breakpoints_.count(address) > 0;
+	}
 };
 
 /**
@@ -313,6 +368,7 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data);
 void InsnHookCB(uc_engine* uc, void* user_data);
 bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
+void BreakpointHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 
 // ============== Utility Functions ==============
 
