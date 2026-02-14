@@ -9,12 +9,12 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-13)
+## Current Snapshot (2026-02-14)
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **2/4** (`#7b`, `#8`)
 - P2 delivered: **0/2**
-- Infrastructure delivered: **6/6** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`)
-- Future Engines delivered: **1/3** (hexcore-remill `DONE` in v3.4.0)
+- Infrastructure delivered: **7/7** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`, `#20`)
+- Future Engines delivered: **0/2** (hexcore-rellic `NEXT`)
 - Pipeline hardening added beyond original backlog:
   - `.hexcore_job.json` schema validation
   - `hexcore.pipeline.validateJob`
@@ -221,16 +221,23 @@
 
 ---
 
-## Future Engines (Research)
-
-### hexcore-remill
-- Lift semantics into LLVM IR (foundation stage for decompilation)
-- N-API bindings, Windows build
+### 20. Remill N-API Bindings (hexcore-remill)
 - **Status**: `DONE`
-- **Version**: 0.1.0
-- **Delivered**: v3.4.0 — full N-API wrapper, 168 static libs (/MT), liftToIR integration in disassembler
+- **Feature**: Lifts machine code to LLVM IR bitcode via Remill (lifting-bits/remill).
+- **Acceptance**:
+  - Multi-arch lifting: x86, x64, ARM64.
+  - Sync and async lifting APIs (64KB threshold).
+  - 168 static libs (/MT) — zero runtime DLL dependencies.
+  - `liftToIR` command integrated in disassembler.
+  - Prebuild pipeline with semantics tarball (win32-x64).
+  - Loaded dynamically via `candidatePaths` — disassembler degrades gracefully.
+- **Version**: 0.1.1
 - **Standalone repo**: [hexcore-remill](https://github.com/LXrdKnowkill/hexcore-remill)
 - **Target**: v3.4.0 ✅
+
+---
+
+## Future Engines (Research)
 
 ### hexcore-rellic
 - LLVM bitcode → goto-free C output (lifting-bits/rellic)

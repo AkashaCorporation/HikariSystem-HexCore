@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-13):** `v3.4.0 "IR Horizon"` — Remill IR Lifting engine, machine code → LLVM IR translation, improved disassembler error handling.
+**Latest release (2026-02-14):** `v3.4.1` — Fix: hexcore-remill packaging for production builds (prebuild + semantics pipeline).
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)

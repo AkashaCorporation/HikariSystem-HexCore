@@ -354,6 +354,7 @@ export function fromGithub({ name, version, repo, sha256, metadata }: IExtension
  */
 const nativeExtensions = [
 	'microsoft-authentication',
+	'hexcore-remill',
 ];
 
 const excludedExtensions = [

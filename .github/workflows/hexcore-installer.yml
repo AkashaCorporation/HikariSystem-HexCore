@@ -108,6 +108,21 @@ jobs:
           cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-better-sqlite3 && npm ci
+          cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
+
+      - name: Fetch HexCore Remill Semantics
+        run: |
+          cd extensions/hexcore-remill
+          $version = node -p "require('./package.json').version"
+          $tag = "v$version"
+          $asset = "hexcore-remill-v$version-semantics-win32-x64.tar.gz"
+          $url = "https://github.com/LXrdKnowkill/hexcore-remill/releases/download/$tag/$asset"
+          Write-Host "Downloading Remill semantics from $url ..."
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          tar -xzf $asset
+          Remove-Item $asset
+          Write-Host "Semantics installed:"
+          Get-ChildItem deps/remill/share/semantics/ | Select-Object Name
 
       - name: Compile HexCore Extensions
         env:
@@ -238,6 +253,26 @@ jobs:
       - name: Fetch HexCore Native Dependencies
         run: |
           cd extensions/hexcore-better-sqlite3 && npm ci
+
+      - name: Fetch HexCore Remill Prebuilds (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-remill && node ../../scripts/hexcore-native-install.js
+
+      - name: Fetch HexCore Remill Semantics (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-remill
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          asset="hexcore-remill-v${version}-semantics-win32-x64.tar.gz"
+          url="https://github.com/LXrdKnowkill/hexcore-remill/releases/download/${tag}/${asset}"
+          echo "Downloading Remill semantics from ${url} ..."
+          curl -fsSL -o "${asset}" "${url}" || { echo "Semantics not available for Linux yet"; exit 0; }
+          tar -xzf "${asset}"
+          rm -f "${asset}"
+          echo "Semantics installed:"
+          ls deps/remill/share/semantics/
 
       - name: Compile HexCore Extensions
         run: |

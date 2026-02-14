@@ -5,6 +5,21 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.4.1] - 2026-02-14
+
+> **Fix Release** — hexcore-remill packaging fix: promoted from experimental to production engine in CI/CD pipeline.
+
+### Fixed
+- **hexcore-remill not included in packaged builds** — the native module worked in dev mode but was missing from the installer output. Added to `nativeExtensions` in build system.
+- **Prebuild workflow** — moved hexcore-remill from experimental matrix to main prebuild matrix alongside Capstone, Unicorn, LLVM MC, and better-sqlite3.
+- **Semantics packaging** — added dedicated semantics tarball (`remill-semantics-win32-x64.tar.gz`) to prebuild workflow for LLVM IR .bc files required at runtime.
+- **Installer workflow** — added hexcore-remill prebuild fetch + semantics download for Windows and Linux builds.
+
+### Changed
+- Experimental prebuild matrix now only contains hexcore-rellic (future).
+- Updated GitHub Actions versions in experimental job (v4 → v6).
+- `docs/FEATURE_BACKLOG.md` — hexcore-remill moved from "Future Engines (Research)" to Infrastructure (#20).
+
 ## [3.4.0] - 2026-02-13 - "IR Horizon"
 
 > **Feature Release** — Remill IR Lifting engine, N-API wrapper for machine code → LLVM IR translation, improved disassembler error handling, and native prebuild CI expansion.
@@ -34,7 +49,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - Extension version bumps:
   - `hexcore-disassembler`: `1.3.0` -> `1.4.0`
-- Native prebuilds CI (`hexcore-native-prebuilds.yml`) updated with experimental Remill engine job.
+- Native prebuilds CI (`hexcore-native-prebuilds.yml`) updated with Remill engine in main matrix.
 - `docs/FEATURE_BACKLOG.md` updated with Infrastructure entries #12–#19.
 - `docs/RUNBOOK_NATIVE_PREBUILDS.md` updated with Remill build instructions.
 - `powers/hexcore-native-engines/POWER.md` updated with Remill wrapper documentation.
@@ -361,6 +376,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.4.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.1
 [3.4.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.0
 [3.3.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.3.0
 [3.2.2]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.2.2
