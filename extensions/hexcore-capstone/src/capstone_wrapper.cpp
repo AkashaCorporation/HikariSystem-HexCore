@@ -398,7 +398,7 @@ Napi::Object CapstoneWrapper::ArmDetailToObject(Napi::Env env, cs_arm* arm) {
 	obj.Set("writeback", Napi::Boolean::New(env, arm->writeback));
 	obj.Set("memBarrier", Napi::Number::New(env, arm->mem_barrier));
 
-	// Operands (simplified)
+	// Operands
 	Napi::Array operands = Napi::Array::New(env, arm->op_count);
 	for (uint8_t i = 0; i < arm->op_count; i++) {
 		cs_arm_op* op = &arm->operands[i];
@@ -418,9 +418,30 @@ Napi::Object CapstoneWrapper::ArmDetailToObject(Napi::Env env, cs_arm* arm) {
 			case ARM_OP_FP:
 				opObj.Set("fp", Napi::Number::New(env, op->fp));
 				break;
+			case ARM_OP_MEM:
+				{
+					Napi::Object mem = Napi::Object::New(env);
+					mem.Set("base", Napi::Number::New(env, op->mem.base));
+					mem.Set("index", Napi::Number::New(env, op->mem.index));
+					mem.Set("scale", Napi::Number::New(env, op->mem.scale));
+					mem.Set("disp", Napi::Number::New(env, op->mem.disp));
+					mem.Set("lshift", Napi::Number::New(env, op->mem.lshift));
+					opObj.Set("mem", mem);
+				}
+				break;
 			default:
 				break;
 		}
+
+		if (op->shift.type != 0) {
+			Napi::Object shift = Napi::Object::New(env);
+			shift.Set("type", Napi::Number::New(env, op->shift.type));
+			shift.Set("value", Napi::Number::New(env, op->shift.value));
+			opObj.Set("shift", shift);
+		}
+
+		opObj.Set("vectorIndex", Napi::Number::New(env, op->vector_index));
+		opObj.Set("subtracted", Napi::Boolean::New(env, op->subtracted));
 
 		operands.Set(i, opObj);
 	}
@@ -439,7 +460,7 @@ Napi::Object CapstoneWrapper::Arm64DetailToObject(Napi::Env env, cs_arm64* arm64
 	obj.Set("updateFlags", Napi::Boolean::New(env, arm64->update_flags));
 	obj.Set("writeback", Napi::Boolean::New(env, arm64->writeback));
 
-	// Operands (simplified)
+	// Operands
 	Napi::Array operands = Napi::Array::New(env, arm64->op_count);
 	for (uint8_t i = 0; i < arm64->op_count; i++) {
 		cs_arm64_op* op = &arm64->operands[i];
@@ -458,9 +479,29 @@ Napi::Object CapstoneWrapper::Arm64DetailToObject(Napi::Env env, cs_arm64* arm64
 			case ARM64_OP_FP:
 				opObj.Set("fp", Napi::Number::New(env, op->fp));
 				break;
+			case ARM64_OP_MEM:
+				{
+					Napi::Object mem = Napi::Object::New(env);
+					mem.Set("base", Napi::Number::New(env, op->mem.base));
+					mem.Set("index", Napi::Number::New(env, op->mem.index));
+					mem.Set("disp", Napi::Number::New(env, op->mem.disp));
+					opObj.Set("mem", mem);
+				}
+				break;
 			default:
 				break;
 		}
+
+		if (op->shift.type != 0) {
+			Napi::Object shift = Napi::Object::New(env);
+			shift.Set("type", Napi::Number::New(env, op->shift.type));
+			shift.Set("value", Napi::Number::New(env, op->shift.value));
+			opObj.Set("shift", shift);
+		}
+
+		opObj.Set("ext", Napi::Number::New(env, op->ext));
+		opObj.Set("vas", Napi::Number::New(env, op->vas));
+		opObj.Set("vectorIndex", Napi::Number::New(env, op->vector_index));
 
 		operands.Set(i, opObj);
 	}

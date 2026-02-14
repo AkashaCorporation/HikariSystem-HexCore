@@ -365,8 +365,12 @@ public:
 
 		if (numInsns_ == 0) {
 			error_ = cs_errno(handle);
-			cs_close(&handle);
-			return;
+			// Only treat as error if Capstone reported an actual error
+			// numInsns_ == 0 with CS_ERR_OK means no valid instructions found (not an error)
+			if (error_ != CS_ERR_OK) {
+				cs_close(&handle);
+				return;
+			}
 		}
 
 		// Copy data to our intermediate structures (no V8 objects here!)
@@ -408,7 +412,9 @@ public:
 		}
 
 		// Free Capstone memory
-		cs_free(insn, numInsns_);
+		if (numInsns_ > 0) {
+			cs_free(insn, numInsns_);
+		}
 		cs_close(&handle);
 	}
 

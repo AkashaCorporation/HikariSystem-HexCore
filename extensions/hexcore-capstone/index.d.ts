@@ -156,6 +156,14 @@ export interface X86Detail {
 }
 
 /**
+ * Shift operand structure
+ */
+export interface ShiftOperand {
+	type: number;
+	value: number;
+}
+
+/**
  * ARM operand structure
  */
 export interface ArmOperand {
@@ -164,6 +172,16 @@ export interface ArmOperand {
 	reg?: number;
 	imm?: number;
 	fp?: number;
+	mem?: {
+		base: number;
+		index: number;
+		scale: number;
+		disp: number;
+		lshift: number;
+	};
+	shift?: ShiftOperand;
+	vectorIndex: number;
+	subtracted: boolean;
 }
 
 /**
@@ -191,6 +209,15 @@ export interface Arm64Operand {
 	reg?: number;
 	imm?: number;
 	fp?: number;
+	mem?: {
+		base: number;
+		index: number;
+		disp: number;
+	};
+	shift?: ShiftOperand;
+	ext: number;
+	vas: number;
+	vectorIndex: number;
 }
 
 /**

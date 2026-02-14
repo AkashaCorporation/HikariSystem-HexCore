@@ -1,6 +1,6 @@
 {
   "name": "hexcore-capstone",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Modern Node.js bindings for Capstone disassembler engine using N-API",
   "main": "./index.js",
   "module": "./index.mjs",
