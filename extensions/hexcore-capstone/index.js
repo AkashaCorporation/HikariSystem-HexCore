@@ -22,29 +22,37 @@
 'use strict';
 
 // Load the native addon
+// prebuildify uses binding.gyp target name (capstone_native)
+// prebuild-install uses package name (hexcore-capstone)
+// node.napi.node is another common convention
+// Try all for maximum compatibility
+const platformDir = './prebuilds/' + process.platform + '-' + process.arch + '/';
+
 let binding;
-try {
-	// Try to load prebuilt binary first
-	binding = require('./prebuilds/' + process.platform + '-' + process.arch + '/node.napi.node');
-} catch (e1) {
+const errors = [];
+
+const candidates = [
+	{ label: 'prebuild (node.napi)', path: platformDir + 'node.napi.node' },
+	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-capstone.node' },
+	{ label: 'prebuild (underscore)', path: platformDir + 'capstone_native.node' },
+	{ label: 'build/Release', path: './build/Release/capstone_native.node' },
+	{ label: 'build/Debug', path: './build/Debug/capstone_native.node' },
+];
+
+for (const candidate of candidates) {
 	try {
-		// Fall back to node-gyp built binary
-		binding = require('./build/Release/capstone_native.node');
-	} catch (e2) {
-		try {
-			// Try debug build
-			binding = require('./build/Debug/capstone_native.node');
-		} catch (e3) {
-			throw new Error(
-				'Failed to load hexcore-capstone native module. ' +
-				'Make sure you have run npm install and have the required build tools. ' +
-				'Original errors:\n' +
-				`  Prebuild: ${e1.message}\n` +
-				`  Release: ${e2.message}\n` +
-				`  Debug: ${e3.message}`
-			);
-		}
+		binding = require(candidate.path);
+		break;
+	} catch (e) {
+		errors.push(`  ${candidate.label}: ${e.message}`);
 	}
+}
+
+if (!binding) {
+	throw new Error(
+		'Failed to load hexcore-capstone native module.\n' +
+		'Errors:\n' + errors.join('\n')
+	);
 }
 
 // Export everything from the binding

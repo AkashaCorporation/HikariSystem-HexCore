@@ -85,7 +85,11 @@ static std::filesystem::path GetSemanticsDir() {
 
 	// 2. Resolve from the .node binary location
 #ifdef _WIN32
+	// Try both naming conventions: underscore (prebuildify) and hyphen (prebuild-install)
 	void* hMod = GetModuleHandleA("hexcore_remill.node");
+	if (!hMod) {
+		hMod = GetModuleHandleA("hexcore-remill.node");
+	}
 	if (hMod) {
 		char dllPath[260] = {0};  // MAX_PATH = 260
 		unsigned long len = GetModuleFileNameA(hMod, dllPath, 260);
@@ -252,8 +256,24 @@ Napi::Value RemillLifter::LiftBytes(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	LiftResult result = DoLift(bytes, length, address);
-	return LiftResultToJS(env, result);
+	try {
+		LiftResult result = DoLift(bytes, length, address);
+		return LiftResultToJS(env, result);
+	} catch (const std::exception& e) {
+		LiftResult result;
+		result.address = address;
+		result.bytesConsumed = 0;
+		result.success = false;
+		result.error = std::string("Native exception during lift: ") + e.what();
+		return LiftResultToJS(env, result);
+	} catch (...) {
+		LiftResult result;
+		result.address = address;
+		result.bytesConsumed = 0;
+		result.success = false;
+		result.error = "Unknown native exception during lift";
+		return LiftResultToJS(env, result);
+	}
 }
 
 Napi::Value RemillLifter::LiftBytesAsync(const Napi::CallbackInfo& info) {
@@ -465,8 +485,22 @@ LiftBytesWorker::LiftBytesWorker(
 	  deferred_(Napi::Promise::Deferred::New(env)) {}
 
 void LiftBytesWorker::Execute() {
-	result_ = lifter_->DoLift(bytes_.data(), bytes_.size(), address_);
-	if (!result_.success) {
+	try {
+		result_ = lifter_->DoLift(bytes_.data(), bytes_.size(), address_);
+		if (!result_.success) {
+			SetError(result_.error);
+		}
+	} catch (const std::exception& e) {
+		result_.address = address_;
+		result_.bytesConsumed = 0;
+		result_.success = false;
+		result_.error = std::string("Native exception during async lift: ") + e.what();
+		SetError(result_.error);
+	} catch (...) {
+		result_.address = address_;
+		result_.bytesConsumed = 0;
+		result_.success = false;
+		result_.error = "Unknown native exception during async lift";
 		SetError(result_.error);
 	}
 }

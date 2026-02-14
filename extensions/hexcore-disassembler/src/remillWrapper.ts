@@ -171,13 +171,24 @@ export class RemillWrapper {
 			};
 		}
 
-		const lifter = this.ensureLifter(arch);
+		try {
+			const lifter = this.ensureLifter(arch);
 
-		if (buffer.length > ASYNC_THRESHOLD) {
-			return lifter.liftBytesAsync(buffer, address);
+			if (buffer.length > ASYNC_THRESHOLD) {
+				return await lifter.liftBytesAsync(buffer, address);
+			}
+
+			return lifter.liftBytes(buffer, address);
+		} catch (err: unknown) {
+			const msg = err instanceof Error ? err.message : String(err);
+			return {
+				success: false,
+				ir: '',
+				error: `Remill native error: ${msg}`,
+				address,
+				bytesConsumed: 0,
+			};
 		}
-
-		return lifter.liftBytes(buffer, address);
 	}
 
 	/**
