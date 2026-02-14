@@ -1,5 +1,8 @@
 src/**
 deps/**
+!deps/remill/share/
+!deps/remill/share/semantics/
+!deps/remill/share/semantics/**
 test/**
 build/**
 binding.gyp

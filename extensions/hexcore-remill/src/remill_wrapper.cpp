@@ -41,6 +41,7 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Verifier.h>
 #include <llvm/Support/raw_ostream.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 
 #include <sstream>
 #include <filesystem>
@@ -59,17 +60,27 @@ __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void*, char*, u
 //
 // Priority:
 //   1. REMILL_SEMANTICS_DIR env var (explicit override)
-//   2. Relative to the .node binary: ../../deps/remill/share/semantics/
-//      (binary lives in build/Release/hexcore_remill.node)
-//   3. Relative to CWD as last resort
+//   2. Relative to the .node binary — works for both layouts:
+//        build/Release/hexcore_remill.node   (dev build)
+//        prebuilds/win32-x64/hexcore_remill.node (packaged)
+//      Both are 2 directories below the extension root, so we need
+//      3 parent_path() calls: file → containing dir → intermediate → root.
+//   3. Relative to CWD as last resort (dev convenience)
+//   4. Compile-time __FILE__ path (dev only)
 //
 // On Windows we use GetModuleHandleA("hexcore_remill.node") +
 // GetModuleFileNameA to find the DLL path at runtime.
 static std::filesystem::path GetSemanticsDir() {
+	const std::filesystem::path relSem =
+		std::filesystem::path("deps") / "remill" / "share" / "semantics";
+
 	// 1. Environment variable override
 	const char* envDir = std::getenv("REMILL_SEMANTICS_DIR");
 	if (envDir && envDir[0] != '\0') {
-		return std::filesystem::path(envDir);
+		std::filesystem::path envPath(envDir);
+		if (std::filesystem::is_directory(envPath)) {
+			return envPath;
+		}
 	}
 
 	// 2. Resolve from the .node binary location
@@ -77,13 +88,20 @@ static std::filesystem::path GetSemanticsDir() {
 	void* hMod = GetModuleHandleA("hexcore_remill.node");
 	if (hMod) {
 		char dllPath[260] = {0};  // MAX_PATH = 260
-		if (GetModuleFileNameA(hMod, dllPath, 260) > 0) {
-			// dllPath = .../extensions/hexcore-remill/build/Release/hexcore_remill.node
-			// Go up 2 dirs (Release → build → module root)
-			auto moduleRoot = std::filesystem::path(dllPath)
-				.parent_path()   // Release/
-				.parent_path();  // build/
-			auto semDir = moduleRoot / "deps" / "remill" / "share" / "semantics";
+		unsigned long len = GetModuleFileNameA(hMod, dllPath, 260);
+		if (len > 0 && len < 260) {
+			// dllPath example:
+			//   .../extensions/hexcore-remill/build/Release/hexcore_remill.node
+			//   .../extensions/hexcore-remill/prebuilds/win32-x64/hexcore_remill.node
+			//
+			// parent_path(1): removes filename  → .../build/Release
+			// parent_path(2): removes Release   → .../build
+			// parent_path(3): removes build     → .../hexcore-remill  (extension root)
+			auto extensionRoot = std::filesystem::path(dllPath)
+				.parent_path()
+				.parent_path()
+				.parent_path();
+			auto semDir = extensionRoot / relSem;
 			if (std::filesystem::is_directory(semDir)) {
 				return semDir;
 			}
@@ -92,14 +110,14 @@ static std::filesystem::path GetSemanticsDir() {
 #endif
 
 	// 3. Fallback: relative to CWD (works when running from module root)
-	auto cwdSem = std::filesystem::current_path() / "deps" / "remill" / "share" / "semantics";
+	auto cwdSem = std::filesystem::current_path() / relSem;
 	if (std::filesystem::is_directory(cwdSem)) {
 		return cwdSem;
 	}
 
-	// 4. Last resort: compile-time path (may work in dev)
+	// 4. Last resort: compile-time path (dev only — won't work on other machines)
 	std::filesystem::path srcFile(__FILE__);
-	return srcFile.parent_path().parent_path() / "deps" / "remill" / "share" / "semantics";
+	return srcFile.parent_path().parent_path() / relSem;
 }
 
 // ---------------------------------------------------------------------------
@@ -341,11 +359,12 @@ LiftResult RemillLifter::DoLift(
 		return result;
 	}
 
-	// Create a fresh module for this lift operation
-	std::vector<std::filesystem::path> semDirs = { GetSemanticsDir() };
-	auto liftModule = remill::LoadArchSemantics(arch_.get(), semDirs);
+	// Clone the cached semantics module instead of reloading from disk.
+	// LoadArchSemantics reads ~50MB of .bc per call; CloneModule copies the
+	// in-memory IR in microseconds with zero disk I/O.
+	auto liftModule = llvm::CloneModule(*semanticsModule_);
 	if (!liftModule) {
-		result.error = "Failed to create lift module";
+		result.error = "Failed to clone semantics module";
 		return result;
 	}
 
