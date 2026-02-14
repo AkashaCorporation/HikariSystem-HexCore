@@ -1,8 +1,4 @@
 src/**
-deps/**
-!deps/remill/share/
-!deps/remill/share/semantics/
-!deps/remill/share/semantics/**
 test/**
 build/**
 binding.gyp
@@ -10,3 +6,25 @@ binding.gyp
 .eslintrc*
 tsconfig.json
 **/*.map
+**/*.obj
+**/*.o
+**/*.lib
+**/*.a
+**/*.exp
+**/*.pdb
+**/*.zip
+.vs/**
+_*.py
+
+# Deps: exclude build-time only dirs (headers, static libs, etc.)
+deps/gflags/**
+deps/glog/**
+deps/llvm/**
+deps/xed/**
+deps/remill/include/**
+deps/remill/lib/**
+# Keep: deps/remill/share/semantics/*.bc (runtime requirement)
+
+# Prebuilds: force include (overrides .gitignore)
+!prebuilds/
+!prebuilds/**

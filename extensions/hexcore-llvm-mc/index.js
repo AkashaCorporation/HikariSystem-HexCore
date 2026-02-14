@@ -3,12 +3,17 @@
 const path = require('path');
 
 // Try to load the native module from various locations
+// prebuildify uses binding.gyp target name (underscore)
+// prebuild-install uses package name (hyphen)
+// Try both conventions for maximum compatibility
 const possiblePaths = [
+    // Prebuilt binaries — underscore (prebuildify)
+    path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`, 'hexcore_llvm_mc.node'),
+    // Prebuilt binaries — hyphen (prebuild-install)
+    path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`, 'hexcore-llvm-mc.node'),
     // Standard build output
     path.join(__dirname, 'build', 'Release', 'hexcore_llvm_mc.node'),
     path.join(__dirname, 'build', 'Debug', 'hexcore_llvm_mc.node'),
-    // Prebuilt binaries
-    path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`, 'hexcore_llvm_mc.node'),
     // Node-pre-gyp style
     path.join(__dirname, 'lib', 'binding', `${process.platform}-${process.arch}`, 'hexcore_llvm_mc.node'),
 ];

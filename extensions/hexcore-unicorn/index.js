@@ -22,24 +22,30 @@ if (process.platform === 'win32') {
  * Load the native addon with fallback paths
  */
 function loadNativeAddon() {
-	const addonName = 'hexcore_unicorn';
+	const underscore = 'hexcore_unicorn';
+	const hyphen = 'hexcore-unicorn';
+	const platDir = path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`);
 	const possiblePaths = [
-		// Prebuilt binaries (prebuildify)
+		// Prebuilt binaries — underscore (prebuildify target name)
 		() => {
 			try {
-				const prebuildPath = path.join(__dirname, 'prebuilds',
-					`${process.platform}-${process.arch}`,
-					`${addonName}.node`);
-				if (fs.existsSync(prebuildPath)) {
-					return require(prebuildPath);
-				}
+				const p = path.join(platDir, `${underscore}.node`);
+				if (fs.existsSync(p)) { return require(p); }
+			} catch (e) {}
+			return null;
+		},
+		// Prebuilt binaries — hyphen (prebuild-install package name)
+		() => {
+			try {
+				const p = path.join(platDir, `${hyphen}.node`);
+				if (fs.existsSync(p)) { return require(p); }
 			} catch (e) {}
 			return null;
 		},
 		// Release build
 		() => {
 			try {
-				const releasePath = path.join(__dirname, 'build', 'Release', `${addonName}.node`);
+				const releasePath = path.join(__dirname, 'build', 'Release', `${underscore}.node`);
 				if (fs.existsSync(releasePath)) {
 					return require(releasePath);
 				}
@@ -49,7 +55,7 @@ function loadNativeAddon() {
 		// Debug build
 		() => {
 			try {
-				const debugPath = path.join(__dirname, 'build', 'Debug', `${addonName}.node`);
+				const debugPath = path.join(__dirname, 'build', 'Debug', `${underscore}.node`);
 				if (fs.existsSync(debugPath)) {
 					return require(debugPath);
 				}

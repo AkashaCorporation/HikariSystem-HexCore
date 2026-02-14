@@ -21,25 +21,35 @@
 
 'use strict';
 
+const platformDir = './prebuilds/' + process.platform + '-' + process.arch + '/';
+
 let binding;
-try {
-	binding = require('./prebuilds/' + process.platform + '-' + process.arch + '/hexcore_remill.node');
-} catch (e1) {
+const errors = [];
+
+// prebuildify uses binding.gyp target name (underscore)
+// prebuild-install uses package name (hyphen)
+// Try both conventions for maximum compatibility
+const candidates = [
+	{ label: 'prebuild (underscore)', path: platformDir + 'hexcore_remill.node' },
+	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-remill.node' },
+	{ label: 'build/Release', path: './build/Release/hexcore_remill.node' },
+	{ label: 'build/Debug', path: './build/Debug/hexcore_remill.node' },
+];
+
+for (const candidate of candidates) {
 	try {
-		binding = require('./build/Release/hexcore_remill.node');
-	} catch (e2) {
-		try {
-			binding = require('./build/Debug/hexcore_remill.node');
-		} catch (e3) {
-			throw new Error(
-				'Failed to load hexcore-remill native module. ' +
-				'Errors:\n' +
-				`  Prebuild: ${e1.message}\n` +
-				`  Release: ${e2.message}\n` +
-				`  Debug: ${e3.message}`
-			);
-		}
+		binding = require(candidate.path);
+		break;
+	} catch (e) {
+		errors.push(`  ${candidate.label}: ${e.message}`);
 	}
+}
+
+if (!binding) {
+	throw new Error(
+		'Failed to load hexcore-remill native module.\n' +
+		'Errors:\n' + errors.join('\n')
+	);
 }
 
 module.exports = binding;
