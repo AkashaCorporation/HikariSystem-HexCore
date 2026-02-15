@@ -61,12 +61,13 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private _getHtmlContent(): string {
+		const nonce = this._getNonce();
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-\${nonce}';">
 	<title>PE Analyzer</title>
 	<style>
 		:root {
@@ -374,7 +375,7 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 		</div>
 	</div>
 
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 
 		function openFile() {
@@ -564,9 +565,13 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 				html += '<span class="count badge warning">' + analysis.suspiciousStrings.length + '</span>';
 				html += '</div>';
 				html += '<div class="section-content" id="strings-content">';
-				analysis.suspiciousStrings.slice(0, 20).forEach(str => {
+				const maxStrings = 20;
+				analysis.suspiciousStrings.slice(0, maxStrings).forEach(str => {
 					html += '<div class="suspicious-item">' + escapeHtml(str) + '</div>';
 				});
+				if (analysis.suspiciousStrings.length > maxStrings) {
+					html += '<div style="padding:4px 8px;opacity:0.7;font-style:italic;">Showing ' + maxStrings + ' of ' + analysis.suspiciousStrings.length + ' strings</div>';
+				}
 				html += '</div></div>';
 			}
 
@@ -589,5 +594,14 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 	</script>
 </body>
 </html>`;
+	}
+
+	private _getNonce(): string {
+		const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+		let nonce = '';
+		for (let i = 0; i < 32; i++) {
+			nonce += possible.charAt(Math.floor(Math.random() * possible.length));
+		}
+		return nonce;
 	}
 }
