@@ -49,20 +49,68 @@ async function decodeBase64InFile(uri: vscode.Uri): Promise<void> {
 		cancellable: false
 	}, async (progress) => {
 		try {
-			const buffer = fs.readFileSync(filePath);
-			const content = buffer.toString('binary');
+			const stats = fs.statSync(filePath);
+			const MAX_FILE_SIZE = 512 * 1024 * 1024; // 512MB safety limit
 
-			progress.report({ increment: 30, message: 'Finding Base64 patterns...' });
+			if (stats.size > MAX_FILE_SIZE) {
+				vscode.window.showWarningMessage(
+					`File is ${(stats.size / (1024 * 1024)).toFixed(0)}MB — skipping (limit: 512MB).`
+				);
+				return;
+			}
 
-			const matches = findBase64Strings(content);
+			// Stream file in chunks to avoid loading entire file into memory
+			const CHUNK_SIZE = 1024 * 1024; // 1MB chunks
+			const OVERLAP = 4096; // overlap to catch base64 spanning chunk boundaries
+			let allMatches: Array<{ offset: number; match: string }> = [];
+			let bytesRead = 0;
+			let carryover = '';
 
-			progress.report({ increment: 40, message: 'Decoding...' });
+			const fd = fs.openSync(filePath, 'r');
+			try {
+				const buf = Buffer.alloc(CHUNK_SIZE);
+				let readLen: number;
 
-			const decodedMatches = decodeMatches(matches);
+				while ((readLen = fs.readSync(fd, buf, 0, CHUNK_SIZE, bytesRead)) > 0) {
+					const chunk = buf.subarray(0, readLen).toString('binary');
+					const combined = carryover + chunk;
+					const baseOffset = bytesRead - carryover.length;
 
-			progress.report({ increment: 20, message: 'Generating report...' });
+					const chunkMatches = findBase64Strings(combined);
+					for (const m of chunkMatches) {
+						allMatches.push({ offset: baseOffset + m.offset, match: m.match });
+					}
 
-			const report = generateReport(fileName, filePath, buffer.length, decodedMatches);
+					bytesRead += readLen;
+
+					// Keep tail as carryover for next chunk
+					carryover = readLen >= OVERLAP ? combined.slice(-OVERLAP) : '';
+
+					progress.report({
+						increment: Math.round((readLen / stats.size) * 60),
+						message: `Scanning... ${((bytesRead / stats.size) * 100).toFixed(0)}%`
+					});
+				}
+			} finally {
+				fs.closeSync(fd);
+			}
+
+			// Deduplicate matches that may appear in overlap regions
+			const seen = new Set<string>();
+			allMatches = allMatches.filter(m => {
+				const key = `${m.offset}:${m.match.slice(0, 64)}`;
+				if (seen.has(key)) { return false; }
+				seen.add(key);
+				return true;
+			});
+
+			progress.report({ increment: 20, message: 'Decoding...' });
+
+			const decodedMatches = decodeMatches(allMatches);
+
+			progress.report({ increment: 10, message: 'Generating report...' });
+
+			const report = generateReport(fileName, filePath, stats.size, decodedMatches);
 
 			const doc = await vscode.workspace.openTextDocument({
 				content: report,
@@ -80,8 +128,9 @@ async function decodeBase64InFile(uri: vscode.Uri): Promise<void> {
 function findBase64Strings(content: string): Array<{ offset: number; match: string }> {
 	const results: Array<{ offset: number; match: string }> = [];
 
-	// Base64 pattern: at least 20 chars, valid base64 alphabet
-	const base64Regex = /[A-Za-z0-9+/]{20,}={0,2}/g;
+	// Base64 pattern: 20-4096 chars, valid base64 alphabet
+	// Upper bound prevents ReDoS on adversarial input
+	const base64Regex = /[A-Za-z0-9+/]{20,4096}={0,2}/g;
 
 	let match;
 	while ((match = base64Regex.exec(content)) !== null) {

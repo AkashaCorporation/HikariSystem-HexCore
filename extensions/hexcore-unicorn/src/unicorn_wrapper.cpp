@@ -815,9 +815,11 @@ void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data)
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
-	auto* callData = new CodeHookCallData{address, size};
+	auto callData = std::make_unique<CodeHookCallData>();
+	callData->address = address;
+	callData->size = size;
 
-	data->tsfn.NonBlockingCall(callData, [](Napi::Env env, Napi::Function callback, CodeHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, CodeHookCallData* data) {
 		callback.Call({
 			Napi::BigInt::New(env, data->address),
 			Napi::Number::New(env, data->size)
@@ -830,9 +832,11 @@ void BlockHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
-	auto* callData = new BlockHookCallData{address, size};
+	auto callData = std::make_unique<BlockHookCallData>();
+	callData->address = address;
+	callData->size = size;
 
-	data->tsfn.NonBlockingCall(callData, [](Napi::Env env, Napi::Function callback, BlockHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, BlockHookCallData* data) {
 		callback.Call({
 			Napi::BigInt::New(env, data->address),
 			Napi::Number::New(env, data->size)
@@ -845,9 +849,13 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
-	auto* callData = new MemHookCallData{static_cast<int>(type), address, size, value};
+	auto callData = std::make_unique<MemHookCallData>();
+	callData->type = static_cast<int>(type);
+	callData->address = address;
+	callData->size = size;
+	callData->value = value;
 
-	data->tsfn.NonBlockingCall(callData, [](Napi::Env env, Napi::Function callback, MemHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, MemHookCallData* data) {
 		callback.Call({
 			Napi::Number::New(env, data->type),
 			Napi::BigInt::New(env, data->address),
@@ -862,9 +870,10 @@ void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data) {
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
-	auto* callData = new InterruptHookCallData{intno};
+	auto callData = std::make_unique<InterruptHookCallData>();
+	callData->intno = intno;
 
-	data->tsfn.NonBlockingCall(callData, [](Napi::Env env, Napi::Function callback, InterruptHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InterruptHookCallData* data) {
 		callback.Call({
 			Napi::Number::New(env, data->intno)
 		});
@@ -885,12 +894,16 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return false;
 
-	auto* callData = new InvalidMemHookCallData{static_cast<int>(type), address, size, value};
+	auto callData = std::make_unique<InvalidMemHookCallData>();
+	callData->type = static_cast<int>(type);
+	callData->address = address;
+	callData->size = size;
+	callData->value = value;
 
 	// For invalid memory hooks, we use blocking call since we need the return value
 	// Note: In practice, returning a meaningful value from JS callback is complex
 	// This is a simplified implementation
-	data->tsfn.NonBlockingCall(callData, [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* data) {
 		callback.Call({
 			Napi::Number::New(env, data->type),
 			Napi::BigInt::New(env, data->address),

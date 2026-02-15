@@ -329,11 +329,14 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		const showAscii = config.get<boolean>('showAscii', true);
 		const uppercase = config.get<boolean>('uppercase', true);
 
+		// Generate nonce for CSP to prevent XSS via inline script injection
+		const nonce = this.getNonce();
+
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
-	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline';">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}';">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Hex Editor</title>
 	<style>
@@ -695,7 +698,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		</div>
 	</div>
 
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 
 		// Configuration
@@ -911,9 +914,10 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 					searchMatches = msg.results;
 					document.getElementById('searchInfo').textContent = msg.results.length + ' matches';
 					const resultsDiv = document.getElementById('searchResults');
-					resultsDiv.innerHTML = msg.results.slice(0, 50).map(offset =>
+					const maxDisplay = 50;
+					resultsDiv.innerHTML = msg.results.slice(0, maxDisplay).map(offset =>
 					\`<div class="search-result-item" data-offset="\${offset}">0x\${offset.toString(16).toUpperCase().padStart(8, '0')}</div>\`
-					).join('');
+					).join('') + (msg.results.length > maxDisplay ? \`<div style="padding:4px 8px;opacity:0.7;font-style:italic;">Showing \${maxDisplay} of \${msg.results.length} results</div>\` : '');
 					resultsDiv.querySelectorAll('.search-result-item').forEach(el => {
 						el.addEventListener('click', () => jumpToOffset(parseInt(el.dataset.offset)));
 					});
@@ -1205,6 +1209,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 	</script>
 </body>
 </html>`;
+	}
+
+	private getNonce(): string {
+		const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+		let nonce = '';
+		for (let i = 0; i < 32; i++) {
+			nonce += possible.charAt(Math.floor(Math.random() * possible.length));
+		}
+		return nonce;
 	}
 }
 

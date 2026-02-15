@@ -213,6 +213,12 @@ export class DisassemblerEngine {
 				return false;
 			}
 
+			const stats = fs.statSync(filePath);
+			const MAX_FILE_SIZE = 512 * 1024 * 1024; // 512MB
+			if (stats.size > MAX_FILE_SIZE) {
+				throw new Error(`File too large (${(stats.size / (1024 * 1024)).toFixed(0)}MB). Maximum supported size is 512MB.`);
+			}
+
 			this.currentFile = filePath;
 			this.fileBuffer = fs.readFileSync(filePath);
 			// Reset state

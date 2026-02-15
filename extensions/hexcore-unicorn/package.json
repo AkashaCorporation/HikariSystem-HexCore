@@ -1,6 +1,6 @@
 {
   "name": "hexcore-unicorn",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Modern Node.js bindings for Unicorn CPU emulator engine using N-API",
   "main": "./index.js",
   "module": "./index.mjs",

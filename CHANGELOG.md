@@ -5,6 +5,43 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.0] - 2026-02-15 - "Fortification"
+
+> **Security & Stability Release** — Full codebase audit across all 18 HexCore extensions. CSP hardening, memory safety, input validation, and crash prevention.
+
+### Security
+
+- **CSP nonce-based script injection** — hexviewer and peanalyzer webviews now use `nonce-<random>` instead of `'unsafe-inline'` to prevent XSS attacks.
+- **ReDoS prevention** — base64 scanner regex bounded to `{20,4096}` (was unbounded `{20,}`).
+- **Output path validation** — hashcalc and filetype `output.path` restricted to workspace or user home directory, preventing arbitrary file writes.
+- **File size limit** — disassembler engine rejects files >512MB before `readFileSync` to prevent OOM crashes.
+
+### Fixed
+
+- **Unicorn hook memory leaks** — replaced raw `new`/`delete` with `std::unique_ptr` RAII in 5 hook callback allocations (`unicorn_wrapper.cpp`).
+- **Strings offset carryover bug** — fixed incorrect offset calculation in chunked extraction that caused reported offsets to drift.
+- **Base64 streaming** — replaced `readFileSync` with chunked streaming (1MB chunks + 4KB overlap) to handle large files without loading entire file into memory.
+- **Remill crash prevention** — added try/catch in C++ `DoLift` and `LiftBytesWorker::Execute` (was aborting process due to `NAPI_DISABLE_CPP_EXCEPTIONS`).
+- **Remill semantics path resolution** — `GetModuleHandleA` now tries both `hexcore_remill.node` and `hexcore-remill.node` naming conventions.
+- **Capstone ARM/ARM64 sync/async detail parity** — sync path now includes `mem`, `shift`, `vectorIndex`, `subtracted`, `ext`, `vas` fields matching async output.
+- **Capstone error handling** — `numInsns == 0` with `CS_ERR_OK` is now treated as valid (empty input), added null guard on `cs_free`.
+
+### Changed
+
+- **Truncation warnings** — hexviewer search results (50 limit) and peanalyzer suspicious strings (20 limit) now show "Showing X of Y" when truncated.
+- **Native module naming** — all 4 engines (Capstone, Remill, Unicorn, LLVM MC) now try both underscore and hyphen naming conventions for prebuilds.
+- **`.vscodeignore` hardening** — added `!prebuilds/**` force-include to Capstone, Unicorn, LLVM MC, and better-sqlite3 to ensure prebuilds survive packaging.
+
+### npm Packages Published
+
+| Package | Version |
+|---------|---------|
+| hexcore-capstone | 1.3.2 |
+| hexcore-remill | 0.1.1 |
+| hexcore-unicorn | 1.2.0 |
+| hexcore-llvm-mc | 1.0.0 |
+| hexcore-better-sqlite3 | 2.0.0 |
+
 ## [3.4.1] - 2026-02-14
 
 > **Fix Release** — hexcore-remill packaging fix: promoted from experimental to production engine in CI/CD pipeline.
@@ -376,6 +413,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.5.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.0
 [3.4.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.1
 [3.4.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.0
 [3.3.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.3.0

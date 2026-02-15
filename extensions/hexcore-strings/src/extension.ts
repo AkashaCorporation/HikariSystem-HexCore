@@ -473,7 +473,7 @@ function extractUnicodeFromChunk(
 
 		if (high === 0 && ((low >= 32 && low <= 126) || low === 9 || low === 10 || low === 13)) {
 			if (currentString.length === 0) {
-				startOffset = combinedOffset + i - (carryover.length > 0 ? carryover.length : 0) + baseOffset;
+				startOffset = combinedOffset + i;
 			}
 			currentString += String.fromCharCode(low);
 		} else {

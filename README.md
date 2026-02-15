@@ -28,11 +28,11 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-14):** `v3.4.1` — Fix: hexcore-remill packaging for production builds (prebuild + semantics pipeline).
+**Latest release (2026-02-15):** `v3.5.0` "Fortification" — Full codebase security audit: CSP hardening, memory safety, crash prevention, input validation across all 18 extensions.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
-- Native Capstone/Unicorn/LLVM MC engines via N-API (no external installs)
+- Native Capstone/Unicorn/LLVM MC/Remill engines via N-API (no external installs)
 - Headless automation pipeline for batch analysis
 - Tested against real CTF binaries (HackTheBox)
 
@@ -81,11 +81,11 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 
 | Package | Version | Description |
 |---------|---------|-------------|
-| **hexcore-capstone** | 1.3.0 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
-| **hexcore-unicorn** | 1.0.0 | Unicorn N-API binding — CPU emulation, hooks, context save/restore |
+| **hexcore-capstone** | 1.3.2 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
+| **hexcore-unicorn** | 1.2.1 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory |
 | **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
-| **hexcore-better-sqlite3** | 1.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
-| **hexcore-remill** | 0.1.0 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
+| **hexcore-better-sqlite3** | 2.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
+| **hexcore-remill** | 0.1.2 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
 > **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and the Remill library itself (168 static libs, ~131 MB of pre-compiled dependencies). Building from source requires clang-cl, VS2022, and a dedicated build pipeline (`_rebuild_mt.py`). For development, download the pre-compiled deps from the [standalone repo releases](https://github.com/LXrdKnowkill/hexcore-remill/releases). End users receive the pre-built `.node` binary via CI — no compilation needed.

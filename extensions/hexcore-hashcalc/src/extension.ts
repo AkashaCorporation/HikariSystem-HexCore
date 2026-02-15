@@ -336,10 +336,21 @@ async function calculateHashesStreaming(
 
 function writeOutput(result: HashCalculationResult, output: CommandOutputOptions): void {
 	const outputFormat = normalizeOutputFormat(output.path, output.format);
-	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+
+	// Validate output path is within workspace or user home to prevent arbitrary writes
+	const resolvedPath = path.resolve(output.path);
+	const workspaceFolders = vscode.workspace.workspaceFolders;
+	const homeDir = require('os').homedir();
+	const isInWorkspace = workspaceFolders?.some(f => resolvedPath.startsWith(f.uri.fsPath));
+	const isInHome = resolvedPath.startsWith(homeDir);
+	if (!isInWorkspace && !isInHome) {
+		throw new Error(`Output path must be within workspace or user home directory: ${resolvedPath}`);
+	}
+
+	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
 
 	if (outputFormat === 'md') {
-		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
+		fs.writeFileSync(resolvedPath, result.reportMarkdown, 'utf8');
 		return;
 	}
 
