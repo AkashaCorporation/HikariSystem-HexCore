@@ -142,33 +142,69 @@ export class CapstoneWrapper {
 	}
 
 	/**
-	 * Convert Capstone instruction to our format with additional analysis
+	 * Convert Capstone instruction to our format with additional analysis.
+	 * Supports x86/x64, ARM32, and ARM64 instruction classification.
 	 */
 	private convertInstruction(inst: CapstoneInstruction): DisassembledInstruction {
 		const mnemonic = inst.mnemonic.toLowerCase();
+		const opStr = inst.opStr.toLowerCase().trim();
 
-		// Detect instruction types
-		const isCall = mnemonic === 'call' || mnemonic === 'bl' || mnemonic === 'blx';
-		const isRet = mnemonic === 'ret' || mnemonic === 'retn' || mnemonic === 'bx lr' ||
-			mnemonic === 'retf' || mnemonic === 'iret';
+		// --- Call detection ---
+		// x86: call
+		// ARM32: bl, blx
+		// ARM64: bl, blr (register-indirect call)
+		const isCall = mnemonic === 'call'
+			|| mnemonic === 'bl'
+			|| mnemonic === 'blx'
+			|| mnemonic === 'blr'
+			|| mnemonic === 'blraa' || mnemonic === 'blrab'  // ARM64 PAC variants
+			|| mnemonic === 'blraaz' || mnemonic === 'blrabz';
 
-		// Jump instructions
-		const jumpMnemonics = [
+		// --- Return detection ---
+		// x86: ret, retn, retf, iret
+		// ARM32: bx lr (Capstone emits mnemonic="bx" opStr="lr"), pop {pc}
+		// ARM64: ret (Capstone emits mnemonic="ret"), retaa, retab (PAC variants)
+		const isRet = mnemonic === 'ret' || mnemonic === 'retn'
+			|| mnemonic === 'retf' || mnemonic === 'iret'
+			|| mnemonic === 'retaa' || mnemonic === 'retab'
+			|| (mnemonic === 'bx' && opStr === 'lr')
+			|| (mnemonic === 'pop' && opStr.includes('pc'));
+
+		// --- Jump detection ---
+		// x86 jumps
+		const x86Jumps = new Set([
 			'jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
 			'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns', 'jp', 'jnp',
-			'jcxz', 'jecxz', 'jrcxz', 'loop', 'loope', 'loopne',
-			// ARM
-			'b', 'beq', 'bne', 'bgt', 'blt', 'bge', 'ble', 'bhi', 'blo', 'bhs', 'bls'
-		];
-		const isJump = jumpMnemonics.includes(mnemonic);
+			'jcxz', 'jecxz', 'jrcxz', 'loop', 'loope', 'loopne'
+		]);
+		// ARM32 conditional branches (Capstone uses beq, bne, etc.)
+		const arm32Jumps = new Set([
+			'b', 'beq', 'bne', 'bgt', 'blt', 'bge', 'ble',
+			'bhi', 'blo', 'bhs', 'bls', 'bpl', 'bmi',
+			'bvs', 'bvc', 'bcc', 'bcs', 'bal'
+		]);
+		// ARM64 conditional branches (Capstone uses b.eq, b.ne, etc. — dot notation)
+		const arm64Jumps = new Set([
+			'b.eq', 'b.ne', 'b.gt', 'b.lt', 'b.ge', 'b.le',
+			'b.hi', 'b.lo', 'b.hs', 'b.ls', 'b.pl', 'b.mi',
+			'b.vs', 'b.vc', 'b.cs', 'b.cc', 'b.al', 'b.nv',
+			'cbz', 'cbnz',   // Compare and Branch if Zero/Non-Zero
+			'tbz', 'tbnz',   // Test bit and Branch if Zero/Non-Zero
+			'br'              // Indirect branch (unconditional)
+		]);
 
-		// Conditional instructions (all jumps except unconditional)
-		const isConditional = isJump && mnemonic !== 'jmp' && mnemonic !== 'b';
+		const isJump = x86Jumps.has(mnemonic) || arm32Jumps.has(mnemonic) || arm64Jumps.has(mnemonic);
 
-		// Parse target address from operand
+		// --- Conditional detection ---
+		// Unconditional: jmp, b (standalone), br
+		const unconditionalSet = new Set(['jmp', 'b', 'br', 'bal', 'b.al']);
+		const isConditional = isJump && !unconditionalSet.has(mnemonic);
+
+		// --- Target address parsing ---
 		let targetAddress: number | undefined;
 		if ((isCall || isJump) && inst.opStr) {
-			const match = inst.opStr.match(/0x([0-9a-fA-F]+)/);
+			// Match hex address: #0x... or 0x...
+			const match = inst.opStr.match(/#?0x([0-9a-fA-F]+)/);
 			if (match) {
 				targetAddress = parseInt(match[1], 16);
 			}

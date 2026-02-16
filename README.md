@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-15):** `v3.5.0` "Fortification" — Full codebase security audit: CSP hardening, memory safety, crash prevention, input validation across all 18 extensions.
+**Latest release (2026-02-16):** `v3.5.1` "ARM64 Fix" — Complete ARM/ARM64 support across disassembler, debugger, strings, and formula engines. 72 functions discovered in ARM64 ELF (was 1). See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)

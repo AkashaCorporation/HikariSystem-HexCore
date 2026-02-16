@@ -94,6 +94,12 @@ interface X86RegConstants {
 interface Arm64RegConstants {
 	X0: number; X1: number; X2: number; X3: number;
 	X4: number; X5: number; X6: number; X7: number;
+	X8: number; X9: number; X10: number; X11: number;
+	X12: number; X13: number; X14: number; X15: number;
+	X16: number; X17: number; X18: number; X19: number;
+	X20: number; X21: number; X22: number; X23: number;
+	X24: number; X25: number; X26: number; X27: number;
+	X28: number; X29: number; X30: number;
 	SP: number; PC: number; LR: number; FP: number;
 	NZCV: number;
 }
@@ -126,6 +132,12 @@ export interface X86Registers {
 export interface Arm64Registers {
 	x0: bigint; x1: bigint; x2: bigint; x3: bigint;
 	x4: bigint; x5: bigint; x6: bigint; x7: bigint;
+	x8: bigint; x9: bigint; x10: bigint; x11: bigint;
+	x12: bigint; x13: bigint; x14: bigint; x15: bigint;
+	x16: bigint; x17: bigint; x18: bigint; x19: bigint;
+	x20: bigint; x21: bigint; x22: bigint; x23: bigint;
+	x24: bigint; x25: bigint; x26: bigint; x27: bigint;
+	x28: bigint; x29: bigint; x30: bigint;
 	sp: bigint; pc: bigint; lr: bigint; fp: bigint;
 	nzcv: bigint;
 }
@@ -776,6 +788,29 @@ export class UnicornWrapper {
 			x5: BigInt(this.uc.regRead(REG.X5)),
 			x6: BigInt(this.uc.regRead(REG.X6)),
 			x7: BigInt(this.uc.regRead(REG.X7)),
+			x8: BigInt(this.uc.regRead(REG.X8)),
+			x9: BigInt(this.uc.regRead(REG.X9)),
+			x10: BigInt(this.uc.regRead(REG.X10)),
+			x11: BigInt(this.uc.regRead(REG.X11)),
+			x12: BigInt(this.uc.regRead(REG.X12)),
+			x13: BigInt(this.uc.regRead(REG.X13)),
+			x14: BigInt(this.uc.regRead(REG.X14)),
+			x15: BigInt(this.uc.regRead(REG.X15)),
+			x16: BigInt(this.uc.regRead(REG.X16)),
+			x17: BigInt(this.uc.regRead(REG.X17)),
+			x18: BigInt(this.uc.regRead(REG.X18)),
+			x19: BigInt(this.uc.regRead(REG.X19)),
+			x20: BigInt(this.uc.regRead(REG.X20)),
+			x21: BigInt(this.uc.regRead(REG.X21)),
+			x22: BigInt(this.uc.regRead(REG.X22)),
+			x23: BigInt(this.uc.regRead(REG.X23)),
+			x24: BigInt(this.uc.regRead(REG.X24)),
+			x25: BigInt(this.uc.regRead(REG.X25)),
+			x26: BigInt(this.uc.regRead(REG.X26)),
+			x27: BigInt(this.uc.regRead(REG.X27)),
+			x28: BigInt(this.uc.regRead(REG.X28)),
+			x29: BigInt(this.uc.regRead(REG.X29)),
+			x30: BigInt(this.uc.regRead(REG.X30)),
 			sp: BigInt(this.uc.regRead(REG.SP)),
 			pc: BigInt(this.uc.regRead(REG.PC)),
 			lr: BigInt(this.uc.regRead(REG.LR)),
@@ -830,7 +865,14 @@ export class UnicornWrapper {
 		const arm64Regs: Record<string, number> = {
 			'x0': ARM64_REG.X0, 'x1': ARM64_REG.X1, 'x2': ARM64_REG.X2, 'x3': ARM64_REG.X3,
 			'x4': ARM64_REG.X4, 'x5': ARM64_REG.X5, 'x6': ARM64_REG.X6, 'x7': ARM64_REG.X7,
-			'sp': ARM64_REG.SP, 'pc': ARM64_REG.PC, 'lr': ARM64_REG.LR, 'fp': ARM64_REG.FP
+			'x8': ARM64_REG.X8, 'x9': ARM64_REG.X9, 'x10': ARM64_REG.X10, 'x11': ARM64_REG.X11,
+			'x12': ARM64_REG.X12, 'x13': ARM64_REG.X13, 'x14': ARM64_REG.X14, 'x15': ARM64_REG.X15,
+			'x16': ARM64_REG.X16, 'x17': ARM64_REG.X17, 'x18': ARM64_REG.X18, 'x19': ARM64_REG.X19,
+			'x20': ARM64_REG.X20, 'x21': ARM64_REG.X21, 'x22': ARM64_REG.X22, 'x23': ARM64_REG.X23,
+			'x24': ARM64_REG.X24, 'x25': ARM64_REG.X25, 'x26': ARM64_REG.X26, 'x27': ARM64_REG.X27,
+			'x28': ARM64_REG.X28, 'x29': ARM64_REG.X29, 'x30': ARM64_REG.X30,
+			'sp': ARM64_REG.SP, 'pc': ARM64_REG.PC, 'lr': ARM64_REG.LR, 'fp': ARM64_REG.FP,
+			'nzcv': ARM64_REG.NZCV
 		};
 
 		// Fix: use correct type per architecture to avoid type confusion

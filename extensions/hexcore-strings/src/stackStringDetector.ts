@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
  *  HexCore Strings Extractor v1.2.0
- *  Stack string detector — opcode pattern matching for x86/x64
+ *  Stack string detector — opcode pattern matching for x86/x64/ARM64
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
@@ -9,14 +9,14 @@
 // ---------------------------------------------------------------------------
 
 export interface StackString {
-	/** The reconstructed string from MOV-to-stack instructions. */
+	/** The reconstructed string from MOV/STRB-to-stack instructions. */
 	value: string;
-	/** Absolute file offset where the first MOV instruction starts. */
+	/** Absolute file offset where the first instruction starts. */
 	offset: number;
-	/** Number of MOV instructions in the sequence. */
+	/** Number of store instructions in the sequence. */
 	instructionCount: number;
-	/** Whether the pattern uses RBP or RSP-relative addressing. */
-	addressingMode: 'rbp' | 'rsp';
+	/** Whether the pattern uses RBP, RSP, or ARM64 SP/FP-relative addressing. */
+	addressingMode: 'rbp' | 'rsp' | 'sp-arm64' | 'fp-arm64';
 }
 
 // ---------------------------------------------------------------------------
@@ -24,17 +24,23 @@ export interface StackString {
 // ---------------------------------------------------------------------------
 
 /**
- * Minimum consecutive MOV-to-stack instructions to consider it a stack string.
+ * Minimum consecutive store-to-stack instructions to consider it a stack string.
  * Fewer than 4 is likely coincidental.
  */
 const MIN_SEQUENCE_LENGTH = 4;
 
 /**
- * Maximum gap (in bytes) between consecutive MOV instructions in a sequence.
- * Stack string builders usually have adjacent MOVs, but compilers might insert
- * NOPs or alignment padding.
+ * Maximum gap (in bytes) between consecutive instructions in a sequence.
+ * Stack string builders usually have adjacent instructions, but compilers might
+ * insert NOPs or alignment padding.
  */
 const MAX_INSTRUCTION_GAP = 8;
+
+/**
+ * Maximum number of instructions to look backwards when searching for a MOV/MOVZ
+ * that loaded the ASCII value into the source register of an ARM64 STRB/STR.
+ */
+const ARM64_MOV_LOOKBACK = 8;
 
 // ---------------------------------------------------------------------------
 // x86/x64 MOV Byte-to-Stack Opcode Patterns
@@ -63,6 +69,34 @@ const MAX_INSTRUCTION_GAP = 8;
  * We scan for these raw byte patterns without full disassembly.
  */
 
+// ---------------------------------------------------------------------------
+// ARM64 STRB/STR-to-Stack Opcode Patterns
+// ---------------------------------------------------------------------------
+
+/**
+ * ARM64 builds stack strings differently using STRB and STR instructions:
+ *
+ * Pattern A: STRB (store byte, unsigned offset)
+ *   strb wT, [Rn, #imm12]
+ *   Encoding: 0011_1001_00ii_iiii_iiii_iinn_nnnt_tttt
+ *   Mask: 0xFFC00000, Value: 0x39000000
+ *   Stack store when Rn = SP (31) or X29/FP (29)
+ *
+ * Pattern B: STR 32-bit (unsigned offset)
+ *   str wT, [Rn, #imm12]
+ *   Encoding: 1011_1001_00ii_iiii_iiii_iinn_nnnt_tttt
+ *   Mask: 0xFFC00000, Value: 0xB9000000
+ *
+ * Pattern C: STR 64-bit (unsigned offset)
+ *   str xT, [Rn, #imm12]
+ *   Encoding: 1111_1001_00ii_iiii_iiii_iinn_nnnt_tttt
+ *   Mask: 0xFFC00000, Value: 0xF9000000
+ *
+ * The immediate value is typically loaded with MOV/MOVZ beforehand:
+ *   mov wT, #imm16  =>  MOVZ: 0101_0010_100h_hhhh_hhhh_hhhh_hhht_tttt
+ *   Mask: 0xFFE00000, Value: 0x52800000
+ */
+
 interface OpcodeMatch {
 	/** Position of the opcode start in the buffer. */
 	position: number;
@@ -73,7 +107,7 @@ interface OpcodeMatch {
 	/** Decoded ASCII character(s). */
 	chars: number[];
 	/** Addressing mode. */
-	mode: 'rbp' | 'rsp';
+	mode: 'rbp' | 'rsp' | 'sp-arm64' | 'fp-arm64';
 }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +115,9 @@ interface OpcodeMatch {
 // ---------------------------------------------------------------------------
 
 /**
- * Scan a binary buffer for x86/x64 stack string patterns.
+ * Scan a binary buffer for x86/x64 and ARM64 stack string patterns.
  *
- * The detector scans the buffer linearly for MOV-to-stack opcodes, groups
+ * The detector scans the buffer linearly for store-to-stack opcodes, groups
  * consecutive matches into sequences, then reconstructs strings by ordering
  * characters by their stack displacement values.
  *
@@ -91,14 +125,19 @@ interface OpcodeMatch {
  * @param baseOffset File offset where this chunk starts
  */
 export function detectStackStrings(buffer: Buffer, baseOffset: number): StackString[] {
-	const matches = scanForMOVOpcodes(buffer);
+	// Scan for both x86 and ARM64 patterns
+	const x86Matches = scanForMOVOpcodes(buffer);
+	const arm64Matches = scanForARM64StackOpcodes(buffer);
 
-	if (matches.length < MIN_SEQUENCE_LENGTH) {
+	// Merge and sort all matches by position
+	const allMatches = [...x86Matches, ...arm64Matches].sort((a, b) => a.position - b.position);
+
+	if (allMatches.length < MIN_SEQUENCE_LENGTH) {
 		return [];
 	}
 
 	// Group consecutive matches into sequences
-	const sequences = groupSequences(matches);
+	const sequences = groupSequences(allMatches);
 
 	// Reconstruct strings from each valid sequence
 	const results: StackString[] = [];
@@ -130,7 +169,7 @@ export function detectStackStrings(buffer: Buffer, baseOffset: number): StackStr
 }
 
 // ---------------------------------------------------------------------------
-// Opcode Scanner
+// x86/x64 Opcode Scanner
 // ---------------------------------------------------------------------------
 
 function scanForMOVOpcodes(buffer: Buffer): OpcodeMatch[] {
@@ -220,14 +259,237 @@ function scanForMOVOpcodes(buffer: Buffer): OpcodeMatch[] {
 }
 
 // ---------------------------------------------------------------------------
+// ARM64 Opcode Scanner
+// ---------------------------------------------------------------------------
+
+/**
+ * Scan a binary buffer for ARM64 STRB/STR-to-stack patterns.
+ *
+ * ARM64 instructions are fixed-width (4 bytes, little-endian). We scan 4 bytes
+ * at a time and match against the following store instruction encodings:
+ *
+ * - STRB (unsigned offset): mask 0xFFC00000, value 0x39000000
+ * - STR  32-bit (unsigned offset): mask 0xFFC00000, value 0xB9000000
+ * - STR  64-bit (unsigned offset): mask 0xFFC00000, value 0xF9000000
+ *
+ * For each matched store, we check if the base register (Rn) is SP (31) or
+ * X29/FP (29), indicating a stack store. We then look backwards for a
+ * MOV/MOVZ instruction that loaded the ASCII value into the source register (Rt).
+ */
+function scanForARM64StackOpcodes(buffer: Buffer): OpcodeMatch[] {
+	const matches: OpcodeMatch[] = [];
+
+	// ARM64 instructions must be 4-byte aligned
+	for (let i = 0; i <= buffer.length - 4; i += 4) {
+		const instr = buffer.readUInt32LE(i);
+
+		// --- Pattern A: STRB (unsigned offset) ---
+		// Mask: 0xFFC00000, Value: 0x39000000
+		if ((instr & 0xFFC00000) === 0x39000000) {
+			const result = decodeARM64StoreAndMatch(buffer, i, instr, 1);
+			if (result !== null) {
+				matches.push(result);
+			}
+			continue;
+		}
+
+		// --- Pattern B: STR 32-bit (unsigned offset) ---
+		// Mask: 0xFFC00000, Value: 0xB9000000
+		if ((instr & 0xFFC00000) === 0xB9000000) {
+			const result = decodeARM64StoreAndMatch(buffer, i, instr, 4);
+			if (result !== null) {
+				matches.push(result);
+			}
+			continue;
+		}
+
+		// --- Pattern C: STR 64-bit (unsigned offset) ---
+		// Mask: 0xFFC00000, Value: 0xF9000000
+		if ((instr & 0xFFC00000) === 0xF9000000) {
+			const result = decodeARM64StoreAndMatch(buffer, i, instr, 8);
+			if (result !== null) {
+				matches.push(result);
+			}
+			continue;
+		}
+	}
+
+	return matches;
+}
+
+/**
+ * Decode an ARM64 store instruction and try to find the loaded ASCII value.
+ *
+ * @param buffer    Full binary buffer
+ * @param pos       Position of the store instruction
+ * @param instr     The 32-bit instruction word
+ * @param storeSize Number of bytes being stored (1 for STRB, 4 for STR W, 8 for STR X)
+ * @returns OpcodeMatch if this is a stack string store, null otherwise
+ */
+function decodeARM64StoreAndMatch(
+	buffer: Buffer,
+	pos: number,
+	instr: number,
+	storeSize: number,
+): OpcodeMatch | null {
+	// Extract fields from the instruction encoding:
+	// Bits [4:0]   = Rt (source register)
+	// Bits [9:5]   = Rn (base register)
+	// Bits [21:10] = imm12 (unsigned offset)
+	const rt = instr & 0x1F;
+	const rn = (instr >>> 5) & 0x1F;
+	const imm12 = (instr >>> 10) & 0xFFF;
+
+	// Only interested in stack stores: base register must be SP (31) or FP/X29 (29)
+	if (rn !== 31 && rn !== 29) {
+		return null;
+	}
+
+	// Scale the offset by the store size (STRB=1, STR W=4, STR X=8)
+	const displacement = imm12 * storeSize;
+
+	// Look backwards for a MOV/MOVZ that loaded a value into register Rt
+	const loadedValue = findARM64MovImmediate(buffer, pos, rt, storeSize);
+	if (loadedValue === null) {
+		return null;
+	}
+
+	// Extract ASCII characters from the loaded value
+	const chars: number[] = [];
+	if (storeSize === 1) {
+		// STRB: single byte
+		if (isPrintableASCII(loadedValue & 0xFF)) {
+			chars.push(loadedValue & 0xFF);
+		}
+	} else if (storeSize === 4) {
+		// STR W: up to 4 chars packed in a 32-bit value (little-endian)
+		for (let byteIdx = 0; byteIdx < 4; byteIdx++) {
+			const byte = (loadedValue >>> (byteIdx * 8)) & 0xFF;
+			if (isPrintableASCII(byte)) {
+				chars.push(byte);
+			} else if (byte === 0x00) {
+				// Null terminator, stop
+				break;
+			} else {
+				// Non-printable non-null: not a string
+				return null;
+			}
+		}
+	} else if (storeSize === 8) {
+		// STR X: up to 8 chars packed in a 64-bit value (little-endian)
+		// We only have the low 32 bits from MOVZ (high bits require MOVK)
+		// Extract what we can
+		for (let byteIdx = 0; byteIdx < 8; byteIdx++) {
+			const byte = (loadedValue >>> (byteIdx * 8)) & 0xFF;
+			if (byteIdx >= 4 && loadedValue <= 0xFFFFFFFF) {
+				// Upper bytes are zero from a 32-bit MOVZ, treat as null terminator
+				break;
+			}
+			if (isPrintableASCII(byte)) {
+				chars.push(byte);
+			} else if (byte === 0x00) {
+				break;
+			} else {
+				return null;
+			}
+		}
+	}
+
+	if (chars.length === 0) {
+		return null;
+	}
+
+	const mode: 'sp-arm64' | 'fp-arm64' = rn === 31 ? 'sp-arm64' : 'fp-arm64';
+
+	return {
+		position: pos,
+		instrLength: 4,
+		displacement,
+		chars,
+		mode,
+	};
+}
+
+/**
+ * Search backwards from a store instruction to find a MOV/MOVZ that loaded
+ * an immediate value into the given register.
+ *
+ * ARM64 MOV (wide immediate) / MOVZ encoding:
+ *   For 32-bit (W registers): mask 0xFFE00000, value 0x52800000
+ *   For 64-bit (X registers): mask 0xFFE00000, value 0xD2800000
+ *
+ * The immediate is in bits [20:5] (imm16), and hw (shift) is in bits [22:21].
+ *
+ * @param buffer    Full binary buffer
+ * @param storePos  Position of the store instruction
+ * @param targetReg Register number (Rt from the store)
+ * @param storeSize Store size to determine if we look for W or X register MOV
+ * @returns The immediate value loaded, or null if not found
+ */
+function findARM64MovImmediate(
+	buffer: Buffer,
+	storePos: number,
+	targetReg: number,
+	storeSize: number,
+): number | null {
+	// Search backwards through preceding instructions
+	for (let step = 1; step <= ARM64_MOV_LOOKBACK; step++) {
+		const movPos = storePos - (step * 4);
+		if (movPos < 0) {
+			break;
+		}
+
+		const movInstr = buffer.readUInt32LE(movPos);
+
+		// MOVZ 32-bit (W register): mask 0xFFE00000, value 0x52800000
+		if ((movInstr & 0xFFE00000) === 0x52800000) {
+			const rd = movInstr & 0x1F;
+			if (rd === targetReg) {
+				const imm16 = (movInstr >>> 5) & 0xFFFF;
+				const hw = (movInstr >>> 21) & 0x3;
+				return imm16 << (hw * 16);
+			}
+		}
+
+		// MOVZ 64-bit (X register): mask 0xFFE00000, value 0xD2800000
+		if ((movInstr & 0xFFE00000) === 0xD2800000) {
+			const rd = movInstr & 0x1F;
+			if (rd === targetReg) {
+				const imm16 = (movInstr >>> 5) & 0xFFFF;
+				const hw = (movInstr >>> 21) & 0x3;
+				// For 64-bit, the shift can be 0, 16, 32, or 48.
+				// JavaScript bitwise ops are 32-bit, so use multiplication for larger shifts.
+				return imm16 * Math.pow(2, hw * 16);
+			}
+		}
+
+		// Also check ORR (immediate) which compilers use for MOV aliases:
+		// MOV Wd, #imm is sometimes encoded as ORR Wd, WZR, #imm
+		// 32-bit ORR immediate: mask 0xFF800000, value 0x32000000
+		// This is complex (bitmask immediate encoding), skip for now — MOVZ covers
+		// the vast majority of stack string patterns.
+
+		// If we see the target register being written by something else, stop looking
+		// (the register was clobbered between the MOV and the STRB)
+		const rdCandidate = movInstr & 0x1F;
+		if (rdCandidate === targetReg) {
+			// Some other instruction writes to our target register — give up
+			break;
+		}
+	}
+
+	return null;
+}
+
+// ---------------------------------------------------------------------------
 // Sequence Grouping
 // ---------------------------------------------------------------------------
 
 /**
- * Group opcode matches into sequences of consecutive MOV instructions.
+ * Group opcode matches into sequences of consecutive store instructions.
  * Two matches are "consecutive" if:
- * 1. Gap between end of one and start of next is ≤ MAX_INSTRUCTION_GAP
- * 2. They use the same addressing mode (rbp or rsp)
+ * 1. Gap between end of one and start of next is <= MAX_INSTRUCTION_GAP
+ * 2. They use the same addressing mode category (x86 with x86, ARM64 with ARM64)
  */
 function groupSequences(matches: OpcodeMatch[]): OpcodeMatch[][] {
 	if (matches.length === 0) { return []; }
@@ -241,7 +503,7 @@ function groupSequences(matches: OpcodeMatch[]): OpcodeMatch[][] {
 
 		const gap = curr.position - (prev.position + prev.instrLength);
 
-		if (gap <= MAX_INSTRUCTION_GAP && gap >= 0 && curr.mode === prev.mode) {
+		if (gap <= MAX_INSTRUCTION_GAP && gap >= 0 && areModesCompatible(curr.mode, prev.mode)) {
 			currentSeq.push(curr);
 		} else {
 			if (currentSeq.length >= MIN_SEQUENCE_LENGTH) {
@@ -258,15 +520,33 @@ function groupSequences(matches: OpcodeMatch[]): OpcodeMatch[][] {
 	return sequences;
 }
 
+/**
+ * Check if two addressing modes are compatible for grouping into the same sequence.
+ * x86 modes group together, ARM64 modes group together, but they don't mix.
+ */
+function areModesCompatible(a: OpcodeMatch['mode'], b: OpcodeMatch['mode']): boolean {
+	const aIsArm64 = a === 'sp-arm64' || a === 'fp-arm64';
+	const bIsArm64 = b === 'sp-arm64' || b === 'fp-arm64';
+
+	// Must be same architecture family
+	if (aIsArm64 !== bIsArm64) {
+		return false;
+	}
+
+	// Within the same family, allow mixing SP and FP (compilers sometimes do this)
+	return true;
+}
+
 // ---------------------------------------------------------------------------
 // String Reconstruction
 // ---------------------------------------------------------------------------
 
 /**
- * Reconstruct a string from a sequence of MOV instructions.
+ * Reconstruct a string from a sequence of store instructions.
  *
- * Characters are ordered by their stack displacement value (ascending for
- * RSP-relative, descending for RBP-relative since RBP offsets are negative).
+ * Characters are ordered by their stack displacement value:
+ * - RSP-relative and ARM64 SP/FP-relative: ascending order (positive offsets)
+ * - RBP-relative: descending order (negative offsets from frame pointer)
  */
 function reconstructString(seq: OpcodeMatch[]): string | null {
 	// Sort by displacement to reconstruct character order
@@ -275,7 +555,7 @@ function reconstructString(seq: OpcodeMatch[]): string | null {
 		if (a.mode === 'rbp') {
 			return b.displacement - a.displacement;
 		}
-		// For RSP-relative (positive displacements), normal order
+		// For RSP-relative and ARM64 SP/FP-relative (positive displacements), normal order
 		return a.displacement - b.displacement;
 	});
 

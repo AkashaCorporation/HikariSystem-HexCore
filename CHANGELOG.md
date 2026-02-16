@@ -5,6 +5,39 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.1] - 2026-02-16 - "ARM64 Fix"
+
+> **Bugfix Release** — Complete ARM/ARM64 support across disassembler, debugger, strings, and formula engines. Previously, ARM64 binaries were effectively unreadable. Tested against HTB Insane-level ARM64 ELF: 72 functions discovered (was 1).
+
+### Fixed
+
+- **Capstone ARM64 instruction classification** — `isCall`, `isRet`, `isJump`, `isConditional` flags now correctly detect ARM64 branch instructions: `blr`/`blraa`/`blrab`, `bx lr`/`retaa`/`retab`/`pop {pc}`, dot-notation (`b.eq`, `b.ne`), `cbz`/`cbnz`/`tbz`/`tbnz`, `br`, and ARM32 conditional branches (`beq`, `bne`, `bhi`, etc.).
+- **STP x29,x30 encoding mask** — prolog scanner mask was `0xFFFF83FF` (included imm7 bits), changed to `0xFC407FFF` to match any addressing mode and offset.
+- **Trampoline/thunk following** — `analyzeFunction` now follows unconditional jump targets as new functions (entry point trampolines like `b #target` were previously dead-ends).
+- **Race condition in recursive analysis** — `analyzeFunction` fired off child BL target analysis without `await`, causing floating promises. Functions discovered via calls were missing from reports. Now properly awaits all child targets before returning.
+
+### Added
+
+- **ARM64/ARM32 function prolog scanning** — `scanForFunctionPrologs` detects STP x29,x30 (any addressing mode), SUB SP,SP, PACIASP (ARM64), PUSH {lr}/STR LR,[SP] (ARM32).
+- **ARM64 function end detection** — architecture-aware: ARM64 NOP (`0xD503201F`), ARM32 NOP, UDF padding, and ARM prolog boundaries.
+- **ARM64/ARM32 fallback disassembly** — `decodeARM64Fallback` (NOP, RET, BL, B, B.cond, CBZ/CBNZ, STP, LDP, BLR, BR) and `decodeARM32Fallback` (NOP, BX LR, POP {pc}, BL, B, PUSH).
+- **ARM64 stack string detection** — `stackStringDetector` scans for STRB/STR opcodes with SP/FP base register, backward search for MOVZ loading ASCII values.
+- **ARM64 DebugEngine** (5 methods):
+  - `setupArm64Stack()` — LR=0xDEAD0000 sentinel, 16-byte SP alignment
+  - `initializeElfProcessStack()` — argc/argv/envp via X0/X1/X2 (register-based)
+  - `installSyscallHandler()` — SVC #0 interception (intno===2), X8=syscall number
+  - `updateEmulationRegisters()` — x0-x15, fp, sp, pc, nzcv mapping
+  - `popReturnAddress()` — reads LR (X30) instead of stack pop
+  - 20+ ARM64 Linux syscalls: write(64), exit(93), exit_group(94), brk(214), mmap(222), openat(56), close(57), fstat(80), ioctl(29), readlinkat(78), etc.
+- **ARM64 formulaBuilder** — register recognition (x0-x30, w0-w30, sp, lr, fp, xzr, wzr, pc, r0-r15), `#` prefix handling, 15 ARM mnemonics (movz, movk, movn, mul, madd, msub, neg, eor, orr, and, lsl, lsr, asr, mla, mvn), 3-operand instruction form support.
+
+### Backlog Items Resolved
+
+| Item | Description |
+|------|-------------|
+| #22 | ARM64 DebugEngine Completion |
+| #26 | buildFormula ARM64 Register Support |
+
 ## [3.5.0] - 2026-02-15 - "Fortification"
 
 > **Security & Stability Release** — Full codebase audit across all 18 HexCore extensions. CSP hardening, memory safety, input validation, and crash prevention.
@@ -413,6 +446,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.5.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.1
 [3.5.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.0
 [3.4.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.1
 [3.4.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.0

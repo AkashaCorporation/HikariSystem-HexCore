@@ -381,40 +381,191 @@ export class DisassemblerEngine {
 	}
 
 	/**
-	 * Fallback disassembly for when Capstone is not available
+	 * Fallback disassembly for when Capstone is not available.
+	 * Supports x86/x64 and basic ARM64/ARM32 decoding.
 	 */
 	private disassembleRangeFallback(startAddr: number, size: number): Instruction[] {
 		const instructions: Instruction[] = [];
 		let offset = this.addressToOffset(startAddr);
 		let addr = startAddr;
 		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
+		const isARM64 = this.architecture === 'arm64';
+		const isARM32 = this.architecture === 'arm';
 
-		while (offset < endOffset && instructions.length < 1000) {
-			const inst = this.disassembleInstructionFallback(offset, addr);
-			if (inst) {
+		if (isARM64 || isARM32) {
+			// ARM: Fixed-width 4-byte instructions
+			while (offset + 4 <= endOffset && instructions.length < 1000) {
+				const word = this.fileBuffer!.readUInt32LE(offset);
+				const bytes = this.fileBuffer!.subarray(offset, offset + 4);
+				const inst = isARM64
+					? this.decodeARM64Fallback(word, addr, bytes)
+					: this.decodeARM32Fallback(word, addr, bytes);
 				instructions.push(inst);
 				this.instructions.set(addr, inst);
-				offset += inst.size;
-				addr += inst.size;
-			} else {
-				const dataByte = this.fileBuffer![offset];
-				instructions.push({
-					address: addr,
-					bytes: Buffer.from([dataByte]),
-					mnemonic: 'db',
-					opStr: `0x${dataByte.toString(16).padStart(2, '0').toUpperCase()}`,
-					size: 1,
-					isCall: false,
-					isJump: false,
-					isRet: false,
-					isConditional: false
-				});
-				offset++;
-				addr++;
+				offset += 4;
+				addr += 4;
+			}
+		} else {
+			// x86/x64: Variable-length instructions
+			while (offset < endOffset && instructions.length < 1000) {
+				const inst = this.disassembleInstructionFallback(offset, addr);
+				if (inst) {
+					instructions.push(inst);
+					this.instructions.set(addr, inst);
+					offset += inst.size;
+					addr += inst.size;
+				} else {
+					const dataByte = this.fileBuffer![offset];
+					instructions.push({
+						address: addr,
+						bytes: Buffer.from([dataByte]),
+						mnemonic: 'db',
+						opStr: `0x${dataByte.toString(16).padStart(2, '0').toUpperCase()}`,
+						size: 1,
+						isCall: false,
+						isJump: false,
+						isRet: false,
+						isConditional: false
+					});
+					offset++;
+					addr++;
+				}
 			}
 		}
 
 		return instructions;
+	}
+
+	/**
+	 * Basic ARM64 (AArch64) instruction decoder fallback.
+	 * Only decodes the most common instructions for function discovery.
+	 */
+	private decodeARM64Fallback(word: number, addr: number, bytes: Buffer): Instruction {
+		// NOP: 0xD503201F
+		if (word === 0xD503201F) {
+			return this.createInstruction(addr, bytes, 'nop', '', 4, false, false, false, false);
+		}
+
+		// RET: 0xD65F03C0 (ret x30)
+		if ((word & 0xFFFFFC1F) === 0xD65F0000) {
+			const rn = (word >> 5) & 0x1F;
+			return this.createInstruction(addr, bytes, 'ret', rn === 30 ? '' : `x${rn}`, 4, false, false, true, false);
+		}
+
+		// BL imm26 (call): 1001_01ii_iiii_iiii_iiii_iiii_iiii_iiii
+		if ((word & 0xFC000000) === 0x94000000) {
+			let imm26 = word & 0x03FFFFFF;
+			if (imm26 & 0x02000000) { imm26 |= ~0x03FFFFFF; } // sign extend
+			const target = addr + (imm26 << 2);
+			return this.createInstruction(addr, bytes, 'bl', `#0x${(target >>> 0).toString(16).toUpperCase()}`, 4, true, false, false, false, target);
+		}
+
+		// B imm26 (jump): 0001_01ii_iiii_iiii_iiii_iiii_iiii_iiii
+		if ((word & 0xFC000000) === 0x14000000) {
+			let imm26 = word & 0x03FFFFFF;
+			if (imm26 & 0x02000000) { imm26 |= ~0x03FFFFFF; }
+			const target = addr + (imm26 << 2);
+			return this.createInstruction(addr, bytes, 'b', `#0x${(target >>> 0).toString(16).toUpperCase()}`, 4, false, true, false, false, target);
+		}
+
+		// B.cond imm19: 0101_0100_iiii_iiii_iiii_iiii_iii0_cccc
+		if ((word & 0xFF000010) === 0x54000000) {
+			const cond = word & 0xF;
+			const condNames = ['eq', 'ne', 'hs', 'lo', 'mi', 'pl', 'vs', 'vc', 'hi', 'ls', 'ge', 'lt', 'gt', 'le', 'al', 'nv'];
+			let imm19 = (word >> 5) & 0x7FFFF;
+			if (imm19 & 0x40000) { imm19 |= ~0x7FFFF; }
+			const target = addr + (imm19 << 2);
+			return this.createInstruction(addr, bytes, `b.${condNames[cond]}`, `#0x${(target >>> 0).toString(16).toUpperCase()}`, 4, false, true, false, cond !== 14, target);
+		}
+
+		// CBZ/CBNZ: x011_010x_iiii_iiii_iiii_iiii_iiit_tttt
+		if ((word & 0x7E000000) === 0x34000000) {
+			const is64 = (word >> 31) & 1;
+			const isNZ = (word >> 24) & 1;
+			const rt = word & 0x1F;
+			let imm19 = (word >> 5) & 0x7FFFF;
+			if (imm19 & 0x40000) { imm19 |= ~0x7FFFF; }
+			const target = addr + (imm19 << 2);
+			const regPrefix = is64 ? 'x' : 'w';
+			return this.createInstruction(addr, bytes, isNZ ? 'cbnz' : 'cbz', `${regPrefix}${rt}, #0x${(target >>> 0).toString(16).toUpperCase()}`, 4, false, true, false, true, target);
+		}
+
+		// STP x29, x30, [sp, #imm] — common prolog (any addressing mode)
+		if ((word & 0xFC407FFF) === 0xA8007BFD) {
+			const imm7 = (word >> 15) & 0x7F;
+			const offset = ((imm7 & 0x40) ? (imm7 | ~0x7F) : imm7) * 8;
+			return this.createInstruction(addr, bytes, 'stp', `x29, x30, [sp, #${offset}]!`, 4, false, false, false, false);
+		}
+
+		// LDP x29, x30, [sp], #imm — common epilog
+		if ((word & 0xFFFF83FF) === 0xA8C003FD) {
+			const imm7 = (word >> 15) & 0x7F;
+			const offset = ((imm7 & 0x40) ? (imm7 | ~0x7F) : imm7) * 8;
+			return this.createInstruction(addr, bytes, 'ldp', `x29, x30, [sp], #${offset}`, 4, false, false, false, false);
+		}
+
+		// BLR Xn (indirect call): 1101_0110_0011_1111_0000_00nn_nnn0_0000
+		if ((word & 0xFFFFFC1F) === 0xD63F0000) {
+			const rn = (word >> 5) & 0x1F;
+			return this.createInstruction(addr, bytes, 'blr', `x${rn}`, 4, true, false, false, false);
+		}
+
+		// BR Xn (indirect jump): 1101_0110_0001_1111_0000_00nn_nnn0_0000
+		if ((word & 0xFFFFFC1F) === 0xD61F0000) {
+			const rn = (word >> 5) & 0x1F;
+			return this.createInstruction(addr, bytes, 'br', `x${rn}`, 4, false, true, false, false);
+		}
+
+		// Default: emit as .word
+		return this.createInstruction(addr, bytes, '.word', `0x${word.toString(16).padStart(8, '0').toUpperCase()}`, 4, false, false, false, false);
+	}
+
+	/**
+	 * Basic ARM32 instruction decoder fallback.
+	 */
+	private decodeARM32Fallback(word: number, addr: number, bytes: Buffer): Instruction {
+		const cond = (word >>> 28) & 0xF;
+
+		// NOP: E320F000 or E1A00000 (mov r0, r0)
+		if (word === 0xE320F000 || word === 0xE1A00000) {
+			return this.createInstruction(addr, bytes, 'nop', '', 4, false, false, false, false);
+		}
+
+		// BX LR (return): cond_0001_0010_1111_1111_1111_0001_1110 = xxE12FFF1E
+		if ((word & 0x0FFFFFFF) === 0x012FFF1E) {
+			return this.createInstruction(addr, bytes, 'bx', 'lr', 4, false, false, true, false);
+		}
+
+		// POP {pc} or LDM SP!, {... pc} — also a return
+		// LDMIA SP!, {reglist} with bit 15 set (PC): cond_1000_1011_1101_RRRR_RRRR_RRRR_RRRR
+		if ((word & 0x0FFF0000) === 0x08BD0000 && (word & (1 << 15)) !== 0) {
+			return this.createInstruction(addr, bytes, 'pop', '{..., pc}', 4, false, false, true, false);
+		}
+
+		// BL imm24 (call): cond_1011_iiii_iiii_iiii_iiii_iiii_iiii
+		if ((word & 0x0F000000) === 0x0B000000) {
+			let imm24 = word & 0x00FFFFFF;
+			if (imm24 & 0x00800000) { imm24 |= ~0x00FFFFFF; }
+			const target = addr + 8 + (imm24 << 2); // ARM32: PC+8 pipeline
+			return this.createInstruction(addr, bytes, 'bl', `#0x${(target >>> 0).toString(16).toUpperCase()}`, 4, true, false, false, false, target);
+		}
+
+		// B imm24 (jump): cond_1010_iiii_iiii_iiii_iiii_iiii_iiii
+		if ((word & 0x0F000000) === 0x0A000000) {
+			let imm24 = word & 0x00FFFFFF;
+			if (imm24 & 0x00800000) { imm24 |= ~0x00FFFFFF; }
+			const target = addr + 8 + (imm24 << 2);
+			const isConditional = cond !== 0xE; // 0xE = always
+			return this.createInstruction(addr, bytes, 'b', `#0x${(target >>> 0).toString(16).toUpperCase()}`, 4, false, true, false, isConditional, target);
+		}
+
+		// PUSH {reglist}: STMDB SP!, {reglist} = cond_1001_0010_1101_RRRR_RRRR_RRRR_RRRR
+		if ((word & 0x0FFF0000) === 0x092D0000) {
+			return this.createInstruction(addr, bytes, 'push', '{...}', 4, false, false, false, false);
+		}
+
+		// Default: emit as .word
+		return this.createInstruction(addr, bytes, '.word', `0x${word.toString(16).padStart(8, '0').toUpperCase()}`, 4, false, false, false, false);
 	}
 
 	private disassembleInstructionFallback(offset: number, addr: number): Instruction | null {
@@ -1442,7 +1593,9 @@ export class DisassemblerEngine {
 		}
 
 		// Find function end - handle multiple RETs, look for the last one followed by
-		// padding (0xCC/0x90) or another function prolog
+		// padding or another function prolog. Architecture-aware detection.
+		const isARM = this.architecture === 'arm64' || this.architecture === 'arm';
+
 		let endIdx = instructions.length;
 		let lastRetIdx = -1;
 		for (let i = 0; i < instructions.length; i++) {
@@ -1451,12 +1604,37 @@ export class DisassemblerEngine {
 				// Check if next instruction is padding or unreachable
 				if (i + 1 < instructions.length) {
 					const next = instructions[i + 1];
-					const nextByte = next.bytes[0];
-					// If next is INT3 (0xCC), NOP (0x90), or another function prolog, end here
-					if (nextByte === 0xCC || nextByte === 0x90 || nextByte === 0x55) {
-						endIdx = i + 1;
-						break;
+
+					if (isARM) {
+						// ARM/ARM64: Check if next instruction is a new function prolog or padding
+						if (next.bytes.length >= 4) {
+							const nextWord = next.bytes.readUInt32LE(0);
+							const isARM64Prolog =
+								(nextWord & 0xFC407FFF) === 0xA8007BFD ||  // STP x29, x30, [sp, #off]
+								nextWord === 0xD503233F ||                  // PACIASP
+								((nextWord & 0xFF0003FF) === 0xD10003FF && ((nextWord >> 5) & 0x1F) === 31); // SUB SP, SP, #N
+							const isARM32Prolog =
+								(nextWord & 0xFFFF0000) === 0xE92D0000 && (nextWord & (1 << 14)) !== 0; // PUSH {..., lr}
+							const isNop =
+								nextWord === 0xD503201F ||  // ARM64 NOP
+								nextWord === 0xE320F000 ||  // ARM32 NOP (mov r0, r0)
+								nextWord === 0xE1A00000;    // ARM32 NOP (mov r0, r0 alt)
+							const isUDF = (nextWord & 0xFFFF0000) === 0x00000000; // UDF (undefined) as padding
+
+							if (isARM64Prolog || isARM32Prolog || isNop || isUDF) {
+								endIdx = i + 1;
+								break;
+							}
+						}
+					} else {
+						// x86/x64: INT3 (0xCC), NOP (0x90), or push rbp (0x55)
+						const nextByte = next.bytes[0];
+						if (nextByte === 0xCC || nextByte === 0x90 || nextByte === 0x55) {
+							endIdx = i + 1;
+							break;
+						}
 					}
+
 					// If next instruction is a jump target from within the function, continue
 					const isJumpTarget = instructions.slice(0, i).some(
 						inst => inst.targetAddress === next.address
@@ -1515,7 +1693,9 @@ export class DisassemblerEngine {
 
 		this.functions.set(address, func);
 
-		// Recursively analyze called functions
+		// Collect child targets for analysis (calls + trampoline jumps)
+		const childTargets: number[] = [];
+
 		for (const inst of funcInstructions) {
 			if (inst.isCall && inst.targetAddress && this.functions.size < this.maxFunctions) {
 				func.callees.push(inst.targetAddress);
@@ -1529,13 +1709,30 @@ export class DisassemblerEngine {
 					}
 				}
 
-				// Don't await to avoid deep recursion
-				this.analyzeFunction(inst.targetAddress);
+				if (!this.functions.has(inst.targetAddress)) {
+					childTargets.push(inst.targetAddress);
+				}
 			}
 
-			// Record jump xrefs
+			// Record jump xrefs and follow unconditional jump targets as new functions
 			if (inst.isJump && inst.targetAddress) {
 				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'jump' });
+
+				// Follow unconditional jumps whose targets are outside this function
+				// (trampolines, tail calls, thunks) — treat target as a new function
+				if (!inst.isConditional &&
+					inst.targetAddress !== address &&
+					!this.functions.has(inst.targetAddress) &&
+					this.functions.size < this.maxFunctions) {
+					childTargets.push(inst.targetAddress);
+				}
+			}
+		}
+
+		// Await child analysis to avoid race conditions with floating promises
+		for (const target of childTargets) {
+			if (!this.functions.has(target) && this.functions.size < this.maxFunctions) {
+				await this.analyzeFunction(target);
 			}
 		}
 
@@ -1543,12 +1740,16 @@ export class DisassemblerEngine {
 	}
 
 	/**
-	 * Scan code sections for function prologs
+	 * Scan code sections for function prologs.
+	 * Supports x86/x64 and ARM64/ARM32 prolog patterns.
 	 */
 	private async scanForFunctionPrologs(): Promise<void> {
 		if (!this.fileBuffer) {
 			return;
 		}
+
+		const isARM64 = this.architecture === 'arm64';
+		const isARM32 = this.architecture === 'arm';
 
 		for (const section of this.sections) {
 			if (!section.isCode && !section.isExecutable) {
@@ -1558,23 +1759,41 @@ export class DisassemblerEngine {
 			const secOffset = section.rawAddress;
 			const secEnd = secOffset + section.rawSize;
 
-			for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off++) {
-				const byte = this.fileBuffer[off];
+			if (isARM64) {
+				// ARM64: Fixed-width 4-byte instructions, must be 4-byte aligned
+				for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off += 4) {
+					if (off + 4 > this.fileBuffer.length) { break; }
+					const word = this.fileBuffer.readUInt32LE(off);
 
-				// x64: push rbp (0x55) followed by mov rbp, rsp (0x48 0x89 0xE5)
-				if (byte === 0x55 && off + 3 < secEnd) {
-					if (this.fileBuffer[off + 1] === 0x48 &&
-						this.fileBuffer[off + 2] === 0x89 &&
-						this.fileBuffer[off + 3] === 0xE5) {
+					// Pattern 1: STP X29, X30, [SP, #imm] (any addressing mode)
+					// Encoding: 10 101 0 0mm iiiiiii 11110 11111 11101
+					// mm = addressing mode (01=signed-offset, 10=post-index, 11=pre-index)
+					// Check: opc=10, fixed=101, V=0, L=0(store), Rt2=30, Rn=31(SP), Rt=29
+					// Mask out: mode bits[25:23], imm7 bits[21:15]
+					// Mask: 0xFC407FFF  Value: 0xA8007BFD
+					if ((word & 0xFC407FFF) === 0xA8007BFD) {
+						// STP x29, x30, [sp, #off] — classic ARM64 prolog
 						const addr = this.sectionOffsetToAddress(off, section);
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
 						}
 						continue;
 					}
-					// x86: push ebp (0x55) followed by mov ebp, esp (0x89 0xE5)
-					if (this.fileBuffer[off + 1] === 0x89 &&
-						this.fileBuffer[off + 2] === 0xE5) {
+
+					// Pattern 2: SUB SP, SP, #imm (frame setup without STP)
+					// Encoding: 1101_0001_00ii_iiii_iiii_ii11_111x_xxxx
+					// Check: bits[31]=1(64-bit), [30]=1(SUB), [29]=0, [28:24]=10001, Rn=SP(31), Rd=SP(31)
+					if ((word & 0xFF0003FF) === 0xD10003FF && ((word >> 5) & 0x1F) === 31) {
+						const addr = this.sectionOffsetToAddress(off, section);
+						if (addr > 0 && !this.functions.has(addr)) {
+							await this.analyzeFunction(addr);
+						}
+						continue;
+					}
+
+					// Pattern 3: PACIASP (pointer auth prolog, common in hardened ARM64)
+					// Encoding: 0xD503233F
+					if (word === 0xD503233F) {
 						const addr = this.sectionOffsetToAddress(off, section);
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
@@ -1582,14 +1801,70 @@ export class DisassemblerEngine {
 						continue;
 					}
 				}
+			} else if (isARM32) {
+				// ARM32: Fixed-width 4-byte instructions
+				for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off += 4) {
+					if (off + 4 > this.fileBuffer.length) { break; }
+					const word = this.fileBuffer.readUInt32LE(off);
 
-				// x64: sub rsp, imm8 (0x48 0x83 0xEC imm8) - frameless function
-				if (byte === 0x48 && off + 3 < secEnd) {
-					if (this.fileBuffer[off + 1] === 0x83 &&
-						this.fileBuffer[off + 2] === 0xEC) {
+					// Pattern 1: PUSH {fp, lr} or PUSH {r4-r11, lr} — STMDB SP!, {...}
+					// ARM32 PUSH is STMDB SP! with cond=1110(always)
+					// Encoding: 1110_1001_0010_1101_RRRR_RRRR_RRRR_RRRR
+					// Mask: 0xFFFF0000 = 0xE92D, reglist includes LR(bit14)
+					if ((word & 0xFFFF0000) === 0xE92D0000 && (word & (1 << 14)) !== 0) {
 						const addr = this.sectionOffsetToAddress(off, section);
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
+						}
+						continue;
+					}
+
+					// Pattern 2: PUSH {r11, lr} — short form: 0xE52DE004 style or STR LR, [SP, #-4]!
+					// Simpler check: MOV R11, SP (0xE1A0B00D) often follows PUSH
+					if ((word & 0xFFFFF000) === 0xE52DE000) {
+						// STR LR, [SP, #-imm]!
+						const addr = this.sectionOffsetToAddress(off, section);
+						if (addr > 0 && !this.functions.has(addr)) {
+							await this.analyzeFunction(addr);
+						}
+						continue;
+					}
+				}
+			} else {
+				// x86/x64: Variable-length instructions
+				for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off++) {
+					const byte = this.fileBuffer[off];
+
+					// x64: push rbp (0x55) followed by mov rbp, rsp (0x48 0x89 0xE5)
+					if (byte === 0x55 && off + 3 < secEnd) {
+						if (this.fileBuffer[off + 1] === 0x48 &&
+							this.fileBuffer[off + 2] === 0x89 &&
+							this.fileBuffer[off + 3] === 0xE5) {
+							const addr = this.sectionOffsetToAddress(off, section);
+							if (addr > 0 && !this.functions.has(addr)) {
+								await this.analyzeFunction(addr);
+							}
+							continue;
+						}
+						// x86: push ebp (0x55) followed by mov ebp, esp (0x89 0xE5)
+						if (this.fileBuffer[off + 1] === 0x89 &&
+							this.fileBuffer[off + 2] === 0xE5) {
+							const addr = this.sectionOffsetToAddress(off, section);
+							if (addr > 0 && !this.functions.has(addr)) {
+								await this.analyzeFunction(addr);
+							}
+							continue;
+						}
+					}
+
+					// x64: sub rsp, imm8 (0x48 0x83 0xEC imm8) - frameless function
+					if (byte === 0x48 && off + 3 < secEnd) {
+						if (this.fileBuffer[off + 1] === 0x83 &&
+							this.fileBuffer[off + 2] === 0xEC) {
+							const addr = this.sectionOffsetToAddress(off, section);
+							if (addr > 0 && !this.functions.has(addr)) {
+								await this.analyzeFunction(addr);
+							}
 						}
 					}
 				}

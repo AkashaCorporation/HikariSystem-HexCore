@@ -9,11 +9,11 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-14)
+## Current Snapshot (2026-02-16 — v3.5.1 "ARM64 Fix")
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
-- P1 delivered: **2/4** (`#7b`, `#8`)
+- P1 delivered: **2/4** (`#7a`, `#8`)
 - P2 delivered: **0/2**
-- Infrastructure delivered: **7/7** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`, `#20`)
+- Infrastructure delivered: **8/8** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`, `#18`, `#20`)
 - Future Engines delivered: **0/2** (hexcore-rellic `NEXT`)
 - Pipeline hardening added beyond original backlog:
   - `.hexcore_job.json` schema validation
@@ -21,6 +21,20 @@
   - `hexcore.pipeline.validateWorkspace`
   - `hexcore.pipeline.doctor`
   - step retries (`retryCount`, `retryDelayMs`)
+- v3.5.0 additions:
+  - Full codebase security audit ("Fortification")
+  - Capstone sync/async ARM/ARM64 detail parity (1.3.2)
+  - Native module naming mismatch fix (underscore vs hyphen)
+  - Remill promoted from experimental to production pipeline
+- v3.5.1 additions:
+  - ARM64 instruction classification fix in Capstone wrapper (isCall, isRet, isJump, isConditional)
+  - ARM64/ARM32 function prolog scanning (STP x29,x30 / SUB SP,SP / PACIASP / PUSH {lr})
+  - ARM64 trampoline/thunk following in recursive function analysis
+  - ARM64 fallback disassembly (decodeARM64Fallback, decodeARM32Fallback)
+  - ARM64 stack string detection (STRB, STR w/ SP/FP base)
+  - ARM64 DebugEngine: 5 methods + 20 syscalls (#22 DONE)
+  - ARM64 formulaBuilder: registers + 15 mnemonics (#26 DONE)
+  - Race condition fix: analyzeFunction now awaits child BL targets
 
 ---
 
@@ -154,7 +168,7 @@
   - Multi-arch emulation: x86, x64, ARM, ARM64, MIPS, SPARC, PPC, RISC-V.
   - Breakpoints, shared memory, snapshot/restore APIs.
   - Prebuild pipeline (win32-x64).
-- **Version**: 1.2.0
+- **Version**: 1.2.1
 - **Target**: v3.3.0
 
 ### 14. LLVM MC N-API Bindings (hexcore-llvm-mc)
@@ -203,7 +217,7 @@
 - **Feature**: Automated prebuild generation for all native engines.
 - **Acceptance**:
   - GitHub Actions workflow (`hexcore-native-prebuilds.yml`).
-  - Builds 4 engines: Capstone, Unicorn, LLVM MC, better-sqlite3.
+  - Builds 5 engines: Capstone, Unicorn, LLVM MC, better-sqlite3, Remill.
   - Creates releases on standalone repos with prebuild tarballs.
   - Preflight validation (`verify-hexcore-preflight.cjs`).
   - `HEXCORE_RELEASE_TOKEN` for cross-repo releases.
@@ -231,7 +245,7 @@
   - `liftToIR` command integrated in disassembler.
   - Prebuild pipeline with semantics tarball (win32-x64).
   - Loaded dynamically via `candidatePaths` — disassembler degrades gracefully.
-- **Version**: 0.1.1
+- **Version**: 0.1.2
 - **Standalone repo**: [hexcore-remill](https://github.com/LXrdKnowkill/hexcore-remill)
 - **Target**: v3.4.0 ✅
 
@@ -266,6 +280,72 @@ Binary → Remill lift stage → LLVM IR → Rellic (C code)
 - `DONE`: hexcore-remill v0.1.0 (N-API wrapper + disassembler integration)
 - Keep Windows installer/build green for 3 consecutive runs
 - Keep pipeline contract stable (`file`, `quiet`, `output`) during native-engine integration
+
+---
+
+## v3.5.0 Audit — New Backlog Items
+
+Items discovered during the comprehensive stress test and audit against an HTB Insane-level ARM64 challenge (2026-02-15).
+
+### 21. Debugger Headless Commands
+- **Status**: `PENDING`
+- **Feature**: Expose DebugEngine's programmatic API as headless VS Code commands for pipeline use.
+- **Commands needed**: `emulateHeadless`, `stepHeadless`, `continueHeadless`, `readMemoryHeadless`, `setBreakpointHeadless`, `snapshotHeadless`, `restoreSnapshotHeadless`
+- **Why**: The engine (`debugEngine.ts`, `unicornWrapper.ts`) is 100% programmatic. All 10 current commands wrap with UI dialogs (`showOpenDialog`, `showInputBox`). AI agents and the pipeline cannot use emulation at all.
+- **Priority**: P0 — blocks any pipeline workflow that needs dynamic analysis
+- **Target**: v3.6.0
+
+### 22. ARM64 DebugEngine Completion
+- **Status**: `DONE` (v3.5.1)
+- **Feature**: Complete ARM64 codepaths in DebugEngine for full ELF emulation.
+- **Methods needed**:
+  - `setupStack()` — configure LR (Link Register) for ARM64
+  - `initializeElfProcessStack()` — mount argc/argv/envp in ARM64 layout
+  - `installSyscallHandler()` — intercept SVC #0 (ARM64 syscall instruction)
+  - `updateEmulationRegisters()` — map ARM64 registers (x0-x30, sp, lr, pc)
+  - `popReturnAddress()` — read LR instead of popping from stack
+- **Why**: Unicorn wrapper already supports ARM64 fully (init, registers, memory). DebugEngine is the bottleneck.
+- **Priority**: P1
+- **Target**: v3.6.0
+
+### 23. ELF Analyzer Extension
+- **Status**: `PENDING`
+- **Feature**: Create `hexcore-elfanalyzer` with headless commands equivalent to `hexcore-peanalyzer`.
+- **Commands**: `elfanalyzer.analyze`, `elfanalyzer.analyzeActive`
+- **Output**: sections, segments, symbols, dynamic linking info, RELRO, stack canary, NX, PIE status
+- **Why**: PE has full structural analysis via `hexcore-peanalyzer`. ELF has nothing equivalent — the disassembler's internal parser is not exposed as structured analysis.
+- **Priority**: P1
+- **Target**: v3.6.0+
+
+### 24. Base64 Headless Mode
+- **Status**: `PENDING`
+- **Feature**: Add `hexcore.base64.decodeHeadless` that writes decoded output to file instead of opening editor.
+- **Why**: Current command always opens a markdown report in the editor, blocking pipeline use.
+- **Priority**: P2
+- **Target**: v3.6.0
+
+### 25. Multi-byte XOR Deobfuscation
+- **Status**: `PENDING`
+- **Feature**: Extend `hexcore.strings.extractAdvanced` to detect multi-byte XOR keys.
+- **Key sizes**: 2, 4, 8, 16 bytes + rolling XOR + XOR with increment
+- **Why**: Current implementation only brute-forces single-byte keys (0x01-0xFF). Modern malware uses multi-byte XOR extensively.
+- **Priority**: P1
+- **Target**: v3.6.0
+
+### 26. buildFormula ARM64 Register Support
+- **Status**: `DONE` (v3.5.1)
+- **Feature**: Expand `hexcore.disasm.buildFormula` register regex to recognize ARM64 registers.
+- **Registers to add**: x0-x30, w0-w30, sp, lr, xzr, wzr
+- **Why**: Currently only recognizes x86/x64 registers (eax, ebx, rax, rbx, etc.). ARM64 formulas produce empty/incorrect results.
+- **Priority**: P2
+- **Target**: v3.6.0
+
+### 27. Hex Viewer Headless Commands
+- **Status**: `PENDING`
+- **Feature**: Add `hexcore.hexview.dumpHeadless` and `hexcore.hexview.searchHeadless` for pipeline use.
+- **Why**: All hex viewer commands require the webview open. No programmatic hex data extraction possible.
+- **Priority**: P2
+- **Target**: v3.6.0+
 
 ---
 

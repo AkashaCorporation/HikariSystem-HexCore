@@ -58,6 +58,11 @@ export class DebugEngine {
 	private fileBuffer?: Buffer;
 	private fileType: 'pe' | 'elf' | 'raw' = 'raw';
 
+	// ARM64 mmap offset tracker for syscall-based memory allocation
+	private _arm64MmapOffset: number = 0;
+	// ARM64 full register set (extended data for UI beyond x86 mapping)
+	private _arm64Registers: any = null;
+
 	async getEmulationAvailability(arch: ArchitectureType): Promise<{ available: boolean; error?: string }> {
 		if (!this.emulator) {
 			this.emulator = new UnicornWrapper();
@@ -151,12 +156,13 @@ export class DebugEngine {
 		// Setup stack
 		const stackBase = 0x7FFF0000n;
 		this.emulator!.setupStack(stackBase);
+		this.setupArm64Stack();
 
 		// Install API call interceptor via code hook
 		this.installApiInterceptor();
 
 		// Set instruction pointer to entry point
-		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		const ipReg = this.architecture === 'arm64' ? 'pc' : (this.architecture === 'x64' ? 'rip' : 'eip');
 		this.emulator!.setRegister(ipReg, peInfo.entryPoint);
 		this.emulator!.setCurrentAddress(peInfo.entryPoint);
 
@@ -191,6 +197,7 @@ export class DebugEngine {
 		// Setup stack
 		const stackBase = 0x7FFF0000n;
 		this.emulator!.setupStack(stackBase);
+		this.setupArm64Stack();
 		this.initializeElfProcessStack();
 
 		// Setup TLS (Thread Local Storage) region for fs:[0x28] stack canary access.
@@ -206,7 +213,7 @@ export class DebugEngine {
 		this.installSyscallHandler();
 
 		// Set instruction pointer to entry point
-		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		const ipReg = this.architecture === 'arm64' ? 'pc' : (this.architecture === 'x64' ? 'rip' : 'eip');
 		this.emulator!.setRegister(ipReg, elfInfo.entryPoint);
 		this.emulator!.setCurrentAddress(elfInfo.entryPoint);
 
@@ -235,10 +242,39 @@ export class DebugEngine {
 		// Setup stack
 		const stackBase = 0x7FFF0000n;
 		this.emulator!.setupStack(stackBase);
+		this.setupArm64Stack();
 
-		const ipReg = this.architecture === 'x64' ? 'rip' : 'eip';
+		const ipReg = this.architecture === 'arm64' ? 'pc' : (this.architecture === 'x64' ? 'rip' : 'eip');
 		this.emulator!.setRegister(ipReg, loadBase);
 		this.emulator!.setCurrentAddress(loadBase);
+	}
+
+	/**
+	 * Configure ARM64-specific stack semantics after the base stack is mapped.
+	 * ARM64 doesn't push return addresses to the stack — it uses the Link Register (X30/LR).
+	 * Set LR to a sentinel value so a RET at the end of main stops emulation.
+	 * Also ensure SP is 16-byte aligned as required by the AAPCS64 ABI.
+	 */
+	private setupArm64Stack(): void {
+		if (!this.emulator || this.architecture !== 'arm64') {
+			return;
+		}
+
+		try {
+			// Set LR (X30) to sentinel return address so RET stops emulation
+			this.emulator.setRegister('lr', 0xDEAD0000n);
+
+			// Read current SP and ensure 16-byte alignment (AAPCS64 requirement)
+			const regs = this.emulator.getRegistersArm64();
+			const alignedSp = (regs.sp / 16n) * 16n;
+			if (alignedSp !== regs.sp) {
+				this.emulator.setRegister('sp', alignedSp);
+			}
+
+			console.log(`ARM64 stack configured: LR=0xDEAD0000, SP=0x${alignedSp.toString(16)}`);
+		} catch (e) {
+			console.warn(`Failed to setup ARM64 stack: ${e}`);
+		}
 	}
 
 	/**
@@ -305,6 +341,41 @@ export class DebugEngine {
 		}
 
 		try {
+			if (this.architecture === 'arm64') {
+				// ARM64 ELF ABI: argc in X0, argv pointer in X1, envp pointer in X2
+				// argv array and strings are still on the stack, but argc is passed via register
+				const regs = this.emulator.getRegistersArm64();
+				let stackPtr = regs.sp - 0x80n;
+				stackPtr = (stackPtr / 16n) * 16n; // 16-byte alignment (AAPCS64)
+
+				// Write argv[0] string on the stack
+				const argv0 = Buffer.from('hexcore\0', 'ascii');
+				const argv0Addr = stackPtr - 0x40n;
+				this.emulator.writeMemory(argv0Addr, argv0);
+
+				// Build argv array on stack: [argv0_ptr, NULL]
+				const argvArray = Buffer.alloc(16);
+				argvArray.writeBigUInt64LE(argv0Addr, 0);  // argv[0]
+				argvArray.writeBigUInt64LE(0n, 8);          // argv[1] = NULL (terminator)
+				const argvAddr = stackPtr;
+				this.emulator.writeMemory(argvAddr, argvArray);
+
+				// envp array on stack: [NULL]
+				const envpArray = Buffer.alloc(8);
+				envpArray.writeBigUInt64LE(0n, 0);          // envp[0] = NULL
+				const envpAddr = stackPtr + 16n;
+				this.emulator.writeMemory(envpAddr, envpArray);
+
+				// Set registers: X0 = argc, X1 = argv, X2 = envp
+				this.emulator.setRegister('x0', 1n);
+				this.emulator.setRegister('x1', argvAddr);
+				this.emulator.setRegister('x2', envpAddr);
+
+				// Update SP
+				this.emulator.setRegister('sp', stackPtr - 0x40n);
+				return;
+			}
+
 			if (this.architecture === 'x64') {
 				const regs = this.emulator.getRegistersX64();
 				let stackPtr = regs.rsp - 0x80n;
@@ -465,6 +536,27 @@ export class DebugEngine {
 		}
 
 		this.emulator.setInterruptHandler((intno: number) => {
+			if (this.architecture === 'arm64') {
+				// ARM64: SVC #0 generates interrupt 2 in Unicorn
+				if (intno === 2) {
+					const result = this.handleArm64Syscall();
+
+					// Set return value in X0
+					this.emulator!.setRegister('x0', result);
+
+					// Emit syscall event for the UI
+					const regs = this.emulator!.getRegistersArm64();
+					const sysNum = Number(regs.x8); // ARM64 syscall number is in X8
+
+					this.emit('api-call', {
+						dll: 'syscall',
+						name: `sys_${sysNum}`,
+						returnValue: result
+					});
+				}
+				return;
+			}
+
 			// int 0x80 on x86 or SYSCALL instruction generates interrupt 2 in Unicorn
 			if (intno === 0x80 || intno === 2) {
 				const result = this.linuxApiHooks!.handleSyscall();
@@ -492,6 +584,116 @@ export class DebugEngine {
 	}
 
 	/**
+	 * Handle ARM64 syscalls (SVC #0).
+	 * ARM64 Linux syscall convention: X8 = syscall number, X0-X5 = arguments, X0 = return value.
+	 * Syscall numbers are different from x86/x64 — ARM64 uses its own numbering.
+	 */
+	private handleArm64Syscall(): bigint {
+		if (!this.emulator) {
+			return BigInt(-38); // -ENOSYS
+		}
+
+		const regs = this.emulator.getRegistersArm64();
+		const syscallNum = Number(regs.x8); // ARM64 syscall number is in X8
+		const args = [regs.x0, regs.x1, regs.x2, regs.x3, regs.x4, regs.x5];
+
+		return this.dispatchArm64Syscall(syscallNum, args);
+	}
+
+	/**
+	 * Dispatch an ARM64 Linux syscall by number.
+	 * ARM64 syscall numbers differ from x86/x64.
+	 * Reference: https://arm64.syscall.sh/
+	 */
+	private dispatchArm64Syscall(syscallNum: number, args: bigint[]): bigint {
+		switch (syscallNum) {
+			case 56: // openat
+				return 3n; // Return a dummy fd
+			case 57: // close
+				return 0n;
+			case 63: { // read(fd, buf, count)
+				return 0n; // EOF
+			}
+			case 64: { // write(fd, buf, count)
+				const count = Number(args[2]);
+				if (count > 0 && count < 0x10000) {
+					try {
+						const data = this.emulator!.readMemory(args[1], count);
+						const fd = Number(args[0]);
+						console.log(`[arm64 syscall write fd${fd}] ${data.toString('utf8')}`);
+						return BigInt(count);
+					} catch {
+						return BigInt(-14); // -EFAULT
+					}
+				}
+				return 0n;
+			}
+			case 93: // exit
+				console.log(`[arm64 syscall exit] code=${Number(args[0])}`);
+				this.emulator!.stop();
+				return 0n;
+			case 94: // exit_group
+				console.log(`[arm64 syscall exit_group] code=${Number(args[0])}`);
+				this.emulator!.stop();
+				return 0n;
+			case 96: // set_tid_address
+				return 0x1000n;
+			case 98: // futex
+				return 0n;
+			case 113: // clock_gettime
+				return 0n;
+			case 124: // sched_yield
+				return 0n;
+			case 131: // tgkill
+				return 0n;
+			case 160: // uname
+				return 0n;
+			case 172: // getpid
+				return 0x1000n;
+			case 174: // getuid
+				return 1000n;
+			case 175: // geteuid
+				return 1000n;
+			case 176: // getgid
+				return 1000n;
+			case 177: // getegid
+				return 1000n;
+			case 214: { // brk
+				return 0x06000000n; // Return end of heap
+			}
+			case 215: // munmap
+				return 0n;
+			case 222: { // mmap
+				const length = Number(args[1]);
+				const prot = Number(args[2]);
+				if (length > 0 && length < 0x10000000 && this.memoryManager) {
+					let ucProt = 0;
+					if (prot & 1) { ucProt |= 1; } // PROT_READ
+					if (prot & 2) { ucProt |= 2; } // PROT_WRITE
+					if (prot & 4) { ucProt |= 4; } // PROT_EXEC
+					const addr = 0x20000000n + BigInt(this._arm64MmapOffset);
+					const pageSize = BigInt(this.emulator!.getPageSize());
+					const alignedSize = ((BigInt(length) + pageSize - 1n) / pageSize) * pageSize;
+					try {
+						this.emulator!.mapMemoryRaw(addr, Number(alignedSize), ucProt || 1);
+						this.memoryManager.trackAllocation(addr, Number(alignedSize), ucProt || 1, 'mmap-arm64');
+						this._arm64MmapOffset += Number(alignedSize);
+						return addr;
+					} catch {
+						return BigInt(-12); // -ENOMEM
+					}
+				}
+				return BigInt(-12);
+			}
+			case 226: // mprotect
+				return 0n;
+			default:
+				console.log(`[arm64 syscall] Unhandled syscall ${syscallNum}`);
+				return BigInt(-38); // -ENOSYS
+		}
+	}
+
+	/**
 	 * Pop the return address from the stack and set the instruction pointer
 	 */
 	private popReturnAddress(): void {
@@ -499,7 +701,13 @@ export class DebugEngine {
 			return;
 		}
 
-		if (this.architecture === 'x64') {
+		if (this.architecture === 'arm64') {
+			// ARM64: Return address is in LR (X30), not on the stack
+			const regs = this.emulator.getRegistersArm64();
+			const retAddr = regs.lr; // X30 = Link Register
+			this.emulator.setRegister('pc', retAddr);
+			this.emulator.setCurrentAddress(retAddr);
+		} else if (this.architecture === 'x64') {
 			const regs = this.emulator.getRegistersX64();
 			const retAddr = this.emulator.readMemory(regs.rsp, 8).readBigUInt64LE();
 			this.emulator.setRegister('rsp', regs.rsp + 8n);
@@ -666,7 +874,7 @@ export class DebugEngine {
 	}
 
 	private isTerminalExecutionAddress(address: bigint): boolean {
-		return address === 0n || address === 0xDEADDEADn || address === 0xDEADDEADDEADDEADn;
+		return address === 0n || address === 0xDEADDEADn || address === 0xDEADDEADDEADDEADn || address === 0xDEAD0000n;
 	}
 
 	private getCurrentInstructionPointer(): bigint {
@@ -780,6 +988,37 @@ export class DebugEngine {
 				rip: BigInt(regs.eip),
 				rflags: BigInt(regs.eflags)
 			};
+		} else if (this.architecture === 'arm64') {
+			const regs = this.emulator.getRegistersArm64();
+			// Map ARM64 registers to the RegisterState interface.
+			// ARM64 general-purpose registers X0-X30, SP, PC, LR (=X30), FP (=X29), NZCV.
+			// We map them into the x86-style RegisterState for UI compatibility:
+			// rax→x0, rbx→x1, rcx→x2, rdx→x3, rsi→x4, rdi→x5, rbp→fp(x29), rsp→sp,
+			// r8→x8, r9→x9, r10→x10, r11→x11, r12→x12, r13→x13, r14→x14, r15→x15,
+			// rip→pc, rflags→nzcv
+			this.registers = {
+				rax: regs.x0,
+				rbx: regs.x1,
+				rcx: regs.x2,
+				rdx: regs.x3,
+				rsi: regs.x4,
+				rdi: regs.x5,
+				rbp: regs.fp,       // X29 / Frame Pointer
+				rsp: regs.sp,       // Stack Pointer
+				r8: regs.x8,
+				r9: regs.x9,
+				r10: regs.x10,
+				r11: regs.x11,
+				r12: regs.x12,
+				r13: regs.x13,
+				r14: regs.x14,
+				r15: regs.x15,
+				rip: regs.pc,       // Program Counter
+				rflags: regs.nzcv   // Condition flags (NZCV)
+			};
+
+			// Store full ARM64 register set as extended data for the UI
+			this._arm64Registers = regs;
 		}
 	}
 
