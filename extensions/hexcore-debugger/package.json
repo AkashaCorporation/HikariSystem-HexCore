@@ -32,6 +32,13 @@
 		"onCommand:hexcore.debug.saveSnapshot",
 		"onCommand:hexcore.debug.restoreSnapshot",
 		"onCommand:hexcore.debug.unicornStatus",
+		"onCommand:hexcore.debug.emulateHeadless",
+		"onCommand:hexcore.debug.continueHeadless",
+		"onCommand:hexcore.debug.stepHeadless",
+		"onCommand:hexcore.debug.readMemoryHeadless",
+		"onCommand:hexcore.debug.getRegistersHeadless",
+		"onCommand:hexcore.debug.setBreakpointHeadless",
+		"onCommand:hexcore.debug.getStateHeadless",
 		"onView:hexcore.debugger.view"
 	],
 	"main": "./out/extension.js",
@@ -95,6 +102,41 @@
 				"title": "Emulate: Restore Snapshot",
 				"category": "HexCore Debugger",
 				"icon": "$(history)"
+			},
+			{
+				"command": "hexcore.debug.emulateHeadless",
+				"title": "Emulate: Start Emulation (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.continueHeadless",
+				"title": "Emulate: Continue (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.stepHeadless",
+				"title": "Emulate: Step (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.readMemoryHeadless",
+				"title": "Emulate: Read Memory (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.getRegistersHeadless",
+				"title": "Emulate: Get Registers (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.setBreakpointHeadless",
+				"title": "Emulate: Set Breakpoint (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.getStateHeadless",
+				"title": "Emulate: Get State (Headless)",
+				"category": "HexCore Automation"
 			}
 		],
 		"viewsContainers": {
