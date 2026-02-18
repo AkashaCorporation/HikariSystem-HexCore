@@ -139,6 +139,8 @@ jobs:
           cd ../hexcore-ioc && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-yara && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-minidump && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elfanalyzer && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
 
@@ -287,6 +289,10 @@ jobs:
           cd ../hexcore-ioc && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-yara && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-minidump && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elfanalyzer && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
 
       - name: Build VS Code
         run: npm run gulp vscode-linux-x64-min
