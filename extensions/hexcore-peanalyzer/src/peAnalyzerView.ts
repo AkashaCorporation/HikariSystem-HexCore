@@ -28,10 +28,10 @@ export class PEAnalyzerViewProvider implements vscode.WebviewViewProvider {
 
 		webviewView.webview.html = this._getHtmlContent();
 
-		webviewView.webview.onDidReceiveMessage(message => {
+		webviewView.webview.onDidReceiveMessage(async message => {
 			switch (message.command) {
 				case 'openFile':
-					vscode.commands.executeCommand('hexcore.peanalyzer.analyze');
+					await vscode.commands.executeCommand('hexcore.peanalyzer.analyze');
 					break;
 				case 'copyToClipboard':
 					vscode.env.clipboard.writeText(message.text);
