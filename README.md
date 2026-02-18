@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-16):** `v3.5.1` "ARM64 Fix" — Complete ARM/ARM64 support across disassembler, debugger, strings, and formula engines. 72 functions discovered in ARM64 ELF (was 1). See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-02-17):** `v3.5.2` "Pipeline Maturity" — Full pipeline maturity with ELF Analyzer, Report Composer, multi-byte XOR deobfuscation, and headless commands for Debugger, Base64, and Hex Viewer. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
@@ -74,6 +74,8 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 | **YARA Scanner** | 2.1.0 | YARA scanning with DefenderYara integration and headless pipeline support |
 | **IOC Extractor** | 1.1.0 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
 | **Minidump Parser** | 1.0.0 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
+| **ELF Analyzer** | 1.0.0 | Structural analysis of ELF binaries — sections, segments, symbols, security mitigations (NEW) |
+| **Report Composer** | 1.0.0 | Aggregates pipeline outputs into unified Markdown reports with TOC and evidence links (NEW) |
 
 ### Native Engines (Standalone N-API Packages)
 
@@ -117,6 +119,16 @@ I/O, string, memory, heap, conversion, process, time, file stubs, and security f
 Kernel32, user32, msvcrt emulation for common PE analysis scenarios.
 
 > Powered by [hexcore-unicorn](extensions/hexcore-unicorn) and [hexcore-capstone](extensions/hexcore-capstone).
+
+### Known Limitations
+
+The HexCore emulator uses **Unicorn Engine** (based on QEMU's TCG backend) for CPU translation. While this covers the vast majority of real-world binaries, there are edge cases where Unicorn's behavior diverges from full QEMU user-mode or real hardware:
+
+- **Instruction fidelity** — Some undocumented or edge-case instructions may behave differently than on real CPUs or full QEMU. Binaries that rely on CPU-specific quirks (e.g., certain CTF challenges) may crash or produce incorrect results.
+- **ARM64 specifics** — ARM64 emulation runs in an isolated worker process to bypass Chromium security restrictions (ACG/CFG). This adds IPC overhead but is functionally equivalent.
+- **No full system emulation** — Unicorn provides user-mode emulation only. Kernel-level operations, hardware interrupts, and privileged instructions are not supported.
+
+For binaries that require higher fidelity emulation, consider using **QEMU user-mode** (`qemu-aarch64`, `qemu-x86_64`) alongside HexCore's static analysis tools.
 
 ---
 
@@ -166,6 +178,19 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
 - **Output** — JSON/Markdown reports + `hexcore-pipeline.status.json` + `hexcore-pipeline.log`
 
 All analysis extensions support headless execution with `file`, `output`, and `quiet` parameters.
+
+### v3.5.2 Headless Commands
+
+| Command | Extension | Description |
+|---------|-----------|-------------|
+| `hexcore.debug.snapshotHeadless` | hexcore-debugger | Save emulation snapshot |
+| `hexcore.debug.restoreSnapshotHeadless` | hexcore-debugger | Restore emulation snapshot |
+| `hexcore.debug.exportTraceHeadless` | hexcore-debugger | Export API/libc call trace |
+| `hexcore.elfanalyzer.analyze` | hexcore-elfanalyzer | Structural ELF analysis |
+| `hexcore.base64.decodeHeadless` | hexcore-base64 | Extract Base64 strings from binary |
+| `hexcore.hexview.dumpHeadless` | hexcore-hexviewer | Programmatic hex dump extraction |
+| `hexcore.hexview.searchHeadless` | hexcore-hexviewer | Pattern search with streaming |
+| `hexcore.pipeline.composeReport` | hexcore-report-composer | Aggregate reports into unified Markdown |
 
 See [docs/HEXCORE_AUTOMATION.md](docs/HEXCORE_AUTOMATION.md) for full documentation.
 
@@ -233,7 +258,9 @@ HikariSystem-HexCore/
 │   ├── hexcore-strings/        # Strings extractor
 │   ├── hexcore-entropy/        # Entropy analyzer
 │   ├── hexcore-base64/         # Base64 decoder
-│   └── hexcore-filetype/       # File type detector
+│   ├── hexcore-filetype/       # File type detector
+│   ├── hexcore-elfanalyzer/    # ELF binary analyzer
+│   └── hexcore-report-composer/ # Pipeline report aggregator
 ├── .agent/
 │   └── skills/hexcore/         # AI skill for agent integration
 ├── docs/                       # Documentation

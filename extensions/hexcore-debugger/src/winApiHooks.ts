@@ -6,6 +6,7 @@
 
 import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
+import { TraceManager, TraceEntry } from './traceManager';
 
 export interface ApiCallLog {
 	dll: string;
@@ -13,6 +14,10 @@ export interface ApiCallLog {
 	args: bigint[];
 	returnValue: bigint;
 	timestamp: number;
+	/** Arguments formatted as hex/decimal strings for trace display */
+	arguments: string[];
+	/** Program counter address at the point of the call */
+	pcAddress: bigint;
 }
 
 type ApiHandler = (args: bigint[]) => bigint;
@@ -31,6 +36,9 @@ export class WinApiHooks {
 	private moduleHandles: Map<string, bigint> = new Map();
 	private imageBase: bigint = 0x400000n;
 
+	/** Optional TraceManager for centralized trace recording */
+	private traceManager: TraceManager | null = null;
+
 	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager, arch: ArchitectureType) {
 		this.emulator = emulator;
 		this.memoryManager = memoryManager;
@@ -44,6 +52,13 @@ export class WinApiHooks {
 	 */
 	setImageBase(base: bigint): void {
 		this.imageBase = base;
+	}
+
+	/**
+	 * Set the TraceManager instance for centralized trace recording.
+	 */
+	setTraceManager(manager: TraceManager): void {
+		this.traceManager = manager;
 	}
 
 	/**
@@ -67,13 +82,46 @@ export class WinApiHooks {
 			console.log(`Unhandled API: ${dll}!${name}`);
 		}
 
+		// Capture PC address from current instruction pointer
+		let pcAddress = 0n;
+		try {
+			if (this.architecture === 'x64') {
+				const regs = this.emulator.getRegistersX64();
+				pcAddress = regs.rip;
+			} else {
+				const regs = this.emulator.getRegistersX86();
+				pcAddress = BigInt(regs.eip);
+			}
+		} catch {
+			// If we can't read PC, leave as 0
+		}
+
+		// Format arguments as hex strings for trace display
+		const formattedArgs = args.map(a => '0x' + a.toString(16));
+		const timestamp = Date.now();
+
 		this.callLog.push({
 			dll,
 			name,
 			args,
 			returnValue,
-			timestamp: Date.now()
+			timestamp,
+			arguments: formattedArgs,
+			pcAddress,
 		});
+
+		// Notify TraceManager if available
+		if (this.traceManager) {
+			const entry: TraceEntry = {
+				functionName: name,
+				library: dll,
+				arguments: formattedArgs,
+				returnValue: '0x' + returnValue.toString(16),
+				pcAddress: '0x' + pcAddress.toString(16),
+				timestamp,
+			};
+			this.traceManager.record(entry);
+		}
 
 		return returnValue;
 	}
@@ -93,7 +141,7 @@ export class WinApiHooks {
 			for (let i = 4; i < count; i++) {
 				const stackOffset = regs.rsp + BigInt(0x28 + (i - 4) * 8);
 				try {
-					const buf = this.emulator.readMemory(stackOffset, 8);
+					const buf = this.emulator.readMemorySync(stackOffset, 8);
 					args.push(buf.readBigUInt64LE());
 				} catch {
 					args.push(0n);
@@ -106,7 +154,7 @@ export class WinApiHooks {
 			for (let i = 0; i < count; i++) {
 				const stackOffset = esp + BigInt(4 + i * 4);
 				try {
-					const buf = this.emulator.readMemory(stackOffset, 4);
+					const buf = this.emulator.readMemorySync(stackOffset, 4);
 					args.push(BigInt(buf.readUInt32LE()));
 				} catch {
 					args.push(0n);
@@ -125,7 +173,7 @@ export class WinApiHooks {
 			return '';
 		}
 		try {
-			const buf = this.emulator.readMemory(address, 256);
+			const buf = this.emulator.readMemorySync(address, 256);
 			const nullIdx = buf.indexOf(0);
 			return buf.toString('ascii', 0, nullIdx >= 0 ? nullIdx : 256);
 		} catch {
@@ -141,7 +189,7 @@ export class WinApiHooks {
 			return '';
 		}
 		try {
-			const buf = this.emulator.readMemory(address, 512);
+			const buf = this.emulator.readMemorySync(address, 512);
 			let end = 0;
 			for (let i = 0; i < buf.length - 1; i += 2) {
 				if (buf[i] === 0 && buf[i + 1] === 0) {
@@ -162,7 +210,7 @@ export class WinApiHooks {
 		const buf = Buffer.alloc(str.length + 1);
 		buf.write(str, 'ascii');
 		buf[str.length] = 0;
-		this.emulator.writeMemory(address, buf);
+		this.emulator.writeMemorySync(address, buf);
 	}
 
 	/**
@@ -194,7 +242,7 @@ export class WinApiHooks {
 				try {
 					const buf = Buffer.alloc(4);
 					buf.writeUInt32LE(result.oldProtect);
-					this.emulator.writeMemory(oldProtectPtr, buf);
+					this.emulator.writeMemorySync(oldProtectPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return result.success ? 1n : 0n;
@@ -328,7 +376,7 @@ export class WinApiHooks {
 				const buf = Buffer.alloc(8);
 				buf.writeBigUInt64LE(BigInt(this.tickCount));
 				try {
-					this.emulator.writeMemory(counterPtr, buf);
+					this.emulator.writeMemorySync(counterPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return 1n; // TRUE
@@ -340,7 +388,7 @@ export class WinApiHooks {
 				const buf = Buffer.alloc(8);
 				buf.writeBigUInt64LE(10000000n); // 10MHz
 				try {
-					this.emulator.writeMemory(freqPtr, buf);
+					this.emulator.writeMemorySync(freqPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return 1n;
@@ -400,7 +448,7 @@ export class WinApiHooks {
 				const buf = Buffer.alloc(4);
 				buf.writeUInt32LE(Number(charsToWrite));
 				try {
-					this.emulator.writeMemory(charsWrittenPtr, buf);
+					this.emulator.writeMemorySync(charsWrittenPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return 1n;
@@ -414,7 +462,7 @@ export class WinApiHooks {
 				const buf = Buffer.alloc(4);
 				buf.writeUInt32LE(Number(charsToWrite));
 				try {
-					this.emulator.writeMemory(charsWrittenPtr, buf);
+					this.emulator.writeMemorySync(charsWrittenPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return 1n;
@@ -442,7 +490,7 @@ export class WinApiHooks {
 				buf.writeUInt32LE(19041, 12); // dwBuildNumber
 				buf.writeUInt32LE(2, 16);  // dwPlatformId (VER_PLATFORM_WIN32_NT)
 				try {
-					this.emulator.writeMemory(versionInfoPtr, buf);
+					this.emulator.writeMemorySync(versionInfoPtr, buf);
 				} catch { /* ignore */ }
 			}
 			return 0n; // STATUS_SUCCESS

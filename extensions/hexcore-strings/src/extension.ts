@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { xorBruteForce, type XorResult } from './xorScanner';
 import { detectStackStrings, type StackString } from './stackStringDetector';
+import { multiByteXorScan, type MultiByteXorResult } from './multiByteXor';
 
 type OutputFormat = 'json' | 'md';
 
@@ -67,9 +68,13 @@ interface UnicodeChunkResult {
 interface DeobfuscatedString {
 	value: string;
 	offset: number;
-	method: 'XOR' | 'Stack';
-	/** XOR key if method is XOR. */
+	method: 'XOR' | 'XOR-multi' | 'XOR-rolling' | 'XOR-increment' | 'Stack';
+	/** XOR key if method is XOR (single-byte). */
 	xorKey?: number;
+	/** Full key in hex for multi-byte XOR methods. */
+	keyHex?: string;
+	/** Key size in bytes for multi-byte XOR methods. */
+	keySize?: number;
 	confidence?: number;
 	instructionCount?: number;
 }
@@ -672,6 +677,13 @@ export function deactivate() { }
 
 const DEOB_CHUNK_SIZE = 64 * 1024;
 
+/** Maps multiByteXor method names to DeobfuscatedString method names. */
+const MULTI_XOR_METHOD_MAP: Record<string, 'XOR-multi' | 'XOR-rolling' | 'XOR-increment'> = {
+	'multi-byte': 'XOR-multi',
+	'rolling': 'XOR-rolling',
+	'increment': 'XOR-increment',
+};
+
 /**
  * Run XOR brute-force and stack-string detection on the binary.
  * Uses chunked streaming to handle large files.
@@ -710,6 +722,23 @@ function runDeobfuscation(
 				});
 			}
 
+			// --- Multi-byte XOR scan ---
+			const multiResults = multiByteXorScan(buffer, offset, { minLength });
+			for (const mr of multiResults) {
+				const dedupKey = `${MULTI_XOR_METHOD_MAP[mr.method]}:${mr.value}`;
+				// Also skip if the same value was already found by single-byte XOR
+				if (seen.has(dedupKey) || seen.has(`xor:${mr.value}`)) { continue; }
+				seen.add(dedupKey);
+				results.push({
+					value: mr.value,
+					offset: mr.offset,
+					method: MULTI_XOR_METHOD_MAP[mr.method],
+					keyHex: mr.keyHex,
+					keySize: mr.keySize,
+					confidence: mr.confidence,
+				});
+			}
+
 			// --- Stack string detection ---
 			const stackResults = detectStackStrings(buffer, offset);
 			for (const ss of stackResults) {
@@ -742,26 +771,83 @@ function runDeobfuscation(
  * Generate Markdown section for deobfuscated strings to append to the main report.
  */
 function generateDeobfuscationReport(deobfuscated: DeobfuscatedString[]): string {
-	const xorStrings = deobfuscated.filter(d => d.method === 'XOR');
+	const singleByteXor = deobfuscated.filter(d => d.method === 'XOR');
+	const multiByteXor = deobfuscated.filter(d => d.method === 'XOR-multi');
+	const rollingXor = deobfuscated.filter(d => d.method === 'XOR-rolling');
+	const incrementXor = deobfuscated.filter(d => d.method === 'XOR-increment');
 	const stackStrings = deobfuscated.filter(d => d.method === 'Stack');
 
 	let report = '\n---\n\n## 🔓 Deobfuscated Strings\n\n';
 
-	if (xorStrings.length > 0) {
-		report += `### XOR-Decoded (${xorStrings.length})\n\n`;
-		report += '| # | Offset | Key | Confidence | Value |\n';
-		report += '|---|--------|-----|------------|-------|\n';
+	if (singleByteXor.length > 0) {
+		report += `### XOR Single-Byte (${singleByteXor.length})\n\n`;
+		report += '| # | Offset | Method | Key | Key Size | Confidence | Value |\n';
+		report += '|---|--------|--------|-----|----------|------------|-------|\n';
 
-		const display = xorStrings.slice(0, 100);
+		const display = singleByteXor.slice(0, 100);
 		for (let i = 0; i < display.length; i++) {
 			const d = display[i];
 			const escaped = d.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 60);
 			const conf = d.confidence !== undefined ? `${Math.round(d.confidence * 100)}%` : '—';
 			const keyHex = d.xorKey !== undefined ? `0x${d.xorKey.toString(16).toUpperCase().padStart(2, '0')}` : '—';
-			report += `| ${i + 1} | 0x${d.offset.toString(16).toUpperCase().padStart(8, '0')} | ${keyHex} | ${conf} | \`${escaped}\` |\n`;
+			report += `| ${i + 1} | 0x${d.offset.toString(16).toUpperCase().padStart(8, '0')} | XOR | ${keyHex} | 1 | ${conf} | \`${escaped}\` |\n`;
 		}
-		if (xorStrings.length > 100) {
-			report += `| ... | ... | ... | ... | *${xorStrings.length - 100} more* |\n`;
+		if (singleByteXor.length > 100) {
+			report += `| ... | ... | ... | ... | ... | ... | *${singleByteXor.length - 100} more* |\n`;
+		}
+		report += '\n';
+	}
+
+	if (multiByteXor.length > 0) {
+		report += `### XOR Multi-Byte (${multiByteXor.length})\n\n`;
+		report += '| # | Offset | Method | Key | Key Size | Confidence | Value |\n';
+		report += '|---|--------|--------|-----|----------|------------|-------|\n';
+
+		const display = multiByteXor.slice(0, 100);
+		for (let i = 0; i < display.length; i++) {
+			const d = display[i];
+			const escaped = d.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 60);
+			const conf = d.confidence !== undefined ? `${Math.round(d.confidence * 100)}%` : '—';
+			report += `| ${i + 1} | 0x${d.offset.toString(16).toUpperCase().padStart(8, '0')} | XOR-multi | ${d.keyHex ?? '—'} | ${d.keySize ?? '—'} | ${conf} | \`${escaped}\` |\n`;
+		}
+		if (multiByteXor.length > 100) {
+			report += `| ... | ... | ... | ... | ... | ... | *${multiByteXor.length - 100} more* |\n`;
+		}
+		report += '\n';
+	}
+
+	if (rollingXor.length > 0) {
+		report += `### XOR Rolling (${rollingXor.length})\n\n`;
+		report += '| # | Offset | Method | Key | Key Size | Confidence | Value |\n';
+		report += '|---|--------|--------|-----|----------|------------|-------|\n';
+
+		const display = rollingXor.slice(0, 100);
+		for (let i = 0; i < display.length; i++) {
+			const d = display[i];
+			const escaped = d.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 60);
+			const conf = d.confidence !== undefined ? `${Math.round(d.confidence * 100)}%` : '—';
+			report += `| ${i + 1} | 0x${d.offset.toString(16).toUpperCase().padStart(8, '0')} | XOR-rolling | ${d.keyHex ?? '—'} | ${d.keySize ?? '—'} | ${conf} | \`${escaped}\` |\n`;
+		}
+		if (rollingXor.length > 100) {
+			report += `| ... | ... | ... | ... | ... | ... | *${rollingXor.length - 100} more* |\n`;
+		}
+		report += '\n';
+	}
+
+	if (incrementXor.length > 0) {
+		report += `### XOR Increment (${incrementXor.length})\n\n`;
+		report += '| # | Offset | Method | Key | Key Size | Confidence | Value |\n';
+		report += '|---|--------|--------|-----|----------|------------|-------|\n';
+
+		const display = incrementXor.slice(0, 100);
+		for (let i = 0; i < display.length; i++) {
+			const d = display[i];
+			const escaped = d.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 60);
+			const conf = d.confidence !== undefined ? `${Math.round(d.confidence * 100)}%` : '—';
+			report += `| ${i + 1} | 0x${d.offset.toString(16).toUpperCase().padStart(8, '0')} | XOR-increment | ${d.keyHex ?? '—'} | ${d.keySize ?? '—'} | ${conf} | \`${escaped}\` |\n`;
+		}
+		if (incrementXor.length > 100) {
+			report += `| ... | ... | ... | ... | ... | ... | *${incrementXor.length - 100} more* |\n`;
 		}
 		report += '\n';
 	}

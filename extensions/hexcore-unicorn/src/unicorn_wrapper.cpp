@@ -322,10 +322,9 @@ Napi::Value UnicornWrapper::MemMap(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	if (emulating_) {
-		Napi::Error::New(env, "Cannot map memory while emulation is running").ThrowAsJavaScriptException();
-		return env.Undefined();
-	}
+	// Note: memMap is safe during hook callbacks because the Unicorn engine
+	// is paused. The emulating_ guard was removed to allow memory mapping
+	// from hook contexts (e.g. page fault handlers).
 
 	if (info.Length() < 3) {
 		Napi::TypeError::New(env, "Expected 3 arguments: address, size, perms").ThrowAsJavaScriptException();
@@ -531,10 +530,9 @@ Napi::Value UnicornWrapper::MemWrite(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	if (emulating_) {
-		Napi::Error::New(env, "Cannot write memory while emulation is running").ThrowAsJavaScriptException();
-		return env.Undefined();
-	}
+	// Note: memWrite is safe during hook callbacks because the Unicorn engine
+	// is paused (BlockingCall). The emulating_ guard was removed to allow
+	// syscall handlers to write memory (e.g. write() syscall buffer reads).
 
 	if (info.Length() < 2) {
 		Napi::TypeError::New(env, "Expected 2 arguments: address, data").ThrowAsJavaScriptException();
@@ -678,10 +676,9 @@ Napi::Value UnicornWrapper::RegWrite(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	if (emulating_) {
-		Napi::Error::New(env, "Cannot write registers while emulation is running").ThrowAsJavaScriptException();
-		return env.Undefined();
-	}
+	// Note: regWrite is safe during hook callbacks because the Unicorn engine
+	// is paused (BlockingCall). The emulating_ guard was removed to allow
+	// syscall handlers to write return values (e.g. X0) directly.
 
 	if (info.Length() < 2) {
 		Napi::TypeError::New(env, "Expected 2 arguments: regId, value").ThrowAsJavaScriptException();
@@ -762,10 +759,7 @@ Napi::Value UnicornWrapper::RegWriteBatch(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	if (emulating_) {
-		Napi::Error::New(env, "Cannot write registers while emulation is running").ThrowAsJavaScriptException();
-		return env.Undefined();
-	}
+	// Note: regWriteBatch is safe during hook callbacks (Unicorn paused via BlockingCall).
 
 	if (info.Length() < 2 || !info[0].IsArray() || !info[1].IsArray()) {
 		Napi::TypeError::New(env, "Expected 2 arguments: array of regIds, array of values").ThrowAsJavaScriptException();
@@ -870,15 +864,33 @@ void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data) {
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
-	auto callData = std::make_unique<InterruptHookCallData>();
-	callData->intno = intno;
+	// Allocate on stack — we block until JS finishes the syscall handler.
+	InterruptHookCallData callData;
+	callData.intno = intno;
+	callData.done.store(false);
 
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InterruptHookCallData* data) {
+	// Use BlockingCall so the Unicorn thread waits for JS to handle the interrupt.
+	// The JS callback dispatches the syscall and writes the return value via
+	// uc_reg_write (cross-thread but safe because the Unicorn thread is blocked
+	// and uc_reg_write only touches the CPU context buffer).
+	data->tsfn.BlockingCall(&callData, [](Napi::Env env, Napi::Function callback, InterruptHookCallData* cd) {
 		callback.Call({
-			Napi::Number::New(env, data->intno)
+			Napi::Number::New(env, cd->intno)
 		});
-		delete data;
+
+		// Signal the native thread that we're done
+		{
+			std::lock_guard<std::mutex> lock(cd->mtx);
+			cd->done.store(true);
+		}
+		cd->cv.notify_one();
 	});
+
+	// Wait for JS to finish handling the interrupt
+	{
+		std::unique_lock<std::mutex> lock(callData.mtx);
+		callData.cv.wait(lock, [&callData] { return callData.done.load(); });
+	}
 }
 
 void InsnHookCB(uc_engine* uc, void* user_data) {
@@ -894,26 +906,51 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return false;
 
+	// Auto-map on fault: perform uc_mem_map directly on the Unicorn thread.
+	// This avoids cross-thread uc_mem_map calls which can corrupt Unicorn state
+	// when uc_emu_start is running on a different thread (EmuAsyncWorker).
+
+	// Reject NULL page and very high addresses
+	if (address < 0x1000) return false;
+	if (address > 0x00007FFFFFFFFFFF) return false;
+
+	// Query page size
+	size_t pageSize = 0;
+	uc_query(uc, UC_QUERY_PAGE_SIZE, &pageSize);
+	if (pageSize == 0) pageSize = 0x1000;
+
+	// Align to page boundary
+	uint64_t alignedAddr = (address / pageSize) * pageSize;
+	size_t neededSize = static_cast<size_t>(address - alignedAddr) + size;
+	size_t alignedSize = ((neededSize + pageSize - 1) / pageSize) * pageSize;
+	if (alignedSize == 0) alignedSize = pageSize;
+
+	// Map with full permissions (RWX) — same as JS handlePageFault
+	uc_err err = uc_mem_map(uc, alignedAddr, alignedSize, UC_PROT_ALL);
+	if (err != UC_ERR_OK) {
+		return false; // Let emulation crash
+	}
+
+	// Notify JS asynchronously for tracking (non-blocking, fire-and-forget)
 	auto callData = std::make_unique<InvalidMemHookCallData>();
 	callData->type = static_cast<int>(type);
 	callData->address = address;
 	callData->size = size;
 	callData->value = value;
+	callData->result = true; // Already handled
 
-	// For invalid memory hooks, we use blocking call since we need the return value
-	// Note: In practice, returning a meaningful value from JS callback is complex
-	// This is a simplified implementation
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* data) {
+	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* cd) {
+		// Call JS callback for tracking/logging only — memory is already mapped
 		callback.Call({
-			Napi::Number::New(env, data->type),
-			Napi::BigInt::New(env, data->address),
-			Napi::Number::New(env, data->size),
-			Napi::BigInt::New(env, static_cast<uint64_t>(data->value))
+			Napi::Number::New(env, cd->type),
+			Napi::BigInt::New(env, cd->address),
+			Napi::Number::New(env, cd->size),
+			Napi::BigInt::New(env, static_cast<uint64_t>(cd->value))
 		});
-		delete data;
+		delete cd;
 	});
 
-	return true; // Continue emulation by default
+	return true; // Fault handled, Unicorn retries the access
 }
 
 Napi::Value UnicornWrapper::HookAdd(const Napi::CallbackInfo& info) {

@@ -1,0 +1,65 @@
+{
+	"name": "hexcore-elfanalyzer",
+	"displayName": "HexCore ELF Analyzer",
+	"description": "Professional ELF (Executable and Linkable Format) analyzer for Linux binary analysis",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.60.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"keywords": [
+		"elf",
+		"linux",
+		"binary",
+		"malware",
+		"reverse engineering",
+		"binary analysis"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onCommand:hexcore.elfanalyzer.analyze",
+		"onCommand:hexcore.elfanalyzer.analyzeActive"
+	],
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.elfanalyzer.analyze",
+				"title": "HexCore: Analyze ELF File"
+			},
+			{
+				"command": "hexcore.elfanalyzer.analyzeActive",
+				"title": "HexCore: Analyze Current File as ELF"
+			}
+		],
+		"menus": {
+			"explorer/context": [
+				{
+					"command": "hexcore.elfanalyzer.analyze",
+					"when": "resourceExtname == .elf || resourceExtname == .so || resourceExtname == .o",
+					"group": "hexcore@1"
+				}
+			],
+			"editor/title/context": [
+				{
+					"command": "hexcore.elfanalyzer.analyzeActive",
+					"group": "hexcore@1"
+				}
+			]
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/mocha": "^10.0.0",
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.60.0",
+		"fast-check": "^3.15.0",
+		"typescript": "^5.0.0"
+	}
+}

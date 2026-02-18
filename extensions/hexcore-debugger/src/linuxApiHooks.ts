@@ -7,6 +7,7 @@
 
 import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
+import { TraceManager, TraceEntry } from './traceManager';
 
 export interface ApiCallLog {
 	dll: string;
@@ -14,6 +15,10 @@ export interface ApiCallLog {
 	args: bigint[];
 	returnValue: bigint;
 	timestamp: number;
+	/** Arguments formatted as hex/decimal strings for trace display */
+	arguments: string[];
+	/** Program counter address at the point of the call */
+	pcAddress: bigint;
 }
 
 type ApiHandler = (args: bigint[]) => bigint;
@@ -42,6 +47,9 @@ export class LinuxApiHooks {
 	// Optional synthetic return address used when redirecting __libc_start_main -> main.
 	private mainReturnAddress: bigint | null = null;
 
+	/** Optional TraceManager for centralized trace recording */
+	private traceManager: TraceManager | null = null;
+
 	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager, arch: ArchitectureType) {
 		this.emulator = emulator;
 		this.memoryManager = memoryManager;
@@ -67,6 +75,13 @@ export class LinuxApiHooks {
 
 	setMainReturnAddress(address: bigint | null): void {
 		this.mainReturnAddress = address;
+	}
+
+	/**
+	 * Set the TraceManager instance for centralized trace recording.
+	 */
+	setTraceManager(manager: TraceManager): void {
+		this.traceManager = manager;
 	}
 
 	/**
@@ -141,13 +156,46 @@ export class LinuxApiHooks {
 			console.log(`Unhandled libc: ${library}!${name}`);
 		}
 
+		// Capture PC address from current instruction pointer
+		let pcAddress = 0n;
+		try {
+			if (this.architecture === 'x64') {
+				const regs = this.emulator.getRegistersX64();
+				pcAddress = regs.rip;
+			} else {
+				const regs = this.emulator.getRegistersX86();
+				pcAddress = BigInt(regs.eip);
+			}
+		} catch {
+			// If we can't read PC, leave as 0
+		}
+
+		// Format arguments as hex strings for trace display
+		const formattedArgs = args.map(a => '0x' + a.toString(16));
+		const timestamp = Date.now();
+
 		this.callLog.push({
 			dll: library,
 			name,
 			args,
 			returnValue,
-			timestamp: Date.now()
+			timestamp,
+			arguments: formattedArgs,
+			pcAddress,
 		});
+
+		// Notify TraceManager if available
+		if (this.traceManager) {
+			const entry: TraceEntry = {
+				functionName: name,
+				library,
+				arguments: formattedArgs,
+				returnValue: '0x' + returnValue.toString(16),
+				pcAddress: '0x' + pcAddress.toString(16),
+				timestamp,
+			};
+			this.traceManager.record(entry);
+		}
 
 		return returnValue;
 	}
@@ -169,7 +217,7 @@ export class LinuxApiHooks {
 			for (let i = 6; i < count; i++) {
 				const stackOffset = regs.rsp + BigInt(8 + (i - 6) * 8);
 				try {
-					const buf = this.emulator.readMemory(stackOffset, 8);
+					const buf = this.emulator.readMemorySync(stackOffset, 8);
 					args.push(buf.readBigUInt64LE());
 				} catch {
 					args.push(0n);
@@ -182,7 +230,7 @@ export class LinuxApiHooks {
 			for (let i = 0; i < count; i++) {
 				const stackOffset = esp + BigInt(4 + i * 4);
 				try {
-					const buf = this.emulator.readMemory(stackOffset, 4);
+					const buf = this.emulator.readMemorySync(stackOffset, 4);
 					args.push(BigInt(buf.readUInt32LE()));
 				} catch {
 					args.push(0n);
@@ -199,7 +247,7 @@ export class LinuxApiHooks {
 	private readString(address: bigint, maxLen: number = 1024): string {
 		if (address === 0n) { return ''; }
 		try {
-			const buf = this.emulator.readMemory(address, maxLen);
+			const buf = this.emulator.readMemorySync(address, maxLen);
 			const nullIdx = buf.indexOf(0);
 			return buf.toString('utf8', 0, nullIdx >= 0 ? nullIdx : maxLen);
 		} catch {
@@ -214,7 +262,7 @@ export class LinuxApiHooks {
 		const buf = Buffer.alloc(str.length + 1);
 		buf.write(str, 'ascii');
 		buf[str.length] = 0;
-		this.emulator.writeMemory(address, buf);
+		this.emulator.writeMemorySync(address, buf);
 	}
 
 	/**
@@ -275,7 +323,7 @@ export class LinuxApiHooks {
 			const count = Number(args[2]);
 			if (count <= 0 || count > 0x10000) { return 0n; }
 			try {
-				const data = this.emulator.readMemory(args[1], count);
+				const data = this.emulator.readMemorySync(args[1], count);
 				const str = data.toString('utf8');
 				if (fd === 1 || fd === 2) {
 					console.log(`[fd${fd}] ${str}`);
@@ -302,7 +350,7 @@ export class LinuxApiHooks {
 				}
 				try {
 					const buf = Buffer.from(data, 'utf8');
-					this.emulator.writeMemory(bufAddr, buf);
+					this.emulator.writeMemorySync(bufAddr, buf);
 					console.log(`[stdin] read(0): ${data.length} bytes`);
 					return BigInt(data.length);
 				} catch {
@@ -357,11 +405,11 @@ export class LinuxApiHooks {
 						if (isLong) {
 							const buf = Buffer.alloc(8);
 							buf.writeBigInt64LE(BigInt(val));
-							this.emulator.writeMemory(destAddr, buf);
+							this.emulator.writeMemorySync(destAddr, buf);
 						} else {
 							const buf = Buffer.alloc(4);
 							buf.writeInt32LE(val);
-							this.emulator.writeMemory(destAddr, buf);
+							this.emulator.writeMemorySync(destAddr, buf);
 						}
 						itemsRead++;
 					} else if (spec === 'u') {
@@ -372,7 +420,7 @@ export class LinuxApiHooks {
 
 						const buf = Buffer.alloc(4);
 						buf.writeUInt32LE(val >>> 0);
-						this.emulator.writeMemory(destAddr, buf);
+						this.emulator.writeMemorySync(destAddr, buf);
 						itemsRead++;
 					} else if (spec === 'x' || spec === 'X') {
 						const hexMatch = line.substring(inputPos).match(/^(?:0[xX])?([0-9a-fA-F]+)/);
@@ -382,7 +430,7 @@ export class LinuxApiHooks {
 
 						const buf = Buffer.alloc(4);
 						buf.writeUInt32LE(val >>> 0);
-						this.emulator.writeMemory(destAddr, buf);
+						this.emulator.writeMemorySync(destAddr, buf);
 						itemsRead++;
 					} else if (spec === 's') {
 						const strMatch = line.substring(inputPos).match(/^\S+/);
@@ -390,14 +438,14 @@ export class LinuxApiHooks {
 						inputPos += strMatch[0].length;
 
 						const strBuf = Buffer.from(strMatch[0] + '\0', 'utf8');
-						this.emulator.writeMemory(destAddr, strBuf);
+						this.emulator.writeMemorySync(destAddr, strBuf);
 						itemsRead++;
 					} else if (spec === 'c') {
 						if (inputPos < line.length) {
 							const charBuf = Buffer.alloc(1);
 							charBuf[0] = line.charCodeAt(inputPos);
 							inputPos++;
-							this.emulator.writeMemory(destAddr, charBuf);
+							this.emulator.writeMemorySync(destAddr, charBuf);
 							itemsRead++;
 						}
 					}
@@ -440,7 +488,7 @@ export class LinuxApiHooks {
 			const toWrite = line.substring(0, size - 2) + '\n';
 			try {
 				const buf = Buffer.from(toWrite + '\0', 'utf8');
-				this.emulator.writeMemory(bufAddr, buf);
+				this.emulator.writeMemorySync(bufAddr, buf);
 				return bufAddr; // Return buffer pointer on success
 			} catch {
 				return 0n;
@@ -475,7 +523,7 @@ export class LinuxApiHooks {
 			const src = this.readString(args[1], n);
 			const buf = Buffer.alloc(n);
 			buf.write(src, 'ascii');
-			try { this.emulator.writeMemory(args[0], buf); } catch {}
+			try { this.emulator.writeMemorySync(args[0], buf); } catch { }
 			return args[0];
 		});
 
@@ -531,9 +579,9 @@ export class LinuxApiHooks {
 			const n = Number(args[2]);
 			if (n <= 0 || n > 0x1000000) { return args[0]; }
 			try {
-				const data = this.emulator.readMemory(args[1], n);
-				this.emulator.writeMemory(args[0], data);
-			} catch {}
+				const data = this.emulator.readMemorySync(args[1], n);
+				this.emulator.writeMemorySync(args[0], data);
+			} catch { }
 			return args[0];
 		});
 
@@ -542,9 +590,9 @@ export class LinuxApiHooks {
 			const n = Number(args[2]);
 			if (n <= 0 || n > 0x1000000) { return args[0]; }
 			try {
-				const data = Buffer.from(this.emulator.readMemory(args[1], n));
-				this.emulator.writeMemory(args[0], data);
-			} catch {}
+				const data = Buffer.from(this.emulator.readMemorySync(args[1], n));
+				this.emulator.writeMemorySync(args[0], data);
+			} catch { }
 			return args[0];
 		});
 
@@ -555,8 +603,8 @@ export class LinuxApiHooks {
 			if (n <= 0 || n > 0x1000000) { return args[0]; }
 			try {
 				const buf = Buffer.alloc(n, c);
-				this.emulator.writeMemory(args[0], buf);
-			} catch {}
+				this.emulator.writeMemorySync(args[0], buf);
+			} catch { }
 			return args[0];
 		});
 
@@ -565,8 +613,8 @@ export class LinuxApiHooks {
 			const n = Number(args[2]);
 			if (n <= 0) { return 0n; }
 			try {
-				const b1 = this.emulator.readMemory(args[0], n);
-				const b2 = this.emulator.readMemory(args[1], n);
+				const b1 = this.emulator.readMemorySync(args[0], n);
+				const b2 = this.emulator.readMemorySync(args[1], n);
 				return BigInt(b1.compare(b2));
 			} catch {
 				return 0n;
@@ -603,9 +651,9 @@ export class LinuxApiHooks {
 				try {
 					// Copy up to size bytes from old allocation
 					const copySize = Math.min(size, 4096);
-					const data = this.emulator.readMemory(ptr, copySize);
-					this.emulator.writeMemory(newPtr, data);
-				} catch {}
+					const data = this.emulator.readMemorySync(ptr, copySize);
+					this.emulator.writeMemorySync(newPtr, data);
+				} catch { }
 				this.memoryManager.heapFree(ptr);
 			}
 			return newPtr;
@@ -726,7 +774,7 @@ export class LinuxApiHooks {
 				// forbids memWrite/regWrite directly during active emulation callbacks.
 				if (argv !== 0n) {
 					try {
-						this.emulator.readMemory(argv, pointerSize);
+						this.emulator.readMemorySync(argv, pointerSize);
 					} catch {
 						argv = 0n;
 					}
@@ -739,9 +787,9 @@ export class LinuxApiHooks {
 				// Prepare main(argc, argv, envp) registers.
 				// The wrapper applies queued register writes safely after emulation stops.
 				if (this.architecture === 'x64') {
-					this.emulator.setRegister('rdi', argc);
-					this.emulator.setRegister('rsi', argv);
-					this.emulator.setRegister('rdx', 0n);
+					this.emulator.setRegisterSync('rdi', argc);
+					this.emulator.setRegisterSync('rsi', argv);
+					this.emulator.setRegisterSync('rdx', 0n);
 
 					// Ensure main() has a deterministic return target.
 					// Without this, returning from main may jump to argc/garbage and fault.
@@ -750,8 +798,8 @@ export class LinuxApiHooks {
 					const newRsp = regs.rsp - 8n;
 					const retBuf = Buffer.alloc(8);
 					retBuf.writeBigUInt64LE(syntheticReturn);
-					this.emulator.writeMemory(newRsp, retBuf);
-					this.emulator.setRegister('rsp', newRsp);
+					this.emulator.writeMemorySync(newRsp, retBuf);
+					this.emulator.setRegisterSync('rsp', newRsp);
 				}
 
 				if (mainAddr === 0n) {
@@ -795,8 +843,8 @@ export class LinuxApiHooks {
 				try {
 					const buf = Buffer.alloc(8);
 					buf.writeBigInt64LE(now);
-					this.emulator.writeMemory(args[0], buf);
-				} catch {}
+					this.emulator.writeMemorySync(args[0], buf);
+				} catch { }
 			}
 			return now;
 		});
@@ -809,8 +857,8 @@ export class LinuxApiHooks {
 					const now = Date.now();
 					buf.writeBigInt64LE(BigInt(Math.floor(now / 1000)), 0); // tv_sec
 					buf.writeBigInt64LE(BigInt((now % 1000) * 1000000), 8); // tv_nsec
-					this.emulator.writeMemory(args[1], buf);
-				} catch {}
+					this.emulator.writeMemorySync(args[1], buf);
+				} catch { }
 			}
 			return 0n; // Success
 		});
@@ -859,9 +907,9 @@ export class LinuxApiHooks {
 			const total = size * nmemb;
 			if (total > 0 && total < 0x10000) {
 				try {
-					const data = this.emulator.readMemory(args[0], total);
+					const data = this.emulator.readMemorySync(args[0], total);
 					console.log(`[fwrite] ${data.toString('utf8')}`);
-				} catch {}
+				} catch { }
 			}
 			return BigInt(nmemb);
 		});
@@ -1031,7 +1079,7 @@ export class LinuxApiHooks {
 				const count = Number(args[2]);
 				if (count > 0 && count < 0x10000) {
 					try {
-						const data = this.emulator.readMemory(args[1], count);
+						const data = this.emulator.readMemorySync(args[1], count);
 						const fd = Number(args[0]);
 						console.log(`[syscall write fd${fd}] ${data.toString('utf8')}`);
 						if (fd === 1) { this.stdoutBuffer += data.toString('utf8'); }
@@ -1105,14 +1153,14 @@ export class LinuxApiHooks {
 				const addr = args[1];
 				if (code === 0x1002) { // ARCH_SET_FS
 					try {
-						this.emulator.setRegister('fs_base', addr);
+						this.emulator.setRegisterSync('fs_base', addr);
 						console.log(`[syscall] arch_prctl ARCH_SET_FS = 0x${addr.toString(16)}`);
 					} catch (e) {
 						console.warn(`[syscall] arch_prctl ARCH_SET_FS failed: ${e}`);
 					}
 				} else if (code === 0x1001) { // ARCH_SET_GS
 					try {
-						this.emulator.setRegister('gs_base', addr);
+						this.emulator.setRegisterSync('gs_base', addr);
 						console.log(`[syscall] arch_prctl ARCH_SET_GS = 0x${addr.toString(16)}`);
 					} catch (e) {
 						console.warn(`[syscall] arch_prctl ARCH_SET_GS failed: ${e}`);
@@ -1139,8 +1187,23 @@ export class LinuxApiHooks {
 			name: `sys_${syscallNum}`,
 			args: args.slice(0, 3),
 			returnValue: result,
-			timestamp: Date.now()
+			timestamp: Date.now(),
+			arguments: args.slice(0, 3).map(a => '0x' + a.toString(16)),
+			pcAddress: regs.rip,
 		});
+
+		// Notify TraceManager if available
+		if (this.traceManager) {
+			const entry: TraceEntry = {
+				functionName: `sys_${syscallNum}`,
+				library: 'syscall',
+				arguments: args.slice(0, 3).map(a => '0x' + a.toString(16)),
+				returnValue: '0x' + result.toString(16),
+				pcAddress: '0x' + regs.rip.toString(16),
+				timestamp: Date.now(),
+			};
+			this.traceManager.record(entry);
+		}
 
 		return result;
 	}

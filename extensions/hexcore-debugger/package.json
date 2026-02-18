@@ -39,7 +39,11 @@
 		"onCommand:hexcore.debug.getRegistersHeadless",
 		"onCommand:hexcore.debug.setBreakpointHeadless",
 		"onCommand:hexcore.debug.getStateHeadless",
-		"onView:hexcore.debugger.view"
+		"onCommand:hexcore.debug.snapshotHeadless",
+		"onCommand:hexcore.debug.restoreSnapshotHeadless",
+		"onCommand:hexcore.debug.exportTraceHeadless",
+		"onView:hexcore.debugger.view",
+		"onView:hexcore.debugger.trace"
 	],
 	"main": "./out/extension.js",
 	"contributes": {
@@ -137,6 +141,21 @@
 				"command": "hexcore.debug.getStateHeadless",
 				"title": "Emulate: Get State (Headless)",
 				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.snapshotHeadless",
+				"title": "Emulate: Save Snapshot (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.restoreSnapshotHeadless",
+				"title": "Emulate: Restore Snapshot (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.exportTraceHeadless",
+				"title": "Emulate: Export Trace (Headless)",
+				"category": "HexCore Automation"
 			}
 		],
 		"viewsContainers": {
@@ -169,6 +188,11 @@
 					"type": "tree",
 					"id": "hexcore.debugger.stack",
 					"name": "Stack"
+				},
+				{
+					"type": "tree",
+					"id": "hexcore.debugger.trace",
+					"name": "API Trace"
 				}
 			]
 		}
@@ -184,6 +208,7 @@
 	"devDependencies": {
 		"@types/node": "^18.0.0",
 		"@types/vscode": "^1.70.0",
+		"fast-check": "^3.15.0",
 		"typescript": "^5.0.0"
 	}
 }

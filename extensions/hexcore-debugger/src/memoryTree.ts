@@ -32,10 +32,8 @@ export class MemoryTreeProvider implements vscode.TreeDataProvider<MemoryItem> {
 		return element;
 	}
 
-	getChildren(): Thenable<MemoryItem[]> {
-		const regions = this.engine.getMemoryRegions();
-		return Promise.resolve(
-			regions.map(r => new MemoryItem(r.address, r.size, r.permissions, r.name))
-		);
+	async getChildren(): Promise<MemoryItem[]> {
+		const regions = await this.engine.getMemoryRegions();
+		return regions.map(r => new MemoryItem(r.address, r.size, r.permissions, r.name));
 	}
 }

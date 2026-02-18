@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as path from 'path';
 import { loadNativeModule } from 'hexcore-common';
+import { Arm64WorkerClient } from './arm64WorkerClient';
 
 // Types from hexcore-unicorn
 interface UnicornModule {
@@ -155,6 +156,7 @@ export type CodeHookCallback = (address: bigint, size: number) => void;
 export type MemoryHookCallback = (type: number, address: bigint, size: number, value: bigint) => void;
 export type MemoryFaultCallback = (type: number, address: bigint, size: number, value: bigint) => boolean;
 export type InterruptCallback = (intno: number) => void;
+export type AsyncInterruptCallback = (intno: number) => Promise<void>;
 
 export type ArchitectureType = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'riscv';
 
@@ -186,17 +188,50 @@ export class UnicornWrapper {
 	// Configurable callbacks for memory faults and interrupts
 	private memoryFaultHandler?: MemoryFaultCallback;
 	private interruptHandler?: InterruptCallback;
+	// Async version of interrupt handler for ARM64 worker mode
+	private _interruptHandlerAsync?: AsyncInterruptCallback;
+	// Flag: true when executing inside a blocking hook callback (INTR/MEM_FAULT).
+	// During blocking hooks the Unicorn thread is paused, so direct regWrite/memMap
+	// via the native binding is safe — no need for deferred writes.
+	private _insideBlockingHook: boolean = false;
+
+	// Flag: set by stop() to signal ARM64 sync loops to terminate.
+	// In sync mode, uc_emu_stop() is a no-op (no active emulation), so the
+	// loop must check this flag after each step/syscall dispatch.
+	private _stopRequested: boolean = false;
+
+	// Track whether the INTR hook is currently installed (to avoid
+	// redundant remove/reinstall when step() is called repeatedly).
+	private _intrHookInstalled: boolean = false;
+
+	// ARM64 worker client: runs Unicorn in a separate Node.js process to
+	// avoid Chromium UtilityProcess security restrictions (ACG/CFG).
+	private _arm64Worker?: Arm64WorkerClient;
+	// When using the worker, we cache Unicorn constants fetched from it.
+	private _workerConstants?: Record<string, unknown>;
+	// Worker-side context ID for save/restore state
+	private _workerContextId?: number;
 
 	/**
 	 * Initialize the Unicorn engine
 	 */
 	async initialize(arch: ArchitectureType): Promise<void> {
-		if (this.initialized && this.uc && this.architecture === arch) {
-			return;
+		if (this.initialized && this.architecture === arch) {
+			// Already initialized for this arch
+			if (arch === 'arm64' && this._arm64Worker) {
+				return;
+			}
+			if (arch !== 'arm64' && this.uc) {
+				return;
+			}
 		}
 
 		if (this.uc) {
 			this.dispose();
+		}
+		if (this._arm64Worker) {
+			this._arm64Worker.dispose();
+			this._arm64Worker = undefined;
 		}
 
 		this.architecture = arch;
@@ -223,19 +258,43 @@ export class UnicornWrapper {
 		const unicornModule = result.module;
 		this.unicornModule = unicornModule;
 
+		if (arch === 'arm64') {
+			// ARM64: use worker process to avoid Chromium UtilityProcess
+			// ACG/CFG restrictions that crash Unicorn's JIT backend.
+			console.log('[arm64] Starting ARM64 worker process...');
+			this._arm64Worker = new Arm64WorkerClient();
+			await this._arm64Worker.start();
+
+			const { arch: ucArch, mode } = this.getArchMode(arch);
+			const initResult = await this._arm64Worker.initialize(ucArch, mode);
+			console.log(`[arm64] Worker initialized: version=${initResult.version}, pageSize=${initResult.pageSize}`);
+
+			this.initialized = true;
+			this.state.isReady = true;
+			console.log(`Unicorn initialized via worker: ${arch} (version: ${initResult.version})`);
+			return;
+		}
+
 		const { arch: ucArch, mode } = this.getArchMode(arch);
+		console.log(`[DIAG] About to create Unicorn instance: arch=${ucArch}, mode=${mode}`);
 		this.uc = new unicornModule.Unicorn(ucArch, mode);
+		console.log(`[DIAG] Unicorn instance created OK, handle=${this.uc.handle}`);
 		this.initialized = true;
 		this.state.isReady = true;
 
-		// Install memory fault hooks
+		// Install memory fault hooks.
+		// Not needed for ARM64 (handled in worker).
 		this.installMemoryFaultHooks();
 
 		console.log(`Unicorn initialized: ${arch} (version: ${unicornModule.version().string})`);
 	}
 
 	/**
-	 * Install hooks for unmapped memory access (page faults)
+	 * Install hooks for unmapped memory access (page faults).
+	 *
+	 * NOT used for ARM64 — the TSFN (ThreadSafeFunction) used by the native
+	 * InvalidMemHookCB crashes in Electron's UtilityProcess extension host.
+	 * For ARM64, memory faults are handled in JS via handleArm64MemoryFault.
 	 */
 	private installMemoryFaultHooks(): void {
 		if (!this.uc || !this.unicornModule) {
@@ -244,17 +303,144 @@ export class UnicornWrapper {
 
 		const HOOK = this.unicornModule.HOOK;
 
-		// Combined hook for all unmapped memory access
+		// Combined hook for all unmapped memory access.
+		// The native InvalidMemHookCB performs uc_mem_map directly on the Unicorn
+		// thread (same thread as uc_emu_start) to avoid cross-thread issues.
+		// This JS callback is called asynchronously via NonBlockingCall for
+		// tracking/logging only — the memory is already mapped by the time this runs.
 		const faultHook = this.uc.hookAdd(
 			HOOK.UC_HOOK_MEM_READ_UNMAPPED | HOOK.UC_HOOK_MEM_WRITE_UNMAPPED | HOOK.UC_HOOK_MEM_FETCH_UNMAPPED,
-			(type: number, address: bigint, size: number, value: bigint) => {
+			(type: number, address: bigint, size: number, _value: bigint) => {
+				// Notify the memory fault handler for tracking (memory already mapped in C++)
 				if (this.memoryFaultHandler) {
-					return this.memoryFaultHandler(type, address, size, value);
+					this.memoryFaultHandler(type, address, size, _value);
 				}
-				return false;
+				// Return value is ignored — C++ already handled the fault
+				return true;
 			}
 		);
 		this.activeHookHandles.push(faultHook);
+	}
+
+	/**
+	 * Handle a memory fault for ARM64 sync execution (no native hook).
+	 *
+	 * When Unicorn emuStart(count=1) throws UC_ERR_READ_UNMAPPED (code 6),
+	 * UC_ERR_WRITE_UNMAPPED (code 7), or UC_ERR_FETCH_UNMAPPED (code 8),
+	 * this method maps the faulting page with RWX from JS (same thread)
+	 * and notifies the memoryFaultHandler for tracking.
+	 *
+	 * @returns `true` if the fault was handled (caller should retry);
+	 *          `false` if it's an unrecoverable error.
+	 */
+	private handleArm64MemoryFault(error: unknown): boolean {
+		if (!this.uc || !this.unicornModule) {
+			return false;
+		}
+
+		const msg = toErrorMessage(error);
+		// Match "(code: 6)", "(code: 7)", or "(code: 8)"
+		const codeMatch = /\(code:\s*(?<errCode>[678])\)/.exec(msg);
+		if (!codeMatch?.groups) {
+			return false;
+		}
+
+		// Read the faulting address from the PC — for fetch faults the PC
+		// is the unmapped address; for read/write faults the PC is the
+		// instruction that triggered the access, but the actual faulting
+		// address is in the error message implicitly.  Unicorn does not
+		// advance PC on error, so the instruction can be retried.
+		//
+		// For fetch unmapped (code 8), the PC *is* the unmapped address.
+		// For read/write unmapped (code 6/7), we need the data address
+		// which Unicorn doesn't expose in the error message.  However,
+		// the native InvalidMemHookCB auto-maps using the faulting address
+		// from the callback parameters.  Since we don't have a native hook,
+		// we map a generous region around the current PC for fetch faults.
+		// For read/write faults, re-running the instruction will fault
+		// again with the same address. We use the regRead-based approach:
+		// read the instruction at PC, decode the memory operand, and map it.
+		//
+		// Simpler approach: for fetch faults map the PC page; for data
+		// faults, map a broad region.  Since this is ARM64 with known
+		// memory layout (ELF loaded at known base), most faults are fetch
+		// faults on code pages or stack/heap accesses that should already
+		// be mapped.  The most common case is fetch unmapped at startup.
+
+		const errCode = Number(codeMatch.groups['errCode']);
+		const PROT = this.unicornModule.PROT;
+		const pageSize = this.uc.pageSize;
+
+		let faultAddr = 0n;
+
+		if (errCode === 8) {
+			// UC_ERR_FETCH_UNMAPPED: PC points to unmapped code
+			faultAddr = BigInt(this.uc.regRead(this.unicornModule.ARM64_REG.PC));
+		} else {
+			// UC_ERR_READ_UNMAPPED / UC_ERR_WRITE_UNMAPPED:
+			// We don't know the exact data address from the error message.
+			// Read the 4-byte instruction at PC and attempt to extract the
+			// base register for the memory operand.  As a fallback, map a
+			// region around SP (most common cause of data faults).
+			const pc = BigInt(this.uc.regRead(this.unicornModule.ARM64_REG.PC));
+			let decoded = false;
+
+			try {
+				const insnBuf = this.uc.memRead(pc, 4);
+				const insn = insnBuf.readUInt32LE(0);
+				// ARM64 LDR/STR (unsigned offset): bits [31:22] pattern
+				// Base register is in bits [9:5]
+				const rn = (insn >> 5) & 0x1F;
+				if (rn <= 30) {
+					const ARM64_REG = this.unicornModule.ARM64_REG;
+					const regMap: Record<number, number> = {};
+					for (let r = 0; r <= 28; r++) {
+						regMap[r] = (ARM64_REG as unknown as Record<string, number>)[`X${r}`];
+					}
+					regMap[29] = ARM64_REG.X29; // FP
+					regMap[30] = ARM64_REG.X30; // LR
+					const baseVal = BigInt(this.uc.regRead(regMap[rn]));
+					if (baseVal >= 0x1000n) {
+						faultAddr = baseVal;
+						decoded = true;
+					}
+				}
+			} catch {
+				// Fall through to SP-based fallback
+			}
+
+			if (!decoded) {
+				// Fallback: use SP as a heuristic for data faults
+				faultAddr = BigInt(this.uc.regRead(this.unicornModule.ARM64_REG.SP));
+			}
+		}
+
+		// Reject NULL page and very high addresses (same as C++ handler)
+		if (faultAddr < 0x1000n) {
+			return false;
+		}
+		if (faultAddr > 0x00007FFFFFFFFFFFn) {
+			return false;
+		}
+
+		const pageSizeBig = BigInt(pageSize);
+		const alignedAddr = (faultAddr / pageSizeBig) * pageSizeBig;
+		const alignedSize = pageSize; // Map at least one page
+
+		try {
+			this.uc.memMap(alignedAddr, alignedSize, PROT.ALL);
+		} catch {
+			// memMap failed (e.g., already mapped, OOM) — unrecoverable
+			return false;
+		}
+
+		// Notify the JS memory fault handler for tracking
+		if (this.memoryFaultHandler) {
+			const type = errCode === 8 ? 16 : (errCode === 6 ? 19 : 20);
+			this.memoryFaultHandler(type, faultAddr, 0, 0n);
+		}
+
+		return true; // Fault handled, caller should retry the instruction
 	}
 
 	/**
@@ -267,7 +453,16 @@ export class UnicornWrapper {
 	}
 
 	/**
-	 * Set handler for interrupts (syscalls)
+	 * Set handler for interrupts (syscalls).
+	 *
+	 * For ARM64, only the JS callback is stored — no native INTR hook is
+	 * installed.  ARM64 uses synchronous stepped execution where SVC
+	 * instructions are detected by opcode inspection and the handler is
+	 * called directly from the JS loop.  Installing the native INTR hook
+	 * (which uses TSFN BlockingCall) triggers STATUS_STACK_BUFFER_OVERRUN
+	 * (0xC0000409) inside Electron's UtilityProcess extension host because
+	 * BlockingCall cannot safely marshal between the Unicorn thread and the
+	 * main thread in that environment.
 	 */
 	setInterruptHandler(handler: InterruptCallback): void {
 		this.interruptHandler = handler;
@@ -276,13 +471,37 @@ export class UnicornWrapper {
 			return;
 		}
 
+		// ARM64: skip native INTR hook entirely — the sync execution path
+		// in startArm64Sync / runSyncSteppedArm64 handles SVC inline.
+		// For worker mode, startArm64Worker handles it.
+		if (this.architecture === 'arm64') {
+			return;
+		}
+
 		const HOOK = this.unicornModule.HOOK;
+		// The native InterruptHookCB uses BlockingCall, so this callback runs
+		// synchronously while the Unicorn thread is paused. Direct regWrite
+		// calls are safe here (no need for deferred writes).
 		const intrHook = this.uc.hookAdd(HOOK.INTR, (intno: number) => {
-			if (this.interruptHandler) {
-				this.interruptHandler(intno);
+			this._insideBlockingHook = true;
+			try {
+				if (this.interruptHandler) {
+					this.interruptHandler(intno);
+				}
+			} finally {
+				this._insideBlockingHook = false;
 			}
 		});
 		this.activeHookHandles.push(intrHook);
+		this._intrHookInstalled = true;
+	}
+
+	/**
+	 * Set async handler for interrupts (ARM64 worker mode).
+	 * This handler is used by startArm64Worker where we can await async operations.
+	 */
+	setAsyncInterruptHandler(handler: AsyncInterruptCallback): void {
+		this._interruptHandlerAsync = handler;
 	}
 
 	/**
@@ -313,7 +532,17 @@ export class UnicornWrapper {
 	/**
 	 * Load binary code into emulator memory
 	 */
-	loadCode(code: Buffer, baseAddress: bigint): void {
+	async loadCode(code: Buffer, baseAddress: bigint): Promise<void> {
+		if (this._arm64Worker) {
+			const pageSize = BigInt(this._arm64Worker.getPageSize());
+			const alignedBase = (baseAddress / pageSize) * pageSize;
+			const alignedSize = Math.ceil(code.length / Number(pageSize)) * Number(pageSize);
+			await this._arm64Worker.memMap(alignedBase, alignedSize, this.unicornModule!.PROT.ALL);
+			await this._arm64Worker.memWrite(baseAddress, code);
+			console.log(`Loaded ${code.length} bytes at 0x${baseAddress.toString(16)} (worker)`);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -335,12 +564,20 @@ export class UnicornWrapper {
 	/**
 	 * Map additional memory region
 	 */
-	mapMemory(address: bigint, size: number, permissions: 'r' | 'w' | 'x' | 'rw' | 'rx' | 'rwx'): void {
+	async mapMemory(address: bigint, size: number, permissions: 'r' | 'w' | 'x' | 'rw' | 'rx' | 'rwx'): Promise<void> {
+		const perms = this.parsePermissions(permissions);
+		if (this._arm64Worker) {
+			const pageSize = BigInt(this._arm64Worker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._arm64Worker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
 
-		const perms = this.parsePermissions(permissions);
 		const pageSize = BigInt(this.uc.pageSize);
 		const alignedBase = (address / pageSize) * pageSize;
 		const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
@@ -351,7 +588,15 @@ export class UnicornWrapper {
 	/**
 	 * Map memory with numeric permissions (Unicorn PROT_* values)
 	 */
-	mapMemoryRaw(address: bigint, size: number, perms: number): void {
+	async mapMemoryRaw(address: bigint, size: number, perms: number): Promise<void> {
+		if (this._arm64Worker) {
+			const pageSize = BigInt(this._arm64Worker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._arm64Worker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -366,7 +611,11 @@ export class UnicornWrapper {
 	/**
 	 * Change memory permissions
 	 */
-	memProtect(address: bigint, size: number, perms: number): void {
+	async memProtect(address: bigint, size: number, perms: number): Promise<void> {
+		if (this._arm64Worker) {
+			await this._arm64Worker.memProtect(address, size, perms);
+			return;
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -394,7 +643,18 @@ export class UnicornWrapper {
 	/**
 	 * Set up stack for emulation with proper alignment
 	 */
-	setupStack(stackBase: bigint, stackSize: number = 0x100000): void {
+	async setupStack(stackBase: bigint, stackSize: number = 0x100000): Promise<void> {
+		if (this._arm64Worker) {
+			const PROT = this.unicornModule!.PROT;
+			await this._arm64Worker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
+
+			// ARM64 doesn't push return addresses (uses LR), so just set SP
+			let sp = stackBase + BigInt(stackSize) - 0x1000n;
+			sp = (sp / 16n) * 16n;
+			await this._arm64Worker.regWrite(this.unicornModule!.ARM64_REG.SP, sp);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -462,10 +722,23 @@ export class UnicornWrapper {
 	 * transparent to callers — continue() will seamlessly handle multiple API calls.
 	 */
 	async start(startAddress: bigint, endAddress: bigint = 0n, timeout: number = 0, count: number = 0): Promise<void> {
-		if (!this.uc) {
+		if (!this.uc && !this._arm64Worker) {
 			throw new Error('Unicorn not initialized');
 		}
 
+		// ARM64 worker mode: use worker's executeBatch for emulation
+		if (this._arm64Worker) {
+			await this.startArm64Worker(startAddress, endAddress, count);
+			return;
+		}
+
+		// ARM64 in-process sync mode (fallback, should not be reached with worker)
+		if (this.architecture === 'arm64') {
+			this.startArm64Sync(startAddress, endAddress, count);
+			return;
+		}
+
+		this._stopRequested = false;
 		this.state.isRunning = true;
 		this.state.isPaused = false;
 		this.state.isReady = true;
@@ -478,7 +751,7 @@ export class UnicornWrapper {
 
 		// Add code hook for tracking
 		const HOOK = this.unicornModule!.HOOK;
-		const hookHandle = this.uc.hookAdd(HOOK.CODE, (addr: bigint, size: number) => {
+		const hookHandle = this.uc!.hookAdd(HOOK.CODE, (addr: bigint, size: number) => {
 			this.state.currentAddress = addr;
 			this.state.instructionsExecuted++;
 
@@ -518,7 +791,7 @@ export class UnicornWrapper {
 				this._apiHookRedirected = false;
 
 				try {
-					await this.uc.emuStartAsync(currentStart, endAddress, timeout, count);
+					await this.uc!.emuStartAsync(currentStart, endAddress, timeout, count);
 				} catch (error: any) {
 					// If the error is from an API redirect stop, that's expected
 					if (!this._apiHookRedirected) {
@@ -555,7 +828,247 @@ export class UnicornWrapper {
 			this.state.isRunning = false;
 			this.state.isPaused = true;
 			// Always delete the tracking hook to prevent leaks
-			try { this.uc.hookDel(hookHandle); } catch {}
+			try { this.uc!.hookDel(hookHandle); } catch { }
+		}
+	}
+
+	/**
+	 * ARM64 worker-based execution for start/step/continue.
+	 *
+	 * Runs emulation in the worker process using executeBatch(), with
+	 * breakpoints, code hooks (API interception), and SVC syscall dispatch
+	 * handled on the host side between batches.
+	 *
+	 * The worker executes a batch of instructions, returning when it
+	 * encounters an SVC, terminal address, or the batch limit. The host
+	 * dispatches syscalls, checks breakpoints, and sends the next batch.
+	 */
+	private async startArm64Worker(startAddress: bigint, endAddress: bigint, count: number): Promise<void> {
+		if (!this._arm64Worker || !this.unicornModule) {
+			throw new Error('ARM64 worker not initialized');
+		}
+
+		this._stopRequested = false;
+		this.state.isRunning = false; // Not using async Unicorn; no deferred writes
+		this.state.isPaused = false;
+		this.state.isReady = true;
+		this.state.currentAddress = startAddress;
+
+		const SVC_MASK = 0xFFE0001F;
+		const SVC_VALUE = 0xD4000001;
+		const maxInstructions = count > 0 ? count : 250000;
+		const batchSize = count === 1 ? 1 : Math.min(1000, maxInstructions);
+		const terminalAddresses = [0n, 0xDEAD0000n, 0xDEADDEADn, 0xDEADDEADDEADDEADn];
+		if (endAddress !== 0n) {
+			terminalAddresses.push(endAddress);
+		}
+
+		let totalExecuted = 0;
+		let isFirstInstruction = true;
+		let currentPc = startAddress;
+
+		try {
+			while (totalExecuted < maxInstructions) {
+				if (this._stopRequested) {
+					break;
+				}
+
+				// Read PC from worker
+				const ARM64_REG = this.unicornModule.ARM64_REG;
+				currentPc = await this._arm64Worker.regRead(ARM64_REG.PC) as bigint;
+				this.state.currentAddress = currentPc;
+
+				// Breakpoint check (skip on first instruction)
+				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
+
+				// Fire code hooks (API interception) before executing
+				this._apiHookRedirected = false;
+				this.codeHooks.forEach(cb => cb(currentPc, 4));
+				if (this._apiHookRedirected) {
+					// API interceptor redirected — read new PC from worker
+					isFirstInstruction = true;
+					continue;
+				}
+
+				// Execute a batch in the worker
+				const remaining = maxInstructions - totalExecuted;
+				const thisBatch = Math.min(batchSize, remaining);
+
+				const result = await this._arm64Worker.executeBatch(
+					currentPc, thisBatch, SVC_MASK, SVC_VALUE, terminalAddresses
+				);
+
+				totalExecuted += result.instructionsExecuted;
+				this.state.instructionsExecuted += result.instructionsExecuted;
+				this.state.currentAddress = result.pc;
+
+				if (result.error) {
+					this.state.lastError = result.error;
+					break;
+				}
+
+				if (result.stopped) {
+					// Terminal address reached
+					break;
+				}
+
+				if (result.svcEncountered) {
+					// SVC detected — dispatch syscall handler on the host side.
+					// For ARM64 worker mode, we use the async interrupt handler
+					// (interruptHandlerAsync) if available, otherwise fall back
+					// to the sync handler (which may not work with async register ops).
+					if (this._interruptHandlerAsync) {
+						await this._interruptHandlerAsync(2);
+					} else if (this.interruptHandler) {
+						this.interruptHandler(2);
+					}
+					// Advance PC past SVC (4 bytes)
+					await this._arm64Worker.regWrite(ARM64_REG.PC, result.pc + 4n);
+
+					if (this._stopRequested) {
+						break;
+					}
+					// Continue with the next batch
+					continue;
+				}
+			}
+		} finally {
+			// Sync the final PC
+			if (this._arm64Worker) {
+				try {
+					const ARM64_REG = this.unicornModule!.ARM64_REG;
+					const finalPc = await this._arm64Worker.regRead(ARM64_REG.PC) as bigint;
+					this.state.currentAddress = finalPc;
+				} catch {
+					// Worker may have exited
+				}
+			}
+			this.state.isPaused = true;
+		}
+	}
+
+	/**
+	 * ARM64 synchronous execution for start/step/continue (in-process fallback).
+	 *
+	 * Same approach as runSyncSteppedArm64 but also handles breakpoints and
+	 * code hooks (API interception). Each instruction is executed with sync
+	 * emuStart(count=1), followed by SVC detection and interrupt dispatch.
+	 *
+	 * No native hooks (INTR or MEM_UNMAPPED) are installed for ARM64 — both
+	 * use TSFN which crashes in Electron's UtilityProcess.  SVC is handled
+	 * inline; memory faults are caught as emuStart exceptions and handled
+	 * via handleArm64MemoryFault.
+	 */
+	private startArm64Sync(startAddress: bigint, endAddress: bigint, count: number): void {
+		if (!this.uc || !this.unicornModule) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		this._stopRequested = false;
+
+		this.state.isRunning = false; // sync mode — no deferred writes needed
+		this.state.isPaused = false;
+		this.state.isReady = true;
+		this.state.currentAddress = startAddress;
+
+		const ARM64_REG = this.unicornModule.ARM64_REG;
+		const SVC_MASK = 0xFFE0001F;
+		const SVC_VALUE = 0xD4000001;
+		const maxInstructions = count > 0 ? count : 250000;
+		let isFirstInstruction = true;
+
+		try {
+			for (let i = 0; i < maxInstructions; i++) {
+				// Check if stop was requested (e.g., exit/exit_group syscall)
+				if (this._stopRequested) {
+					break;
+				}
+
+				const pcBefore = BigInt(this.uc.regRead(ARM64_REG.PC));
+				this.state.currentAddress = pcBefore;
+
+				// Breakpoint check (skip on first instruction to allow continue-from-breakpoint)
+				if (this.breakpoints.has(pcBefore) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
+
+				// Fire code hooks (API interception)
+				this._apiHookRedirected = false;
+				this.codeHooks.forEach(cb => cb(pcBefore, 4));
+				if (this._apiHookRedirected) {
+					// API interceptor redirected execution — sync PC and restart
+					this.syncCurrentAddress();
+					isFirstInstruction = true;
+					continue;
+				}
+
+				// Terminal address check
+				if (pcBefore === 0n || pcBefore === 0xDEAD0000n ||
+					pcBefore === 0xDEADDEADn || pcBefore === 0xDEADDEADDEADDEADn) {
+					break;
+				}
+
+				// End address check
+				if (endAddress !== 0n && pcBefore === endAddress) {
+					break;
+				}
+
+				// Read instruction before executing
+				let insn = 0;
+				try {
+					const insnBuf = this.uc.memRead(pcBefore, 4);
+					insn = insnBuf.readUInt32LE(0);
+				} catch { /* let emuStart handle unmapped memory */ }
+
+				// Check if the instruction is SVC BEFORE executing it.
+				// Without an INTR hook, Unicorn raises UC_ERR_EXCEPTION for SVC
+				// and does NOT advance PC. We detect this, dispatch the syscall
+				// handler directly, and advance PC manually (+4 bytes).
+				const isSvc = (insn & SVC_MASK) === SVC_VALUE;
+
+				if (isSvc) {
+					// Do NOT call emuStart for SVC — it throws UC_ERR_EXCEPTION.
+					// Dispatch the interrupt handler directly and advance PC.
+					this.state.instructionsExecuted++;
+					if (this.interruptHandler) {
+						this.interruptHandler(2);
+					}
+					// Advance PC past the SVC instruction (4 bytes)
+					this.uc.regWrite(ARM64_REG.PC, pcBefore + 4n);
+					if (this._stopRequested) {
+						break;
+					}
+				} else {
+					// Execute 1 instruction synchronously
+					try {
+						this.uc.emuStart(pcBefore, 0n, 0, 1);
+					} catch (error: unknown) {
+						// Handle memory faults (no native hook for ARM64)
+						if (this.handleArm64MemoryFault(error)) {
+							// Page was mapped — retry the same instruction
+							i--;
+							continue;
+						}
+						this.state.lastError = toErrorMessage(error);
+						break;
+					}
+					this.state.instructionsExecuted++;
+				}
+
+				// Handle SVC is already done above; just sync PC
+				this.syncCurrentAddress();
+			}
+		} finally {
+			this.syncCurrentAddress();
+			this.state.isPaused = true;
+			// ARM64 never installs the native INTR hook (see setInterruptHandler),
+			// so no cleanup is needed here.
 		}
 	}
 
@@ -606,9 +1119,12 @@ export class UnicornWrapper {
 	/**
 	 * Read the actual instruction pointer from Unicorn registers and sync state.
 	 * This ensures currentAddress reflects reality after emuStop/step.
+	 * For ARM64 worker mode, this is a no-op (PC is synced in startArm64Worker).
 	 */
 	private syncCurrentAddress(): void {
 		if (!this.uc || !this.unicornModule) { return; }
+		// ARM64 worker: PC is synced in startArm64Worker, skip
+		if (this._arm64Worker) { return; }
 
 		try {
 			const X86_REG = this.unicornModule.X86_REG;
@@ -631,12 +1147,214 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Run N instructions with minimal overhead.
+	 * Used for headless/diagnostic runs.
+	 *
+	 * For ARM64, uses synchronous stepped execution to avoid a fatal crash:
+	 * emuStartAsync runs Unicorn in a worker thread, and the INTR hook uses
+	 * BlockingCall (TSFN) to dispatch syscalls to the JS main thread. On
+	 * Windows, this combination triggers STATUS_STACK_BUFFER_OVERRUN (0xC0000409)
+	 * inside the Unicorn DLL's ARM64 TCG backend.  The fix is to run ARM64
+	 * instructions one-by-one via synchronous emuStart(count=1) on the main
+	 * thread — with the INTR hook temporarily removed — and detect SVC
+	 * instructions by inspecting the opcode after each step.
+	 *
+	 * For other architectures, uses emuStartAsync so the event loop stays
+	 * free for TSFN-based hook callbacks.
+	 */
+	async runSync(startAddress: bigint, count: number, timeout: number = 0): Promise<void> {
+		if (!this.uc && !this._arm64Worker) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		// ARM64 worker: delegate to startArm64Worker (same batch-based approach)
+		if (this._arm64Worker) {
+			await this.startArm64Worker(startAddress, 0n, count);
+			return;
+		}
+
+		// ARM64: use synchronous stepped execution to avoid TSFN/threading crash
+		if (this.architecture === 'arm64') {
+			this.runSyncSteppedArm64(startAddress, count);
+			return;
+		}
+
+		this.state.isRunning = true;
+		this.state.isPaused = false;
+		this.state.currentAddress = startAddress;
+		this.deferredMemoryWrites = [];
+		this.deferredRegisterWrites.clear();
+
+		try {
+			await this.uc!.emuStartAsync(startAddress, 0n, timeout, count);
+		} catch (error: unknown) {
+			this.state.lastError = toErrorMessage(error);
+			throw error;
+		} finally {
+			this.applyDeferredMutations();
+			this.syncCurrentAddress();
+			this.state.isRunning = false;
+			this.state.isPaused = true;
+		}
+	}
+
+	/**
+	 * ARM64 synchronous stepped execution.
+	 *
+	 * Runs exactly `count` instructions (or fewer if emulation terminates)
+	 * using sync emuStart(count=1) in a loop.  SVC instructions are detected
+	 * by reading the 4-byte opcode at the current PC and calling the
+	 * interruptHandler directly (no native INTR hook is installed for ARM64).
+	 *
+	 * No native memory fault hook is installed for ARM64 either — both TSFN
+	 * types (BlockingCall and NonBlockingCall) crash Electron's UtilityProcess.
+	 * Memory faults are caught as emuStart exceptions and handled in JS via
+	 * handleArm64MemoryFault.
+	 */
+	private runSyncSteppedArm64(startAddress: bigint, count: number): void {
+		if (!this.uc || !this.unicornModule) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		this._stopRequested = false;
+
+		this.state.isRunning = false; // Not using async, so no deferred writes needed
+		this.state.isPaused = false;
+		this.state.currentAddress = startAddress;
+
+		const ARM64_REG = this.unicornModule.ARM64_REG;
+		// ARM64 SVC #0 opcode: 0xD4000001
+		// General SVC mask: (insn & 0xFFE0001F) === 0xD4000001
+		const SVC_MASK = 0xFFE0001F;
+		const SVC_VALUE = 0xD4000001;
+
+		try {
+			for (let i = 0; i < count; i++) {
+				// Check if stop was requested (e.g., exit/exit_group syscall)
+				if (this._stopRequested) {
+					break;
+				}
+
+				const pcBefore = BigInt(this.uc.regRead(ARM64_REG.PC));
+
+				// Check for terminal addresses before executing
+				if (pcBefore === 0n || pcBefore === 0xDEAD0000n ||
+					pcBefore === 0xDEADDEADn || pcBefore === 0xDEADDEADDEADDEADn) {
+					break;
+				}
+
+				// Read the 4-byte instruction at current PC BEFORE executing it.
+				// If the memory is unmapped, the C++ fault handler auto-maps it.
+				let insn = 0;
+				try {
+					const insnBuf = this.uc.memRead(pcBefore, 4);
+					insn = insnBuf.readUInt32LE(0);
+				} catch {
+					// Cannot read instruction — memory may be unmapped.
+					// Let emuStart handle it (will trigger fault hook).
+				}
+
+				// Check if the instruction is SVC BEFORE executing it.
+				// Without an INTR hook, Unicorn raises UC_ERR_EXCEPTION for SVC
+				// and does NOT advance PC. We detect this case, dispatch the
+				// syscall handler directly, and advance PC manually (+4 bytes).
+				const isSvc = (insn & SVC_MASK) === SVC_VALUE;
+
+				if (isSvc) {
+					// Do NOT call emuStart for SVC — it would throw UC_ERR_EXCEPTION.
+					// Dispatch the interrupt handler directly and advance PC.
+					this.state.instructionsExecuted++;
+					if (this.interruptHandler) {
+						this.interruptHandler(2);
+					}
+					// Advance PC past the SVC instruction (4 bytes)
+					this.uc.regWrite(ARM64_REG.PC, pcBefore + 4n);
+					if (this._stopRequested) {
+						break;
+					}
+				} else {
+					// Execute exactly 1 instruction synchronously
+					try {
+						this.uc.emuStart(pcBefore, 0n, 0, 1);
+					} catch (error: unknown) {
+						// Handle memory faults (no native hook for ARM64)
+						if (this.handleArm64MemoryFault(error)) {
+							// Page was mapped — retry the same instruction
+							i--;
+							continue;
+						}
+						this.state.lastError = toErrorMessage(error);
+						break;
+					}
+					this.state.instructionsExecuted++;
+				}
+
+				// Sync PC after execution + possible handler changes
+				this.syncCurrentAddress();
+			}
+		} finally {
+			this.syncCurrentAddress();
+			this.state.isPaused = true;
+			// ARM64 never installs the native INTR hook — SVC is handled inline.
+		}
+	}
+
+	/**
+	 * Find the index of the INTR hook handle in activeHookHandles.
+	 * The INTR hook is added by setInterruptHandler and is always the last entry
+	 * pushed to activeHookHandles after the memory fault hooks.
+	 */
+	private findIntrHookIndex(): number {
+		// The INTR hook is the last one added (after the mem fault hook in initialize()).
+		// Memory fault hook is always at index 0 (added first in installMemoryFaultHooks).
+		// INTR hook is at index 1+ (added later by setInterruptHandler).
+		// Return the last index since INTR is added last.
+		if (this.activeHookHandles.length > 1) {
+			return this.activeHookHandles.length - 1;
+		}
+		return -1;
+	}
+
+	/**
+	 * Re-install the TSFN-based INTR hook for async execution.
+	 * Called after ARM64 sync stepping completes.
+	 */
+	private reinstallIntrHook(): void {
+		if (!this.uc || !this.unicornModule || !this.interruptHandler) {
+			return;
+		}
+
+		// Avoid double-install
+		if (this._intrHookInstalled) {
+			return;
+		}
+
+		const HOOK = this.unicornModule.HOOK;
+		const handler = this.interruptHandler;
+
+		try {
+			const intrHook = this.uc.hookAdd(HOOK.INTR, (intno: number) => {
+				this._insideBlockingHook = true;
+				try {
+					handler(intno);
+				} finally {
+					this._insideBlockingHook = false;
+				}
+			});
+			this.activeHookHandles.push(intrHook);
+			this._intrHookInstalled = true;
+		} catch (error: unknown) {
+			console.warn(`[unicorn] Failed to reinstall INTR hook: ${toErrorMessage(error)}`);
+		}
+	}
+
+	/**
 	 * Step one instruction.
 	 * Uses count=1 in emuStart to execute exactly one instruction natively.
 	 * Does NOT use stepMode flag (which would prevent the instruction from running).
 	 */
 	async step(): Promise<void> {
-		if (!this.uc) {
+		if (!this.uc && !this._arm64Worker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -649,7 +1367,7 @@ export class UnicornWrapper {
 	 * Continue execution from current address until breakpoint, exit, or error.
 	 */
 	async continue(): Promise<void> {
-		if (!this.uc) {
+		if (!this.uc && !this._arm64Worker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -661,10 +1379,14 @@ export class UnicornWrapper {
 	 * Stop emulation
 	 */
 	stop(): void {
-		if (!this.uc) {
-			return;
+		this._stopRequested = true;
+		if (this._arm64Worker) {
+			// Worker uses _stopRequested flag; also try emuStop in worker
+			this._arm64Worker.emuStop().catch(() => { /* ignore */ });
 		}
-		this.uc.emuStop();
+		if (this.uc) {
+			this.uc.emuStop();
+		}
 		this.state.isRunning = false;
 	}
 
@@ -692,7 +1414,24 @@ export class UnicornWrapper {
 	/**
 	 * Read memory
 	 */
-	readMemory(address: bigint, size: number): Buffer {
+	async readMemory(address: bigint, size: number): Promise<Buffer> {
+		if (this._arm64Worker) {
+			return await this._arm64Worker.memRead(address, size);
+		}
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
+		return this.uc.memRead(address, size);
+	}
+
+	/**
+	 * Read memory synchronously (for in-process x86/x64 hook callbacks only).
+	 * Must NOT be called when using the ARM64 worker.
+	 */
+	readMemorySync(address: bigint, size: number): Buffer {
+		if (this._arm64Worker) {
+			throw new Error('readMemorySync cannot be used with ARM64 worker');
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -702,18 +1441,66 @@ export class UnicornWrapper {
 	/**
 	 * Write memory
 	 */
-	writeMemory(address: bigint, data: Buffer): void {
+	async writeMemory(address: bigint, data: Buffer): Promise<void> {
+		if (this._arm64Worker) {
+			await this._arm64Worker.memWrite(address, data);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
 
-		if (this.state.isRunning) {
+		if (this.state.isRunning && !this._insideBlockingHook) {
 			// Buffer may be reused by caller; clone to avoid mutation races.
 			this.deferredMemoryWrites.push({ address, data: Buffer.from(data) });
 			return;
 		}
 
 		this.uc.memWrite(address, data);
+	}
+
+	/**
+	 * Write memory synchronously (for in-process x86/x64 hook callbacks only).
+	 * Must NOT be called when using the ARM64 worker.
+	 */
+	writeMemorySync(address: bigint, data: Buffer): void {
+		if (this._arm64Worker) {
+			throw new Error('writeMemorySync cannot be used with ARM64 worker');
+		}
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		if (this.state.isRunning && !this._insideBlockingHook) {
+			this.deferredMemoryWrites.push({ address, data: Buffer.from(data) });
+			return;
+		}
+
+		this.uc.memWrite(address, data);
+	}
+
+	/**
+	 * Set register synchronously (for in-process x86/x64 hook callbacks only).
+	 * Must NOT be called when using the ARM64 worker.
+	 */
+	setRegisterSync(name: string, value: bigint | number): void {
+		if (this._arm64Worker) {
+			throw new Error('setRegisterSync cannot be used with ARM64 worker');
+		}
+
+		const regName = name.toLowerCase();
+
+		if (!this.uc) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		if (this.state.isRunning && !this._insideBlockingHook) {
+			this.deferredRegisterWrites.set(regName, value);
+			return;
+		}
+
+		this.setRegisterImmediate(regName, value);
 	}
 
 	/**
@@ -773,7 +1560,11 @@ export class UnicornWrapper {
 	/**
 	 * Get ARM64 registers
 	 */
-	getRegistersArm64(): Arm64Registers {
+	async getRegistersArm64(): Promise<Arm64Registers> {
+		if (this._arm64Worker) {
+			return await this._arm64Worker.readAllRegisters();
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -822,13 +1613,39 @@ export class UnicornWrapper {
 	/**
 	 * Set register value with correct type handling per architecture
 	 */
-	setRegister(name: string, value: bigint | number): void {
+	async setRegister(name: string, value: bigint | number): Promise<void> {
+		const regName = name.toLowerCase();
+
+		if (this._arm64Worker) {
+			// Route to worker for ARM64
+			const ARM64_REG = this.unicornModule!.ARM64_REG;
+			const arm64Regs: Record<string, number> = {
+				'x0': ARM64_REG.X0, 'x1': ARM64_REG.X1, 'x2': ARM64_REG.X2, 'x3': ARM64_REG.X3,
+				'x4': ARM64_REG.X4, 'x5': ARM64_REG.X5, 'x6': ARM64_REG.X6, 'x7': ARM64_REG.X7,
+				'x8': ARM64_REG.X8, 'x9': ARM64_REG.X9, 'x10': ARM64_REG.X10, 'x11': ARM64_REG.X11,
+				'x12': ARM64_REG.X12, 'x13': ARM64_REG.X13, 'x14': ARM64_REG.X14, 'x15': ARM64_REG.X15,
+				'x16': ARM64_REG.X16, 'x17': ARM64_REG.X17, 'x18': ARM64_REG.X18, 'x19': ARM64_REG.X19,
+				'x20': ARM64_REG.X20, 'x21': ARM64_REG.X21, 'x22': ARM64_REG.X22, 'x23': ARM64_REG.X23,
+				'x24': ARM64_REG.X24, 'x25': ARM64_REG.X25, 'x26': ARM64_REG.X26, 'x27': ARM64_REG.X27,
+				'x28': ARM64_REG.X28, 'x29': ARM64_REG.X29, 'x30': ARM64_REG.X30,
+				'sp': ARM64_REG.SP, 'pc': ARM64_REG.PC, 'lr': ARM64_REG.LR, 'fp': ARM64_REG.FP,
+				'nzcv': ARM64_REG.NZCV
+			};
+			const regId = arm64Regs[regName];
+			if (regId === undefined) {
+				throw new Error(`Unknown ARM64 register: ${regName}`);
+			}
+			await this._arm64Worker.regWrite(regId, BigInt(value));
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
 
-		const regName = name.toLowerCase();
-		if (this.state.isRunning) {
+		// During blocking hook callbacks the Unicorn thread is paused, so
+		// direct regWrite is safe even though isRunning is true.
+		if (this.state.isRunning && !this._insideBlockingHook) {
 			this.deferredRegisterWrites.set(regName, value);
 			return;
 		}
@@ -890,7 +1707,23 @@ export class UnicornWrapper {
 	/**
 	 * Get mapped memory regions
 	 */
-	getMemoryRegions(): MemoryRegion[] {
+	async getMemoryRegions(): Promise<MemoryRegion[]> {
+		if (this._arm64Worker) {
+			const PROT = this.unicornModule!.PROT;
+			const regions = await this._arm64Worker.memRegions();
+			return regions.map(region => {
+				let perms = '';
+				if (region.perms & PROT.READ) { perms += 'r'; }
+				if (region.perms & PROT.WRITE) { perms += 'w'; }
+				if (region.perms & PROT.EXEC) { perms += 'x'; }
+				return {
+					address: region.begin,
+					size: region.end - region.begin,
+					permissions: perms || '---'
+				};
+			});
+		}
+
 		if (!this.uc) {
 			return [];
 		}
@@ -920,6 +1753,9 @@ export class UnicornWrapper {
 	 * Get the page size
 	 */
 	getPageSize(): number {
+		if (this._arm64Worker) {
+			return this._arm64Worker.getPageSize();
+		}
 		return this.uc?.pageSize ?? 0x1000;
 	}
 
@@ -940,7 +1776,14 @@ export class UnicornWrapper {
 	/**
 	 * Save current state (snapshot)
 	 */
-	saveState(): void {
+	async saveState(): Promise<void> {
+		if (this._arm64Worker) {
+			if (this._workerContextId !== undefined) {
+				await this._arm64Worker.contextFree(this._workerContextId);
+			}
+			this._workerContextId = await this._arm64Worker.contextSave();
+			return;
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -954,7 +1797,14 @@ export class UnicornWrapper {
 	/**
 	 * Restore saved state
 	 */
-	restoreState(): void {
+	async restoreState(): Promise<void> {
+		if (this._arm64Worker) {
+			if (this._workerContextId === undefined) {
+				throw new Error('No saved state');
+			}
+			await this._arm64Worker.contextRestore(this._workerContextId);
+			return;
+		}
 		if (!this.uc || !this.savedContext) {
 			throw new Error('No saved state');
 		}
@@ -1002,7 +1852,7 @@ export class UnicornWrapper {
 	 * Check if initialized
 	 */
 	isInitialized(): boolean {
-		return this.initialized && this.uc !== undefined;
+		return this.initialized && (this.uc !== undefined || this._arm64Worker !== undefined);
 	}
 
 	getLastError(): string | undefined {
@@ -1013,6 +1863,13 @@ export class UnicornWrapper {
 	 * Close and cleanup
 	 */
 	dispose(): void {
+		// Dispose ARM64 worker if active
+		if (this._arm64Worker) {
+			this._arm64Worker.dispose();
+			this._arm64Worker = undefined;
+			this._workerContextId = undefined;
+		}
+
 		// Clean up all active hook handles
 		if (this.uc) {
 			for (const handle of this.activeHookHandles) {
@@ -1041,6 +1898,8 @@ export class UnicornWrapper {
 		this.memoryFaultHandler = undefined;
 		this.interruptHandler = undefined;
 		this._apiHookRedirected = false;
+		this._stopRequested = false;
+		this._intrHookInstalled = false;
 	}
 }
 

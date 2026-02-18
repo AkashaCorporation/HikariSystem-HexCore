@@ -5,6 +5,46 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.2] - 2026-02-17 - "Pipeline Maturity"
+
+> **Feature Release** — Full pipeline maturity: every analytical capability in HexCore is now accessible programmatically. New ELF Analyzer, Report Composer, multi-byte XOR deobfuscation, and headless commands for Debugger, Base64, and Hex Viewer.
+
+### Added
+
+- **Debugger Headless — Snapshot & Restore** — `hexcore.debug.snapshotHeadless` and `hexcore.debug.restoreSnapshotHeadless` commands for pipeline-driven emulation state management.
+- **API/Lib Call Trace** — `TraceManager` captures API/libc calls with arguments, return values, and PC addresses during emulation. New `TraceTreeProvider` panel for real-time visualization. `hexcore.debug.exportTraceHeadless` for pipeline export.
+- **ELF Analyzer** (`hexcore-elfanalyzer`) — New extension for structural analysis of ELF binaries. TypeScript-pure parser supporting ELF32/ELF64, section/segment/symbol parsing, dynamic linking info, and security mitigations (RELRO, Stack Canary, NX, PIE). Commands: `hexcore.elfanalyzer.analyze`, `hexcore.elfanalyzer.analyzeActive`.
+- **Report Composer** (`hexcore-report-composer`) — New extension that aggregates pipeline outputs from `hexcore-reports/` directory into a unified Markdown report with table of contents, evidence links, and analyst notes. Command: `hexcore.pipeline.composeReport`.
+- **Base64 Headless** — `hexcore.base64.decodeHeadless` command for pipeline-driven Base64 string extraction from binary files.
+- **Multi-byte XOR Deobfuscation** — Extended `hexcore.strings.extractAdvanced` with multi-byte XOR keys (2, 4, 8, 16 bytes), rolling XOR, and XOR with increment detection. Frequency analysis-based key recovery.
+- **Hex Viewer Headless** — `hexcore.hexview.dumpHeadless` for programmatic hex dump extraction and `hexcore.hexview.searchHeadless` for pattern search with streaming (64KB chunks + overlap).
+- **Pipeline Capability Registration** — All 9 new headless commands registered in `COMMAND_CAPABILITIES`, `COMMAND_OWNERS`, and `COMMAND_ALIASES` maps. 3 convenience aliases added.
+
+### Backlog Items Resolved
+
+| Item | Description |
+|------|-------------|
+| #21 | Debugger Headless Commands (snapshot/restore/trace) |
+| #7b | API/Lib Call Trace Snippets in Debugger |
+| #9 | Report Composer |
+| #23 | ELF Analyzer Extension |
+| #24 | Base64 Headless Mode |
+| #25 | Multi-byte XOR Deobfuscation |
+| #27 | Hex Viewer Headless Commands |
+
+### New Headless Commands
+
+| Command | Extension |
+|---------|-----------|
+| `hexcore.debug.snapshotHeadless` | hexcore-debugger |
+| `hexcore.debug.restoreSnapshotHeadless` | hexcore-debugger |
+| `hexcore.debug.exportTraceHeadless` | hexcore-debugger |
+| `hexcore.elfanalyzer.analyze` | hexcore-elfanalyzer |
+| `hexcore.base64.decodeHeadless` | hexcore-base64 |
+| `hexcore.hexview.dumpHeadless` | hexcore-hexviewer |
+| `hexcore.hexview.searchHeadless` | hexcore-hexviewer |
+| `hexcore.pipeline.composeReport` | hexcore-report-composer |
+
 ## [3.5.1] - 2026-02-16 - "ARM64 Fix"
 
 > **Bugfix Release** — Complete ARM/ARM64 support across disassembler, debugger, strings, and formula engines. Previously, ARM64 binaries were effectively unreadable. Tested against HTB Insane-level ARM64 ELF: 72 functions discovered (was 1).
@@ -446,6 +486,7 @@ Every analysis tool now supports headless execution via standardized parameters:
 - Capstone N-API binding
 - New analysis tools
 
+[3.5.2]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.2
 [3.5.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.1
 [3.5.0]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.5.0
 [3.4.1]: https://github.com/LXrdKnowkill/HikariSystem-HexCore/releases/tag/v3.4.1

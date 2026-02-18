@@ -30,6 +30,8 @@
 		"onCommand:hexcore.copyAsHex",
 		"onCommand:hexcore.copyAsC",
 		"onCommand:hexcore.copyAsPython",
+		"onCommand:hexcore.hexview.dumpHeadless",
+		"onCommand:hexcore.hexview.searchHeadless",
 		"onCustomEditor:hexcore.hexEditor"
 	],
 	"main": "./out/extension.js",
@@ -79,6 +81,16 @@
 			{
 				"command": "hexcore.copyAsPython",
 				"title": "Copy Selection as Python Bytes",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.hexview.dumpHeadless",
+				"title": "Hex Dump (Headless)",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.hexview.searchHeadless",
+				"title": "Hex Search (Headless)",
 				"category": "HexCore"
 			}
 		],
@@ -163,8 +175,10 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"devDependencies": {
+		"@types/mocha": "^10.0.0",
 		"@types/node": "^18.0.0",
 		"@types/vscode": "^1.70.0",
+		"fast-check": "^3.15.0",
 		"typescript": "^5.0.0"
 	}
 }

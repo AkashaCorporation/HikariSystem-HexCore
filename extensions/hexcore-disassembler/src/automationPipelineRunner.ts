@@ -159,7 +159,10 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hash.file', 'hexcore.hashcalc.calculate'],
 	['hexcore.hash.calculate', 'hexcore.hashcalc.calculate'],
 	['hexcore.disasm.open', 'hexcore.disasm.openFile'],
-	['hexcore.pe.analyze', 'hexcore.peanalyzer.analyze']
+	['hexcore.pe.analyze', 'hexcore.peanalyzer.analyze'],
+	['hexcore.elf.analyze', 'hexcore.elfanalyzer.analyze'],
+	['hexcore.hex.dump', 'hexcore.hexview.dumpHeadless'],
+	['hexcore.hex.search', 'hexcore.hexview.searchHeadless']
 ]);
 
 const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
@@ -199,6 +202,22 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.exportASM', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command opens save dialog.' }],
 	['hexcore.debug.emulate', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive debugger command opens file picker and UI.' }],
 	['hexcore.debug.emulateWithArch', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive debugger command opens prompts and UI.' }],
+	['hexcore.debug.emulateHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.continueHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.debug.stepHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.debug.readMemoryHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.getRegistersHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.debug.setBreakpointHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.debug.getStateHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.snapshotHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.restoreSnapshotHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.exportTraceHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.elfanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.elfanalyzer.analyzeActive', { headless: false, defaultTimeoutMs: 60000, validateOutput: false, reason: 'Interactive command analyzes active editor file.' }],
+	['hexcore.base64.decodeHeadless', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
+	['hexcore.hexview.dumpHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.hexview.searchHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.pipeline.composeReport', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.pipeline.runJob', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Recursive pipeline invocation is not supported from a step.' }]
 ]);
 
@@ -225,6 +244,13 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.exportASM', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.debug.emulate', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.emulateWithArch', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.emulateHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.continueHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.stepHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.readMemoryHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.getRegistersHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.setBreakpointHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.getStateHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.pipeline.runJob', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.strings.extractAdvanced', ['hikarisystem.hexcore-strings']],
 	['hexcore.minidump.parse', ['hikarisystem.hexcore-minidump']],
@@ -239,7 +265,16 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.pipeline.validateWorkspace', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.createPresetJob', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.saveJobAsProfile', ['hikarisystem.hexcore-disassembler']],
-	['hexcore.pipeline.doctor', ['hikarisystem.hexcore-disassembler']]
+	['hexcore.pipeline.doctor', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.debug.snapshotHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.restoreSnapshotHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.exportTraceHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.elfanalyzer.analyze', ['hikarisystem.hexcore-elfanalyzer']],
+	['hexcore.elfanalyzer.analyzeActive', ['hikarisystem.hexcore-elfanalyzer']],
+	['hexcore.base64.decodeHeadless', ['hikarisystem.hexcore-base64']],
+	['hexcore.hexview.dumpHeadless', ['hikarisystem.hexcore-hexviewer']],
+	['hexcore.hexview.searchHeadless', ['hikarisystem.hexcore-hexviewer']],
+	['hexcore.pipeline.composeReport', ['hikarisystem.hexcore-report-composer']]
 ]);
 
 export interface PipelineCapabilityEntry {

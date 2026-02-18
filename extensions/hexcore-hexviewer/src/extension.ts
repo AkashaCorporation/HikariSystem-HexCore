@@ -5,7 +5,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import { HexEditorProvider } from './hexEditorProvider';
+import { hexDumpRange } from './hexDump';
+import { hexSearchPattern } from './hexSearch';
 
 export function activate(context: vscode.ExtensionContext): void {
 	// Register internal commands FIRST - before any other extension might need them
@@ -122,6 +126,70 @@ export function activate(context: vscode.ExtensionContext): void {
 			setTimeout(() => {
 				vscode.commands.executeCommand('hexcore.internal.goToOffset', offset);
 			}, 500);
+		})
+	);
+
+	// Headless command: hex dump
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hexview.dumpHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			if (!filePath) {
+				throw new Error('dumpHeadless requires a "file" argument.');
+			}
+
+			const offset = typeof arg?.offset === 'number' ? arg.offset : 0;
+			const size = typeof arg?.size === 'number' ? arg.size : 256;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			const result = hexDumpRange(filePath, offset, size);
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(
+					`HexCore Hex Dump: ${result.size} bytes from offset 0x${offset.toString(16).toUpperCase()}`
+				);
+			}
+
+			return result;
+		})
+	);
+
+	// Headless command: hex search
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hexview.searchHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			if (!filePath) {
+				throw new Error('searchHeadless requires a "file" argument.');
+			}
+
+			const pattern = typeof arg?.pattern === 'string' ? arg.pattern : undefined;
+			if (!pattern) {
+				throw new Error('searchHeadless requires a "pattern" argument.');
+			}
+
+			const maxResults = typeof arg?.maxResults === 'number' ? arg.maxResults : 1000;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			const result = hexSearchPattern(filePath, pattern, maxResults);
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(
+					`HexCore Hex Search: Found ${result.totalMatches} match(es) for pattern ${result.pattern}`
+				);
+			}
+
+			return result;
 		})
 	);
 

@@ -14,6 +14,7 @@
 #include <vector>
 #include <mutex>
 #include <atomic>
+#include <condition_variable>
 
 // Forward declarations
 struct HookData;
@@ -346,6 +347,10 @@ struct MemHookCallData {
 
 struct InterruptHookCallData {
 	uint32_t intno;
+	// Synchronization: the native hook blocks until JS finishes the syscall handler
+	std::atomic<bool> done{false};
+	std::mutex mtx;
+	std::condition_variable cv;
 };
 
 struct InsnHookCallData {
@@ -358,6 +363,8 @@ struct InvalidMemHookCallData {
 	uint64_t address;
 	int size;
 	int64_t value;
+	// result is set by the C++ auto-map logic (true if mapped successfully)
+	bool result{false};
 };
 
 // ============== Hook Callback Functions ==============

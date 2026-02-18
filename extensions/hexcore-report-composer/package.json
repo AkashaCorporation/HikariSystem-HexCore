@@ -1,0 +1,44 @@
+{
+	"name": "hexcore-report-composer",
+	"displayName": "HexCore Report Composer",
+	"description": "Aggregates multiple analysis reports into a unified Markdown report",
+	"version": "1.0.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"activationEvents": [
+		"onCommand:hexcore.pipeline.composeReport"
+	],
+	"categories": [
+		"Other"
+	],
+	"keywords": [
+		"report",
+		"pipeline",
+		"malware",
+		"analysis",
+		"composer"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.pipeline.composeReport",
+				"title": "HexCore: Compose Analysis Report"
+			}
+		]
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/mocha": "^10.0.0",
+		"@types/node": "^18.0.0",
+		"@types/vscode": "^1.60.0",
+		"fast-check": "^3.15.0",
+		"typescript": "^5.0.0"
+	}
+}

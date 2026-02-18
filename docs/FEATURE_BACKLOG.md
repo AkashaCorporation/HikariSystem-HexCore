@@ -1,6 +1,6 @@
 # HexCore Feature Backlog
 
-> **Date**: 2026-02-08
+> **Date**: 2026-02-17
 > **Scope**: Improve reverse workflow quality, reproducibility and teaching value.
 > **Source**: Analysis of real CTF usage (Wayback, virtually.mad challenges).
 
@@ -9,10 +9,10 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-16 — v3.5.1 "ARM64 Fix")
+## Current Snapshot (2026-02-17 — v3.5.2 "Pipeline Maturity")
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
-- P1 delivered: **2/4** (`#7a`, `#8`)
-- P2 delivered: **0/2**
+- P1 delivered: **4/5** (`#7a`, `#8`, `#7b`, `#9`)
+- P2 delivered: **2/4** (`#24`, `#27`)
 - Infrastructure delivered: **8/8** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`, `#18`, `#20`)
 - Future Engines delivered: **0/2** (hexcore-rellic `NEXT`)
 - Pipeline hardening added beyond original backlog:
@@ -35,6 +35,15 @@
   - ARM64 DebugEngine: 5 methods + 20 syscalls (#22 DONE)
   - ARM64 formulaBuilder: registers + 15 mnemonics (#26 DONE)
   - Race condition fix: analyzeFunction now awaits child BL targets
+- v3.5.2 additions:
+  - Debugger Headless: snapshotHeadless, restoreSnapshotHeadless (#21 DONE)
+  - API/Lib Call Trace: TraceManager, TraceTreeProvider, exportTraceHeadless (#7b DONE)
+  - ELF Analyzer: hexcore-elfanalyzer with ELF32/ELF64 parser and security mitigations (#23 DONE)
+  - Report Composer: hexcore-report-composer for pipeline report aggregation (#9 DONE)
+  - Base64 Headless: decodeHeadless command (#24 DONE)
+  - Multi-byte XOR Deobfuscation: 2/4/8/16-byte keys, rolling XOR, XOR with increment (#25 DONE)
+  - Hex Viewer Headless: dumpHeadless, searchHeadless with streaming (#27 DONE)
+  - Pipeline Capability Registration: 9 new headless commands in COMMAND_CAPABILITIES
 
 ---
 
@@ -106,7 +115,7 @@
 - **Target**: v3.3.0
 
 ### 7b. API/Lib Call Trace Snippets in Debugger
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Optional trace for libc calls (`time`, `localtime`, `srand`, `rand`).
 - **Acceptance**:
   - Trace panel with args + return values.
@@ -123,7 +132,7 @@
 - **Target**: v3.3.0
 
 ### 9. Report Composer
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Merge pipeline outputs + analyst notes into one final report.
 - **Acceptance**:
   - Single MD export with evidence links.
@@ -288,7 +297,7 @@ Binary → Remill lift stage → LLVM IR → Rellic (C code)
 Items discovered during the comprehensive stress test and audit against an HTB Insane-level ARM64 challenge (2026-02-15).
 
 ### 21. Debugger Headless Commands
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Expose DebugEngine's programmatic API as headless VS Code commands for pipeline use.
 - **Commands needed**: `emulateHeadless`, `stepHeadless`, `continueHeadless`, `readMemoryHeadless`, `setBreakpointHeadless`, `snapshotHeadless`, `restoreSnapshotHeadless`
 - **Why**: The engine (`debugEngine.ts`, `unicornWrapper.ts`) is 100% programmatic. All 10 current commands wrap with UI dialogs (`showOpenDialog`, `showInputBox`). AI agents and the pipeline cannot use emulation at all.
@@ -309,7 +318,7 @@ Items discovered during the comprehensive stress test and audit against an HTB I
 - **Target**: v3.6.0
 
 ### 23. ELF Analyzer Extension
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Create `hexcore-elfanalyzer` with headless commands equivalent to `hexcore-peanalyzer`.
 - **Commands**: `elfanalyzer.analyze`, `elfanalyzer.analyzeActive`
 - **Output**: sections, segments, symbols, dynamic linking info, RELRO, stack canary, NX, PIE status
@@ -318,14 +327,14 @@ Items discovered during the comprehensive stress test and audit against an HTB I
 - **Target**: v3.6.0+
 
 ### 24. Base64 Headless Mode
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Add `hexcore.base64.decodeHeadless` that writes decoded output to file instead of opening editor.
 - **Why**: Current command always opens a markdown report in the editor, blocking pipeline use.
 - **Priority**: P2
 - **Target**: v3.6.0
 
 ### 25. Multi-byte XOR Deobfuscation
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Extend `hexcore.strings.extractAdvanced` to detect multi-byte XOR keys.
 - **Key sizes**: 2, 4, 8, 16 bytes + rolling XOR + XOR with increment
 - **Why**: Current implementation only brute-forces single-byte keys (0x01-0xFF). Modern malware uses multi-byte XOR extensively.
@@ -341,7 +350,7 @@ Items discovered during the comprehensive stress test and audit against an HTB I
 - **Target**: v3.6.0
 
 ### 27. Hex Viewer Headless Commands
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.5.2)
 - **Feature**: Add `hexcore.hexview.dumpHeadless` and `hexcore.hexview.searchHeadless` for pipeline use.
 - **Why**: All hex viewer commands require the webview open. No programmatic hex data extraction possible.
 - **Priority**: P2

@@ -1,0 +1,25 @@
+node_modules/**
+src/**
+test/**
+build/**
+binding.gyp
+package-lock.json
+.gitignore
+README.md
+**/*.map
+**/*.obj
+**/*.o
+**/*.lib
+**/*.a
+**/*.exp
+**/*.pdb
+**/*.c
+scripts/**
+sync_sqlite.bat
+
+# Deps: exclude build-time only (headers kept for source installs)
+deps/sqlite3/sqlite3.c
+
+# Prebuilds: force include (overrides .gitignore)
+!prebuilds/
+!prebuilds/**

@@ -394,11 +394,14 @@
 	"dependencies": {
 		"hexcore-capstone": "file:../hexcore-capstone",
 		"hexcore-common": "file:../hexcore-common",
-		"hexcore-llvm-mc": "file:../hexcore-llvm-mc"
+		"hexcore-llvm-mc": "file:../hexcore-llvm-mc",
+		"hexcore-remill": "file:../hexcore-remill"
 	},
 	"devDependencies": {
+		"@types/mocha": "^10.0.0",
 		"@types/node": "^18.0.0",
 		"@types/vscode": "^1.70.0",
+		"fast-check": "^3.15.0",
 		"typescript": "^5.0.0"
 	}
 }

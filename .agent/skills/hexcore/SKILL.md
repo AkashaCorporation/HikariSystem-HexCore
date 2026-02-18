@@ -1,326 +1,250 @@
 ---
 name: HexCore Binary Analysis
-description: Skill para análise de binários com ferramentas HexCore integradas ao editor
+description: Skill para analise de binarios com ferramentas HexCore integradas ao editor
 ---
 
-# HexCore Binary Analysis Skill
+# HexCore Binary Analysis Skill — v3.5.2
 
 ## Overview
 
-HexCore é um conjunto de extensões para análise de binários e engenharia reversa integrado ao VS Code. Esta skill documenta como você (agente) pode usar as ferramentas disponíveis para auxiliar o usuário em tarefas de análise.
+HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSystem HexCore). It includes 20 extensions with 5 native engines (Capstone, Unicorn, Remill, LLVM MC, better-sqlite3) and a full automation pipeline.
 
-> **IMPORTANTE**: As ferramentas HexCore são extensões do VS Code. Elas geram outputs visuais (webviews, documentos markdown). Como agente, você pode sugerir que o usuário execute comandos específicos e ajudar a interpretar os resultados descritos.
-
-> **UPDATE 2026-02-10 (v3.2.2 Hotfix)**:
-> - Pipeline capabilities estabilizadas para builds empacotadas.
-> - `hexcore.yara.scan` com suporte headless (`file`, `quiet`, `output`).
-> - `hexcore.pipeline.listCapabilities` disponível para auditoria de comandos headless/interativos.
+> **Current version:** v3.5.2 "Pipeline Maturity" (2026-02-17)
+> **Engine versions:** capstone 1.3.2 | unicorn 1.2.1 | llvm-mc 1.0.0 | better-sqlite3 2.0.0 | remill 0.1.2
 
 ---
 
-## Available Extensions
+## Extensions
 
-### 1. HexCore Disassembler (`hexcore-disassembler`)
-**Status**: ✅ Funcional (Capstone Engine via N-API)
+### Native Engines (no VS Code commands — pure API)
 
-Disassembler profissional com suporte a x86, x64, ARM, ARM64 e MIPS.
+| Engine | Version | Purpose | Architectures |
+|--------|---------|---------|---------------|
+| **hexcore-capstone** | 1.3.2 | Disassembly | x86, x64, ARM, ARM64, MIPS, PPC, SPARC, M68K, RISC-V |
+| **hexcore-unicorn** | 1.2.1 | CPU emulation | x86, x64, ARM, ARM64, MIPS, SPARC, PPC, RISC-V |
+| **hexcore-remill** | 0.1.2 | LLVM IR lifting | x86, x64, ARM64 only |
+| **hexcore-llvm-mc** | 1.0.0 | Assembly/encoding | x86, x64, ARM, ARM64, MIPS, RISC-V, PPC, SPARC |
+| **hexcore-better-sqlite3** | 2.0.0 | SQLite database | N/A |
 
-**Commands**:
-- `hexcore.disasm.analyzeFile` - Disassemblar um binário
-- `hexcore.disasm.analyzeAll` - Deep analysis (headless/export)
-- `hexcore.disasm.goToAddress` - Navegar para endereço específico
-- `hexcore.disasm.findXrefs` - Encontrar referências cruzadas
-- `hexcore.disasm.addComment` - Adicionar comentário em um endereço
-- `hexcore.disasm.renameFunction` - Renomear função
-- `hexcore.disasm.showCFG` - Mostrar grafo de fluxo de controle
-- `hexcore.disasm.searchString` - Buscar referências de string
-- `hexcore.disasm.exportASM` - Exportar assembly para arquivo
-- `hexcore.disasm.patchInstruction` - Patching inline via LLVM MC
-- `hexcore.disasm.nopInstruction` - NOP padding automático
-- `hexcore.disasm.assemble` - Montar instrução
-- `hexcore.disasm.assembleMultiple` - Montar várias instruções
-- `hexcore.disasm.nativeStatus` - Status dos motores nativos
-- `hexcore.pipeline.runJob` - Executar pipeline `.hexcore_job.json`
-- `hexcore.pipeline.listCapabilities` - Exportar mapa de capacidades do runner
-- `hexcore.disasm.searchStringHeadless` - Buscar xrefs de string (headless, sem UI)
-- `hexcore.disasm.exportASMHeadless` - Exportar assembly para arquivo (headless, sem UI)
+### Disassembler (`hexcore-disassembler` v1.3.0)
 
-**Arquiteturas suportadas**:
-- `x86` - Intel 32-bit
-- `x64` - Intel 64-bit (AMD64)
-- `arm` - ARM 32-bit
-- `arm64` - ARM 64-bit (AArch64)
-- `mips` - MIPS 32-bit
+Professional disassembler with Capstone engine, ELF/PE parsing, CFG, xrefs, patching, and the pipeline runner.
 
----
+**Headless commands (pipeline-safe):**
+- `hexcore.disasm.analyzeAll` — Deep analysis (prolog scan + xrefs)
+- `hexcore.disasm.buildFormula` — Symbolic expression extraction (**x86/x64 only**)
+- `hexcore.disasm.checkConstants` — Validate numeric annotations
+- `hexcore.disasm.searchStringHeadless` — Search string references
+- `hexcore.disasm.exportASMHeadless` — Export assembly to file
+- `hexcore.pipeline.runJob` — Run automation job
+- `hexcore.pipeline.listCapabilities` — Export capability map
+- `hexcore.pipeline.validateJob` — Preflight validation
+- `hexcore.pipeline.validateWorkspace` — Batch validation
+- `hexcore.pipeline.createPresetJob` — Generate job from preset
+- `hexcore.pipeline.saveJobAsProfile` — Save job as profile
+- `hexcore.pipeline.doctor` — Diagnose health
 
-### 2. HexCore Hex Viewer (`hexcore-hexviewer`)
-**Status**: ✅ Funcional
+**Interactive commands (need UI):**
+- `hexcore.disasm.openFile`, `analyzeFile`, `goToAddress`, `findXrefs`, `addComment`, `renameFunction`, `showCFG`, `searchString`, `exportASM`, `patchInstruction`, `nopInstruction`, `assemble`, `assembleMultiple`, `savePatchedFile`, `setSyntax`, `showLlvmVersion`, `nativeStatus`
 
-Editor hexadecimal para visualizar e editar binários.
+**Experimental:**
+- `hexcore.disasm.liftToIR` — Lift to LLVM IR (requires Remill, x86/x64/ARM64 only)
 
-**Commands**:
-- `hexcore.openHexView` - Abrir arquivo em visualização hex
-- `hexcore.goToOffset` - Navegar para offset específico
-- `hexcore.searchHex` - Buscar padrão hexadecimal
-- `hexcore.copyAsHex` - Copiar seleção como hex
-- `hexcore.copyAsC` - Copiar seleção como array C
-- `hexcore.copyAsPython` - Copiar seleção como bytes Python
-- `hexcore.addBookmark` - Adicionar bookmark
-- `hexcore.applyTemplate` - Aplicar template de estrutura
-- `hexcore.toggleEdit` - Alternar modo de edição
+**Architecture auto-detection:** Reads ELF `e_machine` / PE `Machine` headers. Supports x86, x64, ARM, ARM64, MIPS. Defaults to x64 for raw files.
 
-**Formatos suportados**: `.bin`, `.exe`, `.dll`, `.so`, `.dylib`, `.dat`, `.raw`
+### Debugger (`hexcore-debugger` v2.0.1)
 
----
+Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, syscall handling, and API call tracing.
 
-### 3. HexCore Strings (`hexcore-strings`)
-**Status**: ✅ Funcional
+**Headless commands (pipeline-safe):**
+- `hexcore.debug.snapshotHeadless` — Save emulation snapshot
+- `hexcore.debug.restoreSnapshotHeadless` — Restore emulation snapshot
+- `hexcore.debug.exportTraceHeadless` — Export API/libc call trace as JSON
 
-Extração de strings ASCII e Unicode de binários.
+**Interactive commands (need UI):**
+- `hexcore.debug.emulate` — Start emulation (auto-detect arch)
+- `hexcore.debug.emulateWithArch` — Start with manual arch selection
+- `hexcore.debug.emulationStep` — Step one instruction
+- `hexcore.debug.emulationContinue` — Continue to breakpoint/end
+- `hexcore.debug.emulationBreakpoint` — Set breakpoint
+- `hexcore.debug.emulationReadMemory` — Read memory region
+- `hexcore.debug.setStdin` — Set STDIN buffer for ELF emulation
+- `hexcore.debug.saveSnapshot` — Save emulation snapshot
+- `hexcore.debug.restoreSnapshot` — Restore snapshot
+- `hexcore.debug.unicornStatus` — Show Unicorn status
 
-**Command**:
-- `hexcore.strings.extract` - Extrair strings de um arquivo
+**Internal engine capabilities (programmatic, not exposed as headless commands):**
+- PE loading with import resolution and Windows API hooks
+- ELF loading with PLT stubs and Linux API hooks (libc emulation)
+- Linux syscall handler (x86/x64: int 0x80, syscall instruction)
+- Architecture auto-detection from ELF/PE headers
+- Deterministic ELF continue (250K instruction budget)
+- STDIN buffer injection for scanf/read emulation
+- Snapshot save/restore via Unicorn context
 
-**Output**: Relatório markdown com:
-- Strings categorizadas (URLs, IPs, paths, DLLs, APIs sensíveis)
-- Offset de cada string
-- Encoding (ASCII ou UTF-16LE)
+**Architecture support in debugger:**
 
----
+| Feature | x86 | x64 | ARM64 | ARM | MIPS |
+|---------|-----|-----|-------|-----|------|
+| Unicorn init | Yes | Yes | Yes | Yes | Yes |
+| Register read/write | Yes | Yes | Yes | No | No |
+| ELF loading | Yes | Yes | Partial | No | No |
+| PE loading | Yes | Yes | No | No | No |
+| Stack initialization | Yes | Yes | No | No | No |
+| Syscall handler | Yes | Yes | No | No | No |
+| API hooks (Linux) | Yes | Yes | No | No | No |
+| API hooks (Windows) | Yes | Yes | No | No | No |
 
-### 4. HexCore Entropy (`hexcore-entropy`)
-**Status**: ✅ Funcional
+### Other Extensions
 
-Análise visual de entropia para detectar regiões compactadas ou criptografadas.
-
-**Command**:
-- `hexcore.entropy.analyze` - Gerar gráfico de entropia
-
-**Headless options**:
-- `file`, `quiet`, `output`, `blockSize`, `sampleRatio`
-
-**Interpretação**:
-- Entropia alta (>7.5) = provavelmente criptografado ou compactado
-- Entropia média (4-7) = código ou dados normais
-- Entropia baixa (<4) = dados repetitivos ou texto
-
----
-
-### 5. HexCore PE Analyzer (`hexcore-peanalyzer`)
-**Status**: ✅ Funcional
-
-Analisador de arquivos PE (Windows executables).
-
-**Commands**:
-- `hexcore.peanalyzer.analyze` - Analisar arquivo PE
-- `hexcore.peanalyzer.analyzeActive` - Analisar arquivo ativo
-
-**Output**: Informações sobre headers, imports, exports, sections, resources.
-
----
-
-### 6. HexCore File Type (`hexcore-filetype`)
-**Status**: ✅ Funcional
-
-Detecta o tipo real de arquivo usando magic bytes.
-
-**Command**:
-- `hexcore.filetype.detect` - Detectar tipo de arquivo
-
-**Uso**: Identificar arquivos com extensão errada ou mascarados.
+| Extension | Version | Headless | Commands |
+|-----------|---------|----------|----------|
+| **hexcore-peanalyzer** | — | Yes | `peanalyzer.analyze`, `peanalyzer.analyzeActive` |
+| **hexcore-elfanalyzer** | 1.0.0 | Yes | `elfanalyzer.analyze`, `elfanalyzer.analyzeActive` |
+| **hexcore-hexviewer** | — | Yes | `hexview.dumpHeadless`, `hexview.searchHeadless`, `openHexView`, `goToOffset`, `searchHex`, `copyAsHex`, `copyAsC`, `copyAsPython`, `addBookmark`, `applyTemplate`, `toggleEdit` |
+| **hexcore-strings** | — | Yes | `strings.extract`, `strings.extractAdvanced` (now with multi-byte XOR, rolling XOR, increment XOR) |
+| **hexcore-entropy** | — | Yes | `entropy.analyze` |
+| **hexcore-filetype** | — | Yes | `filetype.detect` |
+| **hexcore-hashcalc** | — | Yes | `hashcalc.calculate`, `hashcalc.quick`, `hashcalc.verify` |
+| **hexcore-base64** | — | Yes | `base64.decodeHeadless`, `base64.decode` |
+| **hexcore-yara** | — | Partial | `yara.scan` (headless), `yara.updateRules` (headless), rest interactive |
+| **hexcore-ioc** | — | Yes | `ioc.extract`, `ioc.extractActive` |
+| **hexcore-minidump** | — | Yes | `minidump.parse`, `minidump.threads`, `minidump.modules`, `minidump.memory` |
+| **hexcore-report-composer** | 1.0.0 | Yes | `pipeline.composeReport` — aggregates reports into unified Markdown |
+| **hexcore-common** | — | N/A | Utility library (formatBytes, loadNativeModule, etc.) |
 
 ---
 
-### 7. HexCore Hash Calculator (`hexcore-hashcalc`)
-**Status**: ✅ Funcional
+## Pipeline Automation
 
-Calcula hashes de arquivos ou seleções.
+### Creating Jobs
 
-**Commands**:
-- `hexcore.hashcalc.calculate` - Calcular hashes de arquivo
-- `hexcore.hash.file` - Alias para automação
-- `hexcore.hash.calculate` - Alias para automação
+1. **From preset:** Run `hexcore.pipeline.createPresetJob` — choose quick-triage, full-static, or ctf-reverse
+2. **Manual:** Create `.hexcore_job.json` in workspace root (see `docs/HEXCORE_JOB_TEMPLATES.md`)
+3. **Save profile:** Run `hexcore.pipeline.saveJobAsProfile` to store in `.hexcore_profiles.json`
 
-**Algoritmos**: MD5, SHA1, SHA256, SHA512
+### Running Jobs
 
----
+- **Auto:** HexCore watches `.hexcore_job.json` and runs on create/change
+- **Manual:** Run `hexcore.pipeline.runJob`
+- **Validate first:** Run `hexcore.pipeline.validateJob` for preflight check
 
-### 8. HexCore Base64 (`hexcore-base64`)
-**Status**: ⚠️ Funcional (apenas decode)
+### Job Contract
 
-Decodificação Base64 de strings em binários.
+Every headless command receives:
+- `file` — path to target binary
+- `quiet` — suppress UI notifications
+- `output` — `{ path, format }` for writing results
 
-**Commands**:
-- `hexcore.base64.decode` - Decodificar de Base64
+### Output
 
-**⚠️ Limitação**: Atualmente apenas suporta decode. Comando de encode não está implementado.
-
----
-
-### 9. HexCore YARA (`hexcore-yara`)
-**Status**: ✅ Funcional
-
-Integração com regras YARA para detecção de malware.
-
-**Commands**:
-- `hexcore.yara.scan` - Scanning de arquivo (UI/headless)
-- `hexcore.yara.quickScan` - Scan rápido com regras essenciais
-- `hexcore.yara.scanWorkspace` - Scan de workspace (interativo)
-- `hexcore.yara.loadDefender` - Indexar DefenderYara
-- `hexcore.yara.loadCategory` - Carregar categorias específicas
-- `hexcore.yara.updateRules` - Recarregar regras
-- `hexcore.yara.createRule` - Criar regra por seleção
-- `hexcore.yara.threatReport` - Exibir relatório da última varredura
-
-**Headless options (`hexcore.yara.scan`)**:
-- `file`, `quiet`, `output`
+Jobs produce in `outDir`:
+- `hexcore-pipeline.log` — execution log with timestamps
+- `hexcore-pipeline.status.json` — structured status per step (ok/failed/timed-out)
+- Per-step output files (JSON or MD)
 
 ---
 
-### 10. HexCore Debugger (`hexcore-debugger`)
-**Status**: ✅ Funcional
+## Architecture Support Matrix
 
-Debugger integrado para análise dinâmica.
-
-**Features**:
-- Breakpoints
-- Step through code
-- Register view
-- Memory view
-- Emulação via Unicorn (x86/x64/ARM/ARM64/MIPS/RISC-V)
-
-**Commands úteis**:
-- `hexcore.debug.unicornStatus` - Status do Unicorn
+| Component | x86 | x64 | ARM | ARM64 | MIPS |
+|-----------|-----|-----|-----|-------|------|
+| Disassembly (Capstone) | Yes | Yes | Yes | Yes | Yes |
+| Emulation (Unicorn) | Yes | Yes | Yes | Yes | Yes |
+| IR Lifting (Remill) | Yes | Yes | No | Yes | No |
+| Assembly (LLVM MC) | Yes | Yes | Yes | Yes | Yes |
+| Debugger (full) | Yes | Yes | No | Partial | No |
+| PE Analysis | Yes | Yes | No | No | No |
+| Minidump | Yes | Yes | No | No | No |
+| buildFormula | Yes | Yes | No | No | No |
 
 ---
 
-## Workflow Típico de Análise
+## Known Gaps (Critical for Agents)
 
-Quando o usuário pedir para analisar um binário, sugira este workflow:
-
-1. **(Opcional) Pipeline Headless**
-   ```
-   Comando: hexcore.pipeline.runJob
-   ```
-   - Executar fluxo batch com `.hexcore_job.json`
-   - Validar capacidades com `hexcore.pipeline.listCapabilities`
-
-2. **Identificação Inicial**
-   ```
-   Comando: hexcore.filetype.detect
-   ```
-   - Verificar o tipo real do arquivo
-   - Detectar possíveis extensões incorretas
-
-3. **Análise de Entropia**
-   ```
-   Comando: hexcore.entropy.analyze
-   ```
-   - Identificar regiões criptografadas/compactadas
-   - Determinar se o binário está packed
-
-4. **Extração de Strings**
-   ```
-   Comando: hexcore.strings.extract
-   ```
-   - Identificar URLs, IPs, paths, APIs
-   - Procurar indicadores de comportamento
-
-5. **Análise de Headers** (para PE/ELF)
-   ```
-   Comando: hexcore.peanalyzer.analyze
-   ```
-   - Verificar imports e exports
-   - Analisar sections
-   - Identificar anomalias
-
-6. **Disassembly**
-   ```
-   Comando: hexcore.disasm.analyzeFile
-   ```
-   - Analisar funções importantes
-   - Identificar chamadas de API suspeitas
-   - Analisar fluxo de controle
+1. **Debugger interactive commands still need UI** — `emulate`, `emulateWithArch`, `setStdin` require file pickers/prompts. However, `snapshotHeadless`, `restoreSnapshotHeadless`, and `exportTraceHeadless` are now pipeline-safe.
+2. **Debugger ARM64 ELF is incomplete** — Unicorn supports ARM64 but DebugEngine lacks: stack initialization, process stack layout (argc/argv), SVC syscall handler, register state mapping.
+3. **Debugger + static ELF** — statically-linked binaries have no PLT stubs, so LinuxApiHooks cannot intercept libc calls. Only direct syscall interception works (and only for x86/x64).
+4. **buildFormula is x86/x64 only** — the register regex doesn't recognize ARM64 registers (x0-x30, sp, lr).
+5. ~~**No ELF analyzer extension**~~ — **RESOLVED in v3.5.2**: `hexcore-elfanalyzer` provides full ELF analysis (sections, segments, symbols, security mitigations).
+6. ~~**Base64 decode has no headless mode**~~ — **RESOLVED in v3.5.2**: `hexcore.base64.decodeHeadless` is pipeline-safe.
+7. ~~**Hex viewer has no headless dump**~~ — **RESOLVED in v3.5.2**: `hexcore.hexview.dumpHeadless` and `hexcore.hexview.searchHeadless` are pipeline-safe.
+8. ~~**Strings XOR is 1-byte only**~~ — **RESOLVED in v3.5.2**: `extractAdvanced` now supports multi-byte XOR (2, 4, 8, 16 bytes), rolling XOR, and XOR with increment.
+9. **Prebuilds are win32-x64 only** — Linux/macOS need `node-gyp rebuild` fallback.
 
 ---
 
-## Como Usar Esta Skill
+## What Agents CAN Do
 
-### O que você (agente) PODE fazer:
+1. **Create `.hexcore_job.json`** files and run analysis via `hexcore.pipeline.runJob`
+2. **Read pipeline output** from `hexcore-pipeline.status.json` and step output files
+3. **Interpret results** — entropy reports, string extractions, YARA matches, IOC lists
+4. **Validate jobs** with `hexcore.pipeline.validateJob` before execution
+5. **Use presets** via `hexcore.pipeline.createPresetJob` for quick setup
+6. **Search strings headlessly** via `hexcore.disasm.searchStringHeadless`
+7. **Export assembly headlessly** via `hexcore.disasm.exportASMHeadless`
+8. **Analyze ELF binaries** via `hexcore.elfanalyzer.analyze` (sections, segments, symbols, security)
+9. **Decode Base64** via `hexcore.base64.decodeHeadless`
+10. **Dump hex ranges** via `hexcore.hexview.dumpHeadless`
+11. **Search hex patterns** via `hexcore.hexview.searchHeadless`
+12. **Save/restore emulation snapshots** via `hexcore.debug.snapshotHeadless` / `restoreSnapshotHeadless`
+13. **Export API call traces** via `hexcore.debug.exportTraceHeadless`
+14. **Compose unified reports** via `hexcore.pipeline.composeReport`
 
-1. **Sugerir comandos**: "Execute o comando `hexcore.strings.extract` no arquivo suspeito"
+## What Agents CANNOT Do
 
-2. **Interpretar resultados**: Quando o usuário compartilhar output das ferramentas, analisar e explicar
+1. **Start emulation** — `emulate` and `emulateWithArch` require UI interaction
+2. **See webviews** — CFG graph, hex viewer, debugger view are visual only
+3. **Use interactive commands** — file pickers, input boxes, quick-picks
+4. **Patch binaries** — `patchInstruction`, `nopInstruction`, `savePatchedFile` need the disassembler UI open
+5. **Run YARA quick scan** — requires prior UI context
 
-3. **Guiar análise**: Sugerir próximos passos baseado nos resultados
+---
 
-4. **Explicar conceitos**: Ensinar sobre entropia, PE headers, calling conventions, etc.
+## Workflow: Static Analysis
 
-### O que você (agente) NÃO pode fazer diretamente:
-
-1. Assumir que comandos interativos funcionam sem UI (prompts, file pickers e quick-picks)
-2. Ver o conteúdo das webviews diretamente
-3. Modificar binários através das ferramentas
-
-### Observação prática
-
-- Em ambientes com Extension Host ativo e automação habilitada, comandos headless podem ser executados via pipeline.
-- Para fluxo determinístico, priorize comandos marcados como headless e valide com `hexcore.pipeline.listCapabilities`.
-
-### Exemplo de Interação
-
-**Usuário**: "Analise este arquivo malware.bin"
-
-**Agente**:
 ```
-Para começar a análise, execute estes comandos no VS Code:
+1. hexcore.filetype.detect         → Identify file type
+2. hexcore.hashcalc.calculate      → Compute hashes (VT lookup)
+3. hexcore.entropy.analyze         → Detect packing/encryption
+4. hexcore.strings.extract         → Extract strings
+5. hexcore.strings.extractAdvanced → XOR deobfuscation (1-byte + multi-byte + rolling + increment) + stack strings
+6. hexcore.base64.decodeHeadless   → Detect Base64 encoded strings
+7. hexcore.hexview.dumpHeadless    → Inspect file header bytes
+8. hexcore.peanalyzer.analyze      → PE headers/imports (PE files only)
+9. hexcore.elfanalyzer.analyze     → ELF sections/segments/symbols/security (ELF files only)
+10. hexcore.disasm.analyzeAll      → Deep disassembly + xrefs
+11. hexcore.yara.scan              → Threat detection
+12. hexcore.ioc.extract            → IOC extraction
+13. hexcore.pipeline.composeReport → Unified report
+```
 
-1. Primeiro, verifique o tipo real: Ctrl+Shift+P > "HexCore: Detect File Type"
-2. Analise a entropia: Ctrl+Shift+P > "HexCore: Entropy Graph"
-3. Extraia strings: Ctrl+Shift+P > "HexCore: Extract Strings"
+## Workflow: CTF Reverse Engineering
 
-Após executar cada comando, me descreva os resultados e posso ajudar
-a interpretar o que encontrar.
+```
+1. hexcore.filetype.detect              → Verify binary format
+2. hexcore.disasm.analyzeAll            → Function discovery + xrefs
+3. hexcore.disasm.exportASMHeadless     → Full disassembly export
+4. hexcore.disasm.searchStringHeadless  → Find flag patterns
+5. hexcore.strings.extractAdvanced      → Find obfuscated strings (multi-byte XOR, rolling, increment)
+6. hexcore.base64.decodeHeadless        → Find Base64 encoded data
+7. hexcore.hexview.searchHeadless       → Search for flag byte patterns
+8. hexcore.disasm.buildFormula          → Extract key computations (x86/x64 only)
 ```
 
 ---
 
-## Referência Técnica
+## File Format Support
 
-### Capstone Engine (Disassembler)
-O disassembler usa Capstone Engine via N-API para disassembly real.
-Suporta Intel syntax por padrão.
-
-### Formatos de Arquivo Suportados
-
-| Formato | Extensões | Análise PE | Disassembly |
-|---------|-----------|------------|-------------|
-| PE32 | .exe, .dll | ✅ | ✅ x86 |
-| PE64 | .exe, .dll | ✅ | ✅ x64 |
-| ELF32 | .elf, .so | Parcial | ✅ x86 |
-| ELF64 | .elf, .so | Parcial | ✅ x64 |
-| Mach-O | .dylib | Parcial | ✅ arm64 |
-| RAW | .bin | ❌ | ✅ (auto) |
+| Format | Extensions | PE Analysis | ELF Analysis | Disassembly | Emulation |
+|--------|-----------|-------------|--------------|-------------|-----------|
+| PE32 | .exe, .dll | Yes | No | Yes (x86) | Yes |
+| PE64 | .exe, .dll | Yes | No | Yes (x64) | Yes |
+| ELF32 | .elf, .so, .o | No | Yes | Yes (x86/ARM) | Yes |
+| ELF64 | .elf, .so | No | Yes | Yes (x64/ARM64/MIPS) | Yes |
+| Raw | .bin, .raw | No | No | Yes (default x64) | Yes |
+| Minidump | .dmp | N/A | N/A | N/A | N/A |
 
 ---
 
-## Troubleshooting
-
-### Webview não aparece
-- Verifique se a extensão está habilitada
-- Recarregue a janela: Ctrl+Shift+P > "Developer: Reload Window"
-
-### Disassembly incorreto
-- Verifique a arquitetura selecionada
-- Para binários PE/ELF, a arquitetura é detectada automaticamente
-- Para arquivos .bin, especifique a arquitetura manualmente
-
-### Arquivo muito grande
-- Arquivos >100MB podem ser lentos
-- Use a ferramenta de strings com streaming (já implementado)
-- Considere analisar apenas sections específicas
-
----
-
-*HexCore v3.x - Powered by Capstone/LLVM MC/Unicorn*
+*HexCore v3.5.2 "Pipeline Maturity" — Powered by Capstone 1.3.2 / Unicorn 1.2.1 / LLVM MC 1.0.0 / Remill 0.1.2*

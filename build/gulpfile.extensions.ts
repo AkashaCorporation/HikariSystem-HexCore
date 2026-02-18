@@ -77,6 +77,7 @@ const compilations = [
 	'extensions/hexcore-common/tsconfig.json',
 	'extensions/hexcore-debugger/tsconfig.json',
 	'extensions/hexcore-disassembler/tsconfig.json',
+	'extensions/hexcore-elfanalyzer/tsconfig.json',
 	'extensions/hexcore-entropy/tsconfig.json',
 	'extensions/hexcore-filetype/tsconfig.json',
 	'extensions/hexcore-hashcalc/tsconfig.json',
@@ -84,6 +85,7 @@ const compilations = [
 	'extensions/hexcore-ioc/tsconfig.json',
 	'extensions/hexcore-minidump/tsconfig.json',
 	'extensions/hexcore-peanalyzer/tsconfig.json',
+	'extensions/hexcore-report-composer/tsconfig.json',
 	'extensions/hexcore-strings/tsconfig.json',
 	'extensions/hexcore-yara/tsconfig.json',
 
