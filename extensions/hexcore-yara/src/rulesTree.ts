@@ -1,6 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA - Rules Tree Provider v2.1
+ *  HexCore YARA - Rules Tree Provider v3.5.3
  *  Dynamic categories from DefenderYara + built-in rules
+ *  Shows count per category and loading status
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
@@ -39,16 +40,16 @@ export class RuleItem extends vscode.TreeItem {
 
 		const icon = severity === 'critical' ? 'error' :
 			severity === 'high' ? 'warning' :
-			severity === 'medium' ? 'info' : 'shield';
+				severity === 'medium' ? 'info' : 'shield';
 		this.iconPath = new vscode.ThemeIcon(icon);
 	}
 }
 
 export class RuleStatsItem extends vscode.TreeItem {
-	constructor(label: string, detail: string) {
+	constructor(label: string, detail: string, isLoading: boolean = false) {
 		super(label, vscode.TreeItemCollapsibleState.None);
 		this.description = detail;
-		this.iconPath = new vscode.ThemeIcon('graph');
+		this.iconPath = new vscode.ThemeIcon(isLoading ? 'sync~spin' : 'graph');
 	}
 }
 
@@ -64,6 +65,12 @@ export class RulesTreeProvider implements vscode.TreeDataProvider<RuleCategoryIt
 	private defenderCategories: Array<{ name: string; count: number; loaded: boolean }> = [];
 	private totalCatalog: number = 0;
 	private totalLoaded: number = 0;
+	private isLoading: boolean = false;
+
+	setLoading(loading: boolean): void {
+		this.isLoading = loading;
+		this._onDidChangeTreeData.fire(undefined);
+	}
 
 	updateFromEngine(engine: YaraEngine): void {
 		const stats = engine.getCatalogStats();
@@ -92,12 +99,11 @@ export class RulesTreeProvider implements vscode.TreeDataProvider<RuleCategoryIt
 		if (!element) {
 			const items: (RuleCategoryItem | RuleItem | RuleStatsItem)[] = [];
 
-			// Stats header
-			if (this.totalCatalog > 0) {
-				items.push(new RuleStatsItem(
-					'DefenderYara',
-					`${this.totalCatalog.toLocaleString()} indexed | ${this.totalLoaded.toLocaleString()} loaded`
-				));
+			// Stats header with loading status
+			if (this.totalCatalog > 0 || this.isLoading) {
+				const statusText = this.isLoading ? 'Loading...' :
+					`${this.totalCatalog.toLocaleString()} indexed | ${this.totalLoaded.toLocaleString()} loaded`;
+				items.push(new RuleStatsItem('DefenderYara', statusText, this.isLoading));
 			}
 
 			// Built-in categories

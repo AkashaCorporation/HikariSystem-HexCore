@@ -17,6 +17,7 @@ export type IOCCategory =
 	| 'url'
 	| 'domain'
 	| 'email'
+	| 'hash'
 	| 'filePath'
 	| 'registryKey'
 	| 'namedPipe'
@@ -28,7 +29,7 @@ export type IOCStorageMode = 'memory' | 'sqlite' | 'auto';
 export type IOCStorageBackend = 'memory' | 'sqlite';
 
 export const ALL_IOC_CATEGORIES: readonly IOCCategory[] = [
-	'ipv4', 'ipv6', 'url', 'domain', 'email',
+	'ipv4', 'ipv6', 'url', 'domain', 'email', 'hash',
 	'filePath', 'registryKey', 'namedPipe',
 	'mutex', 'userAgent', 'cryptoWallet'
 ] as const;

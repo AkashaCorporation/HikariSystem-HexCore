@@ -5,6 +5,36 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.3] - 2026-02-18 - "Quality & Polish"
+
+> **Maintenance Release** — Developer experience improvements, Issue #8 resolution, and documentation overhaul.
+
+### Fixed
+
+- **Preinstall robustness** — `build/npm/preinstall.ts` `installHeaders()` now uses `--ignore-scripts` flag, 60-second timeout, and clear error messages when `npm ci` fails in `build/npm/gyp/`. Prevents the interactive shell hang reported in Issue #8.
+- **Report Composer outDir resolution** — `composeReport` now resolves the reports directory from: (1) explicit `reportsDir` argument, (2) `output.path` parent directory (pipeline outDir), (3) default `hexcore-reports/`. Previously it was hardcoded to `hexcore-reports/` which failed when the pipeline used a custom `outDir`.
+
+### Added
+
+- **CONTRIBUTING.md** — Complete contributor guide with prerequisites, quick start, project structure, test instructions, extension creation guide, code style reference, native engine development notes, and PR process.
+
+### Improved
+
+- **DEVELOPMENT.md** — Added "Important Notes" section at top with `VSCODE_SKIP_NODE_VERSION_CHECK` requirement, prebuild auto-download clarification, and preinstall troubleshooting.
+
+### Issue #8 Resolution
+
+All 5 items from @YasminePayload's build process report are now resolved. Full credit to **@YasminePayload** for the incredibly detailed bug report that directly improved HexCore's build system reliability and developer experience.
+
+| Item | Description | Fixed In |
+|------|-------------|----------|
+| #1 | Interactive shell blocks npm install | v3.5.3 |
+| #2 | Native module binary naming mismatch | v3.4.2 |
+| #3 | Missing build/Release directory | v3.4.2 |
+| #4 | Unicorn DLL multi-location requirement | v3.4.2 |
+| #5 | No development build documentation | v3.5.3 |
+| #6 | Debugger extension crash | v3.5.1 |
+
 ## [3.5.2] - 2026-02-17 - "Pipeline Maturity"
 
 > **Feature Release** — Full pipeline maturity: every analytical capability in HexCore is now accessible programmatically. New ELF Analyzer, Report Composer, multi-byte XOR deobfuscation, and headless commands for Debugger, Base64, and Hex Viewer.

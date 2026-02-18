@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore YARA - Results Tree Provider v2.1
- *  Scan results with threat scoring and severity icons
+ *  HexCore YARA - Results Tree Provider v3.5.3
+ *  Scan results with threat scoring, severity icons, and 3-level grouping
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
@@ -12,19 +12,21 @@ import { RuleMatch, ScanResult } from './yaraEngine';
 
 export class ThreatScoreItem extends vscode.TreeItem {
 	constructor(result: ScanResult) {
-		const scoreLabel = result.threatScore >= 75 ? '🔴 CRITICAL' :
-			result.threatScore >= 50 ? '🟠 HIGH' :
-			result.threatScore >= 25 ? '🟡 MEDIUM' : '🟢 CLEAN';
+		const scoreLabel = result.threatScore > 70 ? '🔴 CRITICAL' :
+			result.threatScore >= 30 ? '🟡 MEDIUM' : '🟢 CLEAN';
 
 		super(`Threat Score: ${result.threatScore}/100 — ${scoreLabel}`, vscode.TreeItemCollapsibleState.None);
 
 		this.description = `${result.matches.length} matches | ${result.scanTime}ms`;
 		this.tooltip = `File: ${result.file}\nSize: ${(result.fileSize / 1024).toFixed(1)} KB\nScore: ${result.threatScore}/100\nMatches: ${result.matches.length}\nScan Time: ${result.scanTime}ms`;
 
-		const iconId = result.threatScore >= 75 ? 'error' :
-			result.threatScore >= 50 ? 'warning' :
-			result.threatScore >= 25 ? 'info' : 'pass';
-		this.iconPath = new vscode.ThemeIcon(iconId);
+		// Badge color: green (< 30), yellow (30-70), red (> 70)
+		const iconId = result.threatScore > 70 ? 'error' :
+			result.threatScore >= 30 ? 'warning' : 'pass';
+		const iconColor = result.threatScore > 70 ? new vscode.ThemeColor('errorForeground') :
+			result.threatScore >= 30 ? new vscode.ThemeColor('editorWarning.foreground') :
+				new vscode.ThemeColor('charts.green');
+		this.iconPath = new vscode.ThemeIcon(iconId, iconColor);
 
 		this.command = {
 			command: 'hexcore.yara.threatReport',
@@ -32,6 +34,7 @@ export class ThreatScoreItem extends vscode.TreeItem {
 		};
 	}
 }
+
 
 export class FileMatchItem extends vscode.TreeItem {
 	constructor(public readonly filePath: string, public readonly matches: RuleMatch[]) {
@@ -62,7 +65,7 @@ export class CategoryMatchItem extends vscode.TreeItem {
 		this.iconPath = new vscode.ThemeIcon(
 			hasCritical ? 'error' : hasHigh ? 'warning' : 'shield',
 			hasCritical ? new vscode.ThemeColor('errorForeground') :
-			hasHigh ? new vscode.ThemeColor('editorWarning.foreground') : undefined
+				hasHigh ? new vscode.ThemeColor('editorWarning.foreground') : undefined
 		);
 	}
 }
@@ -77,7 +80,7 @@ export class RuleMatchItem extends vscode.TreeItem {
 
 		const icon = match.severity === 'critical' ? 'error' :
 			match.severity === 'high' ? 'warning' :
-			match.severity === 'medium' ? 'info' : 'shield';
+				match.severity === 'medium' ? 'info' : 'shield';
 		this.iconPath = new vscode.ThemeIcon(icon);
 	}
 }
@@ -156,7 +159,7 @@ export class ResultsTreeProvider implements vscode.TreeDataProvider<TreeElement>
 		}
 
 		if (element instanceof FileMatchItem) {
-			// Group matches by category
+			// Group matches by category — always show category level
 			const byCategory: Record<string, RuleMatch[]> = {};
 			for (const m of element.matches) {
 				const cat = m.namespace || 'Unknown';
@@ -164,16 +167,8 @@ export class ResultsTreeProvider implements vscode.TreeDataProvider<TreeElement>
 				byCategory[cat].push(m);
 			}
 
-			// If only one category, show rule matches directly
-			const categories = Object.keys(byCategory);
-			if (categories.length === 1) {
-				return Promise.resolve(
-					element.matches.map(m => new RuleMatchItem(m))
-				);
-			}
-
 			return Promise.resolve(
-				categories.map(cat => new CategoryMatchItem(cat, byCategory[cat]))
+				Object.keys(byCategory).map(cat => new CategoryMatchItem(cat, byCategory[cat]))
 			);
 		}
 

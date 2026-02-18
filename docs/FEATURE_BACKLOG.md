@@ -9,12 +9,12 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-17 — v3.5.2 "Pipeline Maturity")
+## Current Snapshot (2026-02-18 — v3.5.3 "Quality & Polish")
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **4/5** (`#7a`, `#8`, `#7b`, `#9`)
 - P2 delivered: **2/4** (`#24`, `#27`)
 - Infrastructure delivered: **8/8** (`#12`, `#13`, `#14`, `#15`, `#16`, `#17`, `#18`, `#20`)
-- Future Engines delivered: **0/2** (hexcore-rellic `NEXT`)
+- Future Engines delivered: **0/2** (hexcore-rellic `NEXT` — planned for v3.6.0)
 - Pipeline hardening added beyond original backlog:
   - `.hexcore_job.json` schema validation
   - `hexcore.pipeline.validateJob`
@@ -44,6 +44,11 @@
   - Multi-byte XOR Deobfuscation: 2/4/8/16-byte keys, rolling XOR, XOR with increment (#25 DONE)
   - Hex Viewer Headless: dumpHeadless, searchHeadless with streaming (#27 DONE)
   - Pipeline Capability Registration: 9 new headless commands in COMMAND_CAPABILITIES
+- v3.5.3 additions:
+  - Preinstall robustness fix: --ignore-scripts, 60s timeout, clear error messages (Issue #8 #1)
+  - CONTRIBUTING.md: complete contributor guide (Issue #8 #5)
+  - DEVELOPMENT.md: added Important Notes section with troubleshooting
+  - Issue #8 fully resolved (all 6 items closed)
 
 ---
 

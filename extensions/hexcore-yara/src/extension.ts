@@ -142,7 +142,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (result.matches.length > 0) {
 					const severity = result.threatScore >= 75 ? '🔴' :
 						result.threatScore >= 50 ? '🟠' :
-						result.threatScore >= 25 ? '🟡' : '🟢';
+							result.threatScore >= 25 ? '🟡' : '🟢';
 
 					vscode.window.showWarningMessage(
 						`${severity} YARA: ${result.matches.length} matches | Threat Score: ${result.threatScore}/100 | Time: ${result.scanTime}ms`,
@@ -314,7 +314,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				const severity = result.threatScore >= 75 ? '🔴 CRITICAL' :
 					result.threatScore >= 50 ? '🟠 HIGH' :
-					result.threatScore >= 25 ? '🟡 MEDIUM' : '🟢 CLEAN';
+						result.threatScore >= 25 ? '🟡 MEDIUM' : '🟢 CLEAN';
 
 				vscode.window.showWarningMessage(
 					`${severity} | Score: ${result.threatScore}/100 | ${result.matches.length} matches | ${result.scanTime}ms`
@@ -527,29 +527,57 @@ function formatBytes(bytes: number): string {
 // ── Threat Report ────────────────────────────────────────────────────────
 
 function showThreatReport(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number> }): void {
-	outputChannel.appendLine('');
-	outputChannel.appendLine('═'.repeat(60));
-	outputChannel.appendLine('  HEXCORE THREAT REPORT');
-	outputChannel.appendLine('═'.repeat(60));
-	outputChannel.appendLine(`  File:         ${path.basename(filePath)}`);
-	outputChannel.appendLine(`  Path:         ${filePath}`);
-	outputChannel.appendLine(`  Size:         ${(result.fileSize / 1024).toFixed(1)} KB`);
-	outputChannel.appendLine(`  Scan Time:    ${result.scanTime}ms`);
-	outputChannel.appendLine(`  Rules Tested: ${result.matches.length > 0 ? 'Multiple' : '0'}`);
-	outputChannel.appendLine('─'.repeat(60));
+	const md = buildThreatReportMarkdown(filePath, result);
+	vscode.workspace.openTextDocument({ content: md, language: 'markdown' }).then(doc => {
+		vscode.window.showTextDocument(doc, { preview: true });
+	});
+}
+
+function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number> }): string {
+	const lines: string[] = [];
+	const scoreLabel = result.threatScore > 70 ? '🔴 CRITICAL' :
+		result.threatScore >= 30 ? '🟡 MEDIUM' : '🟢 CLEAN';
+
+	lines.push('# HexCore Threat Report');
+	lines.push('');
+	lines.push('## Summary');
+	lines.push('');
+	lines.push(`| Field | Value |`);
+	lines.push(`|-------|-------|`);
+	lines.push(`| File | \`${path.basename(filePath)}\` |`);
+	lines.push(`| Path | \`${filePath}\` |`);
+	lines.push(`| Size | ${formatBytes(result.fileSize)} |`);
+	lines.push(`| Scan Time | ${result.scanTime} ms |`);
+	lines.push(`| Threat Score | **${result.threatScore}/100** (${scoreLabel}) |`);
+	lines.push(`| Total Matches | ${result.matches.length} |`);
+	lines.push('');
 
 	// Threat score bar
-	const barLen = 40;
+	const barLen = 30;
 	const filled = Math.round((result.threatScore / 100) * barLen);
 	const bar = '█'.repeat(filled) + '░'.repeat(barLen - filled);
-	const scoreLabel = result.threatScore >= 75 ? 'CRITICAL' :
-		result.threatScore >= 50 ? 'HIGH' :
-		result.threatScore >= 25 ? 'MEDIUM' : 'CLEAN';
-	outputChannel.appendLine(`  Threat Score: [${bar}] ${result.threatScore}/100 (${scoreLabel})`);
-	outputChannel.appendLine('─'.repeat(60));
+	lines.push(`\`[${bar}]\` ${result.threatScore}/100`);
+	lines.push('');
+
+	// Categories summary
+	if (Object.keys(result.categories).length > 0) {
+		lines.push('## Categories');
+		lines.push('');
+		lines.push('| Category | Detections |');
+		lines.push('|----------|-----------|');
+		for (const [category, count] of Object.entries(result.categories).sort((a, b) => b[1] - a[1])) {
+			lines.push(`| ${category} | ${count} |`);
+		}
+		lines.push('');
+	}
+
+	// Matches detail
+	lines.push('## Detections');
+	lines.push('');
 
 	if (result.matches.length === 0) {
-		outputChannel.appendLine('  ✓ No threats detected');
+		lines.push('✅ No threats detected.');
+		lines.push('');
 	} else {
 		// Group by category
 		const byCategory: Record<string, RuleMatch[]> = {};
@@ -560,31 +588,67 @@ function showThreatReport(filePath: string, result: { matches: RuleMatch[]; thre
 		}
 
 		for (const [category, matches] of Object.entries(byCategory)) {
-			outputChannel.appendLine(`  [${category}] — ${matches.length} detection(s)`);
-			for (const m of matches.slice(0, 10)) {
+			lines.push(`### ${category} — ${matches.length} detection(s)`);
+			lines.push('');
+
+			for (const m of matches) {
 				const icon = m.severity === 'critical' ? '🔴' :
 					m.severity === 'high' ? '🟠' :
-					m.severity === 'medium' ? '🟡' : '🟢';
-				outputChannel.appendLine(`    ${icon} ${m.ruleName} (${m.meta.family || 'unknown'}) — score: ${m.score}`);
+						m.severity === 'medium' ? '🟡' : '🟢';
+				lines.push(`#### ${icon} ${m.ruleName}`);
+				lines.push('');
+				lines.push(`- **Family:** ${m.meta.family || 'unknown'}`);
+				lines.push(`- **Severity:** ${m.severity}`);
+				lines.push(`- **Score:** ${m.score}`);
+				lines.push(`- **Platform:** ${m.meta.platform || 'unknown'}`);
 
-				// Show first 3 string matches
-				for (const s of m.strings.slice(0, 3)) {
-					outputChannel.appendLine(`       ├─ ${s.identifier} @ 0x${s.offset.toString(16).toUpperCase()}: ${s.data}`);
+				if (m.strings.length > 0) {
+					lines.push('');
+					lines.push('**String Matches:**');
+					lines.push('');
+					lines.push('| Identifier | Offset | Data |');
+					lines.push('|-----------|--------|------|');
+					for (const s of m.strings.slice(0, 20)) {
+						const escaped = s.data.replace(/\|/g, '\\|').replace(/\n/g, '\\n');
+						lines.push(`| ${s.identifier} | \`0x${s.offset.toString(16).toUpperCase()}\` | ${escaped} |`);
+					}
+					if (m.strings.length > 20) {
+						lines.push(`| ... | | ${m.strings.length - 20} more |`);
+					}
 				}
-				if (m.strings.length > 3) {
-					outputChannel.appendLine(`       └─ ... and ${m.strings.length - 3} more`);
-				}
-			}
-			if (matches.length > 10) {
-				outputChannel.appendLine(`    ... and ${matches.length - 10} more in this category`);
+				lines.push('');
 			}
 		}
 	}
 
-	outputChannel.appendLine('═'.repeat(60));
-	outputChannel.appendLine(`  Scan completed at ${new Date().toLocaleString()}`);
-	outputChannel.appendLine('═'.repeat(60));
-	outputChannel.appendLine('');
+	// Recommendations
+	lines.push('## Recommendations');
+	lines.push('');
+	if (result.threatScore > 70) {
+		lines.push('⚠️ **High threat level detected.** Recommended actions:');
+		lines.push('');
+		lines.push('1. Isolate the file in a sandbox environment');
+		lines.push('2. Run dynamic analysis with the HexCore Debugger');
+		lines.push('3. Extract IOCs using the IOC Extractor');
+		lines.push('4. Check strings for C2 indicators');
+		lines.push('5. Submit to VirusTotal for cross-reference');
+	} else if (result.threatScore >= 30) {
+		lines.push('⚡ **Moderate threat indicators found.** Recommended actions:');
+		lines.push('');
+		lines.push('1. Review matched rules for false positives');
+		lines.push('2. Analyze suspicious strings and API calls');
+		lines.push('3. Check entropy for packed sections');
+	} else {
+		lines.push('✅ **Low or no threat detected.** The file appears clean based on loaded rules.');
+		lines.push('');
+		lines.push('Consider loading additional YARA rule categories for deeper analysis.');
+	}
+	lines.push('');
+
+	lines.push('---');
+	lines.push(`*Report generated at ${new Date().toLocaleString()} by HexCore YARA Scanner*`);
+
+	return lines.join('\n');
 }
 
 export function deactivate(): void {

@@ -13,6 +13,8 @@ import { ReportAggregator, ComposedReport } from './reportAggregator';
 interface ComposeReportArgs {
 	/** Workspace root path (optional, uses current workspace). */
 	file?: string;
+	/** Explicit reports directory path (overrides default hexcore-reports/). */
+	reportsDir?: string;
 	/** Path to analyst notes file. */
 	notes?: string;
 	/** Output destination. */
@@ -60,7 +62,7 @@ export function activate(context: vscode.ExtensionContext) {
  */
 function resolveWorkspaceRoot(file?: string): string {
 	if (typeof file === 'string' && file.length > 0) {
-		return file;
+		return path.dirname(file);
 	}
 
 	const folders = vscode.workspace.workspaceFolders;
@@ -89,11 +91,26 @@ async function composeReport(
 	options: ComposeReportArgs
 ): Promise<ComposedReport> {
 	const workspaceRoot = resolveWorkspaceRoot(options.file);
-	const reportsDir = path.join(workspaceRoot, 'hexcore-reports');
+
+	// Resolve reports directory in priority order:
+	// 1. Explicit reportsDir argument (from pipeline or user)
+	// 2. outDir inferred from output.path parent directory
+	// 3. Default: {workspace}/hexcore-reports/
+	let reportsDir: string;
+	if (typeof options.reportsDir === 'string' && options.reportsDir.length > 0) {
+		reportsDir = path.isAbsolute(options.reportsDir)
+			? options.reportsDir
+			: path.resolve(workspaceRoot, options.reportsDir);
+	} else if (options.output && typeof options.output.path === 'string') {
+		// When called from pipeline, output.path is inside outDir — use its parent
+		reportsDir = path.dirname(options.output.path);
+	} else {
+		reportsDir = path.join(workspaceRoot, 'hexcore-reports');
+	}
 
 	// Validate reports directory exists
 	if (!fs.existsSync(reportsDir)) {
-		throw new Error(`No reports found in hexcore-reports/. Directory does not exist: ${reportsDir}`);
+		throw new Error(`No reports found. Directory does not exist: ${reportsDir}`);
 	}
 
 	// Scan for report files

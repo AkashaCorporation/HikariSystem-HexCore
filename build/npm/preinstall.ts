@@ -98,11 +98,23 @@ function hasSupportedVisualStudioVersion() {
 
 function installHeaders() {
 	const npm = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-	child_process.execSync(`${npm} ${process.env.npm_command || 'ci'}`, {
-		env: process.env,
-		cwd: path.join(import.meta.dirname, 'gyp'),
-		stdio: 'inherit'
-	});
+	const gypDir = path.join(import.meta.dirname, 'gyp');
+	try {
+		child_process.execSync(`${npm} ${process.env.npm_command || 'ci'} --ignore-scripts`, {
+			env: process.env,
+			cwd: gypDir,
+			stdio: 'inherit',
+			timeout: 60_000
+		});
+	} catch (err: unknown) {
+		const msg = err instanceof Error ? err.message : String(err);
+		console.error('\x1b[1;31m*** Failed to install node-gyp headers.\x1b[0;0m');
+		console.error('\x1b[1;31m*** This usually means npm could not resolve packages in build/npm/gyp/.\x1b[0;0m');
+		console.error(`\x1b[1;31m*** Directory: ${gypDir}\x1b[0;0m`);
+		console.error(`\x1b[1;31m*** Error: ${msg}\x1b[0;0m`);
+		console.error('\x1b[1;33m*** Try: delete build/npm/gyp/node_modules and run npm install again.\x1b[0;0m');
+		throw new Error(`installHeaders failed: ${msg}`);
+	}
 
 	// The node gyp package got installed using the above npm command using the gyp/package.json
 	// file checked into our repository. So from that point it is safe to construct the path

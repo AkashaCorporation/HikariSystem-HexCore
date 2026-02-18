@@ -204,6 +204,33 @@ const IOC_PATTERNS: IOCPattern[] = [
 		regex: /\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}/g,
 	},
 
+	// --- Cryptographic Hashes ---
+	{
+		category: 'hash',
+		// MD5 (32 hex chars)
+		regex: /\b[0-9a-fA-F]{32}\b/g,
+		validate: raw => {
+			// Reject if it looks like a GUID without braces (8-4-4-4-12 pattern)
+			if (/^[0-9a-fA-F]{8}[0-9a-fA-F]{4}[0-9a-fA-F]{4}[0-9a-fA-F]{4}[0-9a-fA-F]{12}$/.test(raw)) {
+				// Only accept if it doesn't contain all zeros or all same char
+				if (/^(.)\1+$/.test(raw)) { return null; }
+			}
+			return raw.toLowerCase();
+		},
+	},
+	{
+		category: 'hash',
+		// SHA-1 (40 hex chars)
+		regex: /\b[0-9a-fA-F]{40}\b/g,
+		validate: raw => /^(.)\1+$/.test(raw) ? null : raw.toLowerCase(),
+	},
+	{
+		category: 'hash',
+		// SHA-256 (64 hex chars)
+		regex: /\b[0-9a-fA-F]{64}\b/g,
+		validate: raw => /^(.)\1+$/.test(raw) ? null : raw.toLowerCase(),
+	},
+
 	// --- Behavioral Indicators ---
 	{
 		category: 'userAgent',

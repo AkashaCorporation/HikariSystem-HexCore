@@ -9,7 +9,7 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
-		"onCommand:hexcore.entropy.analyze"
+		"onView:hexcore.entropy.view"
 	],
 	"categories": [
 		"Other"
@@ -29,6 +29,24 @@
 				"title": "HexCore: Entropy Graph"
 			}
 		],
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "hexcore-entropy",
+					"title": "Entropy Analyzer",
+					"icon": "$(graph)"
+				}
+			]
+		},
+		"views": {
+			"hexcore-entropy": [
+				{
+					"type": "webview",
+					"id": "hexcore.entropy.view",
+					"name": "Entropy Chart"
+				}
+			]
+		},
 		"menus": {
 			"explorer/context": [
 				{

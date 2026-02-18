@@ -24,6 +24,7 @@ product.overrides.json
 .vscode-test
 vscode-telemetry-docs/
 .claude/settings.local.json
+.kiro/
 
 # HexCore Capstone build artifacts
 extensions/hexcore-capstone/deps/

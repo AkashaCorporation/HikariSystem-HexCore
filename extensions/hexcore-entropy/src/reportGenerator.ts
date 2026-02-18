@@ -4,9 +4,34 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { EntropyAnalysisResult } from './types';
+import { EntropyAnalysisResult, EntropyBlock } from './types';
 
-export function generateEntropyReport(result: EntropyAnalysisResult): string {
+/**
+ * Optional section mapping for correlating entropy blocks with binary sections.
+ */
+export interface SectionInfo {
+	name: string;
+	offset: number;
+	size: number;
+}
+
+/**
+ * Finds the section name that contains the given block offset.
+ * Returns undefined if no section matches or sections are not provided.
+ */
+export function findSectionForBlock(blockOffset: number, sections?: SectionInfo[]): string | undefined {
+	if (!sections || sections.length === 0) {
+		return undefined;
+	}
+	for (const sec of sections) {
+		if (blockOffset >= sec.offset && blockOffset < sec.offset + sec.size) {
+			return sec.name;
+		}
+	}
+	return undefined;
+}
+
+export function generateEntropyReport(result: EntropyAnalysisResult, sections?: SectionInfo[]): string {
 	const highEntropyPercentage = result.totalBlocks > 0
 		? ((result.summary.highEntropyBlocks.length / result.totalBlocks) * 100).toFixed(1)
 		: '0.0';
@@ -87,13 +112,31 @@ ${result.graph}
 `;
 
 	if (result.summary.highEntropyBlocks.length > 0) {
-		report += '| Offset | Entropy |\n';
-		report += '|--------|--------|\n';
+		const hasSections = sections && sections.length > 0;
+		if (hasSections) {
+			report += '| Offset | Entropy | Status | Section |\n';
+			report += '|--------|---------|--------|---------|\n';
+		} else {
+			report += '| Offset | Entropy | Status |\n';
+			report += '|--------|---------|--------|\n';
+		}
 		for (const block of result.summary.highEntropyBlocks.slice(0, 20)) {
-			report += `| 0x${block.offset.toString(16).toUpperCase().padStart(8, '0')} | ${block.entropy.toFixed(4)} |\n`;
+			const offsetStr = `0x${block.offset.toString(16).toUpperCase().padStart(8, '0')}`;
+			const entropyStr = block.entropy.toFixed(4);
+			const statusLabel = block.entropy > 7.0 ? '⚠️ ALTA ENTROPIA' : '';
+			if (hasSections) {
+				const sectionName = findSectionForBlock(block.offset, sections) || '-';
+				report += `| ${offsetStr} | ${entropyStr} | ${statusLabel} | ${sectionName} |\n`;
+			} else {
+				report += `| ${offsetStr} | ${entropyStr} | ${statusLabel} |\n`;
+			}
 		}
 		if (result.summary.highEntropyBlocks.length > 20) {
-			report += `| ... | *${result.summary.highEntropyBlocks.length - 20} more regions* |\n`;
+			if (hasSections) {
+				report += `| ... | ... | *${result.summary.highEntropyBlocks.length - 20} more regions* | ... |\n`;
+			} else {
+				report += `| ... | ... | *${result.summary.highEntropyBlocks.length - 20} more regions* |\n`;
+			}
 		}
 	} else {
 		report += '*No high entropy regions detected.*\n';

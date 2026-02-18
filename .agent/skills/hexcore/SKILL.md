@@ -3,13 +3,13 @@ name: HexCore Binary Analysis
 description: Skill para analise de binarios com ferramentas HexCore integradas ao editor
 ---
 
-# HexCore Binary Analysis Skill — v3.5.2
+# HexCore Binary Analysis Skill — v3.5.3
 
 ## Overview
 
 HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSystem HexCore). It includes 20 extensions with 5 native engines (Capstone, Unicorn, Remill, LLVM MC, better-sqlite3) and a full automation pipeline.
 
-> **Current version:** v3.5.2 "Pipeline Maturity" (2026-02-17)
+> **Current version:** v3.5.3 "Quality & Polish" (2026-02-18)
 > **Engine versions:** capstone 1.3.2 | unicorn 1.2.1 | llvm-mc 1.0.0 | better-sqlite3 2.0.0 | remill 0.1.2
 
 ---

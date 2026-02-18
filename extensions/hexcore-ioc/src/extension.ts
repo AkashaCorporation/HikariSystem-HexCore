@@ -25,6 +25,22 @@ import { ALL_IOC_CATEGORIES as ALL_CATEGORIES } from './types';
 
 const DEFAULT_MAX_MATCHES = 10_000;
 
+/** Quick pick labels for IOC categories. */
+const CATEGORY_PICK_LABELS: Record<IOCCategory, string> = {
+	ipv4: 'IPv4 Addresses',
+	ipv6: 'IPv6 Addresses',
+	url: 'URLs',
+	domain: 'Domains',
+	email: 'Email Addresses',
+	hash: 'Hashes (MD5 / SHA-1 / SHA-256)',
+	filePath: 'File Paths',
+	registryKey: 'Registry Keys',
+	namedPipe: 'Named Pipes',
+	mutex: 'Mutexes / GUIDs',
+	userAgent: 'User Agents',
+	cryptoWallet: 'Crypto Wallets',
+};
+
 // ---------------------------------------------------------------------------
 // Activation
 // ---------------------------------------------------------------------------
@@ -40,6 +56,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				const uri = await resolveTargetUri(arg, options);
 				if (!uri) {
 					return undefined;
+				}
+
+				// Interactive category selection via quick pick (Req 12.3)
+				if (!options.quiet && !options.categories) {
+					const picked = await pickCategories();
+					if (!picked) {
+						return undefined; // user cancelled
+					}
+					options.categories = picked;
 				}
 
 				try {
@@ -130,6 +155,31 @@ function resolveCategories(options: IOCCommandOptions): IOCCategory[] {
 		return options.categories.filter(c => ALL_CATEGORIES.includes(c));
 	}
 	return [...ALL_CATEGORIES];
+}
+
+/**
+ * Show a multi-select quick pick for IOC category selection.
+ * Returns the selected categories, or undefined if the user cancelled.
+ */
+async function pickCategories(): Promise<IOCCategory[] | undefined> {
+	const items: (vscode.QuickPickItem & { category: IOCCategory })[] =
+		ALL_CATEGORIES.map(cat => ({
+			label: CATEGORY_PICK_LABELS[cat],
+			category: cat,
+			picked: true,
+		}));
+
+	const selected = await vscode.window.showQuickPick(items, {
+		canPickMany: true,
+		title: 'Select IOC Categories',
+		placeHolder: 'Choose which IOC categories to extract (all selected by default)',
+	});
+
+	if (!selected || selected.length === 0) {
+		return undefined;
+	}
+
+	return selected.map(item => item.category);
 }
 
 // ---------------------------------------------------------------------------

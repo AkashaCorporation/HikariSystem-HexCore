@@ -12,6 +12,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 	private activeWebview?: vscode.Webview;
 	private currentAddress?: number;
 	private currentFunctionAddress?: number;
+	private syncEnabled: boolean = false;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
@@ -215,6 +216,56 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				}
 				break;
 			}
+
+			case 'searchStringRefs':
+				vscode.commands.executeCommand('hexcore.disasm.searchString');
+				break;
+
+			case 'exportAsm':
+				vscode.commands.executeCommand('hexcore.disasm.exportASM');
+				break;
+
+			case 'deepAnalysis':
+				vscode.commands.executeCommand('hexcore.disasm.analyzeFile');
+				break;
+
+			case 'showCFG':
+				vscode.commands.executeCommand('hexcore.disasm.showCFG');
+				break;
+
+			case 'buildFormula':
+				vscode.commands.executeCommand('hexcore.disasm.buildFormula');
+				break;
+
+			case 'checkConstants':
+				vscode.commands.executeCommand('hexcore.disasm.checkConstants');
+				break;
+
+			case 'liftToIR':
+				vscode.commands.executeCommand('hexcore.disasm.liftToIR');
+				break;
+
+			case 'toggleSyntax':
+				vscode.commands.executeCommand('hexcore.disasm.setSyntax');
+				break;
+
+			case 'toggleSync': {
+				// Toggle sync state and notify webview
+				const newState = !this.syncEnabled;
+				this.syncEnabled = newState;
+				webview.postMessage({ command: 'syncState', enabled: newState });
+				break;
+			}
+
+			case 'checkRemill': {
+				try {
+					const remillExt = vscode.extensions.getExtension('hikarisystem.hexcore-remill');
+					webview.postMessage({ command: 'remillStatus', available: !!remillExt });
+				} catch {
+					webview.postMessage({ command: 'remillStatus', available: false });
+				}
+				break;
+			}
 		}
 	}
 
@@ -383,8 +434,76 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			margin-left: auto;
 		}
 
+		/* Toolbar */
+		.toolbar {
+			background: var(--bg-tertiary);
+			border-bottom: 1px solid var(--border-color);
+			padding: 4px 8px;
+			display: flex;
+			gap: 4px;
+			align-items: center;
+			flex-wrap: wrap;
+		}
+
+		.toolbar-btn {
+			background: transparent;
+			border: 1px solid transparent;
+			color: var(--text-secondary);
+			padding: 4px 8px;
+			cursor: pointer;
+			font-size: 11px;
+			border-radius: 3px;
+			display: flex;
+			align-items: center;
+			gap: 4px;
+			white-space: nowrap;
+		}
+
+		.toolbar-btn:hover {
+			background: var(--bg-hover);
+			color: var(--text-primary);
+		}
+
+		.toolbar-btn.active {
+			background: var(--bg-selected);
+			color: var(--text-primary);
+		}
+
+		.toolbar-separator {
+			width: 1px;
+			height: 20px;
+			background: var(--border-color);
+			margin: 0 4px;
+		}
+
+		.toolbar-input {
+			background: var(--bg-primary);
+			border: 1px solid var(--border-color);
+			color: var(--text-primary);
+			padding: 3px 6px;
+			font-size: 11px;
+			font-family: inherit;
+			border-radius: 3px;
+			width: 100px;
+		}
+
+		.toolbar-input:focus {
+			border-color: var(--mnemonic-color);
+			outline: none;
+		}
+
+		.toolbar-input::placeholder {
+			color: var(--text-muted);
+		}
+
+		.syntax-toggle {
+			font-weight: 600;
+			min-width: 50px;
+			text-align: center;
+		}
+
 		.disasm-container {
-			height: calc(100vh - 90px);
+			height: calc(100vh - 126px);
 			overflow-y: auto;
 			padding: 8px 0;
 		}
@@ -673,6 +792,14 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		const vscode = acquireVsCodeApi();
 		let currentData = null;
 		let selectedAddress = null;
+		let remillAvailable = false;
+		let currentSyntax = 'Intel';
+		let syncEnabled = false;
+
+		// Check remill availability
+		try {
+			vscode.postMessage({ command: 'checkRemill' });
+		} catch(e) {}
 
 		// Notify ready
 		vscode.postMessage({ command: 'ready' });
@@ -684,6 +811,19 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				currentData = message.data;
 				selectedAddress = message.data.currentAddress;
 				render();
+			} else if (message.command === 'remillStatus') {
+				remillAvailable = message.available;
+			} else if (message.command === 'syntaxChanged') {
+				currentSyntax = message.syntax;
+				const btn = document.querySelector('.syntax-toggle');
+				if (btn) btn.textContent = currentSyntax;
+			} else if (message.command === 'syncState') {
+				syncEnabled = message.enabled;
+				const btn = document.getElementById('syncBtn');
+				if (btn) {
+					btn.className = 'toolbar-btn' + (syncEnabled ? ' active' : '');
+					btn.innerHTML = syncEnabled ? '&#128279; Sync ON' : '&#128279; Sync';
+				}
 			}
 		});
 
@@ -725,6 +865,22 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 							\${currentFunction.size} bytes |
 							\${currentFunction.instructions.length} instruction(s)
 						</span>
+					</div>
+					<div class="toolbar">
+						<button class="toolbar-btn" onclick="sendCommand('searchStringRefs')" title="Search String References">&#128270; Strings</button>
+						<button class="toolbar-btn" onclick="sendCommand('exportAsm')" title="Export Assembly">&#128190; Export ASM</button>
+						<div class="toolbar-separator"></div>
+						<input class="toolbar-input" id="goToAddrInput" type="text" placeholder="0x..." title="Go to Address" onkeydown="handleGoToAddress(event)" />
+						<button class="toolbar-btn" onclick="goToAddressFromInput()" title="Go to Address">&#8594; Go</button>
+						<div class="toolbar-separator"></div>
+						<button class="toolbar-btn" onclick="sendCommand('deepAnalysis')" title="Deep Analysis (Prolog Scan + Xrefs)">&#128300; Deep Analysis</button>
+						<button class="toolbar-btn" onclick="sendCommand('showCFG')" title="Show Control Flow Graph">&#9670; CFG</button>
+						<button class="toolbar-btn" onclick="sendCommand('buildFormula')" title="Build Formula from Instructions">&#402; Formula</button>
+						<button class="toolbar-btn" onclick="sendCommand('checkConstants')" title="Check Constant Annotation Sanity">&#10003; Constants</button>
+						\${remillAvailable ? '<button class="toolbar-btn" onclick="sendCommand(\\'liftToIR\\')" title="Lift to LLVM IR (Remill)">&#9881; Lift to IR</button>' : ''}
+						<div class="toolbar-separator"></div>
+						<button class="toolbar-btn syntax-toggle" onclick="sendCommand('toggleSyntax')" title="Toggle Intel/AT&T syntax">\${currentSyntax}</button>
+						<button class="toolbar-btn \${syncEnabled ? 'active' : ''}" id="syncBtn" onclick="sendCommand('toggleSync')" title="Sync with Hex View">\${syncEnabled ? '&#128279; Sync ON' : '&#128279; Sync'}</button>
 					</div>
 					<div class="disasm-container">
 						\${renderInstructions(currentFunction.instructions)}
@@ -808,6 +964,28 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				(_, addr, hex) => '<span class="address" onclick="jumpToAddress(' + addr + ')">' + hex + '</span>');
 
 			return result;
+		}
+
+		function sendCommand(command, data) {
+			vscode.postMessage({ command: command, ...(data || {}) });
+		}
+
+		function handleGoToAddress(event) {
+			if (event.key === 'Enter') {
+				goToAddressFromInput();
+			}
+		}
+
+		function goToAddressFromInput() {
+			const input = document.getElementById('goToAddrInput');
+			if (input && input.value) {
+				const addrStr = input.value.trim().replace(/^0x/i, '');
+				const addr = parseInt(addrStr, 16);
+				if (!isNaN(addr)) {
+					vscode.postMessage({ command: 'jumpToAddress', address: addr });
+				}
+				input.value = '';
+			}
 		}
 
 		function escapeHtml(text) {

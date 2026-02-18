@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import * as fs from 'fs';
 import { StructureTemplate, STRUCTURE_TEMPLATES } from './structureTemplates';
 import { BookmarkManager, Bookmark } from './bookmarkManager';
+import { getHexCoreBaseCSS } from 'hexcore-common';
 
 export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<HexDocument> {
 	public static readonly viewType = 'hexcore.hexEditor';
@@ -206,6 +207,24 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 						}))
 					});
 					break;
+
+				case 'syncToDisasm':
+					// Cross-extension sync: navigate Disassembler to the address corresponding to this offset
+					// The Disassembler's goToAddress command accepts a virtual address.
+					// We pass the offset directly — the disassembler will interpret it as an address.
+					// For proper conversion, the disassembler should add its base address.
+					if (typeof message.offset === 'number') {
+						try {
+							await vscode.commands.executeCommand('hexcore.disasm.goToAddress', message.offset);
+						} catch {
+							// Disassembler extension may not be active — fail silently
+						}
+					}
+					break;
+
+				case 'toggleSyncDisasm':
+					// Sync toggle state is managed in the webview; nothing to persist on the host side
+					break;
 			}
 		});
 	}
@@ -331,6 +350,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 
 		// Generate nonce for CSP to prevent XSS via inline script injection
 		const nonce = this.getNonce();
+		const baseCSS = getHexCoreBaseCSS();
 
 		return `<!DOCTYPE html>
 <html lang="en">
@@ -340,6 +360,8 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>Hex Editor</title>
 	<style>
+		${baseCSS}
+
 		:root {
 			--font-mono: 'Consolas', 'Monaco', 'Courier New', monospace;
 			--row-height: 22px;
@@ -360,14 +382,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 		.toolbar {
 			display: flex;
 			align-items: center;
-			gap: 12px;
-			padding: 6px 12px;
+			gap: 8px;
+			padding: 4px 8px;
 			background: var(--vscode-editor-background);
 			border-bottom: 1px solid var(--vscode-panel-border);
 			min-height: 36px;
 			flex-wrap: wrap;
 		}
 
+		.toolbar-group { display: flex; align-items: center; gap: 4px; }
 		.toolbar-item { display: flex; align-items: center; gap: 6px; font-size: 11px; }
 		.label { color: var(--vscode-descriptionForeground); }
 		.value { color: var(--vscode-textLink-foreground); font-weight: bold; }
@@ -381,12 +404,16 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			font-size: 11px;
 			cursor: pointer;
 			border-radius: 3px;
+			display: flex;
+			align-items: center;
+			gap: 4px;
 		}
 		.toolbar-btn:hover { background: var(--vscode-button-secondaryHoverBackground); }
 		.toolbar-btn.primary { background: var(--vscode-button-background); }
 		.toolbar-btn.primary:hover { background: var(--vscode-button-hoverBackground); }
 		.toolbar-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 		.toolbar-btn.modified { background: var(--vscode-inputValidation-warningBackground); }
+		.toolbar-btn.active { background: var(--hexcore-safe); color: #000; }
 
 		.toolbar-input { display: flex; align-items: center; gap: 4px; }
 		.toolbar-input input {
@@ -400,6 +427,15 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			border-radius: 3px;
 		}
 		.toolbar-input input:focus { outline: 1px solid var(--vscode-focusBorder); }
+
+		.toolbar-right {
+			margin-left: auto;
+			display: flex;
+			gap: 8px;
+			align-items: center;
+			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
+		}
 
 		/* Main Layout */
 		.container { display: flex; height: calc(100vh - 36px); }
@@ -431,7 +467,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			flex-shrink: 0;
 			font-size: 11px;
 		}
-	.offset-col.bookmarked::before {
+		.offset-col.bookmarked::before {
 			content: "[B]";
 			margin-right: 4px;
 			color: var(--vscode-textLink-foreground);
@@ -477,7 +513,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 
 		/* Sidebar */
 		.sidebar {
-			width: 280px;
+			width: 300px;
 			background-color: var(--vscode-sideBar-background);
 			border-left: 1px solid var(--vscode-panel-border);
 			padding: 12px;
@@ -506,7 +542,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 
 		.data-grid {
 			display: grid;
-			grid-template-columns: 70px 1fr;
+			grid-template-columns: 80px 1fr;
 			gap: 4px;
 			font-size: 11px;
 		}
@@ -606,30 +642,40 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 </head>
 <body>
 	<div class="toolbar">
-		<div class="toolbar-item">
+		<div class="toolbar-group">
+			<div class="toolbar-input">
+				<input type="text" id="gotoInput" placeholder="Go to offset..." />
+				<button class="toolbar-btn" id="gotoBtn" title="Go to Offset">Go</button>
+			</div>
+			<div class="toolbar-input">
+				<input type="text" id="searchInput" placeholder="Search hex..." />
+				<button class="toolbar-btn" id="searchBtn" title="Search Hex">Find</button>
+			</div>
+		</div>
+		<div class="divider"></div>
+		<div class="toolbar-group">
+			<button class="toolbar-btn" id="addBookmarkBtn" title="Add Bookmark">+ Bookmark</button>
+			<button class="toolbar-btn" id="applyTemplateBtn" title="Apply Template">Template</button>
+			<button class="toolbar-btn" id="editModeBtn" title="Toggle Edit Mode">Edit Mode</button>
+		</div>
+		<div class="divider"></div>
+		<div class="toolbar-group">
+			<button class="toolbar-btn" id="copyHexBtn" title="Copy as Hex" disabled>Copy Hex</button>
+			<button class="toolbar-btn" id="copyCArrayBtn" title="Copy as C Array" disabled>Copy C</button>
+			<button class="toolbar-btn" id="copyPythonBtn" title="Copy as Python Bytes" disabled>Copy Py</button>
+		</div>
+		<div class="divider"></div>
+		<button class="toolbar-btn" id="syncDisasmBtn" title="Sync with Disassembler">Sync Disasm</button>
+		<div class="toolbar-right">
 			<span class="label">FILE:</span>
 			<span class="value" id="fileName">-</span>
-		</div>
-		<div class="divider"></div>
-		<div class="toolbar-item">
+			<span class="divider"></span>
 			<span class="label">SIZE:</span>
 			<span class="value" id="fileSize">-</span>
-		</div>
-		<div class="divider"></div>
-		<div class="toolbar-item">
+			<span class="divider"></span>
 			<span class="label">OFFSET:</span>
 			<span class="value" id="cursorOffset">0x00000000</span>
-		</div>
-		<div class="divider"></div>
-		<button class="toolbar-btn primary" id="saveBtn" disabled>[Save]</button>
-		<button class="toolbar-btn" id="editModeBtn">[Edit Mode]</button>
-		<div class="toolbar-input">
-			<input type="text" id="searchInput" placeholder="Search hex..." />
-			<button class="toolbar-btn" id="searchBtn">[Find]</button>
-		</div>
-		<div class="toolbar-input">
-			<input type="text" id="gotoInput" placeholder="Go to..." />
-			<button class="toolbar-btn" id="gotoBtn">[Go]</button>
+			<button class="toolbar-btn primary" id="saveBtn" disabled>Save</button>
 		</div>
 	</div>
 
@@ -643,33 +689,24 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			<div>
 				<div class="section-header">Data Inspector</div>
 				<div class="data-grid" id="dataInspector">
-					<div class="data-label">Int8</div><div class="data-value" id="valInt8">-</div>
 					<div class="data-label">UInt8</div><div class="data-value" id="valUInt8">-</div>
-					<div class="data-label">Int16</div><div class="data-value" id="valInt16">-</div>
-					<div class="data-label">UInt16</div><div class="data-value" id="valUInt16">-</div>
-					<div class="data-label">Int32</div><div class="data-value" id="valInt32">-</div>
-					<div class="data-label">UInt32</div><div class="data-value" id="valUInt32">-</div>
-					<div class="data-label">Int64</div><div class="data-value" id="valInt64">-</div>
-					<div class="data-label">UInt64</div><div class="data-value" id="valUInt64">-</div>
-					<div class="data-label">Float</div><div class="data-value" id="valFloat32">-</div>
-					<div class="data-label">Double</div><div class="data-value" id="valFloat64">-</div>
+					<div class="data-label">Int8</div><div class="data-value" id="valInt8">-</div>
+					<div class="data-label">UInt16 LE</div><div class="data-value" id="valUInt16LE">-</div>
+					<div class="data-label">UInt16 BE</div><div class="data-value" id="valUInt16BE">-</div>
+					<div class="data-label">Int16 LE</div><div class="data-value" id="valInt16LE">-</div>
+					<div class="data-label">Int16 BE</div><div class="data-value" id="valInt16BE">-</div>
+					<div class="data-label">UInt32 LE</div><div class="data-value" id="valUInt32LE">-</div>
+					<div class="data-label">UInt32 BE</div><div class="data-value" id="valUInt32BE">-</div>
+					<div class="data-label">Int32 LE</div><div class="data-value" id="valInt32LE">-</div>
+					<div class="data-label">Int32 BE</div><div class="data-value" id="valInt32BE">-</div>
+					<div class="data-label">UInt64 LE</div><div class="data-value" id="valUInt64LE">-</div>
+					<div class="data-label">Float32 LE</div><div class="data-value" id="valFloat32LE">-</div>
+					<div class="data-label">Float32 BE</div><div class="data-value" id="valFloat32BE">-</div>
+					<div class="data-label">Float64 LE</div><div class="data-value" id="valFloat64LE">-</div>
+					<div class="data-label">Float64 BE</div><div class="data-value" id="valFloat64BE">-</div>
+					<div class="data-label">ASCII</div><div class="data-value" id="valAscii">-</div>
+					<div class="data-label">UTF-16 LE</div><div class="data-value" id="valUtf16le">-</div>
 				</div>
-			</div>
-
-			<div>
-				<div class="section-header">Structure Template</div>
-				<select class="template-select" id="templateSelect">
-					<option value="">Select template...</option>
-				</select>
-				<div class="template-fields" id="templateFields"></div>
-			</div>
-
-			<div>
-				<div class="section-header">
-					<span>Bookmarks</span>
-					<button class="toolbar-btn" id="addBookmarkBtn">+ Add</button>
-				</div>
-				<div class="bookmark-list" id="bookmarkList"></div>
 			</div>
 
 			<div>
@@ -686,8 +723,23 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 				<div class="copy-section">
 					<button class="copy-btn" id="copyHex" disabled>Copy as Hex</button>
 					<button class="copy-btn" id="copyCArray" disabled>Copy as C Array</button>
-					<button class="copy-btn" id="copyPython" disabled>Copy as Python</button>
+					<button class="copy-btn" id="copyPython" disabled>Copy as Python Bytes</button>
 				</div>
+			</div>
+
+			<div>
+				<div class="section-header">Structure Template</div>
+				<select class="template-select" id="templateSelect">
+					<option value="">Select template...</option>
+				</select>
+				<div class="template-fields" id="templateFields"></div>
+			</div>
+
+			<div>
+				<div class="section-header">
+					<span>Bookmarks</span>
+				</div>
+				<div class="bookmark-list" id="bookmarkList"></div>
 			</div>
 
 			<div id="searchResultsSection" style="display: none;">
@@ -737,7 +789,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 
 		document.getElementById('editModeBtn').addEventListener('click', () => {
 			isEditMode = !isEditMode;
-			document.getElementById('editModeBtn').textContent = isEditMode ? '[Lock]' : '[Edit Mode]';
+			document.getElementById('editModeBtn').textContent = isEditMode ? 'Lock' : 'Edit Mode';
 			document.getElementById('editModeBtn').classList.toggle('modified', isEditMode);
 			renderVisibleRows();
 		});
@@ -765,10 +817,26 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			}
 		});
 
+		document.getElementById('applyTemplateBtn').addEventListener('click', () => {
+			const select = document.getElementById('templateSelect');
+			if (select.value && selection.start !== -1) {
+				vscode.postMessage({ type: 'applyTemplate', templateName: select.value, offset: selection.start });
+			}
+		});
+
 		document.getElementById('templateSelect').addEventListener('change', (e) => {
 			if (e.target.value && selection.start !== -1) {
 				vscode.postMessage({ type: 'applyTemplate', templateName: e.target.value, offset: selection.start });
 			}
+		});
+
+		// Sync with Disassembler toggle (placeholder for Task 17)
+		let syncDisasmEnabled = false;
+		document.getElementById('syncDisasmBtn').addEventListener('click', () => {
+			syncDisasmEnabled = !syncDisasmEnabled;
+			document.getElementById('syncDisasmBtn').classList.toggle('active', syncDisasmEnabled);
+			document.getElementById('syncDisasmBtn').textContent = syncDisasmEnabled ? '🔗 Sync Disasm' : 'Sync Disasm';
+			vscode.postMessage({ type: 'toggleSyncDisasm', enabled: syncDisasmEnabled });
 		});
 
 		function doSearch() {
@@ -833,10 +901,31 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			});
 		}
 
-		// Copy buttons
+		// Copy buttons — sidebar
 		document.getElementById('copyHex').addEventListener('click', () => copySelection('hex'));
-		document.getElementById('copyCArray').addEventListener('click', () => copySelection('carray'));
-		document.getElementById('copyPython').addEventListener('click', () => copySelection('python'));
+		document.getElementById('copyCArray').addEventListener('click', () => copySelection('c-array'));
+		document.getElementById('copyPython').addEventListener('click', () => copySelection('python-bytes'));
+
+		// Copy buttons — toolbar
+		document.getElementById('copyHexBtn').addEventListener('click', () => copySelection('hex'));
+		document.getElementById('copyCArrayBtn').addEventListener('click', () => copySelection('c-array'));
+		document.getElementById('copyPythonBtn').addEventListener('click', () => copySelection('python-bytes'));
+
+		/**
+		 * formatSelection — matches the exported function in hexCopyFormats.ts
+		 */
+		function formatSelectionFn(bytes, format) {
+			switch (format) {
+				case 'hex':
+					return Array.from(bytes).map(b => b.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+				case 'c-array':
+					return '{ ' + Array.from(bytes).map(b => '0x' + b.toString(16).padStart(2, '0').toUpperCase()).join(', ') + ' }';
+				case 'python-bytes':
+					return "b'" + Array.from(bytes).map(b => '\\\\x' + b.toString(16).padStart(2, '0')).join('') + "'";
+				default:
+					return '';
+			}
+		}
 
 		function copySelection(format) {
 			if (selection.start === -1) return;
@@ -845,15 +934,7 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			const bytes = getBytesRange(start, end - start + 1);
 			if (bytes.length === 0) return;
 
-			let text = '';
-			if (format === 'hex') {
-				text = bytes.map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' ');
-			} else if (format === 'carray') {
-				text = 'unsigned char data[] = { ' + bytes.map(b => '0x' + b.toString(16).toUpperCase().padStart(2, '0')).join(', ') + ' };';
-			} else if (format === 'python') {
-				text = 'b"' + bytes.map(b => '\\\\x' + b.toString(16).padStart(2, '0')).join('') + '"';
-			}
-
+			const text = formatSelectionFn(new Uint8Array(bytes), format);
 			vscode.postMessage({ type: 'copyToClipboard', text: text });
 		}
 
@@ -1168,9 +1249,13 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 			document.getElementById('selLen').textContent = len + ' bytes';
 			document.getElementById('cursorOffset').textContent = '0x' + start.toString(16).toUpperCase().padStart(8, '0');
 
+			// Enable copy buttons
 			document.getElementById('copyHex').disabled = false;
 			document.getElementById('copyCArray').disabled = false;
 			document.getElementById('copyPython').disabled = false;
+			document.getElementById('copyHexBtn').disabled = false;
+			document.getElementById('copyCArrayBtn').disabled = false;
+			document.getElementById('copyPythonBtn').disabled = false;
 
 			const bytes = getBytesRange(start, 8);
 			if (bytes.length === 0) return;
@@ -1181,17 +1266,45 @@ export class HexEditorProvider implements vscode.CustomReadonlyEditorProvider<He
 				uint8View[i] = bytes[i];
 			}
 			const view = new DataView(buffer);
+			const bLen = bytes.length;
 
-			document.getElementById('valInt8').textContent = view.getInt8(0);
-			document.getElementById('valUInt8').textContent = view.getUint8(0);
-			document.getElementById('valInt16').textContent = bytes.length >= 2 ? view.getInt16(0, true) : '-';
-			document.getElementById('valUInt16').textContent = bytes.length >= 2 ? view.getUint16(0, true) : '-';
-			document.getElementById('valInt32').textContent = bytes.length >= 4 ? view.getInt32(0, true) : '-';
-			document.getElementById('valUInt32').textContent = bytes.length >= 4 ? view.getUint32(0, true) : '-';
-			document.getElementById('valInt64').textContent = bytes.length >= 8 ? view.getBigInt64(0, true).toString() : '-';
-			document.getElementById('valUInt64').textContent = bytes.length >= 8 ? view.getBigUint64(0, true).toString() : '-';
-			document.getElementById('valFloat32').textContent = bytes.length >= 4 ? view.getFloat32(0, true).toPrecision(6) : '-';
-			document.getElementById('valFloat64').textContent = bytes.length >= 8 ? view.getFloat64(0, true).toPrecision(10) : '-';
+			// Data Inspector — all formats with LE/BE and N/A for insufficient bytes
+			document.getElementById('valUInt8').textContent = bLen >= 1 ? view.getUint8(0) : 'N/A';
+			document.getElementById('valInt8').textContent = bLen >= 1 ? view.getInt8(0) : 'N/A';
+			document.getElementById('valUInt16LE').textContent = bLen >= 2 ? view.getUint16(0, true) : 'N/A';
+			document.getElementById('valUInt16BE').textContent = bLen >= 2 ? view.getUint16(0, false) : 'N/A';
+			document.getElementById('valInt16LE').textContent = bLen >= 2 ? view.getInt16(0, true) : 'N/A';
+			document.getElementById('valInt16BE').textContent = bLen >= 2 ? view.getInt16(0, false) : 'N/A';
+			document.getElementById('valUInt32LE').textContent = bLen >= 4 ? view.getUint32(0, true) : 'N/A';
+			document.getElementById('valUInt32BE').textContent = bLen >= 4 ? view.getUint32(0, false) : 'N/A';
+			document.getElementById('valInt32LE').textContent = bLen >= 4 ? view.getInt32(0, true) : 'N/A';
+			document.getElementById('valInt32BE').textContent = bLen >= 4 ? view.getInt32(0, false) : 'N/A';
+			document.getElementById('valUInt64LE').textContent = bLen >= 8 ? view.getBigUint64(0, true).toString() : 'N/A';
+			document.getElementById('valFloat32LE').textContent = bLen >= 4 ? view.getFloat32(0, true).toPrecision(6) : 'N/A';
+			document.getElementById('valFloat32BE').textContent = bLen >= 4 ? view.getFloat32(0, false).toPrecision(6) : 'N/A';
+			document.getElementById('valFloat64LE').textContent = bLen >= 8 ? view.getFloat64(0, true).toPrecision(10) : 'N/A';
+			document.getElementById('valFloat64BE').textContent = bLen >= 8 ? view.getFloat64(0, false).toPrecision(10) : 'N/A';
+
+			// ASCII: show printable chars, '.' for non-printable
+			let asciiStr = '';
+			for (let i = 0; i < Math.min(bLen, 8); i++) {
+				const b = bytes[i];
+				asciiStr += (b >= 32 && b <= 126) ? String.fromCharCode(b) : '.';
+			}
+			document.getElementById('valAscii').textContent = bLen >= 1 ? asciiStr : 'N/A';
+
+			// UTF-16 LE
+			let utf16str = '';
+			for (let i = 0; i + 1 < Math.min(bLen, 8); i += 2) {
+				const code = bytes[i] | (bytes[i + 1] << 8);
+				utf16str += String.fromCharCode(code);
+			}
+			document.getElementById('valUtf16le').textContent = bLen >= 2 ? utf16str : 'N/A';
+
+			// Sync with Disassembler if enabled
+			if (syncDisasmEnabled) {
+				vscode.postMessage({ type: 'syncToDisasm', offset: start });
+			}
 		}
 
 		function formatBytes(bytes) {

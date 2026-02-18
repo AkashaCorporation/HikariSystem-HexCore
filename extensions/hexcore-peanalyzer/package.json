@@ -75,6 +75,9 @@
 		"compile": "tsc -p ./",
 		"watch": "tsc -watch -p ./"
 	},
+	"dependencies": {
+		"hexcore-common": "file:../hexcore-common"
+	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",
 		"@types/vscode": "^1.60.0",

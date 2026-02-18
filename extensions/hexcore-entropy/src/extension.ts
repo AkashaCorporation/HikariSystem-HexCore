@@ -10,6 +10,7 @@ import * as path from 'path';
 import { analyzeEntropyFile } from './entropyAnalyzer';
 import { generateAsciiGraph } from './graphGenerator';
 import { generateEntropyReport } from './reportGenerator';
+import { EntropyWebviewProvider } from './entropyWebviewProvider';
 import {
 	CommandOutputOptions,
 	EntropyAnalysisResult,
@@ -20,6 +21,14 @@ import {
 export function activate(context: vscode.ExtensionContext): void {
 	console.log('HexCore Entropy Analyzer extension activated');
 
+	const entropyViewProvider = new EntropyWebviewProvider(context.extensionUri);
+	context.subscriptions.push(
+		vscode.window.registerWebviewViewProvider(
+			EntropyWebviewProvider.viewType,
+			entropyViewProvider
+		)
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.entropy.analyze', async (arg?: vscode.Uri | EntropyCommandOptions) => {
 			const options = normalizeOptions(arg);
@@ -29,7 +38,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			try {
-				return await analyzeEntropy(uri, options);
+				const result = await analyzeEntropy(uri, options);
+				entropyViewProvider.showAnalysis(result);
+				return result;
 			} catch (error: unknown) {
 				if (!options.quiet) {
 					vscode.window.showErrorMessage(`Entropy analysis failed: ${toErrorMessage(error)}`);

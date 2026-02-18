@@ -19,6 +19,40 @@ function formatFileSize(bytes: number): string {
 }
 
 /**
+ * Return a colored badge descriptor for an ELF security feature.
+ *
+ * The mapping follows the unified HexCore risk palette:
+ * - RELRO: Full → green, Partial → yellow, None → red
+ * - NX / PIE / Stack Canary: Enabled/Present → green, Disabled/Absent → red
+ *
+ * @param feature - Security feature name (e.g. "RELRO", "NX", "PIE", "Stack Canary")
+ * @param state   - Current state string (e.g. "full", "partial", "none", "enabled", "disabled", "present", "absent")
+ * @returns Object with `color` (hex string) and `label` (human-readable text)
+ */
+export function elfSecurityBadge(feature: string, state: string): { color: string; label: string } {
+	const s = state.toLowerCase();
+
+	// RELRO has three states
+	if (feature.toLowerCase() === 'relro') {
+		switch (s) {
+			case 'full':
+				return { color: '#4ec9b0', label: 'Full RELRO' };
+			case 'partial':
+				return { color: '#dcdcaa', label: 'Partial RELRO' };
+			default:
+				return { color: '#f44747', label: 'No RELRO' };
+		}
+	}
+
+	// Boolean features: enabled/present → green, disabled/absent → red
+	const positive = s === 'enabled' || s === 'present' || s === 'true' || s === 'yes';
+	if (positive) {
+		return { color: '#4ec9b0', label: `${feature} Enabled` };
+	}
+	return { color: '#f44747', label: `${feature} Disabled` };
+}
+
+/**
  * Escape pipe characters in Markdown table cells.
  */
 function escapeCell(value: string): string {
@@ -62,15 +96,36 @@ export function buildMarkdownReport(analysis: ELFAnalysis): string {
 	lines.push(`| Entry Point | \`${analysis.entryPoint}\` |`);
 	lines.push('');
 
-	// Security mitigations
+	// Headers (ELF header details)
+	lines.push('## Headers');
+	lines.push('');
+	lines.push('### ELF Header');
+	lines.push('');
+	lines.push('| Field | Value |');
+	lines.push('|---|---|');
+	lines.push(`| Class | ${analysis.elfClass} |`);
+	lines.push(`| Data | ${analysis.endianness === 'little' ? '2\'s complement, little endian' : '2\'s complement, big endian'} |`);
+	lines.push(`| OS/ABI | ${escapeCell(analysis.osABI)} |`);
+	lines.push(`| Type | ${escapeCell(analysis.type)} |`);
+	lines.push(`| Machine | ${escapeCell(analysis.machine)} |`);
+	lines.push(`| Entry Point | \`${analysis.entryPoint}\` |`);
+	lines.push(`| Section Headers | ${analysis.sections.length} entries |`);
+	lines.push(`| Program Headers | ${analysis.segments.length} entries |`);
+	lines.push('');
+
+	// Security mitigations with colored badges
 	lines.push('## Security Mitigations');
 	lines.push('');
-	lines.push('| Mitigation | Status |');
-	lines.push('|---|---|');
-	lines.push(`| RELRO | ${formatRelro(analysis.security.relro)} |`);
-	lines.push(`| Stack Canary | ${analysis.security.stackCanary ? '✅ Enabled' : '❌ Disabled'} |`);
-	lines.push(`| NX | ${analysis.security.nx ? '✅ Enabled' : '❌ Disabled'} |`);
-	lines.push(`| PIE | ${analysis.security.pie ? '✅ Enabled' : '❌ Disabled'} |`);
+	const relroBadge = elfSecurityBadge('RELRO', analysis.security.relro);
+	const canaryBadge = elfSecurityBadge('Stack Canary', analysis.security.stackCanary ? 'enabled' : 'disabled');
+	const nxBadge = elfSecurityBadge('NX', analysis.security.nx ? 'enabled' : 'disabled');
+	const pieBadge = elfSecurityBadge('PIE', analysis.security.pie ? 'enabled' : 'disabled');
+	lines.push('| Mitigation | Status | Badge |');
+	lines.push('|---|---|---|');
+	lines.push(`| RELRO | ${formatRelro(analysis.security.relro)} | 🔵 ${relroBadge.label} |`);
+	lines.push(`| Stack Canary | ${analysis.security.stackCanary ? '✅ Enabled' : '❌ Disabled'} | 🔵 ${canaryBadge.label} |`);
+	lines.push(`| NX | ${analysis.security.nx ? '✅ Enabled' : '❌ Disabled'} | 🔵 ${nxBadge.label} |`);
+	lines.push(`| PIE | ${analysis.security.pie ? '✅ Enabled' : '❌ Disabled'} | 🔵 ${pieBadge.label} |`);
 	lines.push('');
 
 	// Sections

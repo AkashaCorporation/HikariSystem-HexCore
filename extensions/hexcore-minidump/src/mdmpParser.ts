@@ -17,6 +17,7 @@ import type {
 	MemoryDescriptor,
 	Memory64Descriptor,
 	SystemInfo,
+	ExceptionInfo,
 } from './types';
 import {
 	MDMP_SIGNATURE,
@@ -33,6 +34,7 @@ import {
 	parseMinidumpString,
 	parseMemoryListStream,
 	parseMemory64ListStream,
+	parseExceptionStream,
 } from './streamParsers';
 
 // ---------------------------------------------------------------------------
@@ -78,6 +80,7 @@ export function parseMinidump(filePath: string): Omit<MinidumpAnalysisResult, 'r
 		let memoryRegions: MemoryRegion[] = [];
 		let memoryDescriptors: MemoryDescriptor[] = [];
 		let memory64Descriptors: Memory64Descriptor[] = [];
+		let exception: ExceptionInfo | undefined;
 
 		for (const entry of streamDirectory) {
 			if (entry.dataSize === 0 || entry.rva === 0) {
@@ -112,6 +115,10 @@ export function parseMinidump(filePath: string): Omit<MinidumpAnalysisResult, 'r
 				case StreamType.Memory64ListStream:
 					memory64Descriptors = parseMemory64ListStream(fd, entry.rva, entry.dataSize);
 					break;
+
+				case StreamType.ExceptionStream:
+					exception = parseExceptionStream(fd, entry.rva, entry.dataSize);
+					break;
 			}
 		}
 
@@ -136,6 +143,7 @@ export function parseMinidump(filePath: string): Omit<MinidumpAnalysisResult, 'r
 			memoryRegions,
 			memoryDescriptors,
 			memory64Descriptors,
+			exception,
 			threats,
 		};
 	} finally {

@@ -91,6 +91,47 @@ export const WINDOWS_VERSION: Record<string, string> = {
 	'5.1': 'Windows XP',
 };
 
+/**
+ * Common Windows exception codes mapped to human-readable names.
+ * Reference: ntstatus.h / winnt.h
+ */
+export const EXCEPTION_CODES: Record<number, string> = {
+	0xC0000005: 'ACCESS_VIOLATION',
+	0xC0000006: 'IN_PAGE_ERROR',
+	0xC0000008: 'INVALID_HANDLE',
+	0xC000000D: 'INVALID_PARAMETER',
+	0xC0000017: 'NO_MEMORY',
+	0xC000001D: 'ILLEGAL_INSTRUCTION',
+	0xC0000025: 'NONCONTINUABLE_EXCEPTION',
+	0xC0000026: 'INVALID_DISPOSITION',
+	0xC000008C: 'ARRAY_BOUNDS_EXCEEDED',
+	0xC000008D: 'FLOAT_DENORMAL_OPERAND',
+	0xC000008E: 'FLOAT_DIVIDE_BY_ZERO',
+	0xC000008F: 'FLOAT_INEXACT_RESULT',
+	0xC0000090: 'FLOAT_INVALID_OPERATION',
+	0xC0000091: 'FLOAT_OVERFLOW',
+	0xC0000092: 'FLOAT_STACK_CHECK',
+	0xC0000093: 'FLOAT_UNDERFLOW',
+	0xC0000094: 'INTEGER_DIVIDE_BY_ZERO',
+	0xC0000095: 'INTEGER_OVERFLOW',
+	0xC0000096: 'PRIVILEGED_INSTRUCTION',
+	0xC00000FD: 'STACK_OVERFLOW',
+	0xC0000135: 'DLL_NOT_FOUND',
+	0xC0000138: 'ORDINAL_NOT_FOUND',
+	0xC0000139: 'ENTRYPOINT_NOT_FOUND',
+	0xC000013A: 'CONTROL_C_EXIT',
+	0xC0000142: 'DLL_INIT_FAILED',
+	0xC00002B4: 'FLOAT_MULTIPLE_FAULTS',
+	0xC00002B5: 'FLOAT_MULTIPLE_TRAPS',
+	0xC00002C9: 'REG_NAT_CONSUMPTION',
+	0x80000001: 'GUARD_PAGE_VIOLATION',
+	0x80000002: 'DATATYPE_MISALIGNMENT',
+	0x80000003: 'BREAKPOINT',
+	0x80000004: 'SINGLE_STEP',
+	0xE06D7363: 'CPP_EXCEPTION',
+	0xE0434352: 'CLR_EXCEPTION',
+};
+
 // ---------------------------------------------------------------------------
 // Parsed Data Structures
 // ---------------------------------------------------------------------------
@@ -194,6 +235,17 @@ export interface ThreatIndicators {
 	suspiciousStartAddresses: ThreadExInfo[];
 }
 
+/** Parsed MINIDUMP_EXCEPTION_STREAM data. */
+export interface ExceptionInfo {
+	threadId: number;
+	exceptionCode: number;
+	exceptionName: string;
+	exceptionFlags: number;
+	exceptionAddress: bigint;
+	numberOfParameters: number;
+	parameters: bigint[];
+}
+
 // ---------------------------------------------------------------------------
 // Analysis Result
 // ---------------------------------------------------------------------------
@@ -211,6 +263,7 @@ export interface MinidumpAnalysisResult {
 	memoryRegions: MemoryRegion[];
 	memoryDescriptors: MemoryDescriptor[];
 	memory64Descriptors: Memory64Descriptor[];
+	exception?: ExceptionInfo;
 	threats: ThreatIndicators;
 	reportMarkdown: string;
 }

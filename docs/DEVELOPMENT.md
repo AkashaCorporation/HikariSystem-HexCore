@@ -4,6 +4,14 @@ Guia para configurar o ambiente de desenvolvimento do HikariSystem HexCore sem g
 
 ---
 
+## ⚠️ Notas Importantes
+
+1. **`VSCODE_SKIP_NODE_VERSION_CHECK=1`** é obrigatório antes de qualquer `npm install` ou `npm run compile`. Sem isso, o preinstall pode rejeitar sua versão do Node.js.
+2. **Prebuilds nativos** (Capstone, Unicorn, LLVM MC, Remill, better-sqlite3) são baixados automaticamente pelo `scripts/hexcore-native-install.js`. Não é necessário compilar localmente.
+3. **Se `npm install` travar**: delete `build/npm/gyp/node_modules` e tente novamente. O preinstall tem timeout de 60 segundos para evitar hangs indefinidos.
+
+---
+
 ## Pré-requisitos
 
 | Ferramenta | Versão | Motivo |

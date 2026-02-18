@@ -32,6 +32,7 @@
 		"onCommand:hexcore.copyAsPython",
 		"onCommand:hexcore.hexview.dumpHeadless",
 		"onCommand:hexcore.hexview.searchHeadless",
+		"onCommand:hexcore.hexview.goToOffset",
 		"onCustomEditor:hexcore.hexEditor"
 	],
 	"main": "./out/extension.js",
@@ -91,6 +92,11 @@
 			{
 				"command": "hexcore.hexview.searchHeadless",
 				"title": "Hex Search (Headless)",
+				"category": "HexCore"
+			},
+			{
+				"command": "hexcore.hexview.goToOffset",
+				"title": "Go to Offset (Cross-Extension Sync)",
 				"category": "HexCore"
 			}
 		],
@@ -180,5 +186,8 @@
 		"@types/vscode": "^1.70.0",
 		"fast-check": "^3.15.0",
 		"typescript": "^5.0.0"
+	},
+	"dependencies": {
+		"hexcore-common": "file:../hexcore-common"
 	}
 }

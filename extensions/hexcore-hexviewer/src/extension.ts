@@ -37,6 +37,19 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Cross-extension sync command: navigate to a specific offset (called by Disassembler, Entropy, etc.)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hexview.goToOffset', (offset: number) => {
+			const sent = HexEditorProvider.postToActiveWebview({
+				type: 'jumpToOffset',
+				offset: offset
+			});
+			if (!sent) {
+				console.log('HexCore: hexview.goToOffset — no active hex editor to navigate');
+			}
+		})
+	);
+
 	// Register the custom editor provider
 	context.subscriptions.push(
 		HexEditorProvider.register(context)

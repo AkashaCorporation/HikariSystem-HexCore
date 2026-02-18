@@ -30,3 +30,8 @@ export interface NativeModuleLoadResult<T> {
 }
 
 export function loadNativeModule<T = unknown>(options: NativeModuleLoadOptions): NativeModuleLoadResult<T>;
+
+export function getHexCoreBaseCSS(): string;
+
+export function riskLevelToColor(level: 'safe' | 'warning' | 'danger'): string;
+export function entropyToColor(value: number): string;

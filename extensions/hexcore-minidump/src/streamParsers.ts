@@ -12,6 +12,7 @@ import type {
 	MemoryDescriptor,
 	Memory64Descriptor,
 	SystemInfo,
+	ExceptionInfo,
 } from './types';
 import {
 	MEMORY_PROTECTION,
@@ -19,6 +20,7 @@ import {
 	MEMORY_TYPE,
 	PROCESSOR_ARCH,
 	WINDOWS_VERSION,
+	EXCEPTION_CODES,
 } from './types';
 import { readBytes } from './mdmpParser';
 
@@ -395,6 +397,56 @@ export function parseMinidumpString(fd: number, rva: number): string {
 
 	const strBuf = readBytes(fd, rva + 4, byteLength);
 	return strBuf.toString('utf16le').replace(/\0+$/, '');
+}
+
+// ---------------------------------------------------------------------------
+// ExceptionStream (StreamType 6)
+// ---------------------------------------------------------------------------
+
+/**
+ * MINIDUMP_EXCEPTION_STREAM layout:
+ *   uint32 ThreadId
+ *   uint32 __alignment
+ *   MINIDUMP_EXCEPTION ExceptionRecord:
+ *     uint32 ExceptionCode
+ *     uint32 ExceptionFlags
+ *     uint64 ExceptionRecord (pointer to chained record, usually 0)
+ *     uint64 ExceptionAddress
+ *     uint32 NumberParameters
+ *     uint32 __unusedAlignment
+ *     uint64 ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS=15]
+ *   MINIDUMP_LOCATION_DESCRIPTOR ThreadContext (8 bytes)
+ */
+export function parseExceptionStream(fd: number, rva: number, _size: number): ExceptionInfo {
+	// ThreadId (4) + alignment (4) + ExceptionRecord start
+	const buf = readBytes(fd, rva, 8 + 32 + 15 * 8);
+
+	const threadId = buf.readUInt32LE(0);
+	// ExceptionRecord starts at offset 8
+	const exceptionCode = buf.readUInt32LE(8);
+	const exceptionFlags = buf.readUInt32LE(12);
+	// ExceptionRecord pointer at 16 (uint64, skip)
+	const exceptionAddress = buf.readBigUInt64LE(24);
+	const numberOfParameters = buf.readUInt32LE(32);
+	// alignment at 36
+
+	const paramCount = Math.min(numberOfParameters, 15);
+	const parameters: bigint[] = [];
+	for (let i = 0; i < paramCount; i++) {
+		parameters.push(buf.readBigUInt64LE(40 + i * 8));
+	}
+
+	const exceptionName = EXCEPTION_CODES[exceptionCode >>> 0] ?? `0x${(exceptionCode >>> 0).toString(16).toUpperCase()}`;
+
+	return {
+		threadId,
+		exceptionCode: exceptionCode >>> 0,
+		exceptionName,
+		exceptionFlags,
+		exceptionAddress,
+		numberOfParameters: paramCount,
+		parameters,
+	};
 }
 
 // ---------------------------------------------------------------------------

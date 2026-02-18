@@ -13,6 +13,7 @@ const CATEGORY_LABELS: Record<IOCCategory, string> = {
 	url: 'URLs',
 	domain: 'Domains',
 	email: 'Email Addresses',
+	hash: 'Hashes (MD5 / SHA-1 / SHA-256)',
 	filePath: 'File Paths',
 	registryKey: 'Registry Keys',
 	namedPipe: 'Named Pipes',
@@ -24,7 +25,7 @@ const CATEGORY_LABELS: Record<IOCCategory, string> = {
 /** Priority order for report sections — network indicators first. */
 const CATEGORY_PRIORITY: IOCCategory[] = [
 	'url', 'ipv4', 'ipv6', 'domain', 'email',
-	'cryptoWallet', 'namedPipe', 'registryKey',
+	'hash', 'cryptoWallet', 'namedPipe', 'registryKey',
 	'filePath', 'mutex', 'userAgent',
 ];
 
@@ -35,12 +36,41 @@ const SEVERITY_TAG: Record<IOCCategory, string> = {
 	ipv6: '🟡 MEDIUM',
 	domain: '🔴 HIGH',
 	email: '🟡 MEDIUM',
+	hash: '🟡 MEDIUM',
 	cryptoWallet: '🔴 HIGH',
 	namedPipe: '🔴 HIGH',
 	registryKey: '🟡 MEDIUM',
 	filePath: '🟢 LOW',
 	mutex: '🟡 MEDIUM',
 	userAgent: '🟡 MEDIUM',
+};
+
+/**
+ * Risk level badge for Markdown reports.
+ * Uses colored emoji indicators as Markdown-compatible badges.
+ */
+type RiskLevel = 'danger' | 'warning' | 'safe';
+
+const RISK_BADGE: Record<RiskLevel, string> = {
+	danger: '🔴',
+	warning: '🟡',
+	safe: '🟢',
+};
+
+/** Map IOC category to risk level for badge rendering. */
+const CATEGORY_RISK: Record<IOCCategory, RiskLevel> = {
+	url: 'danger',
+	ipv4: 'danger',
+	ipv6: 'warning',
+	domain: 'danger',
+	email: 'warning',
+	hash: 'warning',
+	cryptoWallet: 'danger',
+	namedPipe: 'danger',
+	registryKey: 'warning',
+	filePath: 'safe',
+	mutex: 'warning',
+	userAgent: 'warning',
 };
 
 export function generateIOCReport(result: IOCExtractionResult): string {
@@ -94,7 +124,32 @@ export function generateIOCReport(result: IOCExtractionResult): string {
 				lines.push(`- ${threat}`);
 			}
 		} else {
-			lines.push('- No high-confidence threat indicators detected.');
+			lines.push(`- ${RISK_BADGE.safe} No high-confidence threat indicators detected.`);
+		}
+		lines.push('');
+
+		// Risk summary badges
+		lines.push('### Risk Summary');
+		lines.push('');
+		const dangerCount = CATEGORY_PRIORITY.filter(c =>
+			CATEGORY_RISK[c] === 'danger' && (result.summary.categoryCounts[c] ?? 0) > 0
+		).length;
+		const warningCount = CATEGORY_PRIORITY.filter(c =>
+			CATEGORY_RISK[c] === 'warning' && (result.summary.categoryCounts[c] ?? 0) > 0
+		).length;
+		const safeCount = CATEGORY_PRIORITY.filter(c =>
+			CATEGORY_RISK[c] === 'safe' && (result.summary.categoryCounts[c] ?? 0) > 0
+		).length;
+		lines.push(`| Risk Level | Badge | Categories |`);
+		lines.push(`|------------|-------|------------|`);
+		if (dangerCount > 0) {
+			lines.push(`| **HIGH** | ${RISK_BADGE.danger} | ${dangerCount} categor${dangerCount === 1 ? 'y' : 'ies'} |`);
+		}
+		if (warningCount > 0) {
+			lines.push(`| **MEDIUM** | ${RISK_BADGE.warning} | ${warningCount} categor${warningCount === 1 ? 'y' : 'ies'} |`);
+		}
+		if (safeCount > 0) {
+			lines.push(`| **LOW** | ${RISK_BADGE.safe} | ${safeCount} categor${safeCount === 1 ? 'y' : 'ies'} |`);
 		}
 		lines.push('');
 	}
@@ -148,6 +203,7 @@ function assessThreats(result: IOCExtractionResult): string[] {
 	const wallets = result.indicators.cryptoWallet ?? [];
 	const agents = result.indicators.userAgent ?? [];
 	const registry = result.indicators.registryKey ?? [];
+	const hashes = result.indicators.hash ?? [];
 
 	if (urls.length > 0) {
 		const suspicious = urls.filter(u => hasSuspiciousURLPattern(u.value));
@@ -170,6 +226,10 @@ function assessThreats(result: IOCExtractionResult): string[] {
 
 	if (agents.length > 0) {
 		threats.push(`🕵️ **${agents.length} user agent string(s)** found — custom HTTP client fingerprint.`);
+	}
+
+	if (hashes.length > 0) {
+		threats.push(`🔑 **${hashes.length} cryptographic hash(es)** found — possible file integrity checks or known-malware references.`);
 	}
 
 	if (registry.length > 0) {
