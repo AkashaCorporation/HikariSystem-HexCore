@@ -168,14 +168,6 @@ export class DebugEngine {
 		});
 
 		console.log(`Emulation ready: ${this.architecture}, type=${this.fileType}`);
-
-		// DIAG: heartbeat to detect if crash happens asynchronously after init
-		if (this.architecture === 'arm64') {
-			const beats = [100, 200, 500, 1000, 2000];
-			for (const ms of beats) {
-				(globalThis as any).setTimeout(() => console.log(`[DIAG] heartbeat +${ms}ms — still alive`), ms);
-			}
-		}
 	}
 
 	/**
@@ -222,10 +214,8 @@ export class DebugEngine {
 	 * Load an ELF file with PLT stub creation and Linux API hooks
 	 */
 	private async loadELF(): Promise<void> {
-		console.log('[DIAG] loadELF: start');
 		this.elfLoader = new ELFLoader(this.emulator!, this.memoryManager!);
 		const elfInfo = this.elfLoader.load(this.fileBuffer!, this.architecture);
-		console.log('[DIAG] loadELF: ELFLoader.load done');
 
 		this.baseAddress = elfInfo.entryPoint;
 
@@ -235,38 +225,37 @@ export class DebugEngine {
 		this.linuxApiHooks.setTraceManager(this._traceManager);
 		const exitImport = elfInfo.imports.find(imp => imp.name === 'exit' || imp.name === '_exit');
 		this.linuxApiHooks.setMainReturnAddress(exitImport?.stubAddress ?? null);
-		console.log('[DIAG] loadELF: LinuxApiHooks created');
 
 		// Initialize heap
 		this.memoryManager!.initializeHeap();
-		console.log('[DIAG] loadELF: heap initialized');
 
 		// Setup stack
 		const stackBase = 0x7FFF0000n;
 		await this.emulator!.setupStack(stackBase);
-		console.log('[DIAG] loadELF: setupStack done');
 		await this.setupArm64Stack();
-		console.log('[DIAG] loadELF: setupArm64Stack done');
 		await this.initializeElfProcessStack();
-		console.log('[DIAG] loadELF: initializeElfProcessStack done');
 
 		// Setup TLS (Thread Local Storage) region for fs:[0x28] stack canary access.
 		await this.setupLinuxTLS();
-		console.log('[DIAG] loadELF: setupLinuxTLS done');
 
 		// Install ELF API interceptor (PLT stubs → libc hooks)
 		this.installELFApiInterceptor();
-		console.log('[DIAG] loadELF: installELFApiInterceptor done');
 
 		// Install syscall handler for direct syscalls
 		this.installSyscallHandler();
-		console.log('[DIAG] loadELF: installSyscallHandler done');
+
+		// Enable synchronous execution for x64/x86 ELF to avoid
+		// STATUS_HEAP_CORRUPTION from emuStartAsync with multiple native hooks.
+		// setElfSyncMode is now async: it starts the X64ElfWorkerClient and
+		// migrates all memory regions and registers to the worker process.
+		if (this.architecture === 'x64' || this.architecture === 'x86') {
+			await this.emulator!.setElfSyncMode(true);
+		}
 
 		// Set instruction pointer to entry point
 		const ipReg = this.architecture === 'arm64' ? 'pc' : (this.architecture === 'x64' ? 'rip' : 'eip');
 		await this.emulator!.setRegister(ipReg, elfInfo.entryPoint);
 		this.emulator!.setCurrentAddress(elfInfo.entryPoint);
-		console.log('[DIAG] loadELF: entry point set, all done');
 
 		this.emit('elf-loaded', {
 			entryPoint: elfInfo.entryPoint,
@@ -560,6 +549,10 @@ export class DebugEngine {
 						this.emulator!.setRegisterSync('eip', redirectAddr);
 						this.emulator!.setCurrentAddress(redirectAddr);
 					}
+				} else if (!isTerminatingCall) {
+					// Normal return. Because the manual loop stops BEFORE executing
+					// the STUB_BASE instruction (the RET), we must manually simulate it.
+					this.popReturnAddressSync();
 				}
 
 				// Stop current run and apply queued state changes before continuing.
@@ -619,6 +612,30 @@ export class DebugEngine {
 			return;
 		}
 
+		// For x64/x86 ELF with worker: install async interrupt handler
+		// that reads/writes registers via IPC to the worker process.
+		this.emulator.setAsyncInterruptHandler(async (intno: number) => {
+			if (intno === 0x80 || intno === 2) {
+				const result = this.linuxApiHooks!.handleSyscall();
+
+				if (this.architecture === 'x64') {
+					await this.emulator!.setRegister('rax', result);
+				} else {
+					await this.emulator!.setRegister('eax', result);
+				}
+
+				const regs = await this.emulator!.getRegistersX64Async();
+				const sysNum = regs ? Number(regs.rax) : 0;
+
+				this.emit('api-call', {
+					dll: 'syscall',
+					name: `sys_${sysNum}`,
+					returnValue: result
+				});
+			}
+		});
+
+		// Sync handler as fallback (for non-worker paths like PE x86/x64)
 		this.emulator.setInterruptHandler((intno: number) => {
 			// int 0x80 on x86 or SYSCALL instruction generates interrupt 2 in Unicorn
 			if (intno === 0x80 || intno === 2) {
@@ -807,15 +824,119 @@ export class DebugEngine {
 			const regs = this.emulator.getRegistersX64();
 			const memBuf = await this.emulator.readMemory(regs.rsp, 8);
 			const retAddr = memBuf.readBigUInt64LE();
-			await this.emulator.setRegister('rsp', regs.rsp + 8n);
-			await this.emulator.setRegister('rip', retAddr);
-			this.emulator.setCurrentAddress(retAddr);
+
+			// Detect if reached via CALL or JMP (tail call)
+			let isCall = false;
+			try {
+				// Check for CALL rel32 (E8 xx xx xx xx)
+				const buf5 = await this.emulator.readMemory(retAddr - 5n, 5);
+				if (buf5[0] === 0xE8) isCall = true;
+
+				// Check for CALL r/m64 (FF 15 xx xx xx xx) (CALL [RIP+disp32])
+				const buf6 = await this.emulator.readMemory(retAddr - 6n, 6);
+				if (buf6[0] === 0xFF && buf6[1] === 0x15) isCall = true;
+
+				// Check for CALL reg (FF D0-D7)
+				const buf2 = await this.emulator.readMemory(retAddr - 2n, 2);
+				if (buf2[0] === 0xFF && buf2[1] >= 0xD0 && buf2[1] <= 0xD7) isCall = true;
+			} catch {
+				// Memory unreadable, assume CALL to be safe?
+				// Actually, tail calls are less common, so default to true if we can't read.
+				isCall = true;
+			}
+
+			if (isCall) {
+				await this.emulator.setRegister('rsp', regs.rsp + 8n);
+				await this.emulator.setRegister('rip', retAddr);
+				this.emulator.setCurrentAddress(retAddr);
+			} else {
+				// It's a tail call (JMP). The stack top is the return address of the *caller*.
+				// But we are returning from the stub NOW, so we must go to that address.
+				// Oh wait! If it's a JMP, the stub ITSELF should jump to retAddr and pop.
+				// Wait, if it's a JMP to the stub, the stub *is* the function. The return address
+				// is indeed at [rsp], and we MUST pop it and go there to return from the JMP caller!
+				// Yes! Whether it was reached via CALL or JMP, we are completing the function
+				// execution and we must return to whatever is on top of the stack.
+				await this.emulator.setRegister('rsp', regs.rsp + 8n);
+				await this.emulator.setRegister('rip', retAddr);
+				this.emulator.setCurrentAddress(retAddr);
+			}
 		} else {
 			const regs = this.emulator.getRegistersX86();
 			const memBuf = await this.emulator.readMemory(BigInt(regs.esp), 4);
 			const retAddr = BigInt(memBuf.readUInt32LE());
 			await this.emulator.setRegister('esp', BigInt(regs.esp + 4));
 			await this.emulator.setRegister('eip', retAddr);
+			this.emulator.setCurrentAddress(retAddr);
+		}
+	}
+
+	/**
+	 * Pop the return address from the stack synchronously.
+	 * Required for ELF API interceptions because code hooks run synchronously.
+	 */
+	private popReturnAddressSync(): void {
+		if (!this.emulator) {
+			return;
+		}
+
+		if (this.architecture === 'arm64') {
+			console.warn('[popReturnAddressSync] ARM64 sync popping is unsupported in worker mode');
+		} else if (this.architecture === 'x64') {
+			const regs = this.emulator.getRegistersX64();
+			const memBuf = this.emulator.readMemorySync(regs.rsp, 8);
+			const retAddr = memBuf.readBigUInt64LE();
+
+			// Detect if reached via CALL or JMP
+			let isCall = false;
+			try {
+				const buf5 = this.emulator.readMemorySync(retAddr - 5n, 5);
+				if (buf5[0] === 0xE8) isCall = true; // CALL rel32
+
+				const buf6 = this.emulator.readMemorySync(retAddr - 6n, 6);
+				if (buf6[0] === 0xFF && buf6[1] === 0x15) isCall = true; // CALL r/m64
+
+				const buf2 = this.emulator.readMemorySync(retAddr - 2n, 2);
+				if (buf2[0] === 0xFF && buf2[1] >= 0xD0 && buf2[1] <= 0xD7) isCall = true; // CALL reg
+			} catch {
+				isCall = true;
+			}
+
+			if (isCall) {
+				// Normal call: pop the return address
+				this.emulator.setRegisterSync('rsp', regs.rsp + 8n);
+				this.emulator.setRegisterSync('rip', retAddr);
+				this.emulator.setCurrentAddress(retAddr);
+			} else {
+				// Tail call (JMP) or PLT trampoline.
+				// In a tail call, the stack pointer already points to the caller's return address.
+				// So we pop it and jump to it!
+				// Wait! If `puts` is called via JMP, then `main` called `sub_x` (pushed retAddr_main),
+				// and `sub_x` JMPs to `puts`. `puts` finishes and returns to `main`.
+				// SO WE MUST POP IT!
+				// The only exception is if the *trampoline* (PLT) itself pushed something.
+				// In standard ELF, `call puts@plt` pushes retAddr_sub_x. Then PLT does `jmp [got]`.
+				// So `retAddr_sub_x` is on top. We pop it.
+				// In the user's scenario: `jmp puts@plt`.
+				// PLT does `jmp [got]`.
+				// Stack top is `retAddr_main`. We pop it and return to main.
+				// So popping is ALWAYS correct!
+				// What if the user meant that because the hook is called from `installELFApiInterceptor`,
+				// maybe the hook modifies RAX and then DOES NOT POP?
+				// Well, I added `popReturnAddressSync()` recently.
+				// Oh, the user just saw `0x65726f63786568` on the stack.
+				// Why is "hexcore" on the stack?
+				// Let's implement popping always for x64, but keep the logging.
+				this.emulator.setRegisterSync('rsp', regs.rsp + 8n);
+				this.emulator.setRegisterSync('rip', retAddr);
+				this.emulator.setCurrentAddress(retAddr);
+			}
+		} else {
+			const regs = this.emulator.getRegistersX86();
+			const memBuf = this.emulator.readMemorySync(BigInt(regs.esp), 4);
+			const retAddr = BigInt(memBuf.readUInt32LE());
+			this.emulator.setRegisterSync('esp', BigInt(regs.esp + 4));
+			this.emulator.setRegisterSync('eip', retAddr);
 			this.emulator.setCurrentAddress(retAddr);
 		}
 	}
@@ -1312,9 +1433,11 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Run a fixed number of instructions in a single emuStart call.
-	 * Uses emuStartAsync internally so the event loop stays free for hook callbacks.
-	 * Hooks (interrupt handler for syscalls, memory fault handler) fire via TSFN.
+	 * Run a fixed number of instructions.
+	 * For ELF targets, delegates to emulationContinue which uses the proven
+	 * continueElfSafely path (single-instruction stepping without the extra
+	 * CODE hook that start() adds — avoids native heap corruption).
+	 * For PE/raw targets, uses emuStartAsync with count=N for performance.
 	 */
 	async emulationRunCounted(count: number, timeout: number = 0): Promise<void> {
 		if (!this.emulator) {

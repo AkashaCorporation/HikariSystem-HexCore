@@ -162,7 +162,9 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.pe.analyze', 'hexcore.peanalyzer.analyze'],
 	['hexcore.elf.analyze', 'hexcore.elfanalyzer.analyze'],
 	['hexcore.hex.dump', 'hexcore.hexview.dumpHeadless'],
-	['hexcore.hex.search', 'hexcore.hexview.searchHeadless']
+	['hexcore.hex.search', 'hexcore.hexview.searchHeadless'],
+	['hexcore.debug.emulate.full', 'hexcore.debug.emulateFullHeadless'],
+	['hexcore.debug.run', 'hexcore.debug.emulateFullHeadless']
 ]);
 
 const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
@@ -212,6 +214,11 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.debug.snapshotHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.debug.restoreSnapshotHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.debug.exportTraceHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.emulateFullHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.debug.writeMemoryHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.debug.setRegisterHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.debug.setStdinHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.debug.disposeHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.elfanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.elfanalyzer.analyzeActive', { headless: false, defaultTimeoutMs: 60000, validateOutput: false, reason: 'Interactive command analyzes active editor file.' }],
 	['hexcore.base64.decodeHeadless', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
@@ -269,6 +276,11 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.debug.snapshotHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.restoreSnapshotHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.exportTraceHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.emulateFullHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.writeMemoryHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.setRegisterHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.setStdinHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.disposeHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.elfanalyzer.analyze', ['hikarisystem.hexcore-elfanalyzer']],
 	['hexcore.elfanalyzer.analyzeActive', ['hikarisystem.hexcore-elfanalyzer']],
 	['hexcore.base64.decodeHeadless', ['hikarisystem.hexcore-base64']],

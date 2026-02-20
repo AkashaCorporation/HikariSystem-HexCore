@@ -5,6 +5,54 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.5.4] - 2026-02-19 - "Stability & Isolation"
+
+> **Bugfix, Stability, & Validation Release** — x64 ELF emulation crash fix via worker process isolation, intelligent IPC string memory synchronization, advanced custom VM CTF challenge validation, and memory region size correction.
+
+### Fixed
+
+- **Worker/Host Memory Desync** — Fixed a critical issue where the Node.js `x64ElfWorker` would dynamically modify the heap (e.g., decrypting strings) but the Host's HexCore instance couldn't read those strings when evaluating API hooks like `__printf_chk`.
+- **Smart Memory Sync** — Implemented "Smart Sync" in `unicornWrapper.ts`. Before every API hook execution, HexCore instantly synchronizes 1024 bytes around argument pointers (`RDI`, `RSI`, `RDX`, `RCX`) from the Worker to the Host.
+- **RSP Stack Synchronization** — Fixed a bug where `popReturnAddressSync` read stale Host stack memory instead of real stack written by the Worker. RSP is now continuously synced prior to hook validation.
+- **x64 ELF emuStart crash (STATUS_HEAP_CORRUPTION)** — Unicorn's x64 ELF emulation caused `0xC0000374` heap corruption in the Electron extension host. Fix: x64 ELF emulation now runs in a dedicated child process (`x64ElfWorker.js`) communicating via JSON-RPC.
+- **Unicorn `memRegions()` size calculation** — Fixed `end` field from Unicorn being inclusive instead of exclusive. Size is now `end - begin + 1n`.
+- **Entropy Analyzer** — Fixed webview not updating and missing "Open File" button.
+
+### Added
+
+- **`getline` API Hook** — Implemented a robust `getline` hook in `linuxApiHooks.ts` utilizing `this.memoryManager.heapAlloc` to dynamically allocate and fetch inputs from `stdinBuffer`.
+- **`__printf_chk` String Mapping** — Extended the `__printf_chk` hook to properly serialize its string formatting logic and propagate to the headless pipeline's `stdout`.
+- **CTF Validation** — Verified that HexCore effortlessly executes over 19,000 instructions from advanced custom VM challenges, gracefully bypassing `ptrace` anti-dbg checks and evaluating dozens of sub-VM loops in headless automation mode.
+- **x64 ELF Worker Client & Worker** — Standalone Node.js process and IPC client handling Unicorn state.
+- **Debugger headless emulation commands** — 5 new pipeline-safe commands: `emulateFullHeadless`, `writeMemoryHeadless`, `setRegisterHeadless`, `setStdinHeadless`, `disposeHeadless`.
+
+### Fixed
+
+- **x64 ELF emuStart crash (STATUS_HEAP_CORRUPTION)** — Unicorn's x64 ELF emulation caused `0xC0000374` heap corruption in the Electron extension host process. Root cause: Unicorn's internal memory management conflicts with Electron's V8 heap. Fix: replicated the ARM64 worker pattern — x64 ELF emulation now runs in a dedicated child process (`x64ElfWorker.js`) communicating via JSON-RPC over IPC. The worker spawns automatically when `setElfSyncMode(true)` is called for x64 architecture, migrating all Unicorn state (memory regions, register values) to the isolated process.
+- **Unicorn `memRegions()` size calculation** — `end` field from Unicorn is **inclusive** (last valid byte), so region size must be `end - begin + 1`, not `end - begin`. The off-by-one caused `UC_ERR_ARG` (code 15) during worker state migration because Unicorn rejected unaligned sizes (e.g., 4095 instead of 4096 for a page). Fixed in `setElfSyncMode` migration loop.
+- **`getMemoryRegions()` display size** — cosmetic fix in 3 code paths (ARM64 worker, x64 ELF worker, in-process) to use `end - begin + 1n` for correct region size display.
+- **Entropy Analyzer webview not updating on second run** — CSP `nonce-${nonce}` doesn't work in VS Code sidebar webviews. Changed to `'unsafe-inline'` (same fix as PE Analyzer). Also added re-send of cached analysis data when webview is recreated.
+- **Entropy Analyzer missing "Open File" button** — added file picker button to toolbar, bypassing `getActiveFileUri()` logic.
+
+### Added
+
+- **x64 ELF Worker Client** (`x64ElfWorkerClient.ts`) — IPC client that manages the child process lifecycle. Supports: `initialize`, `mapMemory`, `memWrite`, `memRead`, `regWrite`, `regRead`, `emuStart`, `emuStop`, `memRegions`, `contextSave`, `contextRestore`, `addHook`, `dispose`. BigInt values serialized with `BI:` prefix for JSON transport.
+- **x64 ELF Worker** (`x64ElfWorker.js`) — standalone Node.js process that loads `hexcore-unicorn` and executes Unicorn operations in isolation. Handles all emulation lifecycle including hook callbacks via IPC.
+- **Debugger headless emulation commands** — 5 new pipeline-safe commands: `emulateFullHeadless`, `writeMemoryHeadless`, `setRegisterHeadless`, `setStdinHeadless`, `disposeHeadless`. All registered in `COMMAND_CAPABILITIES`, `COMMAND_OWNERS`, and `COMMAND_ALIASES`.
+
+### Removed
+
+- **ARM64 heartbeat DIAG** — removed diagnostic `setTimeout` heartbeat logging from `startEmulation` (was temporary crash detection aid, no longer needed).
+- **DIAG code in extension.ts** — removed diagnostic instrumentation from debugger extension entry point.
+
+### Backlog Items Resolved
+
+| Item | Description |
+|------|-------------|
+| N/A | x64 ELF worker process isolation (crash fix) |
+| N/A | memRegions size calculation fix (UC_ERR_ARG) |
+| N/A | Entropy analyzer webview + Open File button |
+
 ## [3.5.3] - 2026-02-18 - "Quality & Polish"
 
 > **Maintenance Release** — Developer experience improvements, Issue #8 resolution, and documentation overhaul.

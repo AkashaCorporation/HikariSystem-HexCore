@@ -9,7 +9,7 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-18 — v3.5.3 "Quality & Polish")
+## Current Snapshot (2026-02-19 — v3.5.4 "Stability & Isolation")
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **4/5** (`#7a`, `#8`, `#7b`, `#9`)
 - P2 delivered: **2/4** (`#24`, `#27`)
@@ -49,6 +49,13 @@
   - CONTRIBUTING.md: complete contributor guide (Issue #8 #5)
   - DEVELOPMENT.md: added Important Notes section with troubleshooting
   - Issue #8 fully resolved (all 6 items closed)
+- v3.5.4 additions:
+  - x64 ELF worker process isolation: prevents STATUS_HEAP_CORRUPTION (0xC0000374) crash
+  - Unicorn memRegions size fix: end is inclusive, size = end - begin + 1
+  - getMemoryRegions display size cosmetic fix (3 code paths)
+  - Debugger headless emulation commands: emulateFullHeadless, writeMemoryHeadless, setRegisterHeadless, setStdinHeadless, disposeHeadless
+  - Entropy analyzer webview CSP fix + Open File button
+  - ARM64 heartbeat DIAG removed, extension.ts DIAG cleanup
 
 ---
 

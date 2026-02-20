@@ -5,6 +5,7 @@
 import * as path from 'path';
 import { loadNativeModule } from 'hexcore-common';
 import { Arm64WorkerClient } from './arm64WorkerClient';
+import { X64ElfWorkerClient } from './x64ElfWorkerClient';
 
 // Types from hexcore-unicorn
 interface UnicornModule {
@@ -207,10 +208,20 @@ export class UnicornWrapper {
 	// ARM64 worker client: runs Unicorn in a separate Node.js process to
 	// avoid Chromium UtilityProcess security restrictions (ACG/CFG).
 	private _arm64Worker?: Arm64WorkerClient;
+	// x64 ELF worker client: runs Unicorn in a separate Node.js process to
+	// avoid Chromium UtilityProcess security restrictions (ACG/CFG) that cause
+	// STATUS_HEAP_CORRUPTION (0xC0000374) when Unicorn's JIT backend allocates
+	// executable memory for x64 code translation.
+	private _x64ElfWorker?: X64ElfWorkerClient;
 	// When using the worker, we cache Unicorn constants fetched from it.
 	private _workerConstants?: Record<string, unknown>;
 	// Worker-side context ID for save/restore state
 	private _workerContextId?: number;
+
+	// ELF sync mode: when true, x64 execution uses synchronous emuStart
+	// instead of emuStartAsync to avoid STATUS_HEAP_CORRUPTION (0xC0000374)
+	// caused by TSFN threading issues with multiple native hooks installed.
+	private _elfSyncMode: boolean = false;
 
 	/**
 	 * Initialize the Unicorn engine
@@ -276,9 +287,7 @@ export class UnicornWrapper {
 		}
 
 		const { arch: ucArch, mode } = this.getArchMode(arch);
-		console.log(`[DIAG] About to create Unicorn instance: arch=${ucArch}, mode=${mode}`);
 		this.uc = new unicornModule.Unicorn(ucArch, mode);
-		console.log(`[DIAG] Unicorn instance created OK, handle=${this.uc.handle}`);
 		this.initialized = true;
 		this.state.isReady = true;
 
@@ -444,6 +453,115 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Enable synchronous execution mode for x64 ELF targets.
+	 * When enabled, start() uses emuStart (sync) instead of emuStartAsync
+	 * to avoid STATUS_HEAP_CORRUPTION caused by TSFN threading issues
+	 * when multiple native hooks (MEM_FAULT + INTR + CODE) are installed.
+	 *
+	 * IMPORTANT: This also removes ALL native hooks (MEM_FAULT, INTR) that
+	 * use TSFN callbacks. The sync execution loop handles memory faults and
+	 * syscalls directly in JS, just like the ARM64 sync path.
+	 */
+	async setElfSyncMode(enabled: boolean): Promise<void> {
+		this._elfSyncMode = enabled;
+
+		if (enabled && this.uc) {
+			// Remove all native hooks to eliminate TSFN callbacks entirely.
+			for (const handle of this.activeHookHandles) {
+				try {
+					this.uc.hookDel(handle);
+				} catch { /* ignore — hook may already be removed */ }
+			}
+			this.activeHookHandles = [];
+			this._intrHookInstalled = false;
+
+			// Start X64ElfWorkerClient and migrate state from in-process
+			// Unicorn to the worker. This isolates emuStart from the
+			// Electron extension host heap, avoiding STATUS_HEAP_CORRUPTION.
+			this._x64ElfWorker = new X64ElfWorkerClient();
+			await this._x64ElfWorker.start();
+
+			const { arch: ucArch, mode } = this.getArchMode(this.architecture);
+			await this._x64ElfWorker.initialize(ucArch, mode);
+
+			// Migrate all mapped memory regions from in-process to worker
+			// NOTE: Unicorn memRegions() returns end as INCLUSIVE (last valid byte),
+			// so size = end - begin + 1.
+			const regions = this.uc.memRegions();
+			let migratedCount = 0;
+			for (const region of regions) {
+				const size = Number(region.end - region.begin + 1n);
+				if (size <= 0) {
+					continue; // skip degenerate regions
+				}
+				try {
+					await this._x64ElfWorker.memMap(region.begin, size, region.perms);
+					migratedCount++;
+				} catch (mapErr) {
+					// Log but continue — don't abort migration for one failed region
+					console.warn(`[x64-elf] memMap failed for region 0x${region.begin.toString(16)}-0x${region.end.toString(16)} size=0x${size.toString(16)} perms=${region.perms}: ${mapErr}`);
+					continue;
+				}
+				// Copy memory contents
+				try {
+					const data = this.uc.memRead(region.begin, size);
+					await this._x64ElfWorker.memWrite(region.begin, data);
+				} catch {
+					// Region may not be fully readable (e.g., guard pages)
+				}
+			}
+			console.log(`[x64-elf] Migrated ${migratedCount}/${regions.length} memory regions`);
+
+			// Migrate x64 registers from in-process to worker
+			const X86_REG = this.unicornModule!.X86_REG;
+			const regIds: Array<[string, number]> = [
+				['RAX', X86_REG.RAX], ['RBX', X86_REG.RBX], ['RCX', X86_REG.RCX], ['RDX', X86_REG.RDX],
+				['RSI', X86_REG.RSI], ['RDI', X86_REG.RDI], ['RBP', X86_REG.RBP], ['RSP', X86_REG.RSP],
+				['R8', X86_REG.R8], ['R9', X86_REG.R9], ['R10', X86_REG.R10], ['R11', X86_REG.R11],
+				['R12', X86_REG.R12], ['R13', X86_REG.R13], ['R14', X86_REG.R14], ['R15', X86_REG.R15],
+				['RIP', X86_REG.RIP], ['RFLAGS', X86_REG.RFLAGS],
+				['FS_BASE', X86_REG.FS_BASE], ['GS_BASE', X86_REG.GS_BASE]
+			];
+			for (const [name, regId] of regIds) {
+				try {
+					const val = BigInt(this.uc.regRead(regId));
+					await this._x64ElfWorker.regWrite(regId, val);
+				} catch (regErr) {
+					console.warn(`[x64-elf] regWrite failed for ${name}: ${regErr}`);
+				}
+			}
+
+			// Post-migration verification: ensure RSP points to mapped memory.
+			// If the stack region was not migrated (e.g., memMap failed due to
+			// Unicorn merging adjacent regions), explicitly map it in the worker.
+			try {
+				const rsp = BigInt(this.uc.regRead(X86_REG.RSP));
+				const workerRegions = await this._x64ElfWorker.memRegions();
+				const rspMapped = workerRegions.some(r => rsp >= r.begin && rsp <= r.end);
+				if (!rspMapped) {
+					console.warn(`[x64-elf] RSP 0x${rsp.toString(16)} not in any worker region — mapping stack explicitly`);
+					const PROT = this.unicornModule!.PROT;
+					const stackBase = 0x7FFF0000n;
+					const stackSize = 0x100000;
+					await this._x64ElfWorker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
+					// Copy stack contents from in-process Unicorn
+					try {
+						const stackData = this.uc.memRead(stackBase, stackSize);
+						await this._x64ElfWorker.memWrite(stackBase, stackData);
+					} catch {
+						// Partial read is OK — stack may not be fully initialized
+					}
+					console.log(`[x64-elf] Stack explicitly mapped: 0x${stackBase.toString(16)} size=0x${stackSize.toString(16)}`);
+				}
+			} catch (verifyErr) {
+				console.warn(`[x64-elf] Post-migration RSP verification failed: ${verifyErr}`);
+			}
+
+			console.log('[x64-elf] Worker started, state migrated from in-process Unicorn');
+		}
+	}
+
+	/**
 	 * Set handler for memory faults (unmapped access)
 	 * Handler should return true if it handled the fault (mapped the memory),
 	 * false to let the emulation crash.
@@ -543,6 +661,16 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._x64ElfWorker) {
+			const pageSize = BigInt(this._x64ElfWorker.getPageSize());
+			const alignedBase = (baseAddress / pageSize) * pageSize;
+			const alignedSize = Math.ceil(code.length / Number(pageSize)) * Number(pageSize);
+			await this._x64ElfWorker.memMap(alignedBase, alignedSize, this.unicornModule!.PROT.ALL);
+			await this._x64ElfWorker.memWrite(baseAddress, code);
+			console.log(`Loaded ${code.length} bytes at 0x${baseAddress.toString(16)} (x64 ELF worker)`);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -574,6 +702,14 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._x64ElfWorker) {
+			const pageSize = BigInt(this._x64ElfWorker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._x64ElfWorker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -597,6 +733,14 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._x64ElfWorker) {
+			const pageSize = BigInt(this._x64ElfWorker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._x64ElfWorker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -614,6 +758,10 @@ export class UnicornWrapper {
 	async memProtect(address: bigint, size: number, perms: number): Promise<void> {
 		if (this._arm64Worker) {
 			await this._arm64Worker.memProtect(address, size, perms);
+			return;
+		}
+		if (this._x64ElfWorker) {
+			await this._x64ElfWorker.memProtect(address, size, perms);
 			return;
 		}
 		if (!this.uc) {
@@ -652,6 +800,21 @@ export class UnicornWrapper {
 			let sp = stackBase + BigInt(stackSize) - 0x1000n;
 			sp = (sp / 16n) * 16n;
 			await this._arm64Worker.regWrite(this.unicornModule!.ARM64_REG.SP, sp);
+			return;
+		}
+
+		if (this._x64ElfWorker) {
+			const PROT = this.unicornModule!.PROT;
+			await this._x64ElfWorker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
+
+			// x64: push fake return address and set RSP
+			let sp = stackBase + BigInt(stackSize) - 0x1000n;
+			sp = (sp / 16n) * 16n;
+			sp -= 8n;
+			const retBuf = Buffer.alloc(8);
+			retBuf.writeBigUInt64LE(0xDEADDEADDEADDEADn);
+			await this._x64ElfWorker.memWrite(sp, retBuf);
+			await this._x64ElfWorker.regWrite(this.unicornModule!.X86_REG.RSP, sp);
 			return;
 		}
 
@@ -722,7 +885,7 @@ export class UnicornWrapper {
 	 * transparent to callers — continue() will seamlessly handle multiple API calls.
 	 */
 	async start(startAddress: bigint, endAddress: bigint = 0n, timeout: number = 0, count: number = 0): Promise<void> {
-		if (!this.uc && !this._arm64Worker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -735,6 +898,19 @@ export class UnicornWrapper {
 		// ARM64 in-process sync mode (fallback, should not be reached with worker)
 		if (this.architecture === 'arm64') {
 			this.startArm64Sync(startAddress, endAddress, count);
+			return;
+		}
+
+		// x64 ELF worker mode: use worker's executeBatch for emulation
+		if (this._x64ElfWorker) {
+			await this.startX64ElfWorker(startAddress, endAddress, count);
+			return;
+		}
+
+		// x64 ELF sync mode: use synchronous emuStart to avoid heap corruption
+		// from TSFN threading with multiple native hooks (MEM_FAULT + INTR + CODE).
+		if (this._elfSyncMode) {
+			this.startX64ElfSync(startAddress, endAddress, count);
 			return;
 		}
 
@@ -952,6 +1128,304 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * x64 ELF worker-based execution for start/step/continue.
+	 *
+	 * Runs emulation in the worker process using executeBatch(), with
+	 * breakpoints, code hooks (API interception), and SYSCALL/INT 0x80
+	 * dispatch handled on the host side between batches.
+	 *
+	 * The worker executes a batch of instructions, returning when it
+	 * encounters a SYSCALL/INT 0x80, terminal address, or the batch limit.
+	 * The host dispatches syscalls, checks breakpoints, and sends the next batch.
+	 */
+	private async startX64ElfWorker(startAddress: bigint, endAddress: bigint, count: number): Promise<void> {
+		if (!this._x64ElfWorker || !this.unicornModule) {
+			throw new Error('x64 ELF worker not initialized');
+		}
+
+		this._stopRequested = false;
+		this.state.isRunning = false; // Not using async Unicorn; no deferred writes
+		this.state.isPaused = false;
+		this.state.isReady = true;
+		this.state.currentAddress = startAddress;
+
+		const X86_REG = this.unicornModule.X86_REG;
+		const maxInstructions = count > 0 ? count : 250000;
+		const batchSize = count === 1 ? 1 : Math.min(1000, maxInstructions);
+		const terminalAddresses = [0n, 0xDEAD0000n, 0xDEADDEADn, 0xDEADDEADDEADDEADn];
+		if (endAddress !== 0n) {
+			terminalAddresses.push(endAddress);
+		}
+
+		// API stub region: worker must stop when PC enters this range
+		// so the host-side code hooks (API interceptor) can fire.
+		// STUB_BASE = 0x70000000, STUB_SIZE = 0x00100000 (from elfLoader.ts)
+		const terminalRanges = [
+			{ start: 0x70000000n, end: 0x70000000n + 0x100000n }
+		];
+
+		let totalExecuted = 0;
+		let isFirstInstruction = true;
+		let currentPc = startAddress;
+
+		try {
+			while (totalExecuted < maxInstructions) {
+				if (this._stopRequested) {
+					break;
+				}
+
+				// Read PC from worker
+				currentPc = await this._x64ElfWorker.regRead(X86_REG.RIP) as bigint;
+				this.state.currentAddress = currentPc;
+
+				// Breakpoint check (skip on first instruction)
+				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
+
+				// Fire code hooks (API interception) before executing.
+				// The linuxApiHooks handlers use sync register/memory reads
+				// (getRegistersX64, readMemorySync, writeMemorySync, setRegisterSync)
+				// which operate on the in-process Unicorn instance.  In worker mode
+				// the in-process instance still exists but its registers are stale
+				// (they were migrated to the worker in setElfSyncMode).  To make the
+				// sync API work transparently we pull the current register state from
+				// the worker into the in-process Unicorn BEFORE firing hooks, and push
+				// any mutations back to the worker AFTER hooks complete.
+				this._apiHookRedirected = false;
+
+				if (this.codeHooks.size > 0 && this.uc) {
+					// Pull worker registers → in-process Unicorn
+					try {
+						const workerRegs = await this._x64ElfWorker.readAllRegisters();
+						const REG = this.unicornModule.X86_REG;
+						this.uc.regWrite(REG.RAX, workerRegs.rax);
+						this.uc.regWrite(REG.RBX, workerRegs.rbx);
+						this.uc.regWrite(REG.RCX, workerRegs.rcx);
+						this.uc.regWrite(REG.RDX, workerRegs.rdx);
+						this.uc.regWrite(REG.RSI, workerRegs.rsi);
+						this.uc.regWrite(REG.RDI, workerRegs.rdi);
+						this.uc.regWrite(REG.RBP, workerRegs.rbp);
+						this.uc.regWrite(REG.RSP, workerRegs.rsp);
+						this.uc.regWrite(REG.R8, workerRegs.r8);
+						this.uc.regWrite(REG.R9, workerRegs.r9);
+						this.uc.regWrite(REG.R10, workerRegs.r10);
+						this.uc.regWrite(REG.R11, workerRegs.r11);
+						this.uc.regWrite(REG.R12, workerRegs.r12);
+						this.uc.regWrite(REG.R13, workerRegs.r13);
+						this.uc.regWrite(REG.R14, workerRegs.r14);
+						this.uc.regWrite(REG.R15, workerRegs.r15);
+						this.uc.regWrite(REG.RIP, workerRegs.rip);
+						this.uc.regWrite(REG.RFLAGS, workerRegs.rflags);
+
+						// Sync stack memory from worker → in-process Unicorn.
+						// We need this because functions executed in the worker (e.g., 'call puts')
+						// write the return address to the worker's stack memory. If we don't
+						// sync it, the API hook will read stale host memory and fetch garbage
+						// (like "hexcore" from argv) instead of the real return address.
+						try {
+							const rsp = BigInt(workerRegs.rsp);
+							// Read 256 bytes around RSP (mostly above RSP since it grows down)
+							const syncBase = rsp - 64n;
+							const syncSize = 256;
+							const stackData = await this._x64ElfWorker.memRead(syncBase, syncSize);
+							this.uc.memWrite(syncBase, stackData);
+						} catch {
+							// Best-effort stack sync
+						}
+
+						// Smart Sync: Sync potential string/buffer argument pointers (RDI, RSI, RDX, RCX)
+						// The worker might have dynamically generated strings in the heap, which the
+						// Host's Unicorn instance won't see because memory isn't fully synced.
+						const argRegsToSync = [workerRegs.rdi, workerRegs.rsi, workerRegs.rdx, workerRegs.rcx];
+						for (const regVal of argRegsToSync) {
+							const ptr = BigInt(regVal);
+							if (ptr > 0x1000n) { // Skip null/small integer arguments
+								try {
+									const argData = await this._x64ElfWorker.memRead(ptr, 1024);
+									this.uc.memWrite(ptr, argData);
+								} catch {
+									// Pointer might not be mapped or could hit unmapped boundary
+								}
+							}
+						}
+					} catch {
+						// Best-effort sync — if it fails, hooks will see stale data
+					}
+				}
+
+				this.codeHooks.forEach(cb => cb(currentPc, 0));
+
+				if (this._apiHookRedirected) {
+					// A hook redirected execution (e.g. __libc_start_main → main).
+					// Push any register/memory mutations from the hook back to the worker.
+					if (this.uc) {
+						try {
+							const REG = this.unicornModule.X86_REG;
+							const postRegs: Record<string, bigint> = {
+								RAX: BigInt(this.uc.regRead(REG.RAX)),
+								RBX: BigInt(this.uc.regRead(REG.RBX)),
+								RCX: BigInt(this.uc.regRead(REG.RCX)),
+								RDX: BigInt(this.uc.regRead(REG.RDX)),
+								RSI: BigInt(this.uc.regRead(REG.RSI)),
+								RDI: BigInt(this.uc.regRead(REG.RDI)),
+								RBP: BigInt(this.uc.regRead(REG.RBP)),
+								RSP: BigInt(this.uc.regRead(REG.RSP)),
+								R8: BigInt(this.uc.regRead(REG.R8)),
+								R9: BigInt(this.uc.regRead(REG.R9)),
+								R10: BigInt(this.uc.regRead(REG.R10)),
+								R11: BigInt(this.uc.regRead(REG.R11)),
+								R12: BigInt(this.uc.regRead(REG.R12)),
+								R13: BigInt(this.uc.regRead(REG.R13)),
+								R14: BigInt(this.uc.regRead(REG.R14)),
+								R15: BigInt(this.uc.regRead(REG.R15)),
+								RIP: BigInt(this.uc.regRead(REG.RIP)),
+								RFLAGS: BigInt(this.uc.regRead(REG.RFLAGS)),
+							};
+							await this._x64ElfWorker.writeRegisters(postRegs);
+						} catch {
+							// Best-effort push
+						}
+
+						// Sync stack memory from in-process → worker.
+						// Handlers like __libc_start_main push a synthetic return
+						// address onto the stack via writeMemorySync.  Since
+						// state.isRunning is false, those writes go directly to
+						// the in-process Unicorn (not deferred).  Copy the top
+						// of the stack (around RSP) to the worker so it's consistent.
+						try {
+							const REG2 = this.unicornModule.X86_REG;
+							const rsp = BigInt(this.uc.regRead(REG2.RSP));
+							// Copy 256 bytes around RSP (128 below, 128 above)
+							// to catch any stack writes made by the hook.
+							const syncBase = rsp - 128n;
+							const syncSize = 256;
+							const stackData = this.uc.memRead(syncBase, syncSize);
+							await this._x64ElfWorker.memWrite(syncBase, stackData);
+						} catch {
+							// Best-effort stack sync
+						}
+
+						// Also sync any deferred memory writes to the worker.
+						for (const { address, data } of this.deferredMemoryWrites) {
+							try {
+								await this._x64ElfWorker.memWrite(address, data);
+							} catch { /* best-effort */ }
+						}
+						this.deferredMemoryWrites = [];
+
+						// Apply deferred register writes to in-process first,
+						// then the full register sync above already covers them.
+						if (this.deferredRegisterWrites.size > 0) {
+							for (const [name, value] of this.deferredRegisterWrites) {
+								try {
+									this.setRegisterImmediate(name, value);
+								} catch { /* best-effort */ }
+							}
+							this.deferredRegisterWrites.clear();
+							// Re-sync all registers to worker after applying deferred writes
+							try {
+								const REG3 = this.unicornModule.X86_REG;
+								const finalRegs: Record<string, bigint> = {
+									RAX: BigInt(this.uc.regRead(REG3.RAX)),
+									RBX: BigInt(this.uc.regRead(REG3.RBX)),
+									RCX: BigInt(this.uc.regRead(REG3.RCX)),
+									RDX: BigInt(this.uc.regRead(REG3.RDX)),
+									RSI: BigInt(this.uc.regRead(REG3.RSI)),
+									RDI: BigInt(this.uc.regRead(REG3.RDI)),
+									RBP: BigInt(this.uc.regRead(REG3.RBP)),
+									RSP: BigInt(this.uc.regRead(REG3.RSP)),
+									R8: BigInt(this.uc.regRead(REG3.R8)),
+									R9: BigInt(this.uc.regRead(REG3.R9)),
+									R10: BigInt(this.uc.regRead(REG3.R10)),
+									R11: BigInt(this.uc.regRead(REG3.R11)),
+									R12: BigInt(this.uc.regRead(REG3.R12)),
+									R13: BigInt(this.uc.regRead(REG3.R13)),
+									R14: BigInt(this.uc.regRead(REG3.R14)),
+									R15: BigInt(this.uc.regRead(REG3.R15)),
+									RIP: BigInt(this.uc.regRead(REG3.RIP)),
+									RFLAGS: BigInt(this.uc.regRead(REG3.RFLAGS)),
+								};
+								await this._x64ElfWorker.writeRegisters(finalRegs);
+							} catch { /* best-effort */ }
+						}
+					}
+
+					// Read new PC from worker after sync
+					isFirstInstruction = true;
+					continue;
+				}
+
+				// Execute a batch in the worker
+				const remaining = maxInstructions - totalExecuted;
+				const thisBatch = Math.min(batchSize, remaining);
+
+				const result = await this._x64ElfWorker.executeBatch(
+					currentPc, thisBatch, terminalAddresses, terminalRanges
+				);
+
+				totalExecuted += result.instructionsExecuted;
+				this.state.instructionsExecuted += result.instructionsExecuted;
+				this.state.currentAddress = result.pc;
+
+				if (result.error) {
+					this.state.lastError = result.error;
+					break;
+				}
+
+				if (result.stopped) {
+					let isTerminalRange = false;
+					for (const r of terminalRanges) {
+						if (result.pc >= r.start && result.pc < r.end) {
+							isTerminalRange = true;
+							break;
+						}
+					}
+					if (isTerminalRange) {
+						// We stopped because we entered an API stub region.
+						// Continue so the next loop iteration fires the API host hook.
+						continue;
+					}
+					// Terminal address reached (e.g. program exit)
+					break;
+				}
+				if (result.syscallEncountered) {
+					// SYSCALL or INT 0x80 detected — dispatch on the host side.
+					// For SYSCALL: intno = 2 (Unicorn convention for x64 SYSCALL)
+					// For INT 0x80: intno = 0x80
+					const intno = result.syscallType === 'int80' ? 0x80 : 2;
+					if (this._interruptHandlerAsync) {
+						await this._interruptHandlerAsync(intno);
+					} else if (this.interruptHandler) {
+						this.interruptHandler(intno);
+					}
+					// Advance PC past the 2-byte instruction
+					await this._x64ElfWorker.regWrite(X86_REG.RIP, result.pc + 2n);
+
+					if (this._stopRequested) {
+						break;
+					}
+					// Continue with the next batch
+					continue;
+				}
+			}
+		} finally {
+			// Sync the final PC
+			if (this._x64ElfWorker) {
+				try {
+					const finalPc = await this._x64ElfWorker.regRead(X86_REG.RIP) as bigint;
+					this.state.currentAddress = finalPc;
+				} catch {
+					// Worker may have exited
+				}
+			}
+			this.state.isPaused = true;
+		}
+	}
+
+	/**
 	 * ARM64 synchronous execution for start/step/continue (in-process fallback).
 	 *
 	 * Same approach as runSyncSteppedArm64 but also handles breakpoints and
@@ -1072,6 +1546,215 @@ export class UnicornWrapper {
 		}
 	}
 
+	/**
+	 * Synchronous execution loop for x64 ELF targets.
+	 * Uses emuStart (sync) instead of emuStartAsync to avoid
+	 * STATUS_HEAP_CORRUPTION (0xC0000374) caused by TSFN threading
+	 * issues when multiple native hooks are installed simultaneously.
+	 *
+	 * This mirrors the ARM64 startArm64Sync approach: execute one
+	 * instruction at a time synchronously, fire code hooks manually,
+	 * and handle SYSCALL/INT via the installed interrupt handler.
+	 */
+	private startX64ElfSync(startAddress: bigint, endAddress: bigint, count: number): void {
+		if (!this.uc || !this.unicornModule) {
+			throw new Error('Unicorn not initialized');
+		}
+
+		this._stopRequested = false;
+		this.state.isRunning = false; // sync mode — no deferred writes needed
+		this.state.isPaused = false;
+		this.state.isReady = true;
+		this.state.currentAddress = startAddress;
+
+		const maxInstructions = count > 0 ? count : 250000;
+		let isFirstInstruction = true;
+
+		// x86/x64 SYSCALL opcode: 0x0F 0x05
+		// x86/x64 INT 0x80 opcode: 0xCD 0x80
+		const SYSCALL_BYTE0 = 0x0F;
+		const SYSCALL_BYTE1 = 0x05;
+		const INT80_BYTE0 = 0xCD;
+		const INT80_BYTE1 = 0x80;
+
+		// Determine the IP register based on architecture
+		const isX64 = this.architecture === 'x64';
+		const X86_REG = this.unicornModule.X86_REG;
+		const ipReg = isX64 ? X86_REG.RIP : X86_REG.EIP;
+
+		try {
+			for (let i = 0; i < maxInstructions; i++) {
+				if (this._stopRequested) {
+					break;
+				}
+
+				const pcBefore = BigInt(this.uc.regRead(ipReg));
+				this.state.currentAddress = pcBefore;
+
+				// Breakpoint check (skip on first instruction to allow continue-from-breakpoint)
+				if (this.breakpoints.has(pcBefore) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
+
+				// Fire code hooks (API interception)
+				this._apiHookRedirected = false;
+				this.codeHooks.forEach(cb => cb(pcBefore, 0));
+				if (this._apiHookRedirected) {
+					// API interceptor redirected execution — sync PC and restart
+					this.syncCurrentAddress();
+					isFirstInstruction = true;
+					continue;
+				}
+
+				// Terminal address check
+				if (pcBefore === 0n || pcBefore === 0xDEAD0000n ||
+					pcBefore === 0xDEADDEADn || pcBefore === 0xDEADDEADDEADDEADn) {
+					break;
+				}
+
+				// End address check
+				if (endAddress !== 0n && pcBefore === endAddress) {
+					break;
+				}
+
+				// Read instruction bytes to detect SYSCALL/INT 0x80
+				let byte0 = 0, byte1 = 0;
+				try {
+					const insnBuf = this.uc.memRead(pcBefore, 2);
+					byte0 = insnBuf[0];
+					byte1 = insnBuf[1];
+				} catch { /* let emuStart handle unmapped memory */ }
+
+				const isSyscall = (byte0 === SYSCALL_BYTE0 && byte1 === SYSCALL_BYTE1);
+				const isInt80 = (byte0 === INT80_BYTE0 && byte1 === INT80_BYTE1);
+
+				if (isSyscall || isInt80) {
+					// Dispatch interrupt handler directly and advance PC past the 2-byte instruction.
+					// For SYSCALL: intno = 2 (Unicorn convention for x64 SYSCALL)
+					// For INT 0x80: intno = 0x80
+					this.state.instructionsExecuted++;
+					if (this.interruptHandler) {
+						this.interruptHandler(isSyscall ? 2 : 0x80);
+					}
+					// Advance PC past the 2-byte instruction
+					this.uc.regWrite(ipReg, pcBefore + 2n);
+					if (this._stopRequested) {
+						break;
+					}
+				} else {
+					// Execute 1 instruction synchronously
+					try {
+						this.uc.emuStart(pcBefore, 0n, 0, 1);
+					} catch (error: unknown) {
+						// Handle memory faults in JS (native hooks removed).
+						// Unicorn throws UC_ERR_READ_UNMAPPED (6), UC_ERR_WRITE_UNMAPPED (7),
+						// or UC_ERR_FETCH_UNMAPPED (8) when accessing unmapped memory.
+						if (this.handleX64MemoryFault(error)) {
+							// Page was mapped — retry the same instruction
+							i--;
+							continue;
+						}
+						this.state.lastError = toErrorMessage(error);
+						break;
+					}
+					this.state.instructionsExecuted++;
+				}
+
+				this.syncCurrentAddress();
+			}
+		} finally {
+			this.syncCurrentAddress();
+			this.state.isPaused = true;
+		}
+	}
+
+	/**
+	 * Handle a memory fault for x64 ELF sync execution (no native MEM_FAULT hook).
+	 *
+	 * When emuStart(count=1) throws UC_ERR_READ_UNMAPPED (code 6),
+	 * UC_ERR_WRITE_UNMAPPED (code 7), or UC_ERR_FETCH_UNMAPPED (code 8),
+	 * this method maps the faulting page with RWX from JS and notifies
+	 * the memoryFaultHandler for tracking.
+	 *
+	 * @returns `true` if the fault was handled (caller should retry);
+	 *          `false` if it's an unrecoverable error.
+	 */
+	private handleX64MemoryFault(error: unknown): boolean {
+		if (!this.uc || !this.unicornModule) {
+			return false;
+		}
+
+		const msg = toErrorMessage(error);
+		// Match "(code: 6)", "(code: 7)", or "(code: 8)"
+		const codeMatch = /\(code:\s*(?<errCode>[678])\)/.exec(msg);
+		if (!codeMatch?.groups) {
+			return false;
+		}
+
+		const errCode = Number(codeMatch.groups['errCode']);
+		const PROT = this.unicornModule.PROT;
+		const X86_REG = this.unicornModule.X86_REG;
+		const pageSize = this.uc.pageSize;
+		const isX64 = this.architecture === 'x64';
+
+		let faultAddr = 0n;
+
+		if (errCode === 8) {
+			// UC_ERR_FETCH_UNMAPPED: RIP/EIP points to unmapped code
+			const ipReg = isX64 ? X86_REG.RIP : X86_REG.EIP;
+			faultAddr = BigInt(this.uc.regRead(ipReg));
+		} else {
+			// UC_ERR_READ_UNMAPPED / UC_ERR_WRITE_UNMAPPED:
+			// Try to decode the instruction to find the memory operand base register.
+			// Fallback to RSP-based heuristic for stack accesses.
+			const ipReg = isX64 ? X86_REG.RIP : X86_REG.EIP;
+			const pc = BigInt(this.uc.regRead(ipReg));
+
+			// Heuristic: use RSP as the most common data fault source (stack access)
+			const spReg = isX64 ? X86_REG.RSP : X86_REG.ESP;
+			faultAddr = BigInt(this.uc.regRead(spReg));
+
+			// If RSP is in a mapped region, try RBP as alternative
+			if (faultAddr < 0x1000n) {
+				const bpReg = isX64 ? X86_REG.RBP : X86_REG.EBP;
+				faultAddr = BigInt(this.uc.regRead(bpReg));
+			}
+
+			// Last resort: use PC (for self-modifying code or similar)
+			if (faultAddr < 0x1000n) {
+				faultAddr = pc;
+			}
+		}
+
+		// Reject NULL page and very high addresses
+		if (faultAddr < 0x1000n) {
+			return false;
+		}
+		if (isX64 && faultAddr > 0x00007FFFFFFFFFFFn) {
+			return false;
+		}
+
+		const pageSizeBig = BigInt(pageSize);
+		const alignedAddr = (faultAddr / pageSizeBig) * pageSizeBig;
+
+		try {
+			this.uc.memMap(alignedAddr, pageSize, PROT.ALL);
+		} catch {
+			// memMap failed (e.g., already mapped, OOM) — unrecoverable
+			return false;
+		}
+
+		// Notify the JS memory fault handler for tracking
+		if (this.memoryFaultHandler) {
+			const type = errCode === 8 ? 16 : (errCode === 6 ? 19 : 20);
+			this.memoryFaultHandler(type, faultAddr, 0, 0n);
+		}
+
+		return true;
+	}
+
 	private applyDeferredMutations(): void {
 		if (!this.uc) {
 			this.deferredMemoryWrites = [];
@@ -1125,6 +1808,8 @@ export class UnicornWrapper {
 		if (!this.uc || !this.unicornModule) { return; }
 		// ARM64 worker: PC is synced in startArm64Worker, skip
 		if (this._arm64Worker) { return; }
+		// x64 ELF worker: PC is synced in startX64ElfWorker, skip
+		if (this._x64ElfWorker) { return; }
 
 		try {
 			const X86_REG = this.unicornModule.X86_REG;
@@ -1163,7 +1848,7 @@ export class UnicornWrapper {
 	 * free for TSFN-based hook callbacks.
 	 */
 	async runSync(startAddress: bigint, count: number, timeout: number = 0): Promise<void> {
-		if (!this.uc && !this._arm64Worker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -1173,9 +1858,21 @@ export class UnicornWrapper {
 			return;
 		}
 
+		// x64 ELF worker: delegate to startX64ElfWorker
+		if (this._x64ElfWorker) {
+			await this.startX64ElfWorker(startAddress, 0n, count);
+			return;
+		}
+
 		// ARM64: use synchronous stepped execution to avoid TSFN/threading crash
 		if (this.architecture === 'arm64') {
 			this.runSyncSteppedArm64(startAddress, count);
+			return;
+		}
+
+		// x64 ELF sync mode: delegate to startX64ElfSync to avoid heap corruption
+		if (this._elfSyncMode) {
+			this.startX64ElfSync(startAddress, 0n, count);
 			return;
 		}
 
@@ -1354,7 +2051,7 @@ export class UnicornWrapper {
 	 * Does NOT use stepMode flag (which would prevent the instruction from running).
 	 */
 	async step(): Promise<void> {
-		if (!this.uc && !this._arm64Worker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -1367,7 +2064,7 @@ export class UnicornWrapper {
 	 * Continue execution from current address until breakpoint, exit, or error.
 	 */
 	async continue(): Promise<void> {
-		if (!this.uc && !this._arm64Worker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -1383,6 +2080,9 @@ export class UnicornWrapper {
 		if (this._arm64Worker) {
 			// Worker uses _stopRequested flag; also try emuStop in worker
 			this._arm64Worker.emuStop().catch(() => { /* ignore */ });
+		}
+		if (this._x64ElfWorker) {
+			this._x64ElfWorker.emuStop().catch(() => { /* ignore */ });
 		}
 		if (this.uc) {
 			this.uc.emuStop();
@@ -1418,6 +2118,9 @@ export class UnicornWrapper {
 		if (this._arm64Worker) {
 			return await this._arm64Worker.memRead(address, size);
 		}
+		if (this._x64ElfWorker) {
+			return await this._x64ElfWorker.memRead(address, size);
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -1444,6 +2147,10 @@ export class UnicornWrapper {
 	async writeMemory(address: bigint, data: Buffer): Promise<void> {
 		if (this._arm64Worker) {
 			await this._arm64Worker.memWrite(address, data);
+			return;
+		}
+		if (this._x64ElfWorker) {
+			await this._x64ElfWorker.memWrite(address, data);
 			return;
 		}
 
@@ -1532,6 +2239,17 @@ export class UnicornWrapper {
 			rip: BigInt(this.uc.regRead(REG.RIP)),
 			rflags: BigInt(this.uc.regRead(REG.RFLAGS))
 		};
+	}
+
+	/**
+	 * Get x86-64 registers asynchronously (for worker mode).
+	 * Uses the x64 ELF worker when active, otherwise falls back to sync in-process read.
+	 */
+	async getRegistersX64Async(): Promise<X86_64Registers> {
+		if (this._x64ElfWorker) {
+			return await this._x64ElfWorker.readAllRegisters();
+		}
+		return this.getRegistersX64();
 	}
 
 	/**
@@ -1639,6 +2357,25 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._x64ElfWorker) {
+			// Route to worker for x64 ELF
+			const X86_REG = this.unicornModule!.X86_REG;
+			const x64Regs: Record<string, number> = {
+				'rax': X86_REG.RAX, 'rbx': X86_REG.RBX, 'rcx': X86_REG.RCX, 'rdx': X86_REG.RDX,
+				'rsi': X86_REG.RSI, 'rdi': X86_REG.RDI, 'rbp': X86_REG.RBP, 'rsp': X86_REG.RSP,
+				'r8': X86_REG.R8, 'r9': X86_REG.R9, 'r10': X86_REG.R10, 'r11': X86_REG.R11,
+				'r12': X86_REG.R12, 'r13': X86_REG.R13, 'r14': X86_REG.R14, 'r15': X86_REG.R15,
+				'rip': X86_REG.RIP, 'rflags': X86_REG.RFLAGS,
+				'fs_base': X86_REG.FS_BASE, 'gs_base': X86_REG.GS_BASE
+			};
+			const regId = x64Regs[regName];
+			if (regId === undefined) {
+				throw new Error(`Unknown x64 register: ${regName}`);
+			}
+			await this._x64ElfWorker.regWrite(regId, BigInt(value));
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -1718,7 +2455,23 @@ export class UnicornWrapper {
 				if (region.perms & PROT.EXEC) { perms += 'x'; }
 				return {
 					address: region.begin,
-					size: region.end - region.begin,
+					size: region.end - region.begin + 1n,
+					permissions: perms || '---'
+				};
+			});
+		}
+
+		if (this._x64ElfWorker) {
+			const PROT = this.unicornModule!.PROT;
+			const regions = await this._x64ElfWorker.memRegions();
+			return regions.map(region => {
+				let perms = '';
+				if (region.perms & PROT.READ) { perms += 'r'; }
+				if (region.perms & PROT.WRITE) { perms += 'w'; }
+				if (region.perms & PROT.EXEC) { perms += 'x'; }
+				return {
+					address: region.begin,
+					size: region.end - region.begin + 1n,
 					permissions: perms || '---'
 				};
 			});
@@ -1743,7 +2496,7 @@ export class UnicornWrapper {
 
 			return {
 				address: region.begin,
-				size: region.end - region.begin,
+				size: region.end - region.begin + 1n,
 				permissions: perms || '---'
 			};
 		});
@@ -1755,6 +2508,9 @@ export class UnicornWrapper {
 	getPageSize(): number {
 		if (this._arm64Worker) {
 			return this._arm64Worker.getPageSize();
+		}
+		if (this._x64ElfWorker) {
+			return this._x64ElfWorker.getPageSize();
 		}
 		return this.uc?.pageSize ?? 0x1000;
 	}
@@ -1784,6 +2540,13 @@ export class UnicornWrapper {
 			this._workerContextId = await this._arm64Worker.contextSave();
 			return;
 		}
+		if (this._x64ElfWorker) {
+			if (this._workerContextId !== undefined) {
+				await this._x64ElfWorker.contextFree(this._workerContextId);
+			}
+			this._workerContextId = await this._x64ElfWorker.contextSave();
+			return;
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -1803,6 +2566,13 @@ export class UnicornWrapper {
 				throw new Error('No saved state');
 			}
 			await this._arm64Worker.contextRestore(this._workerContextId);
+			return;
+		}
+		if (this._x64ElfWorker) {
+			if (this._workerContextId === undefined) {
+				throw new Error('No saved state');
+			}
+			await this._x64ElfWorker.contextRestore(this._workerContextId);
 			return;
 		}
 		if (!this.uc || !this.savedContext) {
@@ -1852,7 +2622,7 @@ export class UnicornWrapper {
 	 * Check if initialized
 	 */
 	isInitialized(): boolean {
-		return this.initialized && (this.uc !== undefined || this._arm64Worker !== undefined);
+		return this.initialized && (this.uc !== undefined || this._arm64Worker !== undefined || this._x64ElfWorker !== undefined);
 	}
 
 	getLastError(): string | undefined {
@@ -1867,6 +2637,13 @@ export class UnicornWrapper {
 		if (this._arm64Worker) {
 			this._arm64Worker.dispose();
 			this._arm64Worker = undefined;
+			this._workerContextId = undefined;
+		}
+
+		// Dispose x64 ELF worker if active
+		if (this._x64ElfWorker) {
+			this._x64ElfWorker.dispose();
+			this._x64ElfWorker = undefined;
 			this._workerContextId = undefined;
 		}
 
