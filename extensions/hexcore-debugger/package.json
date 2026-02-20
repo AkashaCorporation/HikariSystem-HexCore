@@ -2,7 +2,7 @@
 	"name": "hexcore-debugger",
 	"displayName": "HexCore Debugger",
 	"description": "Emulation-based debugger using Unicorn Engine for PE/ELF binary analysis",
-	"version": "2.0.1",
+	"version": "2.1.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

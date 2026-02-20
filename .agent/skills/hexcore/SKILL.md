@@ -3,13 +3,13 @@ name: HexCore Binary Analysis
 description: Skill para analise de binarios com ferramentas HexCore integradas ao editor
 ---
 
-# HexCore Binary Analysis Skill — v3.5.3
+# HexCore Binary Analysis Skill — v3.5.4
 
 ## Overview
 
 HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSystem HexCore). It includes 20 extensions with 5 native engines (Capstone, Unicorn, Remill, LLVM MC, better-sqlite3) and a full automation pipeline.
 
-> **Current version:** v3.5.3 "Quality & Polish" (2026-02-18)
+> **Current version:** v3.5.4 "Stability & Isolation" (2026-02-19)
 > **Engine versions:** capstone 1.3.2 | unicorn 1.2.1 | llvm-mc 1.0.0 | better-sqlite3 2.0.0 | remill 0.1.2
 
 ---
@@ -56,7 +56,14 @@ Professional disassembler with Capstone engine, ELF/PE parsing, CFG, xrefs, patc
 
 Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, syscall handling, and API call tracing.
 
+**Process isolation & Smart Sync:** x64 ELF and ARM64 ELF emulation run in dedicated child processes (`x64ElfWorker.js`, `arm64Worker.js`) to prevent Unicorn heap corruption from crashing the VS Code extension host. The worker communicates via JSON-RPC over IPC. A unique **Smart Sync** architecture instantly synchronizes heap memory (e.g. dynamically allocated strings) from the Worker to the Host before evaluating any API hook (such as `__printf_chk`, `getline`, or `puts`), guaranteeing flawless validation of complex obfuscated VMs (like the HTB VVM CTF). PE emulation and other architectures run in-process.
+
 **Headless commands (pipeline-safe):**
+- `hexcore.debug.emulateFullHeadless` — **Unified single-shot emulation** (load → configure → run → collect → dispose). Recommended for pipeline jobs. Args: `{ file, arch?, stdin?, maxInstructions?, breakpoints?, keepAlive?, output?, quiet? }`. Aliases: `hexcore.debug.emulate.full`, `hexcore.debug.run`
+- `hexcore.debug.writeMemoryHeadless` — Write data to emulation memory. Args: `{ address, data, output?, quiet? }`. Data accepts base64 or `0x`-prefixed hex.
+- `hexcore.debug.setRegisterHeadless` — Set CPU register value. Args: `{ name, value, output?, quiet? }`. Value accepts hex string or decimal.
+- `hexcore.debug.setStdinHeadless` — Set STDIN buffer for emulation. Args: `{ input, output?, quiet? }`. Supports escape sequences (`\n`, `\t`, `\r`, `\\`).
+- `hexcore.debug.disposeHeadless` — Dispose emulation session (idempotent, safe to call without active session). Args: `{ output?, quiet? }`
 - `hexcore.debug.snapshotHeadless` — Save emulation snapshot
 - `hexcore.debug.restoreSnapshotHeadless` — Restore emulation snapshot
 - `hexcore.debug.exportTraceHeadless` — Export API/libc call trace as JSON
@@ -76,11 +83,13 @@ Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, 
 **Internal engine capabilities (programmatic, not exposed as headless commands):**
 - PE loading with import resolution and Windows API hooks
 - ELF loading with PLT stubs and Linux API hooks (libc emulation)
-- Linux syscall handler (x86/x64: int 0x80, syscall instruction)
+- Linux syscall handler (x86/x64: int 0x80, syscall instruction; ARM64: SVC #0)
 - Architecture auto-detection from ELF/PE headers
 - Deterministic ELF continue (250K instruction budget)
 - STDIN buffer injection for scanf/read emulation
 - Snapshot save/restore via Unicorn context
+- x64 ELF worker process isolation with Smart Sync (prevents host heap corruption & guarantees dynamic string visibility)
+- ARM64 ELF worker process isolation (same pattern)
 
 **Architecture support in debugger:**
 
@@ -88,12 +97,13 @@ Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, 
 |---------|-----|-----|-------|-----|------|
 | Unicorn init | Yes | Yes | Yes | Yes | Yes |
 | Register read/write | Yes | Yes | Yes | No | No |
-| ELF loading | Yes | Yes | Partial | No | No |
+| ELF loading | Yes | Yes | Yes | No | No |
 | PE loading | Yes | Yes | No | No | No |
-| Stack initialization | Yes | Yes | No | No | No |
-| Syscall handler | Yes | Yes | No | No | No |
-| API hooks (Linux) | Yes | Yes | No | No | No |
+| Stack initialization | Yes | Yes | Yes | No | No |
+| Syscall handler | Yes | Yes | Yes | No | No |
+| API hooks (Linux) | Yes | Yes | Yes | No | No |
 | API hooks (Windows) | Yes | Yes | No | No | No |
+| Worker process isolation | No | Yes (ELF) | Yes | No | No |
 
 ### Other Extensions
 
@@ -153,7 +163,7 @@ Jobs produce in `outDir`:
 | Emulation (Unicorn) | Yes | Yes | Yes | Yes | Yes |
 | IR Lifting (Remill) | Yes | Yes | No | Yes | No |
 | Assembly (LLVM MC) | Yes | Yes | Yes | Yes | Yes |
-| Debugger (full) | Yes | Yes | No | Partial | No |
+| Debugger (full) | Yes | Yes | No | Yes | No |
 | PE Analysis | Yes | Yes | No | No | No |
 | Minidump | Yes | Yes | No | No | No |
 | buildFormula | Yes | Yes | No | No | No |
@@ -162,10 +172,10 @@ Jobs produce in `outDir`:
 
 ## Known Gaps (Critical for Agents)
 
-1. **Debugger interactive commands still need UI** — `emulate`, `emulateWithArch`, `setStdin` require file pickers/prompts. However, `snapshotHeadless`, `restoreSnapshotHeadless`, and `exportTraceHeadless` are now pipeline-safe.
-2. **Debugger ARM64 ELF is incomplete** — Unicorn supports ARM64 but DebugEngine lacks: stack initialization, process stack layout (argc/argv), SVC syscall handler, register state mapping.
-3. **Debugger + static ELF** — statically-linked binaries have no PLT stubs, so LinuxApiHooks cannot intercept libc calls. Only direct syscall interception works (and only for x86/x64).
-4. **buildFormula is x86/x64 only** — the register regex doesn't recognize ARM64 registers (x0-x30, sp, lr).
+1. ~~**Debugger interactive commands still need UI**~~ — **MOSTLY RESOLVED**: `emulateFullHeadless` provides full headless emulation (load → run → collect → dispose) without UI. `writeMemoryHeadless`, `setRegisterHeadless`, `setStdinHeadless`, and `disposeHeadless` fill remaining gaps. Only `emulateWithArch` (manual arch picker) remains interactive.
+2. ~~**Debugger ARM64 ELF is incomplete**~~ — **RESOLVED in v3.5.1**: Full ARM64 DebugEngine with stack initialization, process stack layout (argc/argv via X0/X1/X2), SVC syscall handler, register state mapping, and 20+ Linux syscalls.
+3. **Debugger + static ELF** — statically-linked binaries have no PLT stubs, so LinuxApiHooks cannot intercept libc calls. Only direct syscall interception works (and only for x86/x64/ARM64).
+4. **buildFormula is x86/x64 only** — the register regex doesn't recognize ARM64 registers (x0-x30, sp, lr). *(ARM64 formulaBuilder added in v3.5.1 but limited to 15 mnemonics)*
 5. ~~**No ELF analyzer extension**~~ — **RESOLVED in v3.5.2**: `hexcore-elfanalyzer` provides full ELF analysis (sections, segments, symbols, security mitigations).
 6. ~~**Base64 decode has no headless mode**~~ — **RESOLVED in v3.5.2**: `hexcore.base64.decodeHeadless` is pipeline-safe.
 7. ~~**Hex viewer has no headless dump**~~ — **RESOLVED in v3.5.2**: `hexcore.hexview.dumpHeadless` and `hexcore.hexview.searchHeadless` are pipeline-safe.
@@ -187,13 +197,18 @@ Jobs produce in `outDir`:
 9. **Decode Base64** via `hexcore.base64.decodeHeadless`
 10. **Dump hex ranges** via `hexcore.hexview.dumpHeadless`
 11. **Search hex patterns** via `hexcore.hexview.searchHeadless`
-12. **Save/restore emulation snapshots** via `hexcore.debug.snapshotHeadless` / `restoreSnapshotHeadless`
-13. **Export API call traces** via `hexcore.debug.exportTraceHeadless`
-14. **Compose unified reports** via `hexcore.pipeline.composeReport`
+12. **Run full emulation headlessly** via `hexcore.debug.emulateFullHeadless` (single-shot: load → configure → run → collect → dispose)
+13. **Write emulation memory** via `hexcore.debug.writeMemoryHeadless`
+14. **Set CPU registers** via `hexcore.debug.setRegisterHeadless`
+15. **Set STDIN buffer** via `hexcore.debug.setStdinHeadless`
+16. **Dispose emulation sessions** via `hexcore.debug.disposeHeadless`
+17. **Save/restore emulation snapshots** via `hexcore.debug.snapshotHeadless` / `restoreSnapshotHeadless`
+18. **Export API call traces** via `hexcore.debug.exportTraceHeadless`
+19. **Compose unified reports** via `hexcore.pipeline.composeReport`
 
 ## What Agents CANNOT Do
 
-1. **Start emulation** — `emulate` and `emulateWithArch` require UI interaction
+1. ~~**Start emulation**~~ — **RESOLVED**: Use `hexcore.debug.emulateFullHeadless` (or aliases `hexcore.debug.emulate.full` / `hexcore.debug.run`) for headless emulation. Interactive `emulateWithArch` still requires UI for manual arch selection.
 2. **See webviews** — CFG graph, hex viewer, debugger view are visual only
 3. **Use interactive commands** — file pickers, input boxes, quick-picks
 4. **Patch binaries** — `patchInstruction`, `nopInstruction`, `savePatchedFile` need the disassembler UI open
@@ -232,6 +247,22 @@ Jobs produce in `outDir`:
 8. hexcore.disasm.buildFormula          → Extract key computations (x86/x64 only)
 ```
 
+## Workflow: Dynamic Analysis (Emulation)
+
+```
+1. hexcore.debug.emulateFullHeadless    → Single-shot emulation (recommended for pipeline jobs)
+   Args: { file, arch?, stdin?, maxInstructions?, breakpoints?, keepAlive?, output? }
+   Returns: FullEmulationResult with registers, apiCalls, stdout, memoryRegions, crash status
+
+For advanced multi-step emulation (keepAlive: true):
+2. hexcore.debug.emulateFullHeadless    → Start with keepAlive: true
+3. hexcore.debug.writeMemoryHeadless    → Patch memory (base64 or 0x hex data)
+4. hexcore.debug.setRegisterHeadless    → Modify CPU registers
+5. hexcore.debug.setStdinHeadless       → Inject STDIN input
+6. hexcore.debug.snapshotHeadless       → Save state checkpoint
+7. hexcore.debug.disposeHeadless        → Clean up session
+```
+
 ---
 
 ## File Format Support
@@ -241,10 +272,10 @@ Jobs produce in `outDir`:
 | PE32 | .exe, .dll | Yes | No | Yes (x86) | Yes |
 | PE64 | .exe, .dll | Yes | No | Yes (x64) | Yes |
 | ELF32 | .elf, .so, .o | No | Yes | Yes (x86/ARM) | Yes |
-| ELF64 | .elf, .so | No | Yes | Yes (x64/ARM64/MIPS) | Yes |
+| ELF64 | .elf, .so | No | Yes | Yes (x64/ARM64/MIPS) | Yes (worker isolated) |
 | Raw | .bin, .raw | No | No | Yes (default x64) | Yes |
 | Minidump | .dmp | N/A | N/A | N/A | N/A |
 
 ---
 
-*HexCore v3.5.2 "Pipeline Maturity" — Powered by Capstone 1.3.2 / Unicorn 1.2.1 / LLVM MC 1.0.0 / Remill 0.1.2*
+*HexCore v3.5.4 "Stability & Isolation" — Powered by Capstone 1.3.2 / Unicorn 1.2.1 / LLVM MC 1.0.0 / Remill 0.1.2*

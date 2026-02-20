@@ -249,8 +249,14 @@ export class LinuxApiHooks {
 		try {
 			const buf = this.emulator.readMemorySync(address, maxLen);
 			const nullIdx = buf.indexOf(0);
+			if (nullIdx === 0) {
+				console.log(`[readString] string at 0x${address.toString(16)} is EMPTY (starts with null byte)`);
+				this.stdoutBuffer += `[DEBUG readString] string at 0x${address.toString(16)} is EMPTY\n`;
+			}
 			return buf.toString('utf8', 0, nullIdx >= 0 ? nullIdx : maxLen);
-		} catch {
+		} catch (err) {
+			console.log(`[readString] failed to read from 0x${address.toString(16)}: ${err}`);
+			this.stdoutBuffer += `[DEBUG readString] failed to read 0x${address.toString(16)}: ${err}\n`;
 			return '';
 		}
 	}
@@ -299,22 +305,37 @@ export class LinuxApiHooks {
 
 		// int sprintf(char *str, const char *format, ...)
 		this.handlers.set('sprintf', (args) => {
-			const format = this.readString(args[1]);
-			const output = this.simpleFormat(format, args.slice(2));
-			this.writeString(args[0], output);
-			return BigInt(output.length);
+			const str = this.formatString(args[1], args, 2);
+			this.writeString(args[0], str);
+			return BigInt(str.length);
 		});
 
 		// int snprintf(char *str, size_t size, const char *format, ...)
 		this.handlers.set('snprintf', (args) => {
 			const size = Number(args[1]);
-			const format = this.readString(args[2]);
-			const output = this.simpleFormat(format, args.slice(3));
-			const truncated = output.substring(0, Math.max(0, size - 1));
-			if (args[0] !== 0n) {
-				this.writeString(args[0], truncated);
+			if (size === 0) {
+				const str = this.formatString(args[2], args, 3);
+				return BigInt(str.length); // POSIX: return what *would* have been written
 			}
-			return BigInt(output.length);
+			let str = this.formatString(args[2], args, 3);
+			if (str.length >= size) {
+				str = str.substring(0, size - 1);
+			}
+			this.writeString(args[0], str);
+			return BigInt(str.length);
+		});
+
+		// int __printf_chk(int flag, const char *format, ...)
+		// This is a secure version of printf. args[0] is the flag.
+		// args[1] is the format string. args[2...] are the format arguments.
+		this.handlers.set('__printf_chk', (args) => {
+			const formatStr = this.readString(args[1]);
+			this.stdoutBuffer += `[DEBUG __printf_chk] flag: ${args[0]}, format_ptr: 0x${args[1].toString(16)}, formatStr: ${formatStr}, a2: 0x${args[2].toString(16)}\n`;
+
+			const str = this.formatString(args[1], args, 2);
+			this.stdoutBuffer += `[DEBUG resulting string] ${str}\n`;
+			this.stdoutBuffer += str;
+			return BigInt(str.length);
 		});
 
 		// ssize_t write(int fd, const void *buf, size_t count)
@@ -900,6 +921,71 @@ export class LinuxApiHooks {
 			return 0n;
 		});
 
+		// ssize_t getline(char **lineptr, size_t *n, FILE *stream)
+		this.handlers.set('getline', (args) => {
+			const lineptrAddr = args[0];
+			const nAddr = args[1];
+			// stream is args[2], ignored for now (assumed stdin)
+
+			if (lineptrAddr === 0n || nAddr === 0n) {
+				return BigInt(-1);
+			}
+
+			// Read from our stdin buffer up to the next newline
+			let lineStr = '';
+			const remaining = this.stdinBuffer.length - this.stdinOffset;
+			if (remaining <= 0) {
+				return BigInt(-1); // EOF
+			}
+
+			const nextNewline = this.stdinBuffer.indexOf('\n', this.stdinOffset);
+			if (nextNewline !== -1) {
+				lineStr = this.stdinBuffer.substring(this.stdinOffset, nextNewline + 1);
+				this.stdinOffset = nextNewline + 1;
+			} else {
+				lineStr = this.stdinBuffer.substring(this.stdinOffset);
+				this.stdinOffset = this.stdinBuffer.length;
+			}
+
+			const lineBuf = Buffer.from(lineStr + '\0', 'utf8');
+			const requiredSize = lineBuf.length;
+
+			try {
+				const ptrBuf = this.emulator.readMemorySync(lineptrAddr, 8);
+				let lineptr = ptrBuf.readBigUInt64LE();
+
+				const sizeBuf = this.emulator.readMemorySync(nAddr, 8);
+				let n = Number(sizeBuf.readBigUInt64LE());
+
+				if (lineptr === 0n || n < requiredSize) {
+					// Allocate or reallocate
+					if (lineptr !== 0n) {
+						this.memoryManager.heapFree(lineptr);
+					}
+					n = Math.max(requiredSize, 128); // minimum 128 bytes
+					lineptr = this.memoryManager.heapAlloc(n, false);
+
+					// Write back the new pointer and size
+					const newPtrBuf = Buffer.alloc(8);
+					newPtrBuf.writeBigUInt64LE(lineptr);
+					this.emulator.writeMemorySync(lineptrAddr, newPtrBuf);
+
+					const newSizeBuf = Buffer.alloc(8);
+					newSizeBuf.writeBigUInt64LE(BigInt(n));
+					this.emulator.writeMemorySync(nAddr, newSizeBuf);
+				}
+
+				// Write the string data to the buffer
+				this.emulator.writeMemorySync(lineptr, lineBuf);
+
+				// Return characters written (excluding null terminator)
+				return BigInt(lineBuf.length - 1);
+			} catch (err) {
+				console.warn(`[linuxApiHooks] getline failed: ${err}`);
+				return BigInt(-1);
+			}
+		});
+
 		// size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream)
 		this.handlers.set('fwrite', (args) => {
 			const size = Number(args[1]);
@@ -963,6 +1049,14 @@ export class LinuxApiHooks {
 				return BigInt(-1) & 0xFFFFFFFFFFFFFFFFn;
 			}
 		});
+	}
+
+	/**
+	 * Read formatting string from memory and expand it using simpleFormat.
+	 */
+	private formatString(formatAddr: bigint, args: bigint[], argsStartIndex: number): string {
+		const format = this.readString(formatAddr);
+		return this.simpleFormat(format, args.slice(argsStartIndex));
 	}
 
 	/**

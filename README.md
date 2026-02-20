@@ -28,13 +28,13 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-17):** `v3.5.2` "Pipeline Maturity" — Full pipeline maturity with ELF Analyzer, Report Composer, multi-byte XOR deobfuscation, and headless commands for Debugger, Base64, and Hex Viewer. See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-02-19):** `v3.5.4` "Smart Sync" — Emulation Verification Release with flawless validation against the HTB Insane-level challenge VVM. Complete IPC string memory sync fixing `__printf_chk` and `getline`. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
-- Full PE and ELF emulation with 65+ API hooks (Windows + Linux)
+- Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
 - Native Capstone/Unicorn/LLVM MC/Remill engines via N-API (no external installs)
 - Headless automation pipeline for batch analysis
-- Tested against real CTF binaries (HackTheBox)
+- Tested and verified against real-world obfuscated custom VM CTF binaries (e.g., HackTheBox VVM)
 
 ---
 
@@ -62,7 +62,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.0.1 | PE/ELF emulation with Unicorn Engine, 65+ API hooks, stdin emulation |
+| **Debugger** | 2.1.0 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation |
 | **Disassembler** | 1.4.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting |
 | **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |

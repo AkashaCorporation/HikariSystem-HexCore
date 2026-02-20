@@ -1,4 +1,4 @@
-# HexCore Automation — v3.5.2
+# HexCore Automation — v3.5.4
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -106,6 +106,11 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
+| `hexcore.debug.emulateFullHeadless` | 300s | Unified single-shot emulation (load → configure → run → collect → dispose) | x86, x64, ARM64 |
+| `hexcore.debug.writeMemoryHeadless` | 30s | Write data to emulation memory (requires active session) | x86, x64, ARM64 |
+| `hexcore.debug.setRegisterHeadless` | 30s | Set CPU register value (requires active session) | x86, x64, ARM64 |
+| `hexcore.debug.setStdinHeadless` | 30s | Set STDIN buffer for emulation (requires active session) | x86, x64, ARM64 |
+| `hexcore.debug.disposeHeadless` | 30s | Dispose emulation session — idempotent, safe to call without active session | x86, x64, ARM64 |
 | `hexcore.debug.snapshotHeadless` | 60s | Save emulation snapshot (requires active session) | x86, x64, ARM64 |
 | `hexcore.debug.restoreSnapshotHeadless` | 60s | Restore emulation snapshot (requires saved snapshot) | x86, x64, ARM64 |
 | `hexcore.debug.exportTraceHeadless` | 60s | Export API/libc call trace as JSON | x86, x64, ARM64 |
@@ -171,6 +176,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.hex.dump` | `hexcore.hexview.dumpHeadless` |
 | `hexcore.hex.search` | `hexcore.hexview.searchHeadless` |
 | `hexcore.disasm.open` | `hexcore.disasm.openFile` |
+| `hexcore.debug.emulate.full` | `hexcore.debug.emulateFullHeadless` |
+| `hexcore.debug.run` | `hexcore.debug.emulateFullHeadless` |
 
 ---
 
@@ -287,6 +294,215 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 }
 ```
 
+### `hexcore.debug.emulateFullHeadless`
+
+Unified single-shot emulation: loads the binary, optionally configures STDIN and breakpoints, runs emulation up to the instruction budget, collects full state, and disposes the session.
+
+> **Note on IPC Smart Sync:** Emulation of x64 and ARM64 ELFs occurs in an isolated Node.js Worker process. To ensure the headless pipeline has perfect visibility of dynamically allocated memory (for `__printf_chk`, `puts`, `getline`), HexCore uses an aggressive Smart Sync strategy that seamlessly mirrors the Worker's stack and heap back to the host engine prior to any API interception. This guarantees flawless automated solving of complex VMs.
+
+```json
+{
+	"cmd": "hexcore.debug.emulateFullHeadless",
+	"args": {
+		"arch": "x64",
+		"stdin": "flag{test}\\n",
+		"maxInstructions": 500000,
+		"breakpoints": ["0x401000", "0x401050"],
+		"keepAlive": false
+	},
+	"output": { "path": "emulation-result.json" },
+	"timeoutMs": 300000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | `string` | *(from job)* | Path to binary (PE/ELF/raw). Inherited from job-level `file` if omitted in args. |
+| `arch` | `string` | auto-detect | Architecture: `x86`, `x64`, or `arm64`. Auto-detected from PE/ELF headers when omitted. |
+| `stdin` | `string` | — | STDIN buffer content. Escape sequences (`\n`, `\t`, `\r`, `\\`) are decoded. |
+| `maxInstructions` | `number` | `1000000` | Maximum instructions to execute before stopping. |
+| `breakpoints` | `string[]` | — | Array of `0x`-prefixed hex address strings where execution pauses. |
+| `keepAlive` | `boolean` | `false` | When `true`, preserves the emulation session after completion for subsequent commands. |
+| `output` | `{ path? }` | — | JSON output file path. Parent directories are created recursively. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns** `FullEmulationResult`:
+
+```json
+{
+	"file": "C:\\samples\\target.exe",
+	"architecture": "x64",
+	"fileType": "pe",
+	"crashed": false,
+	"state": {
+		"isRunning": false,
+		"isPaused": false,
+		"currentAddress": "0x401100",
+		"instructionsExecuted": 42350,
+		"lastError": null
+	},
+	"registers": { "rax": "0x0", "rcx": "0x1", "rip": "0x401100" },
+	"apiCalls": [
+		{ "dll": "kernel32.dll", "name": "GetStdHandle", "returnValue": "0x7" }
+	],
+	"stdout": "Hello, World!\n",
+	"memoryRegions": [
+		{ "address": "0x400000", "size": 4096, "permissions": "r-x", "name": ".text" }
+	],
+	"generatedAt": "2025-01-15T10:30:00.000Z"
+}
+```
+
+When emulation crashes, `crashed` is `true` and `crashError` contains the error message. All other fields are still populated with the state collected up to the crash point.
+
+**Errors:**
+- `emulateFullHeadless requires a "file" argument.` — `file` not provided.
+- Propagates `DebugEngine.startEmulation` errors (file not found, unsupported format).
+
+---
+
+### `hexcore.debug.writeMemoryHeadless`
+
+Write data to emulation memory. Requires an active emulation session (use `emulateFullHeadless` with `keepAlive: true` first, or the existing `emulateHeadless`).
+
+```json
+{
+	"cmd": "hexcore.debug.writeMemoryHeadless",
+	"args": {
+		"address": "0x401000",
+		"data": "SGVsbG8gV29ybGQ="
+	},
+	"output": { "path": "write-memory-result.json" },
+	"timeoutMs": 30000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `string` | *(required)* | Target memory address as `0x`-prefixed hex string. |
+| `data` | `string` | *(required)* | Data to write — base64-encoded string or `0x`-prefixed hex string. |
+| `output` | `{ path? }` | — | JSON output file path. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns:**
+
+```json
+{
+	"address": "0x401000",
+	"bytesWritten": 11,
+	"generatedAt": "2025-01-15T10:30:00.000Z"
+}
+```
+
+**Errors:**
+- `No active emulation session.` — no session is active.
+- `Invalid data format. Use base64 or 0x-prefixed hex.` — `data` is neither valid base64 nor `0x`-prefixed hex.
+
+---
+
+### `hexcore.debug.setRegisterHeadless`
+
+Set a CPU register value. Requires an active emulation session.
+
+```json
+{
+	"cmd": "hexcore.debug.setRegisterHeadless",
+	"args": {
+		"name": "rax",
+		"value": "0xDEADBEEF"
+	},
+	"output": { "path": "set-register-result.json" },
+	"timeoutMs": 30000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `name` | `string` | *(required)* | Register name (e.g., `rax`, `rip`, `eax`, `x0`). |
+| `value` | `string \| number` | *(required)* | Register value — `0x`-prefixed hex string or decimal number. |
+| `output` | `{ path? }` | — | JSON output file path. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns:**
+
+```json
+{
+	"register": "rax",
+	"value": "0xdeadbeef",
+	"architecture": "x64",
+	"generatedAt": "2025-01-15T10:30:00.000Z"
+}
+```
+
+**Errors:**
+- `No active emulation session.` — no session is active.
+- Propagates `DebugEngine.emulationSetRegister` error if register name is invalid for the current architecture.
+
+---
+
+### `hexcore.debug.setStdinHeadless`
+
+Set the STDIN buffer for emulation. Requires an active emulation session.
+
+```json
+{
+	"cmd": "hexcore.debug.setStdinHeadless",
+	"args": {
+		"input": "flag{my_secret}\\n"
+	},
+	"output": { "path": "set-stdin-result.json" },
+	"timeoutMs": 30000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `input` | `string` | *(required)* | STDIN content. Escape sequences (`\n`, `\t`, `\r`, `\\`) are decoded before setting the buffer. |
+| `output` | `{ path? }` | — | JSON output file path. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns:**
+
+```json
+{
+	"bytesSet": 16,
+	"generatedAt": "2025-01-15T10:30:00.000Z"
+}
+```
+
+**Errors:**
+- `No active emulation session.` — no session is active.
+
+---
+
+### `hexcore.debug.disposeHeadless`
+
+Dispose the active emulation session and free Unicorn engine resources. This command is idempotent — calling it without an active session returns success without error.
+
+```json
+{
+	"cmd": "hexcore.debug.disposeHeadless",
+	"output": { "path": "dispose-result.json" },
+	"timeoutMs": 30000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `output` | `{ path? }` | — | JSON output file path. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns:**
+
+```json
+{
+	"disposed": true,
+	"generatedAt": "2025-01-15T10:30:00.000Z"
+}
+```
+
+---
+
 ### `hexcore.pipeline.composeReport`
 ```json
 {
@@ -339,6 +555,11 @@ Relative output paths are resolved from `outDir`.
 - Expected for interactive commands (file pickers/prompts/UI-only actions).
 - Use the headless variant if one exists (e.g., `searchStringHeadless` instead of `searchString`).
 - For the debugger, use headless variants: `snapshotHeadless`, `restoreSnapshotHeadless`, `exportTraceHeadless`.
+- For single-shot emulation, use `emulateFullHeadless` (alias: `hexcore.debug.run`).
+
+### `No active emulation session.`
+- `writeMemoryHeadless`, `setRegisterHeadless`, and `setStdinHeadless` require an active session.
+- Start a session first with `emulateFullHeadless` (set `keepAlive: true`) or the existing `emulateHeadless`.
 
 ### `timed out after ...`
 - Increase `timeoutMs` for heavy binaries.

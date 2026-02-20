@@ -723,6 +723,252 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Emulate Full Headless — unified single-shot emulation (load → configure → run → collect → dispose)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.emulateFullHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			if (!filePath) {
+				throw new Error('emulateFullHeadless requires a "file" argument.');
+			}
+
+			const arch = typeof arg?.arch === 'string' ? arg.arch as ArchitectureType : undefined;
+			const stdin = typeof arg?.stdin === 'string' ? arg.stdin : undefined;
+			const maxInstructions = typeof arg?.maxInstructions === 'number' ? arg.maxInstructions : 1_000_000;
+			const breakpoints = Array.isArray(arg?.breakpoints) ? arg.breakpoints as string[] : undefined;
+			const keepAlive = arg?.keepAlive === true;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			console.log('[emulateFullHeadless] starting emulation...');
+			await engine.startEmulation(filePath, arch);
+
+			if (stdin) {
+				engine.setStdinBuffer(decodeEscapedInput(stdin));
+			}
+
+			if (breakpoints) {
+				for (const addr of breakpoints) {
+					engine.emulationSetBreakpoint(BigInt(addr));
+				}
+			}
+
+			let crashed = false;
+			let crashError = '';
+
+			try {
+				await engine.emulationRunCounted(maxInstructions);
+			} catch (error: any) {
+				crashed = true;
+				crashError = error.message || String(error);
+			}
+
+			const stateAfter = engine.getEmulationState();
+			const registers = engine.getFullRegisters();
+			const apiCalls = engine.getApiCallLog();
+			const stdout = engine.getStdoutBuffer();
+			const regions = await engine.getMemoryRegions();
+
+			if (!keepAlive) {
+				engine.disposeEmulation();
+			}
+
+			const exportData = {
+				file: filePath,
+				architecture: engine.getArchitecture(),
+				fileType: engine.getFileType(),
+				crashed,
+				crashError: crashError || undefined,
+				state: stateAfter ? {
+					isRunning: stateAfter.isRunning,
+					isPaused: stateAfter.isPaused,
+					currentAddress: '0x' + stateAfter.currentAddress.toString(16),
+					instructionsExecuted: stateAfter.instructionsExecuted,
+					lastError: stateAfter.lastError
+				} : null,
+				registers,
+				apiCalls: apiCalls.map(c => ({
+					dll: c.dll,
+					name: c.name,
+					returnValue: '0x' + (c.returnValue ?? 0n).toString(16)
+				})),
+				stdout,
+				memoryRegions: regions.map(r => ({
+					address: '0x' + r.address.toString(16),
+					size: r.size,
+					permissions: r.permissions,
+					name: r.name
+				})),
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				const status = crashed ? `CRASHED: ${crashError}` : 'OK';
+				vscode.window.showInformationMessage(
+					`Full emulation ${status}: ${filePath} (${engine.getArchitecture()})`
+				);
+			}
+
+			return exportData;
+		})
+	);
+
+	// Write Memory Headless — write data to emulation memory from pipeline
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.writeMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const addrStr = typeof arg?.address === 'string' ? arg.address : undefined;
+			const dataStr = typeof arg?.data === 'string' ? arg.data : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			if (!addrStr) {
+				throw new Error('writeMemoryHeadless requires an "address" argument (hex string).');
+			}
+			if (!dataStr) {
+				throw new Error('writeMemoryHeadless requires a "data" argument (base64 or 0x-prefixed hex).');
+			}
+
+			const state = engine.getEmulationState();
+			if (!state) {
+				throw new Error('No active emulation session.');
+			}
+
+			const address = BigInt(addrStr.startsWith('0x') ? addrStr : '0x' + addrStr);
+			const buffer = decodeDataParam(dataStr);
+			await engine.emulationWriteMemory(address, buffer);
+
+			const exportData = {
+				address: '0x' + address.toString(16),
+				bytesWritten: buffer.length,
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`Wrote ${buffer.length} bytes to 0x${address.toString(16)}`);
+			}
+
+			return exportData;
+		})
+	);
+
+	// Set Register Headless — set CPU register value from pipeline
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.setRegisterHeadless', async (arg?: Record<string, unknown>) => {
+			const name = typeof arg?.name === 'string' ? arg.name : undefined;
+			const rawValue = arg?.value;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			if (!name) {
+				throw new Error('setRegisterHeadless requires a "name" argument (register name).');
+			}
+			if (rawValue === undefined || rawValue === null) {
+				throw new Error('setRegisterHeadless requires a "value" argument (hex string or decimal number).');
+			}
+
+			const state = engine.getEmulationState();
+			if (!state) {
+				throw new Error('No active emulation session.');
+			}
+
+			// Parse value: hex string (0x-prefixed) or decimal number
+			let parsedValue: bigint;
+			if (typeof rawValue === 'string' && rawValue.startsWith('0x')) {
+				parsedValue = BigInt(rawValue);
+			} else {
+				parsedValue = BigInt(Number(rawValue));
+			}
+
+			await engine.emulationSetRegister(name, parsedValue);
+
+			const exportData = {
+				register: name,
+				value: '0x' + parsedValue.toString(16),
+				architecture: engine.getArchitecture(),
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`Set ${name} = 0x${parsedValue.toString(16)}`);
+			}
+
+			return exportData;
+		})
+	);
+
+	// Set Stdin Headless — set STDIN buffer for emulation from pipeline
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.setStdinHeadless', async (arg?: Record<string, unknown>) => {
+			const input = typeof arg?.input === 'string' ? arg.input : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			const state = engine.getEmulationState();
+			if (!state) {
+				throw new Error('No active emulation session.');
+			}
+
+			const decodedInput = decodeEscapedInput(input ?? '');
+			engine.setStdinBuffer(decodedInput);
+
+			const exportData = {
+				bytesSet: Buffer.byteLength(decodedInput),
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`STDIN buffer set: ${exportData.bytesSet} bytes`);
+			}
+
+			return exportData;
+		})
+	);
+
+	// Dispose Headless — release emulation session resources from pipeline
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.disposeHeadless', async (arg?: Record<string, unknown>) => {
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			engine.disposeEmulation();
+
+			const exportData = {
+				disposed: true as const,
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage('Emulation session disposed.');
+			}
+
+			return exportData;
+		})
+	);
+
 	console.log('HexCore Debugger extension activated');
 }
 
@@ -766,4 +1012,19 @@ function decodeEscapedInput(value: string): string {
 		.replace(/\\n/g, '\n')
 		.replace(/\\t/g, '\t')
 		.replace(/\\\\/g, '\\');
+}
+
+export function decodeDataParam(data: string): Buffer {
+	if (data.startsWith('0x') || data.startsWith('0X')) {
+		const hex = data.slice(2);
+		if (hex.length === 0 || !/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+			throw new Error('Invalid data format. Use base64 or 0x-prefixed hex.');
+		}
+		return Buffer.from(hex, 'hex');
+	}
+	const buf = Buffer.from(data, 'base64');
+	if (buf.length === 0 && data.length > 0) {
+		throw new Error('Invalid data format. Use base64 or 0x-prefixed hex.');
+	}
+	return buf;
 }
