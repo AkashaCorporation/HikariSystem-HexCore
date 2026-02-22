@@ -43,7 +43,14 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Transforms/Utils/Cloning.h>
 
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/GlobalAlias.h>
+#include <llvm/IR/IRBuilder.h>
+
 #include <sstream>
+#include <set>
+#include <vector>
 #include <filesystem>
 
 // Forward-declare Win32 functions to avoid #include <windows.h> which
@@ -444,10 +451,151 @@ LiftResult RemillLifter::DoLift(
 
 	result.bytesConsumed = offset;
 
-	// Print the function IR to string
+	// Ensure every basic block has a terminator.  Remill's LiftIntoBlock
+	// leaves blocks "open" (no ret/br) because it expects the caller to
+	// wire up control flow.  Without a terminator, Module::print() emits
+	// a block that ends abruptly and parseAssemblyString rejects it with
+	// "expected instruction opcode" at the closing '}'.
+	for (auto &BB : *func) {
+		if (!BB.getTerminator()) {
+			llvm::IRBuilder<> builder(&BB);
+			// The lifted function signature is: ptr (ptr %state, i64 %pc, ptr %memory)
+			// Return the memory pointer (3rd argument) to match the Remill convention.
+			builder.CreateRet(func->getArg(2));
+		}
+	}
+
+	// Print the lifted function IR including all type definitions it needs.
+	// We use Module::print() on a stripped module (see below) which
+	// correctly emits ALL type definitions, declarations, metadata nodes,
+	// and the function body.  Previous approach of manually collecting
+	// types from GEP instructions was fragile and missed transitive
+	// dependencies (causing "base element of getelementptr must be sized"
+	// errors when the IR was re-parsed by Rellic).
+
+	// --- Build IR string using Module::print() ---
+	// Instead of manually collecting types, declarations, and metadata,
+	// we strip the cloned module down to only the lifted function and
+	// its dependencies, then use Module::print() which correctly emits
+	// ALL type definitions, function declarations, metadata nodes, and
+	// the function body.  This is the most robust approach — LLVM knows
+	// how to serialize its own modules.
+
+	// Aggressively strip the cloned module down to ONLY the lifted
+	// function and its direct dependencies.  The semantics module
+	// contains thousands of ISEL_* globals and instruction semantics
+	// functions that bloat the IR and can cause parse errors in Rellic.
+	// We keep: the lifted function, functions it calls (as declarations),
+	// and globals it references.  Everything else is removed.
+	{
+		// 1. Collect all Values reachable from the lifted function
+		std::set<llvm::Function*> reachableFunctions;
+		std::set<llvm::GlobalVariable*> reachableGlobals;
+		std::vector<llvm::Function*> worklist;
+
+		reachableFunctions.insert(func);
+		worklist.push_back(func);
+
+		while (!worklist.empty()) {
+			llvm::Function* current = worklist.back();
+			worklist.pop_back();
+
+			for (auto &BB : *current) {
+				for (auto &I : BB) {
+					// Track called functions
+					if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+						if (auto *CalledF = CI->getCalledFunction()) {
+							if (reachableFunctions.insert(CalledF).second) {
+								worklist.push_back(CalledF);
+							}
+						}
+					}
+					// Track referenced globals from all operands
+					for (unsigned op = 0; op < I.getNumOperands(); ++op) {
+						if (auto *GV = llvm::dyn_cast<llvm::GlobalVariable>(I.getOperand(op))) {
+							reachableGlobals.insert(GV);
+						}
+					}
+				}
+			}
+		}
+
+		// 2. Remove all aliases (they reference ISEL functions and
+		//    can cause parse errors)
+		std::vector<llvm::GlobalAlias*> aliasesToRemove;
+		for (auto &A : liftModule->aliases()) {
+			aliasesToRemove.push_back(&A);
+		}
+		for (auto *A : aliasesToRemove) {
+			A->replaceAllUsesWith(llvm::UndefValue::get(A->getType()));
+			A->eraseFromParent();
+		}
+
+		// 3. Remove all IFuncs
+		std::vector<llvm::GlobalIFunc*> ifuncsToRemove;
+		for (auto &IF : liftModule->ifuncs()) {
+			ifuncsToRemove.push_back(&IF);
+		}
+		for (auto *IF : ifuncsToRemove) {
+			IF->replaceAllUsesWith(llvm::UndefValue::get(IF->getType()));
+			IF->eraseFromParent();
+		}
+
+		// 4. Remove unreachable globals first (breaks references
+		//    that keep functions alive)
+		std::vector<llvm::GlobalVariable*> gvToRemove;
+		for (auto &GV : liftModule->globals()) {
+			if (reachableGlobals.count(&GV) == 0) {
+				gvToRemove.push_back(&GV);
+			}
+		}
+		for (auto *GV : gvToRemove) {
+			GV->replaceAllUsesWith(llvm::UndefValue::get(GV->getType()));
+			GV->eraseFromParent();
+		}
+
+		// 5. Remove unreachable functions
+		std::vector<llvm::Function*> fnToRemove;
+		for (auto &F : *liftModule) {
+			if (reachableFunctions.count(&F) == 0) {
+				fnToRemove.push_back(&F);
+			}
+		}
+		for (auto *F : fnToRemove) {
+			F->replaceAllUsesWith(llvm::UndefValue::get(F->getType()));
+			F->eraseFromParent();
+		}
+
+		// 6. Strip bodies from callee functions (keep as declarations)
+		for (auto &F : *liftModule) {
+			if (&F != func && !F.isDeclaration()) {
+				F.deleteBody();
+			}
+		}
+
+		// 7. Remove named metadata that may reference deleted values
+		//    (e.g. !llvm.module.flags, !llvm.ident are safe to keep,
+		//    but others may cause parse errors)
+		std::vector<llvm::NamedMDNode*> namedMDToRemove;
+		for (auto &NMD : liftModule->named_metadata()) {
+			llvm::StringRef name = NMD.getName();
+			// Keep only essential module-level metadata
+			if (name != "llvm.module.flags" && name != "llvm.ident" &&
+				!name.starts_with("remill")) {
+				namedMDToRemove.push_back(&NMD);
+			}
+		}
+		for (auto *NMD : namedMDToRemove) {
+			NMD->eraseFromParent();
+		}
+	}
+
+	// Print the stripped module — this emits everything correctly:
+	// target triple, data layout, type definitions, declarations,
+	// the lifted function, and all metadata nodes.
 	std::string irStr;
 	llvm::raw_string_ostream os(irStr);
-	func->print(os);
+	liftModule->print(os, nullptr);
 	os.flush();
 
 	result.ir = irStr;

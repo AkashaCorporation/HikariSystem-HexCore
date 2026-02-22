@@ -232,8 +232,25 @@
 				"category": "HexCore Automation"
 			},
 			{
+				"command": "hexcore.disasm.disassembleAtHeadless",
+				"title": "Disassemble At Address (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.disasm.liftToIR",
 				"title": "[Experimental] Lift to LLVM IR",
+				"category": "HexCore Disassembler",
+				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.rellic.decompile",
+				"title": "[Experimental] Decompile to C",
+				"category": "HexCore Disassembler",
+				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.rellic.decompileIR",
+				"title": "[Experimental] Decompile IR to C",
 				"category": "HexCore Disassembler",
 				"icon": "$(beaker)"
 			}
@@ -261,6 +278,11 @@
 					"command": "hexcore.disasm.liftToIR",
 					"group": "navigation",
 					"when": "activeWebviewPanelId == hexcore.disassembler && hexcore:remillAvailable"
+				},
+				{
+					"command": "hexcore.rellic.decompile",
+					"group": "navigation",
+					"when": "activeWebviewPanelId == hexcore.disassembler && hexcore:rellicAvailable && hexcore:remillAvailable"
 				}
 			],
 			"view/title": [
@@ -392,10 +414,7 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"dependencies": {
-		"hexcore-capstone": "file:../hexcore-capstone",
-		"hexcore-common": "file:../hexcore-common",
-		"hexcore-llvm-mc": "file:../hexcore-llvm-mc",
-		"hexcore-remill": "file:../hexcore-remill"
+		"hexcore-common": "file:../hexcore-common"
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.0",

@@ -1,4 +1,4 @@
-# HexCore Automation — v3.5.4
+# HexCore Automation — v3.6.0
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -94,6 +94,10 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.disasm.checkConstants` | 90s | Validate numeric annotations against instruction immediates | All |
 | `hexcore.disasm.searchStringHeadless` | 120s | Search string references (headless variant) | All |
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
+| `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble N instructions starting at a given address | x86, x64, ARM, ARM64, MIPS |
+| `hexcore.disasm.liftToIR` | 120s | Lift machine code to LLVM IR via Remill engine | x86, x64 |
+| `hexcore.rellic.decompile` | 180s | Decompile binary to pseudo-C (lift + decompile in one step) | x86, x64 |
+| `hexcore.rellic.decompileIR` | 120s | Decompile pre-lifted LLVM IR text to pseudo-C | x86, x64 |
 
 ### Hex Viewer
 
@@ -161,6 +165,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.yara.threatReport` | Renders output from prior UI scan context |
 | `hexcore.debug.emulate` | Opens file picker and UI |
 | `hexcore.debug.emulateWithArch` | Opens prompts and UI |
+| `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration |
 | `hexcore.pipeline.runJob` | Recursive pipeline invocation is not supported |
 
 ---
@@ -178,6 +183,10 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.disasm.open` | `hexcore.disasm.openFile` |
 | `hexcore.debug.emulate.full` | `hexcore.debug.emulateFullHeadless` |
 | `hexcore.debug.run` | `hexcore.debug.emulateFullHeadless` |
+| `hexcore.decompile` | `hexcore.rellic.decompile` |
+| `hexcore.decompile.ir` | `hexcore.rellic.decompileIR` |
+| `hexcore.liftir` | `hexcore.disasm.liftToIR` |
+| `hexcore.disasm.disassembleAt` | `hexcore.disasm.disassembleAtHeadless` |
 
 ---
 
@@ -190,6 +199,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **PE Analyzer** is PE-format only. Use `hexcore.elfanalyzer.analyze` for ELF binaries.
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
+- **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
+- **Rellic Decompiler** (Experimental) walks LLVM IR and emits pseudo-C with mnemonic annotations. No Clang AST or Z3 solver — real decompilation passes planned for v3.6.x.
 
 ---
 
@@ -249,6 +260,106 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
   "args": { "functionAddress": "0x401000" }
 }
 ```
+
+### `hexcore.disasm.disassembleAtHeadless`
+
+Disassemble N instructions starting at a given virtual address. Requires prior `analyzeAll` or a loaded binary.
+
+```json
+{
+  "cmd": "hexcore.disasm.disassembleAtHeadless",
+  "args": {
+    "address": "0x401000",
+    "count": 50
+  },
+  "output": { "path": "disasm-at-result.json" },
+  "timeoutMs": 120000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
+| `count` | `number` | `20` | Number of instructions to disassemble. |
+| `output` | `{ path? }` | — | JSON output file path. |
+
+### `hexcore.disasm.liftToIR`
+
+Lift machine code to LLVM IR using the Remill engine. Requires a loaded binary with disassembly data.
+
+```json
+{
+  "cmd": "hexcore.disasm.liftToIR",
+  "args": {
+    "address": "0x401000",
+    "count": 100
+  },
+  "output": { "path": "lifted-ir.ll" },
+  "timeoutMs": 120000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
+| `count` | `number` | `50` | Number of instructions to lift. |
+| `output` | `{ path? }` | — | Output file path for LLVM IR text. |
+
+### `hexcore.rellic.decompile` *(Experimental)*
+
+Decompile binary to pseudo-C in one step: lifts machine code via Remill, then decompiles the LLVM IR via Rellic. This is the recommended single-shot decompile command for pipelines.
+
+```json
+{
+  "cmd": "hexcore.rellic.decompile",
+  "args": {
+    "address": "0x401000",
+    "count": 200
+  },
+  "output": { "path": "decompiled.c" },
+  "timeoutMs": 180000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
+| `count` | `number` | `100` | Number of instructions to lift before decompiling. |
+| `output` | `{ path? }` | — | Output file path for pseudo-C code. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "code": "// Pseudo-C generated by HexCore Rellic\nvoid * lifted_...",
+  "functionCount": 1,
+  "instructionsLifted": 87,
+  "generatedAt": "2026-02-21T10:30:00.000Z"
+}
+```
+
+> **Note:** Rellic is marked Experimental in v3.5.x. The pseudo-C output uses mnemonic comments (`// MOV`, `// ADD`, `// CMP`, `// JB`, etc.) to annotate each decompiled statement. Real Clang AST-based decompilation passes are planned for v3.6.x.
+
+### `hexcore.rellic.decompileIR` *(Experimental)*
+
+Decompile pre-lifted LLVM IR text to pseudo-C. Use this when you already have IR from `liftToIR` and want to decompile it separately.
+
+```json
+{
+  "cmd": "hexcore.rellic.decompileIR",
+  "args": {
+    "irText": "; ModuleID = ...\ndefine void @lifted_..."
+  },
+  "output": { "path": "decompiled-from-ir.c" },
+  "timeoutMs": 120000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `irText` | `string` | *(required)* | LLVM IR text to decompile. |
+| `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
 ### `hexcore.strings.extract`
 ```json

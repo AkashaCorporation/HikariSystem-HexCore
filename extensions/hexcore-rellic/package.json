@@ -1,0 +1,74 @@
+{
+  "name": "hexcore-rellic",
+  "version": "0.1.0",
+  "description": "N-API bindings for Rellic — decompiles LLVM IR to pseudo-C",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js",
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "prebuild": "prebuildify --napi --strip",
+    "test": "node test/test.js",
+    "clean": "node-gyp clean"
+  },
+  "keywords": [
+    "rellic",
+    "decompiler",
+    "llvm",
+    "llvm-ir",
+    "pseudo-c",
+    "decompilation",
+    "reverse-engineering",
+    "binary-analysis",
+    "clang",
+    "z3",
+    "native",
+    "napi",
+    "async"
+  ],
+  "author": "HikariSystem <hikarisystem@example.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/LXrdKnowkill/hexcore-rellic.git"
+  },
+  "bugs": {
+    "url": "https://github.com/LXrdKnowkill/hexcore-rellic/issues"
+  },
+  "homepage": "https://github.com/LXrdKnowkill/hexcore-rellic#readme",
+  "engines": {
+    "vscode": "^1.0.0",
+    "node": ">=18.0.0"
+  },
+  "activationEvents": [],
+  "files": [
+    "src/",
+    "deps/llvm/include/",
+    "deps/llvm/lib/",
+    "deps/clang/include/",
+    "deps/clang/lib/",
+    "deps/z3/include/",
+    "deps/z3/lib/",
+    "deps/rellic/include/",
+    "deps/rellic/lib/",
+    "prebuilds/",
+    "binding.gyp",
+    "index.js",
+    "index.mjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "binary": {
+    "napi_versions": [8]
+  },
+  "devDependencies": {}
+}

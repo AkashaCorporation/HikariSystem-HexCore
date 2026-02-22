@@ -109,6 +109,7 @@ jobs:
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-better-sqlite3 && npm ci
           cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Remill Semantics
         run: |
@@ -260,6 +261,11 @@ jobs:
         continue-on-error: true
         run: |
           cd extensions/hexcore-remill && node ../../scripts/hexcore-native-install.js
+
+      - name: Fetch HexCore Rellic Prebuilds (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Remill Semantics (Linux)
         continue-on-error: true

@@ -52,7 +52,8 @@ Cada engine nativa tem um repo standalone onde o código-fonte e as releases de 
 - `LXrdKnowkill/hexcore-unicorn`
 - `LXrdKnowkill/hexcore-llvm-mc`
 - `LXrdKnowkill/hexcore-better-sqlite3`
-- `LXrdKnowkill/hexcore-remill` (experimental)
+- `LXrdKnowkill/hexcore-remill`
+- `LXrdKnowkill/hexcore-rellic` (experimental)
 
 O monorepo contém uma cópia sincronizada de cada engine em `extensions/hexcore-{name}/`.
 
@@ -360,7 +361,7 @@ npm test
 O Remill usa Sleigh (Ghidra) que define `ghidra::sleightokentype::CHAR`. Isso conflita com `winnt.h` que faz `typedef char CHAR`. A solução é forward-declarar `GetModuleHandleA` e `GetModuleFileNameA` via `extern "C" __declspec(dllimport)` em vez de incluir `<windows.h>`.
 
 **Workflow CI:**
-O Remill está no job `prebuild-windows-experimental`, que só roda quando o workflow é disparado manualmente com "Include experimental engines" marcado. Isso evita builds desnecessários no CI normal.
+O Remill e o Rellic estão no job principal `prebuild-windows` junto com Capstone, Unicorn, LLVM MC e better-sqlite3. Ambos baixam deps pesadas (zip de libs estáticas) da GitHub Release do repo standalone antes de compilar.
 
 ### Prebuild não encontrado no install
 
@@ -419,16 +420,68 @@ node ../../scripts/hexcore-native-install.js
 
 ---
 
-**Engines**: Capstone, Unicorn, LLVM MC, better-sqlite3, Remill (experimental)
+**Engines**: Capstone, Unicorn, LLVM MC, better-sqlite3, Remill, Rellic (experimental)
 **N-API**: v8 | **C++**: 17+ | **Node**: 18+
 
 ---
+
+## ⚠️ Monorepo vs Standalone — Diferenças Críticas
+
+O `package.json` no monorepo (`extensions/hexcore-{name}/`) e no standalone (`StandalonePackagesHexCore/hexcore-{name}/`) são **DIFERENTES** em dois campos críticos:
+
+### Campos que DEVEM ser diferentes
+
+| Campo | Monorepo | Standalone |
+|-------|----------|------------|
+| `scripts.install` | `"node ../../scripts/hexcore-native-install.js"` | `"prebuild-install -r napi \|\| node-gyp rebuild"` |
+| `devDependencies` | `{}` (vazio — build tools ficam no standalone) | `{ "prebuildify": "^6.0.0", "prebuild-install": "^7.1.0", "node-addon-api": "^8.0.0", "node-gyp": "^10.0.0" }` |
+
+### Por que são diferentes?
+
+- **Monorepo**: O install script usa `hexcore-native-install.js` que baixa prebuilds da GitHub Release. DevDependencies ficam vazias porque o monorepo não compila engines — usa prebuilds prontos.
+- **Standalone**: O install script usa `prebuild-install` (padrão npm). DevDependencies incluem todas as ferramentas de build porque o CI compila o `.node` nesse repo.
+
+### Arquivo extra no Standalone
+
+- `package-lock.json` — **OBRIGATÓRIO** no standalone (o CI usa `npm ci` que exige lockfile). No monorepo, o lockfile raiz do VS Code gerencia tudo.
+
+### O que o `_copy_to_standalone.py` NÃO faz (e deveria)
+
+O script de sync copia os arquivos do monorepo para o standalone, mas **NÃO** ajusta automaticamente:
+1. O `scripts.install` (fica com o path `../../scripts/` que não existe no standalone)
+2. O `devDependencies` (fica vazio)
+3. O `package-lock.json` (não é gerado)
+
+**Isso é a causa #1 de falhas no CI de prebuilds.**
+
+### Checklist de Sync Standalone (OBRIGATÓRIO)
+
+Após rodar `_copy_to_standalone.py`, SEMPRE executar:
+
+```powershell
+# 1. Corrigir install script
+$pkg = Get-Content package.json -Raw | ConvertFrom-Json
+$pkg.scripts.install = "prebuild-install -r napi || node-gyp rebuild"
+$pkg.devDependencies = @{
+  "prebuildify" = "^6.0.0"
+  "prebuild-install" = "^7.1.0"
+  "node-addon-api" = "^8.0.0"
+  "node-gyp" = "^10.0.0"
+}
+$pkg | ConvertTo-Json -Depth 10 | Set-Content package.json -Encoding UTF8
+
+# 2. Gerar/atualizar package-lock.json
+npm install --package-lock-only --ignore-scripts
+
+# 3. Verificar
+node -e "const p=require('./package.json'); console.log('install:', p.scripts.install); console.log('devDeps:', Object.keys(p.devDependencies))"
+```
 
 ## Checklist de CI / Preflight
 
 Antes de submeter um PR com mudanças em extensões nativas, verificar:
 
-### package.json
+### package.json (Monorepo)
 - [ ] `"name"` segue o padrão `hexcore-{name}` (hyphen, não underscore)
 - [ ] `"version"` foi bumpada se houve mudança no código nativo
 - [ ] `"main"` aponta para `"./index.js"`
@@ -439,9 +492,15 @@ Antes de submeter um PR com mudanças em extensões nativas, verificar:
 - [ ] `"install"` usa `"node ../../scripts/hexcore-native-install.js"`
 - [ ] `"binary.napi_versions"` é `[8]`
 - [ ] Zero dependências runtime (sem `bindings`, sem `node-gyp-build`)
-- [ ] `devDependencies` inclui: `node-addon-api`, `node-gyp`, `prebuildify`, `prebuild-install`
+- [ ] `devDependencies` está VAZIO `{}` (build tools ficam no standalone)
 
-### package-lock.json
+### package.json (Standalone)
+- [ ] `"install"` usa `"prebuild-install -r napi || node-gyp rebuild"`
+- [ ] `devDependencies` inclui: `prebuildify`, `prebuild-install`, `node-addon-api`, `node-gyp`
+- [ ] `package-lock.json` existe e está sincronizado
+
+### package-lock.json (Standalone)
+- [ ] Existe no repo standalone
 - [ ] Está sincronizado com package.json (`npm install --package-lock-only`)
 - [ ] Não contém deps removidas (rodar `npm ci` localmente para validar)
 
@@ -485,3 +544,100 @@ Antes de submeter um PR com mudanças em extensões nativas, verificar:
 2. **Sempre** usar hyphen no nome do pacote npm — convenção npm
 3. O nome do `.node` gerado pelo prebuildify segue o `target_name`
 4. O path de fallback no `index.js` deve corresponder ao `target_name`
+
+---
+
+## ⛔ Extensões Consumidoras — NUNCA declarar engines nativas como dependencies
+
+### Regra Absoluta
+
+Extensões que **consomem** engines nativas (ex: `hexcore-disassembler` usa capstone, llvm-mc, remill, rellic) **NUNCA** devem declarar essas engines em `dependencies` ou `optionalDependencies` do `package.json`.
+
+A única dependência permitida é `hexcore-common` (TypeScript puro, sem código nativo).
+
+### Por que essa regra existe
+
+O build system do VS Code (`build/lib/extensions.ts`) divide extensões em dois grupos:
+
+1. **Non-native** — processadas por `packageNonNativeLocalExtensionsStream()`
+2. **Native** — processadas por `packageNativeLocalExtensionsStream()` (listadas em `nativeExtensions[]`)
+
+O disassembler é **non-native** (não está na lista `nativeExtensions`). Quando o gulp processa ele, roda `vsce.listFiles()` que internamente executa `npm list --production --parseable --depth=99999`. Esse comando tenta resolver TODAS as `dependencies`, incluindo `"hexcore-remill": "file:../hexcore-remill"`.
+
+No CI, remill e rellic são processados como **native** em um step separado. Quando o `npm list` do disassembler tenta resolver o symlink `file:../hexcore-remill`, o diretório pode não estar pronto ou o layout é diferente — e o build inteiro falha após ~1h45min.
+
+### Histórico de falhas
+
+| Versão | O que aconteceu | Commit do fix |
+|--------|----------------|---------------|
+| v3.4.0 | Adicionou `hexcore-remill` nas deps → CI quebrou | `846706d` removeu remill |
+| v3.5.2 | Remill voltou pras deps (regressão) | Não detectado na época |
+| v3.6.0 | Adicionou `hexcore-rellic` também → CI quebrou após 1h36min | Removeu todas as 4 engines |
+
+### Como as engines são carregadas no runtime
+
+Todas as engines usam `loadNativeModule()` do `hexcore-common` com `candidatePaths` relativos:
+
+```typescript
+// Em capstoneWrapper.ts, remillWrapper.ts, rellicWrapper.ts, llvmMcWrapper.ts
+const candidatePaths = [
+    path.join(__dirname, '..', '..', 'hexcore-{engine}'),      // extensions/hexcore-{engine}
+    path.join(__dirname, '..', '..', '..', 'hexcore-{engine}') // fallback
+];
+const result = loadNativeModule<Module>({
+    moduleName: 'hexcore-{engine}',
+    candidatePaths
+});
+```
+
+No build final (.exe), todas as extensões ficam lado a lado em `resources/app/extensions/`. O `__dirname` do disassembler é `extensions/hexcore-disassembler/out/`, então `../../hexcore-capstone` resolve corretamente para `extensions/hexcore-capstone/`.
+
+Os `import type` do TypeScript (ex: `import type { Instruction } from 'hexcore-capstone'`) são **apagados** na compilação — zero impacto no runtime.
+
+### Como o build final inclui tudo
+
+O gulp task `vscode-win32-x64-min` executa:
+
+1. `compileNonNativeExtensionsBuildTask` → processa disassembler, capstone, llvm-mc, etc. → `.build/extensions/`
+2. `compileNativeExtensionsBuildTask` → processa remill, rellic → `.build/extensions/`
+3. `packageTask` → copia TUDO de `.build/extensions/**` para o Electron final
+
+Cada extensão é copiada **independentemente**. As `dependencies` do package.json do disassembler **NÃO controlam** o que vai no build final.
+
+### Regra para o package.json do disassembler
+
+```json
+{
+  "dependencies": {
+    "hexcore-common": "file:../hexcore-common"
+  }
+}
+```
+
+Apenas `hexcore-common` — NADA de capstone, llvm-mc, remill, rellic.
+
+### Regra para `build/lib/extensions.ts`
+
+A lista `nativeExtensions` controla quais extensões são processadas no step nativo:
+
+```typescript
+const nativeExtensions = [
+    'microsoft-authentication',
+    'hexcore-remill',
+    'hexcore-rellic',
+];
+```
+
+Capstone, llvm-mc, unicorn e better-sqlite3 **NÃO** estão nessa lista porque seus prebuilds são baixados antes do build e ficam dentro do próprio diretório da extensão. Remill e rellic estão na lista porque têm deps pesadas que precisam de tratamento especial.
+
+### Checklist para agentes
+
+Ao adicionar uma nova engine nativa ao disassembler (ou qualquer extensão consumidora):
+
+- [ ] **NÃO** adicionar a engine em `dependencies` do consumidor
+- [ ] Usar `import type` para tipos (apagado na compilação)
+- [ ] Usar `loadNativeModule()` com `candidatePaths` relativos para carregar no runtime
+- [ ] Adicionar a engine na lista `nativeExtensions` em `build/lib/extensions.ts` se ela tiver deps pesadas
+- [ ] Adicionar o step de fetch de prebuilds no `hexcore-installer.yml` (Windows E Linux)
+- [ ] Adicionar o step de compile no `hexcore-installer.yml` se a engine tiver TypeScript
+

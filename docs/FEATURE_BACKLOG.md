@@ -279,7 +279,7 @@
 - Depends on Remill (LLVM IR pipeline)
 - N-API bindings, Windows build
 - **Status**: `NEXT`
-- **Target**: v4.0.0
+- **Target**: v3.6.0
 
 ### hexcore-sleigh (Optional / Parked)
 - Unofficial CMake build of Ghidra's SLEIGH (lifting-bits/sleigh)
@@ -367,6 +367,47 @@ Items discovered during the comprehensive stress test and audit against an HTB I
 - **Why**: All hex viewer commands require the webview open. No programmatic hex data extraction possible.
 - **Priority**: P2
 - **Target**: v3.6.0+
+
+---
+
+## v3.5.4 VVM Intelligence Audit — New Backlog Items
+
+Items discovered during the comprehensive stress test and audit against a complex custom VM CTF challenge (2026-02-19). These features were evaluated against the impending v3.6.0 Rellic Integration roadmap.
+
+### 28. Robust Runtime Memory Disassembly (mmap regions)
+- **Status**: `PENDING`
+- **Feature**: Provide a mechanism in the headless/pipeline debugger to dump an arbitrary region of dynamically allocated (mmap'd) memory and immediately pass it to the Disassembler engine to extract runtime-decrypted opcodes or handlers.
+- **Why**: The HexCore emulator executed the handlers flawlessly, but standard static analysis couldn't disassemble them because they only exist in memory after XOR decryption.
+- **Priority**: P1 (High Value)
+- **Target**: v3.6.1 (Post-Rellic Integration)
+
+### 29. Headless Breakpoint Snapshots & Dumps
+- **Status**: `PENDING`
+- **Feature**: Expand the `"breakpoints": []` capability in `emulateFullHeadless` so that hitting a breakpoint doesn't just halt, but can automatically trigger a mini-snapshot or a structured dump of registers and stack before continuing.
+- **Why**: Currently "roda tudo e vê o resultado" (run and collect at the end). Analysts need to inspect packed values or shift results *during* the execution flow at specific checkpoints.
+- **Priority**: P1
+- **Target**: v3.6.1 (Post-Rellic Integration)
+
+### 30. Automated VM Pattern Heuristics (Dispatcher/Handler detection)
+- **Status**: `PENDING`
+- **Feature**: Run basic Graph Theory algorithms on basic blocks to automatically flag large Dispatch Loops, Handler Tables, and Bytecode Arrays.
+- **Why**: Reduces human cognitive load when first opening a virtualized binary.
+- **Priority**: P2 / P3 (Predictive Analysis)
+- **Target**: v3.7.0+
+
+### 31. Zero-Copy IPC Shared Memory (SharedArrayBuffer)
+- **Status**: `PENDING`
+- **Feature**: Erradicate the N-API context switch overhead during Unicorn Hook callbacks by exposing the C++ CPU state block directly to the Node.js V8 engine via a `BigUint64Array` typed view of an external ArrayBuffer.
+- **Why**: To push emulation speeds from 50k inst/sec to 10M+ inst/sec by eliminating JSON-RPC marshalling and N-API transition latencies during heavy API hooking. Also includes Native Hook Filters in C++.
+- **Priority**: P3 (Architectural Refactor / Advanced Niche)
+- **Target**: v4.0.0
+
+### 32. Basic Symbolic Execution (Constraint Solving)
+- **Status**: `PENDING`
+- **Feature**: Integrate a lightweight symbolic execution engine (via an SMT solver like Z3) to mark specific inputs as symbolic and track constraints to auto-solve VM bytecode challenges.
+- **Why**: Simplifies constraint extraction from complex VM algorithms.
+- **Priority**: P4 (Titantic Project)
+- **Target**: v4.0.0+
 
 ---
 

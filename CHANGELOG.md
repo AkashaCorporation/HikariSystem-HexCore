@@ -5,6 +5,43 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.6.0] - 2026-02-21 - "Decompiler & Deep Analysis"
+
+> **Major Feature Release** — Rellic decompiler (experimental), disassembleAt headless command, emulateFullHeadless PE32 crash fix, searchString xref fix, and full pipeline integration for decompilation workflows.
+
+### Added
+
+- **Rellic Decompiler (Experimental)** — New native N-API engine (`hexcore-rellic`) that decompiles LLVM IR to pseudo-C with mnemonic annotations. Walks Remill-lifted IR directly and generates annotated C output with register variables, basic blocks, arithmetic, comparisons, branches, memory operations, and SSE/FP instructions. Supports 30+ x86/x64 mnemonic handlers (MOV, ADD, SUB, CMP, JMP, XOR, OR, SHL, SHR, LEA, INC, DEC, IMUL, MOVD, MOVSX, ADDSS, SUBSS, MULSS, MOVSS_MEM, CVTDQ2PS, NOP, and all conditional jumps). Built on LLVM 18 + Clang 18 + Z3.
+- **`hexcore.rellic.decompile`** — Single-shot pipeline command: lifts machine code via Remill then decompiles to pseudo-C in one step.
+- **`hexcore.rellic.decompileIR`** — Decompile pre-lifted LLVM IR text to pseudo-C.
+- **`hexcore.rellic.decompileUI`** — Interactive decompile panel with editor integration.
+- **`hexcore.disasm.disassembleAtHeadless`** — Disassemble N instructions starting at a given virtual address. Full headless handler with address parsing, instruction fetching, JSON output.
+- **`hexcore.disasm.liftToIR`** — Lift machine code to LLVM IR via Remill engine (pipeline-safe).
+- **Remill `cleanIR()` post-processing** — Strips Remill-specific metadata, normalizes function declarations, and cleans memory intrinsics for Rellic pipeline compatibility.
+- **Deep Reverse Engineering job template** — New automation template: disassemble → lift IR → decompile → strings → base64 → report.
+- **PE32 Worker process isolation** — Dedicated Worker for PE32 emulation with IPC message protocol, preventing Extension Host crashes from native segfaults.
+
+### Fixed
+
+- **`emulateFullHeadless` PE32 crash** — Extension Host crashed instantly and entered restart loop when running emulateFullHeadless on PE32 binaries. Root cause: native segfault in Unicorn engine propagated to Extension Host process. Fix: Worker process isolation (same pattern as x64 ELF and ARM64).
+- **`searchStringHeadless` empty references** — `searchStringReferences()` returned `references: []` because it only scanned `this.instructions` array. Fix: implemented `scanTextSectionForStringRefs()` that scans full .text section bytes.
+- **Rellic `demangleRemillSemantic()` off-by-one** — `_ZN12_GLOBAL__N_1` prefix is 17 chars, old code used `substr(0, 18)`. Fixed to use `prefix.size()`.
+
+### Changed
+
+- **Native prebuilds workflow** — Promoted `hexcore-rellic` from experimental job to main prebuild matrix. Rellic now builds alongside Capstone, Unicorn, LLVM MC, Remill, and better-sqlite3.
+- **Pipeline capability map** — Added `liftToIR`, `rellic.decompile`, `rellic.decompileIR`, `disassembleAtHeadless` to `COMMAND_CAPABILITIES`, `COMMAND_OWNERS`, and `COMMAND_ALIASES`.
+- **Full Static Analysis template** — Added `rellic.decompile` step with `continueOnError: true`.
+- **CTF Reverse Engineering template** — Added `rellic.decompile` step for automated decompilation.
+
+### Architecture Notes
+
+- Rellic is marked **Experimental** — generates low-level IR-style pseudo-C, not readable high-level C. Best for automated pattern matching and batch analysis. Real Clang AST-based decompilation passes planned for v3.7.
+- Rellic requires x86/x64 binaries only (same as Remill).
+- Must use same LLVM version as hexcore-remill (LLVM 18) to avoid symbol conflicts.
+
+---
+
 ## [3.5.4] - 2026-02-19 - "Stability & Isolation"
 
 > **Bugfix, Stability, & Validation Release** — x64 ELF emulation crash fix via worker process isolation, intelligent IPC string memory synchronization, advanced custom VM CTF challenge validation, and memory region size correction.

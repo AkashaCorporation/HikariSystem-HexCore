@@ -133,6 +133,9 @@ export class DisassemblerEngine {
 	private maxFunctions: number = 5000;
 	private maxFunctionSize: number = 65536;
 
+	// Cache for text section byte-pattern scan results
+	private _textScanCache?: Map<number, number[]>;
+
 	constructor() {
 		this.capstone = new CapstoneWrapper();
 		this.llvmMc = new LlvmMcWrapper();
@@ -230,6 +233,7 @@ export class DisassemblerEngine {
 			this.comments.clear();
 			this.xrefs = [];
 			this.strings.clear();
+			this._textScanCache = undefined;
 
 			// Initialize architecture first (needed for base address detection in PE)
 			this.architecture = this.detectArchitecture();
@@ -773,6 +777,171 @@ export class DisassemblerEngine {
 				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'data' });
 			}
 		}
+
+		// Complement with byte-pattern scan for strings with no xrefs from this.instructions
+		const unresolvedAddrs = new Set<number>();
+		for (const strRef of this.strings.values()) {
+			if (strRef.references.length === 0) {
+				unresolvedAddrs.add(strRef.address);
+			}
+		}
+
+		if (unresolvedAddrs.size > 0) {
+			const scanResults = this.scanTextSectionForStringRefs(unresolvedAddrs);
+			for (const [strAddr, instrAddrs] of scanResults) {
+				const strRef = this.strings.get(strAddr);
+				if (strRef) {
+					for (const instrAddr of instrAddrs) {
+						if (!strRef.references.includes(instrAddr)) {
+							strRef.references.push(instrAddr);
+						}
+						this.xrefs.push({ from: instrAddr, to: strAddr, type: 'string' });
+					}
+				}
+			}
+		}
+	}
+
+	/**
+	 * Scan executable sections (.text) for byte patterns that reference known string addresses.
+	 * Complements buildStringXrefs() which only scans this.instructions.
+	 *
+	 * For x64: Scans for LEA RIP-relative (48 8D xx [disp32]) and absolute address patterns.
+	 *          Also scans for LEA without REX.W prefix (8D xx [disp32]) — 6-byte form.
+	 * For x86: Scans for absolute 4-byte addresses in little-endian.
+	 *
+	 * @param targetAddresses Set of virtual addresses of strings to search for
+	 * @returns Map from string address to array of instruction addresses that reference it
+	 */
+	private scanTextSectionForStringRefs(targetAddresses: Set<number>): Map<number, number[]> {
+		const result = new Map<number, number[]>();
+
+		if (!this.fileBuffer || targetAddresses.size === 0) {
+			return result;
+		}
+
+		// Return cached results if available and covers requested addresses
+		if (this._textScanCache) {
+			let allCached = true;
+			for (const addr of targetAddresses) {
+				if (!this._textScanCache.has(addr)) {
+					allCached = false;
+					break;
+				}
+			}
+			if (allCached) {
+				for (const addr of targetAddresses) {
+					const refs = this._textScanCache.get(addr);
+					if (refs && refs.length > 0) {
+						result.set(addr, refs);
+					}
+				}
+				return result;
+			}
+		}
+
+		// Find executable sections
+		const execSections = this.sections.filter(s => s.isCode || s.isExecutable);
+		if (execSections.length === 0) {
+			return result;
+		}
+
+		const buf = this.fileBuffer;
+
+		for (const section of execSections) {
+			const rawStart = section.rawAddress;
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+			if (rawStart >= buf.length || rawEnd <= rawStart) {
+				continue;
+			}
+
+			if (this.architecture === 'x64') {
+				// --- LEA RIP-relative with REX.W prefix: 48 8D [ModR/M] [disp32] (7 bytes) ---
+				for (let i = rawStart; i + 7 <= rawEnd; i++) {
+					if (buf[i] === 0x48 && buf[i + 1] === 0x8D && (buf[i + 2] & 0xC7) === 0x05) {
+						const disp32 = buf.readInt32LE(i + 3);
+						const instrVA = this.sectionOffsetToAddress(i, section);
+						const targetAddr = instrVA + 7 + disp32;
+						if (targetAddresses.has(targetAddr)) {
+							let refs = result.get(targetAddr);
+							if (!refs) {
+								refs = [];
+								result.set(targetAddr, refs);
+							}
+							if (!refs.includes(instrVA)) {
+								refs.push(instrVA);
+							}
+						}
+					}
+				}
+
+				// --- LEA RIP-relative without REX.W prefix: 8D [ModR/M] [disp32] (6 bytes) ---
+				for (let i = rawStart; i + 6 <= rawEnd; i++) {
+					if (buf[i] === 0x8D && (buf[i + 1] & 0xC7) === 0x05) {
+						// Skip if previous byte is 0x48 (already handled above as REX.W LEA)
+						if (i > rawStart && buf[i - 1] === 0x48) {
+							continue;
+						}
+						const disp32 = buf.readInt32LE(i + 2);
+						const instrVA = this.sectionOffsetToAddress(i, section);
+						const targetAddr = instrVA + 6 + disp32;
+						if (targetAddresses.has(targetAddr)) {
+							let refs = result.get(targetAddr);
+							if (!refs) {
+								refs = [];
+								result.set(targetAddr, refs);
+							}
+							if (!refs.includes(instrVA)) {
+								refs.push(instrVA);
+							}
+						}
+					}
+				}
+
+				// --- Absolute 4-byte addresses (MOV with immediate, etc.) ---
+				for (let i = rawStart; i + 4 <= rawEnd; i++) {
+					const val = buf.readUInt32LE(i);
+					if (targetAddresses.has(val)) {
+						const instrVA = this.sectionOffsetToAddress(i, section);
+						let refs = result.get(val);
+						if (!refs) {
+							refs = [];
+							result.set(val, refs);
+						}
+						if (!refs.includes(instrVA)) {
+							refs.push(instrVA);
+						}
+					}
+				}
+			} else if (this.architecture === 'x86') {
+				// --- x86: Absolute 4-byte addresses in little-endian ---
+				for (let i = rawStart; i + 4 <= rawEnd; i++) {
+					const val = buf.readUInt32LE(i);
+					if (targetAddresses.has(val)) {
+						const instrVA = this.sectionOffsetToAddress(i, section);
+						let refs = result.get(val);
+						if (!refs) {
+							refs = [];
+							result.set(val, refs);
+						}
+						if (!refs.includes(instrVA)) {
+							refs.push(instrVA);
+						}
+					}
+				}
+			}
+		}
+
+		// Cache results
+		if (!this._textScanCache) {
+			this._textScanCache = new Map();
+		}
+		for (const addr of targetAddresses) {
+			const refs = result.get(addr);
+			this._textScanCache.set(addr, refs ?? []);
+		}
+
+		return result;
 	}
 
 	async analyzeEntryPoint(): Promise<void> {
@@ -1918,8 +2087,33 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// On-demand byte-pattern scan for strings with empty references
+		const unresolvedAddrs = new Set<number>();
+		for (const strRef of results) {
+			if (strRef.references.length === 0) {
+				unresolvedAddrs.add(strRef.address);
+			}
+		}
+
+		if (unresolvedAddrs.size > 0) {
+			const scanResults = this.scanTextSectionForStringRefs(unresolvedAddrs);
+			for (const [strAddr, instrAddrs] of scanResults) {
+				const strRef = this.strings.get(strAddr);
+				if (strRef) {
+					for (const instrAddr of instrAddrs) {
+						if (!strRef.references.includes(instrAddr)) {
+							strRef.references.push(instrAddr);
+						}
+						this.xrefs.push({ from: instrAddr, to: strAddr, type: 'string' });
+					}
+				}
+			}
+		}
+
 		return results;
 	}
+
+
 
 	async exportAssembly(filePath: string): Promise<void> {
 		const lines: string[] = [];
@@ -1977,6 +2171,19 @@ export class DisassemblerEngine {
 	getStrings(): StringReference[] {
 		return Array.from(this.strings.values()).sort((a, b) => a.address - b.address);
 	}
+
+	getComments(): Map<number, string> {
+		return this.comments;
+	}
+
+	getStringsMap(): Map<number, StringReference> {
+		return this.strings;
+	}
+
+	getFunctionsMap(): Map<number, Function> {
+		return this.functions;
+	}
+
 
 	getFunctionAt(address: number): Function | undefined {
 		return this.functions.get(address);

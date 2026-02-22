@@ -164,7 +164,11 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hex.dump', 'hexcore.hexview.dumpHeadless'],
 	['hexcore.hex.search', 'hexcore.hexview.searchHeadless'],
 	['hexcore.debug.emulate.full', 'hexcore.debug.emulateFullHeadless'],
-	['hexcore.debug.run', 'hexcore.debug.emulateFullHeadless']
+	['hexcore.debug.run', 'hexcore.debug.emulateFullHeadless'],
+	['hexcore.decompile', 'hexcore.rellic.decompile'],
+	['hexcore.decompile.ir', 'hexcore.rellic.decompileIR'],
+	['hexcore.liftir', 'hexcore.disasm.liftToIR'],
+	['hexcore.disasm.disassembleAt', 'hexcore.disasm.disassembleAtHeadless'],
 ]);
 
 const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
@@ -191,6 +195,10 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.checkConstants', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.exportASMHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.rellic.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.rellic.decompileIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
 	['hexcore.yara.scanWorkspace', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command depends on workspace UI flow.' }],
 	['hexcore.yara.loadDefender', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command opens folder picker.' }],
@@ -286,7 +294,11 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.base64.decodeHeadless', ['hikarisystem.hexcore-base64']],
 	['hexcore.hexview.dumpHeadless', ['hikarisystem.hexcore-hexviewer']],
 	['hexcore.hexview.searchHeadless', ['hikarisystem.hexcore-hexviewer']],
-	['hexcore.pipeline.composeReport', ['hikarisystem.hexcore-report-composer']]
+	['hexcore.pipeline.composeReport', ['hikarisystem.hexcore-report-composer']],
+	['hexcore.rellic.decompile', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.rellic.decompileIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.liftToIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.disassembleAtHeadless', ['hikarisystem.hexcore-disassembler']],
 ]);
 
 export interface PipelineCapabilityEntry {

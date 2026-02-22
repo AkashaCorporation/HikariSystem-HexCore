@@ -28,20 +28,22 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-02-19):** `v3.5.4` "Smart Sync" — Emulation Verification Release with flawless validation against advanced custom VM CTF challenges. Complete IPC string memory sync fixing `__printf_chk` and `getline`. See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-02-21):** `v3.6.0` "Decompiler & Deep Analysis" — Experimental Rellic decompiler (LLVM IR → pseudo-C), disassembleAt headless, PE32 emulation crash fix, searchString xref fix. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
-- Native Capstone/Unicorn/LLVM MC/Remill engines via N-API (no external installs)
+- Native Capstone/Unicorn/LLVM MC/Remill/Rellic engines via N-API (no external installs)
+- Experimental decompilation pipeline: machine code → LLVM IR → pseudo-C
 - Headless automation pipeline for batch analysis
-- Tested and verified against real-world obfuscated custom VM CTF binaries (e.g., active advanced HTB challenges)
+- Tested and verified against real-world obfuscated custom VM CTF binaries
 
 ---
 
 ## Features
 
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
-- **IR Lifting** — Machine code → LLVM IR translation via Remill engine (experimental)
+- **IR Lifting** — Machine code → LLVM IR translation via Remill engine
+- **Decompilation** — LLVM IR → pseudo-C via Rellic engine (experimental, x86/x64 only)
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support

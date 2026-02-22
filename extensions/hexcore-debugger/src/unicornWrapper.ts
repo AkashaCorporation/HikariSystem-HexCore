@@ -6,6 +6,7 @@ import * as path from 'path';
 import { loadNativeModule } from 'hexcore-common';
 import { Arm64WorkerClient } from './arm64WorkerClient';
 import { X64ElfWorkerClient } from './x64ElfWorkerClient';
+import { Pe32WorkerClient } from './pe32WorkerClient';
 
 // Types from hexcore-unicorn
 interface UnicornModule {
@@ -213,6 +214,17 @@ export class UnicornWrapper {
 	// STATUS_HEAP_CORRUPTION (0xC0000374) when Unicorn's JIT backend allocates
 	// executable memory for x64 code translation.
 	private _x64ElfWorker?: X64ElfWorkerClient;
+	// PE32 worker client: runs Unicorn in a separate Node.js process to
+	// avoid Chromium UtilityProcess security restrictions (ACG/CFG) that cause
+	// STATUS_HEAP_CORRUPTION when Unicorn's JIT backend allocates executable
+	// memory for PE32 (x86/x64) code translation.
+	private _pe32Worker?: Pe32WorkerClient;
+	// Stub address range for PE32 WinAPI interception
+	private _pe32StubRangeStart: bigint = 0n;
+	private _pe32StubRangeEnd: bigint = 0n;
+	// Callback for PE32 stub dispatch: called when the worker hits a stub address.
+	// The caller (debugEngine.ts) provides this to handle WinAPI dispatch.
+	private _pe32StubCallback?: (stubAddress: bigint) => Promise<{ returnValue: bigint; newPc: bigint } | null>;
 	// When using the worker, we cache Unicorn constants fetched from it.
 	private _workerConstants?: Record<string, unknown>;
 	// Worker-side context ID for save/restore state
@@ -243,6 +255,10 @@ export class UnicornWrapper {
 		if (this._arm64Worker) {
 			this._arm64Worker.dispose();
 			this._arm64Worker = undefined;
+		}
+		if (this._pe32Worker) {
+			this._pe32Worker.dispose();
+			this._pe32Worker = undefined;
 		}
 
 		this.architecture = arch;
@@ -562,6 +578,444 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Enable PE32 worker mode for x86/x64 PE targets.
+	 * Isolates emuStart in a child_process.fork() worker to avoid
+	 * STATUS_HEAP_CORRUPTION caused by Unicorn's JIT backend colliding
+	 * with Electron's ACG/CFG restrictions.
+	 *
+	 * This follows the same pattern as setElfSyncMode:
+	 * 1. Remove all native hooks
+	 * 2. Create and start the worker
+	 * 3. Initialize worker with same arch/mode
+	 * 4. Migrate memory regions (memMap + memWrite for each region)
+	 * 5. Migrate registers
+	 * 6. Post-migration verification (RSP/ESP check)
+	 *
+	 * @param stubRangeStart Start of the WinAPI stub address range
+	 * @param stubRangeEnd End of the WinAPI stub address range
+	 * @param stubCallback Callback for WinAPI dispatch when a stub is hit
+	 */
+	async setPe32WorkerMode(
+		stubRangeStart: bigint,
+		stubRangeEnd: bigint,
+		stubCallback?: (stubAddress: bigint) => Promise<{ returnValue: bigint; newPc: bigint } | null>
+	): Promise<void> {
+		if (!this.uc || !this.unicornModule) {
+			throw new Error('Unicorn not initialized — cannot enable PE32 worker mode');
+		}
+
+		this._pe32StubRangeStart = stubRangeStart;
+		this._pe32StubRangeEnd = stubRangeEnd;
+		if (stubCallback) {
+			this._pe32StubCallback = stubCallback;
+		}
+
+		// Remove all native hooks to eliminate TSFN callbacks entirely.
+		for (const handle of this.activeHookHandles) {
+			try {
+				this.uc.hookDel(handle);
+			} catch { /* ignore — hook may already be removed */ }
+		}
+		this.activeHookHandles = [];
+		this._intrHookInstalled = false;
+
+		// Start Pe32WorkerClient and migrate state from in-process
+		// Unicorn to the worker.
+		this._pe32Worker = new Pe32WorkerClient();
+		await this._pe32Worker.start();
+
+		const { arch: ucArch, mode } = this.getArchMode(this.architecture);
+		await this._pe32Worker.initialize(ucArch, mode);
+
+		// Migrate all mapped memory regions from in-process to worker
+		// NOTE: Unicorn memRegions() returns end as INCLUSIVE (last valid byte),
+		// so size = end - begin + 1.
+		const regions = this.uc.memRegions();
+		let migratedCount = 0;
+		for (const region of regions) {
+			const size = Number(region.end - region.begin + 1n);
+			if (size <= 0) {
+				continue; // skip degenerate regions
+			}
+			try {
+				await this._pe32Worker.memMap(region.begin, size, region.perms);
+				migratedCount++;
+			} catch (mapErr) {
+				console.warn(`[pe32] memMap failed for region 0x${region.begin.toString(16)}-0x${region.end.toString(16)} size=0x${size.toString(16)} perms=${region.perms}: ${mapErr}`);
+				continue;
+			}
+			// Copy memory contents
+			try {
+				const data = this.uc.memRead(region.begin, size);
+				await this._pe32Worker.memWrite(region.begin, data);
+			} catch {
+				// Region may not be fully readable (e.g., guard pages)
+			}
+		}
+		console.log(`[pe32] Migrated ${migratedCount}/${regions.length} memory regions`);
+
+		// Migrate registers from in-process to worker
+		const X86_REG = this.unicornModule.X86_REG;
+		if (this.architecture === 'x64') {
+			const regIds: Array<[string, number]> = [
+				['RAX', X86_REG.RAX], ['RBX', X86_REG.RBX], ['RCX', X86_REG.RCX], ['RDX', X86_REG.RDX],
+				['RSI', X86_REG.RSI], ['RDI', X86_REG.RDI], ['RBP', X86_REG.RBP], ['RSP', X86_REG.RSP],
+				['R8', X86_REG.R8], ['R9', X86_REG.R9], ['R10', X86_REG.R10], ['R11', X86_REG.R11],
+				['R12', X86_REG.R12], ['R13', X86_REG.R13], ['R14', X86_REG.R14], ['R15', X86_REG.R15],
+				['RIP', X86_REG.RIP], ['RFLAGS', X86_REG.RFLAGS],
+				['FS_BASE', X86_REG.FS_BASE], ['GS_BASE', X86_REG.GS_BASE]
+			];
+			for (const [name, regId] of regIds) {
+				try {
+					const val = BigInt(this.uc.regRead(regId));
+					await this._pe32Worker.regWrite(regId, val);
+				} catch (regErr) {
+					console.warn(`[pe32] regWrite failed for ${name}: ${regErr}`);
+				}
+			}
+		} else {
+			// x86 (32-bit)
+			const regIds: Array<[string, number]> = [
+				['EAX', X86_REG.EAX], ['EBX', X86_REG.EBX], ['ECX', X86_REG.ECX], ['EDX', X86_REG.EDX],
+				['ESI', X86_REG.ESI], ['EDI', X86_REG.EDI], ['EBP', X86_REG.EBP], ['ESP', X86_REG.ESP],
+				['EIP', X86_REG.EIP], ['EFLAGS', X86_REG.EFLAGS]
+			];
+			for (const [name, regId] of regIds) {
+				try {
+					const val = this.uc.regRead(regId);
+					await this._pe32Worker.regWrite(regId, typeof val === 'bigint' ? val : BigInt(val));
+				} catch (regErr) {
+					console.warn(`[pe32] regWrite failed for ${name}: ${regErr}`);
+				}
+			}
+		}
+
+		// Post-migration verification: ensure RSP/ESP points to mapped memory.
+		try {
+			const spRegId = this.architecture === 'x64' ? X86_REG.RSP : X86_REG.ESP;
+			const spName = this.architecture === 'x64' ? 'RSP' : 'ESP';
+			const sp = BigInt(this.uc.regRead(spRegId));
+			const workerRegions = await this._pe32Worker.memRegions();
+			const spMapped = workerRegions.some(r => sp >= r.begin && sp <= r.end);
+			if (!spMapped) {
+				console.warn(`[pe32] ${spName} 0x${sp.toString(16)} not in any worker region — mapping stack explicitly`);
+				const PROT = this.unicornModule.PROT;
+				const stackBase = this.architecture === 'x64' ? 0x7FFF0000n : 0x00BF0000n;
+				const stackSize = 0x100000;
+				await this._pe32Worker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
+				try {
+					const stackData = this.uc.memRead(stackBase, stackSize);
+					await this._pe32Worker.memWrite(stackBase, stackData);
+				} catch {
+					// Partial read is OK — stack may not be fully initialized
+				}
+				console.log(`[pe32] Stack explicitly mapped: 0x${stackBase.toString(16)} size=0x${stackSize.toString(16)}`);
+			}
+		} catch (verifyErr) {
+			console.warn(`[pe32] Post-migration SP verification failed: ${verifyErr}`);
+		}
+
+		console.log('[pe32] Worker started, state migrated from in-process Unicorn');
+	}
+
+	/**
+	 * PE32 worker-based execution loop.
+	 *
+	 * Runs emulation in the worker process using executeBatch(), with
+	 * WinAPI stub dispatch, breakpoints, and code hooks handled on the
+	 * host side between batches.
+	 *
+	 * When the worker hits a stub address (WinAPI call), the host-side
+	 * callback dispatches the API call via WinApiHooks, updates the
+	 * return value (RAX/EAX) in the worker, and continues execution.
+	 */
+	async startPe32Worker(startAddress: bigint, until: bigint, count: number): Promise<void> {
+		if (!this._pe32Worker || !this.unicornModule) {
+			throw new Error('PE32 worker not initialized');
+		}
+
+		this._stopRequested = false;
+		this.state.isRunning = false; // Not using async Unicorn; no deferred writes
+		this.state.isPaused = false;
+		this.state.isReady = true;
+		this.state.currentAddress = startAddress;
+
+		const X86_REG = this.unicornModule.X86_REG;
+		const isX64 = this.architecture === 'x64';
+		const pcRegId = isX64 ? X86_REG.RIP : X86_REG.EIP;
+		const maxInstructions = count > 0 ? count : 250000;
+		const batchSize = count === 1 ? 1 : Math.min(1000, maxInstructions);
+		const terminalAddresses = [0n, 0xDEAD0000n, 0xDEADDEADn];
+		if (isX64) {
+			terminalAddresses.push(0xDEADDEADDEADDEADn);
+		}
+		if (until !== 0n) {
+			terminalAddresses.push(until);
+		}
+
+		let totalExecuted = 0;
+		let isFirstInstruction = true;
+		let currentPc = startAddress;
+
+		try {
+			while (totalExecuted < maxInstructions) {
+				if (this._stopRequested) {
+					break;
+				}
+
+				// Read PC from worker
+				currentPc = await this._pe32Worker.regRead(pcRegId) as bigint;
+				this.state.currentAddress = currentPc;
+
+				// Breakpoint check (skip on first instruction)
+				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
+
+				// Fire code hooks (API interception) before executing.
+				// Pull worker registers → in-process Unicorn for sync API compatibility.
+				this._apiHookRedirected = false;
+
+				if (this.codeHooks.size > 0 && this.uc) {
+					try {
+						if (isX64) {
+							const workerRegs = await this._pe32Worker.readAllX64Registers();
+							const REG = this.unicornModule.X86_REG;
+							this.uc.regWrite(REG.RAX, workerRegs.rax);
+							this.uc.regWrite(REG.RBX, workerRegs.rbx);
+							this.uc.regWrite(REG.RCX, workerRegs.rcx);
+							this.uc.regWrite(REG.RDX, workerRegs.rdx);
+							this.uc.regWrite(REG.RSI, workerRegs.rsi);
+							this.uc.regWrite(REG.RDI, workerRegs.rdi);
+							this.uc.regWrite(REG.RBP, workerRegs.rbp);
+							this.uc.regWrite(REG.RSP, workerRegs.rsp);
+							this.uc.regWrite(REG.R8, workerRegs.r8);
+							this.uc.regWrite(REG.R9, workerRegs.r9);
+							this.uc.regWrite(REG.R10, workerRegs.r10);
+							this.uc.regWrite(REG.R11, workerRegs.r11);
+							this.uc.regWrite(REG.R12, workerRegs.r12);
+							this.uc.regWrite(REG.R13, workerRegs.r13);
+							this.uc.regWrite(REG.R14, workerRegs.r14);
+							this.uc.regWrite(REG.R15, workerRegs.r15);
+							this.uc.regWrite(REG.RIP, workerRegs.rip);
+							this.uc.regWrite(REG.RFLAGS, workerRegs.rflags);
+						} else {
+							const workerRegs = await this._pe32Worker.readAllX86Registers();
+							const REG = this.unicornModule.X86_REG;
+							this.uc.regWrite(REG.EAX, Number(workerRegs.eax));
+							this.uc.regWrite(REG.EBX, Number(workerRegs.ebx));
+							this.uc.regWrite(REG.ECX, Number(workerRegs.ecx));
+							this.uc.regWrite(REG.EDX, Number(workerRegs.edx));
+							this.uc.regWrite(REG.ESI, Number(workerRegs.esi));
+							this.uc.regWrite(REG.EDI, Number(workerRegs.edi));
+							this.uc.regWrite(REG.EBP, Number(workerRegs.ebp));
+							this.uc.regWrite(REG.ESP, Number(workerRegs.esp));
+							this.uc.regWrite(REG.EIP, Number(workerRegs.eip));
+							this.uc.regWrite(REG.EFLAGS, Number(workerRegs.eflags));
+						}
+
+						// Sync stack memory from worker → in-process Unicorn
+						try {
+							const spRegVal = isX64
+								? BigInt(await this._pe32Worker.regRead(X86_REG.RSP))
+								: BigInt(await this._pe32Worker.regRead(X86_REG.ESP));
+							const syncBase = spRegVal - 64n;
+							const syncSize = 256;
+							const stackData = await this._pe32Worker.memRead(syncBase, syncSize);
+							this.uc.memWrite(syncBase, stackData);
+						} catch {
+							// Best-effort stack sync
+						}
+					} catch {
+						// Best-effort sync — if it fails, hooks will see stale data
+					}
+				}
+
+				this.codeHooks.forEach(cb => cb(currentPc, 0));
+
+				if (this._apiHookRedirected) {
+					// A hook redirected execution — push mutations back to worker.
+					if (this.uc) {
+						try {
+							const REG = this.unicornModule.X86_REG;
+							if (isX64) {
+								const postRegs: Record<string, bigint> = {
+									RAX: BigInt(this.uc.regRead(REG.RAX)),
+									RBX: BigInt(this.uc.regRead(REG.RBX)),
+									RCX: BigInt(this.uc.regRead(REG.RCX)),
+									RDX: BigInt(this.uc.regRead(REG.RDX)),
+									RSI: BigInt(this.uc.regRead(REG.RSI)),
+									RDI: BigInt(this.uc.regRead(REG.RDI)),
+									RBP: BigInt(this.uc.regRead(REG.RBP)),
+									RSP: BigInt(this.uc.regRead(REG.RSP)),
+									R8: BigInt(this.uc.regRead(REG.R8)),
+									R9: BigInt(this.uc.regRead(REG.R9)),
+									R10: BigInt(this.uc.regRead(REG.R10)),
+									R11: BigInt(this.uc.regRead(REG.R11)),
+									R12: BigInt(this.uc.regRead(REG.R12)),
+									R13: BigInt(this.uc.regRead(REG.R13)),
+									R14: BigInt(this.uc.regRead(REG.R14)),
+									R15: BigInt(this.uc.regRead(REG.R15)),
+									RIP: BigInt(this.uc.regRead(REG.RIP)),
+									RFLAGS: BigInt(this.uc.regRead(REG.RFLAGS)),
+								};
+								await this._pe32Worker.writeRegisters(postRegs);
+							} else {
+								const postRegs: Record<string, bigint> = {
+									EAX: BigInt(this.uc.regRead(REG.EAX)),
+									EBX: BigInt(this.uc.regRead(REG.EBX)),
+									ECX: BigInt(this.uc.regRead(REG.ECX)),
+									EDX: BigInt(this.uc.regRead(REG.EDX)),
+									ESI: BigInt(this.uc.regRead(REG.ESI)),
+									EDI: BigInt(this.uc.regRead(REG.EDI)),
+									EBP: BigInt(this.uc.regRead(REG.EBP)),
+									ESP: BigInt(this.uc.regRead(REG.ESP)),
+									EIP: BigInt(this.uc.regRead(REG.EIP)),
+									EFLAGS: BigInt(this.uc.regRead(REG.EFLAGS)),
+								};
+								await this._pe32Worker.writeRegisters(postRegs);
+							}
+						} catch {
+							// Best-effort push
+						}
+
+						// Sync stack memory from in-process → worker
+						try {
+							const spReg = isX64 ? X86_REG.RSP : X86_REG.ESP;
+							const rsp = BigInt(this.uc.regRead(spReg));
+							const syncBase = rsp - 128n;
+							const syncSize = 256;
+							const stackData = this.uc.memRead(syncBase, syncSize);
+							await this._pe32Worker.memWrite(syncBase, stackData);
+						} catch {
+							// Best-effort stack sync
+						}
+
+						// Sync deferred memory writes to worker
+						for (const { address, data } of this.deferredMemoryWrites) {
+							try {
+								await this._pe32Worker.memWrite(address, data);
+							} catch { /* best-effort */ }
+						}
+						this.deferredMemoryWrites = [];
+
+						// Apply deferred register writes
+						if (this.deferredRegisterWrites.size > 0) {
+							for (const [name, value] of this.deferredRegisterWrites) {
+								try {
+									this.setRegisterImmediate(name, value);
+								} catch { /* best-effort */ }
+							}
+							this.deferredRegisterWrites.clear();
+							// Re-sync all registers to worker
+							try {
+								const REG2 = this.unicornModule.X86_REG;
+								if (isX64) {
+									const finalRegs: Record<string, bigint> = {
+										RAX: BigInt(this.uc.regRead(REG2.RAX)),
+										RBX: BigInt(this.uc.regRead(REG2.RBX)),
+										RCX: BigInt(this.uc.regRead(REG2.RCX)),
+										RDX: BigInt(this.uc.regRead(REG2.RDX)),
+										RSI: BigInt(this.uc.regRead(REG2.RSI)),
+										RDI: BigInt(this.uc.regRead(REG2.RDI)),
+										RBP: BigInt(this.uc.regRead(REG2.RBP)),
+										RSP: BigInt(this.uc.regRead(REG2.RSP)),
+										R8: BigInt(this.uc.regRead(REG2.R8)),
+										R9: BigInt(this.uc.regRead(REG2.R9)),
+										R10: BigInt(this.uc.regRead(REG2.R10)),
+										R11: BigInt(this.uc.regRead(REG2.R11)),
+										R12: BigInt(this.uc.regRead(REG2.R12)),
+										R13: BigInt(this.uc.regRead(REG2.R13)),
+										R14: BigInt(this.uc.regRead(REG2.R14)),
+										R15: BigInt(this.uc.regRead(REG2.R15)),
+										RIP: BigInt(this.uc.regRead(REG2.RIP)),
+										RFLAGS: BigInt(this.uc.regRead(REG2.RFLAGS)),
+									};
+									await this._pe32Worker.writeRegisters(finalRegs);
+								} else {
+									const finalRegs: Record<string, bigint> = {
+										EAX: BigInt(this.uc.regRead(REG2.EAX)),
+										EBX: BigInt(this.uc.regRead(REG2.EBX)),
+										ECX: BigInt(this.uc.regRead(REG2.ECX)),
+										EDX: BigInt(this.uc.regRead(REG2.EDX)),
+										ESI: BigInt(this.uc.regRead(REG2.ESI)),
+										EDI: BigInt(this.uc.regRead(REG2.EDI)),
+										EBP: BigInt(this.uc.regRead(REG2.EBP)),
+										ESP: BigInt(this.uc.regRead(REG2.ESP)),
+										EIP: BigInt(this.uc.regRead(REG2.EIP)),
+										EFLAGS: BigInt(this.uc.regRead(REG2.EFLAGS)),
+									};
+									await this._pe32Worker.writeRegisters(finalRegs);
+								}
+							} catch { /* best-effort */ }
+						}
+					}
+
+					// Read new PC from worker after sync
+					isFirstInstruction = true;
+					continue;
+				}
+
+				// Execute a batch in the worker
+				const remaining = maxInstructions - totalExecuted;
+				const thisBatch = Math.min(batchSize, remaining);
+
+				const result = await this._pe32Worker.executeBatch(
+					currentPc, thisBatch, terminalAddresses,
+					this._pe32StubRangeStart, this._pe32StubRangeEnd
+				);
+
+				totalExecuted += result.instructionsExecuted;
+				this.state.instructionsExecuted += result.instructionsExecuted;
+				this.state.currentAddress = result.pc;
+
+				if (result.error) {
+					this.state.lastError = result.error;
+					break;
+				}
+
+				if (result.stubHit && result.stubAddress !== null) {
+					// Worker hit a WinAPI stub address — dispatch on the host side.
+					if (this._pe32StubCallback) {
+						const dispatchResult = await this._pe32StubCallback(result.stubAddress);
+						if (dispatchResult) {
+							// Set return value (RAX for x64, EAX for x86) in worker
+							const retRegId = isX64 ? X86_REG.RAX : X86_REG.EAX;
+							await this._pe32Worker.regWrite(retRegId, dispatchResult.returnValue);
+							// Set new PC (after RET from stub)
+							await this._pe32Worker.regWrite(pcRegId, dispatchResult.newPc);
+						}
+					} else {
+						// No callback — fire code hooks as fallback (same as ELF worker)
+						// Pull registers and fire hooks so the host-side API interceptor can handle it
+						continue;
+					}
+					// Continue execution from the new PC
+					continue;
+				}
+
+				if (result.stopped) {
+					// Terminal address reached (e.g. program exit)
+					break;
+				}
+			}
+		} finally {
+			// Sync the final PC
+			if (this._pe32Worker) {
+				try {
+					const finalPc = await this._pe32Worker.regRead(pcRegId) as bigint;
+					this.state.currentAddress = finalPc;
+				} catch {
+					// Worker may have exited
+				}
+			}
+			this.state.isPaused = true;
+		}
+	}
+
+	/**
 	 * Set handler for memory faults (unmapped access)
 	 * Handler should return true if it handled the fault (mapped the memory),
 	 * false to let the emulation crash.
@@ -671,6 +1125,16 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._pe32Worker) {
+			const pageSize = BigInt(this._pe32Worker.getPageSize());
+			const alignedBase = (baseAddress / pageSize) * pageSize;
+			const alignedSize = Math.ceil(code.length / Number(pageSize)) * Number(pageSize);
+			await this._pe32Worker.memMap(alignedBase, alignedSize, this.unicornModule!.PROT.ALL);
+			await this._pe32Worker.memWrite(baseAddress, code);
+			console.log(`Loaded ${code.length} bytes at 0x${baseAddress.toString(16)} (PE32 worker)`);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -710,6 +1174,14 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._pe32Worker) {
+			const pageSize = BigInt(this._pe32Worker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._pe32Worker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -741,6 +1213,14 @@ export class UnicornWrapper {
 			return;
 		}
 
+		if (this._pe32Worker) {
+			const pageSize = BigInt(this._pe32Worker.getPageSize());
+			const alignedBase = (address / pageSize) * pageSize;
+			const alignedSize = Math.ceil(size / Number(pageSize)) * Number(pageSize);
+			await this._pe32Worker.memMap(alignedBase, alignedSize, perms);
+			return;
+		}
+
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -762,6 +1242,10 @@ export class UnicornWrapper {
 		}
 		if (this._x64ElfWorker) {
 			await this._x64ElfWorker.memProtect(address, size, perms);
+			return;
+		}
+		if (this._pe32Worker) {
+			await this._pe32Worker.memProtect(address, size, perms);
 			return;
 		}
 		if (!this.uc) {
@@ -904,6 +1388,12 @@ export class UnicornWrapper {
 		// x64 ELF worker mode: use worker's executeBatch for emulation
 		if (this._x64ElfWorker) {
 			await this.startX64ElfWorker(startAddress, endAddress, count);
+			return;
+		}
+
+		// PE32 worker mode: use worker's executeBatch for emulation
+		if (this._pe32Worker) {
+			await this.startPe32Worker(startAddress, endAddress, count);
 			return;
 		}
 
@@ -1848,7 +2338,7 @@ export class UnicornWrapper {
 	 * free for TSFN-based hook callbacks.
 	 */
 	async runSync(startAddress: bigint, count: number, timeout: number = 0): Promise<void> {
-		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker && !this._pe32Worker) {
 			throw new Error('Unicorn not initialized');
 		}
 
@@ -1861,6 +2351,12 @@ export class UnicornWrapper {
 		// x64 ELF worker: delegate to startX64ElfWorker
 		if (this._x64ElfWorker) {
 			await this.startX64ElfWorker(startAddress, 0n, count);
+			return;
+		}
+
+		// PE32 worker: delegate to startPe32Worker
+		if (this._pe32Worker) {
+			await this.startPe32Worker(startAddress, 0n, count);
 			return;
 		}
 
@@ -2121,6 +2617,9 @@ export class UnicornWrapper {
 		if (this._x64ElfWorker) {
 			return await this._x64ElfWorker.memRead(address, size);
 		}
+		if (this._pe32Worker) {
+			return await this._pe32Worker.memRead(address, size);
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -2151,6 +2650,10 @@ export class UnicornWrapper {
 		}
 		if (this._x64ElfWorker) {
 			await this._x64ElfWorker.memWrite(address, data);
+			return;
+		}
+		if (this._pe32Worker) {
+			await this._pe32Worker.memWrite(address, data);
 			return;
 		}
 
@@ -2249,6 +2752,9 @@ export class UnicornWrapper {
 		if (this._x64ElfWorker) {
 			return await this._x64ElfWorker.readAllRegisters();
 		}
+		if (this._pe32Worker) {
+			return await this._pe32Worker.readAllX64Registers();
+		}
 		return this.getRegistersX64();
 	}
 
@@ -2273,6 +2779,29 @@ export class UnicornWrapper {
 			eip: Number(this.uc.regRead(REG.EIP)),
 			eflags: Number(this.uc.regRead(REG.EFLAGS))
 		};
+	}
+
+	/**
+	 * Get x86 (32-bit) registers asynchronously.
+	 * Uses the PE32 worker when active, otherwise falls back to sync in-process read.
+	 */
+	async getRegistersX86Async(): Promise<X86Registers> {
+		if (this._pe32Worker) {
+			const wr = await this._pe32Worker.readAllX86Registers();
+			return {
+				eax: Number(wr.eax),
+				ebx: Number(wr.ebx),
+				ecx: Number(wr.ecx),
+				edx: Number(wr.edx),
+				esi: Number(wr.esi),
+				edi: Number(wr.edi),
+				ebp: Number(wr.ebp),
+				esp: Number(wr.esp),
+				eip: Number(wr.eip),
+				eflags: Number(wr.eflags)
+			};
+		}
+		return this.getRegistersX86();
 	}
 
 	/**
@@ -2373,6 +2902,30 @@ export class UnicornWrapper {
 				throw new Error(`Unknown x64 register: ${regName}`);
 			}
 			await this._x64ElfWorker.regWrite(regId, BigInt(value));
+			return;
+		}
+
+		if (this._pe32Worker) {
+			// Route to PE32 worker for x86/x64 PE targets
+			const X86_REG = this.unicornModule!.X86_REG;
+			const x64Regs: Record<string, number> = {
+				'rax': X86_REG.RAX, 'rbx': X86_REG.RBX, 'rcx': X86_REG.RCX, 'rdx': X86_REG.RDX,
+				'rsi': X86_REG.RSI, 'rdi': X86_REG.RDI, 'rbp': X86_REG.RBP, 'rsp': X86_REG.RSP,
+				'r8': X86_REG.R8, 'r9': X86_REG.R9, 'r10': X86_REG.R10, 'r11': X86_REG.R11,
+				'r12': X86_REG.R12, 'r13': X86_REG.R13, 'r14': X86_REG.R14, 'r15': X86_REG.R15,
+				'rip': X86_REG.RIP, 'rflags': X86_REG.RFLAGS,
+				'fs_base': X86_REG.FS_BASE, 'gs_base': X86_REG.GS_BASE
+			};
+			const x86Regs: Record<string, number> = {
+				'eax': X86_REG.EAX, 'ebx': X86_REG.EBX, 'ecx': X86_REG.ECX, 'edx': X86_REG.EDX,
+				'esi': X86_REG.ESI, 'edi': X86_REG.EDI, 'ebp': X86_REG.EBP, 'esp': X86_REG.ESP,
+				'eip': X86_REG.EIP, 'eflags': X86_REG.EFLAGS
+			};
+			const regId = x64Regs[regName] ?? x86Regs[regName];
+			if (regId === undefined) {
+				throw new Error(`Unknown x86/x64 register: ${regName}`);
+			}
+			await this._pe32Worker.regWrite(regId, BigInt(value));
 			return;
 		}
 
@@ -2477,6 +3030,22 @@ export class UnicornWrapper {
 			});
 		}
 
+		if (this._pe32Worker) {
+			const PROT = this.unicornModule!.PROT;
+			const regions = await this._pe32Worker.memRegions();
+			return regions.map(region => {
+				let perms = '';
+				if (region.perms & PROT.READ) { perms += 'r'; }
+				if (region.perms & PROT.WRITE) { perms += 'w'; }
+				if (region.perms & PROT.EXEC) { perms += 'x'; }
+				return {
+					address: region.begin,
+					size: region.end - region.begin + 1n,
+					permissions: perms || '---'
+				};
+			});
+		}
+
 		if (!this.uc) {
 			return [];
 		}
@@ -2511,6 +3080,9 @@ export class UnicornWrapper {
 		}
 		if (this._x64ElfWorker) {
 			return this._x64ElfWorker.getPageSize();
+		}
+		if (this._pe32Worker) {
+			return this._pe32Worker.getPageSize();
 		}
 		return this.uc?.pageSize ?? 0x1000;
 	}
@@ -2547,6 +3119,13 @@ export class UnicornWrapper {
 			this._workerContextId = await this._x64ElfWorker.contextSave();
 			return;
 		}
+		if (this._pe32Worker) {
+			if (this._workerContextId !== undefined) {
+				await this._pe32Worker.contextFree(this._workerContextId);
+			}
+			this._workerContextId = await this._pe32Worker.contextSave();
+			return;
+		}
 		if (!this.uc) {
 			throw new Error('Unicorn not initialized');
 		}
@@ -2573,6 +3152,13 @@ export class UnicornWrapper {
 				throw new Error('No saved state');
 			}
 			await this._x64ElfWorker.contextRestore(this._workerContextId);
+			return;
+		}
+		if (this._pe32Worker) {
+			if (this._workerContextId === undefined) {
+				throw new Error('No saved state');
+			}
+			await this._pe32Worker.contextRestore(this._workerContextId);
 			return;
 		}
 		if (!this.uc || !this.savedContext) {
@@ -2647,6 +3233,13 @@ export class UnicornWrapper {
 			this._workerContextId = undefined;
 		}
 
+		// Dispose PE32 worker if active
+		if (this._pe32Worker) {
+			this._pe32Worker.dispose();
+			this._pe32Worker = undefined;
+			this._workerContextId = undefined;
+		}
+
 		// Clean up all active hook handles
 		if (this.uc) {
 			for (const handle of this.activeHookHandles) {
@@ -2677,6 +3270,9 @@ export class UnicornWrapper {
 		this._apiHookRedirected = false;
 		this._stopRequested = false;
 		this._intrHookInstalled = false;
+		this._pe32StubCallback = undefined;
+		this._pe32StubRangeStart = 0n;
+		this._pe32StubRangeEnd = 0n;
 	}
 }
 

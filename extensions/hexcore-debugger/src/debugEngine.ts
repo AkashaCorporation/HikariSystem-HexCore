@@ -200,6 +200,122 @@ export class DebugEngine {
 		await this.emulator!.setRegister(ipReg, peInfo.entryPoint);
 		this.emulator!.setCurrentAddress(peInfo.entryPoint);
 
+		// Activate PE32 worker mode to isolate emuStart from Extension Host heap.
+		// This prevents STATUS_HEAP_CORRUPTION from Unicorn's JIT backend (TCG).
+		// Follows the same pattern as setElfSyncMode in loadELF.
+		if (this.architecture === 'x64' || this.architecture === 'x86') {
+			const PE_STUB_BASE = 0x70000000n;
+			const PE_STUB_END = PE_STUB_BASE + 0x100000n;
+
+			await this.emulator!.setPe32WorkerMode(PE_STUB_BASE, PE_STUB_END, async (stubAddress: bigint) => {
+				// Worker hit a WinAPI stub — dispatch on the host side.
+				const importEntry = this.peLoader!.lookupStub(stubAddress);
+				if (!importEntry) {
+					return null;
+				}
+
+				const isX64 = this.architecture === 'x64';
+				const emulator = this.emulator!;
+
+				// Sync registers from worker → in-process Unicorn so
+				// WinApiHooks.readArguments() (which uses getRegistersX64/X86
+				// and readMemorySync) sees correct values.
+				try {
+					if (isX64) {
+						const wr = await emulator.getRegistersX64Async();
+						emulator.setRegisterSync('rax', wr.rax);
+						emulator.setRegisterSync('rbx', wr.rbx);
+						emulator.setRegisterSync('rcx', wr.rcx);
+						emulator.setRegisterSync('rdx', wr.rdx);
+						emulator.setRegisterSync('rsi', wr.rsi);
+						emulator.setRegisterSync('rdi', wr.rdi);
+						emulator.setRegisterSync('rbp', wr.rbp);
+						emulator.setRegisterSync('rsp', wr.rsp);
+						emulator.setRegisterSync('r8', wr.r8);
+						emulator.setRegisterSync('r9', wr.r9);
+						emulator.setRegisterSync('r10', wr.r10);
+						emulator.setRegisterSync('r11', wr.r11);
+						emulator.setRegisterSync('r12', wr.r12);
+						emulator.setRegisterSync('r13', wr.r13);
+						emulator.setRegisterSync('r14', wr.r14);
+						emulator.setRegisterSync('r15', wr.r15);
+						emulator.setRegisterSync('rip', wr.rip);
+						emulator.setRegisterSync('rflags', wr.rflags);
+					} else {
+						const wr = await emulator.getRegistersX86Async();
+						emulator.setRegisterSync('eax', wr.eax);
+						emulator.setRegisterSync('ebx', wr.ebx);
+						emulator.setRegisterSync('ecx', wr.ecx);
+						emulator.setRegisterSync('edx', wr.edx);
+						emulator.setRegisterSync('esi', wr.esi);
+						emulator.setRegisterSync('edi', wr.edi);
+						emulator.setRegisterSync('ebp', wr.ebp);
+						emulator.setRegisterSync('esp', wr.esp);
+						emulator.setRegisterSync('eip', wr.eip);
+						emulator.setRegisterSync('eflags', wr.eflags);
+					}
+				} catch {
+					// Best-effort register sync
+				}
+
+				// Sync stack memory from worker → in-process Unicorn so
+				// stack-based argument reads work correctly.
+				try {
+					const sp = isX64
+						? emulator.getRegistersX64().rsp
+						: BigInt(emulator.getRegistersX86().esp);
+					// Sync 256 bytes around the stack pointer (covers typical args)
+					const syncBase = sp - 64n;
+					const stackData = await emulator.readMemory(syncBase, 256);
+					emulator.writeMemorySync(syncBase, stackData);
+				} catch {
+					// Best-effort stack sync
+				}
+
+				// Read return address from top of stack (pushed by CALL instruction).
+				// The worker stopped AT the stub address, before executing it.
+				let returnAddress: bigint;
+				try {
+					if (isX64) {
+						const rsp = emulator.getRegistersX64().rsp;
+						const retBuf = emulator.readMemorySync(rsp, 8);
+						returnAddress = retBuf.readBigUInt64LE();
+					} else {
+						const esp = BigInt(emulator.getRegistersX86().esp);
+						const retBuf = emulator.readMemorySync(esp, 4);
+						returnAddress = BigInt(retBuf.readUInt32LE());
+					}
+				} catch {
+					// Cannot read return address — abort dispatch
+					return null;
+				}
+
+				// handleCall reads args from in-process Unicorn (now synced)
+				const returnValue = this.apiHooks!.handleCall(importEntry.dll, importEntry.name);
+
+				this.emit('api-call', {
+					dll: importEntry.dll,
+					name: importEntry.name,
+					returnValue
+				});
+
+				// Pop return address: adjust RSP/ESP in the worker (add pointer size)
+				try {
+					if (isX64) {
+						const rsp = emulator.getRegistersX64().rsp;
+						await emulator.setRegister('rsp', rsp + 8n);
+					} else {
+						const esp = BigInt(emulator.getRegistersX86().esp);
+						await emulator.setRegister('esp', esp + 4n);
+					}
+				} catch {
+					// Best-effort RSP/ESP adjustment
+				}
+
+				return { returnValue, newPc: returnAddress };
+			});
+		}
+
 		this.emit('pe-loaded', {
 			imageBase: peInfo.imageBase,
 			entryPoint: peInfo.entryPoint,

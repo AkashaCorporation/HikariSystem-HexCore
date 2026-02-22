@@ -10,7 +10,13 @@
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"forceConsistentCasingInFileNames": true,
-		"resolveJsonModule": true
+		"resolveJsonModule": true,
+		"baseUrl": ".",
+		"paths": {
+			"hexcore-capstone": ["../hexcore-capstone"],
+			"hexcore-remill": ["../hexcore-remill"],
+			"hexcore-rellic": ["../hexcore-rellic"]
+		}
 	},
 	"exclude": ["node_modules", ".vscode-test"]
 }

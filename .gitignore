@@ -55,6 +55,19 @@ extensions/hexcore-remill/deps/
 extensions/hexcore-remill/build/
 extensions/hexcore-remill/prebuilds/
 
+# HexCore Rellic build artifacts
+extensions/hexcore-rellic/deps/llvm/
+extensions/hexcore-rellic/deps/clang/
+extensions/hexcore-rellic/deps/z3/
+extensions/hexcore-rellic/deps/rellic/
+extensions/hexcore-rellic/build/
+extensions/hexcore-rellic/prebuilds/
+extensions/hexcore-rellic/__pycache__/
+extensions/hexcore-rellic/build-rellic/
+extensions/hexcore-rellic/clang-build/
+extensions/hexcore-rellic/clang-install/
+extensions/hexcore-rellic/z3-download/
+
 # HexCore LLVM MC build artifacts
 extensions/hexcore-llvm-mc/deps/
 extensions/hexcore-llvm-mc/build/

@@ -31,6 +31,7 @@ export const dirs = [
 	'extensions/hexcore-unicorn',
 	'extensions/hexcore-disassembler',
 	'extensions/hexcore-debugger',
+	'extensions/hexcore-rellic',
 	'extensions/configuration-editing',
 	'extensions/css-language-features',
 	'extensions/css-language-features/server',

@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.5.2
+# HexCore Job Templates — v3.6.0
 
 Safe default `.hexcore_job.json` templates for users and AI agents.
 
@@ -52,6 +52,7 @@ Comprehensive static analysis with advanced strings, Base64 detection, hex inspe
     { "cmd": "hexcore.disasm.analyzeAll", "args": { "maxFunctions": 3000, "maxFunctionSize": 65536, "forceReload": true }, "timeoutMs": 300000 },
     { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
     { "cmd": "hexcore.ioc.extract", "timeoutMs": 120000 },
+    { "cmd": "hexcore.rellic.decompile", "args": { "address": "entry", "count": 200 }, "output": { "path": "decompiled-entry.c" }, "timeoutMs": 180000, "continueOnError": true },
     { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "FINAL_REPORT.md", "format": "md" }, "timeoutMs": 60000 }
   ]
 }
@@ -79,6 +80,13 @@ Focused on disassembly, formula extraction, constant checking, string references
       "cmd": "hexcore.disasm.exportASMHeadless",
       "output": { "path": "02-disassembly.asm" },
       "timeoutMs": 240000
+    },
+    {
+      "cmd": "hexcore.rellic.decompile",
+      "args": { "address": "entry", "count": 300 },
+      "output": { "path": "02b-decompiled.c" },
+      "timeoutMs": 180000,
+      "continueOnError": true
     },
     {
       "cmd": "hexcore.disasm.searchStringHeadless",
@@ -113,6 +121,65 @@ Focused on disassembly, formula extraction, constant checking, string references
 ```
 
 **Note:** `buildFormula` only works with x86/x64 binaries. For ARM/ARM64/MIPS challenges, omit it or replace with `checkConstants`.
+
+---
+
+## Template: Deep Reverse Engineering (Decompile)
+
+Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to pseudo-C, extract strings and Base64. Ideal for understanding complex functions in PE/ELF binaries.
+
+> **Note:** `hexcore.rellic.decompile` is Experimental in v3.5.x. It performs lift + decompile in one step.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\deep-reverse",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 2500, "maxFunctionSize": 65536, "forceReload": true },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": { "address": "0x401000", "count": 200 },
+      "output": { "path": "01-disasm-at.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x401000", "count": 200 },
+      "output": { "path": "02-lifted.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.rellic.decompile",
+      "args": { "address": "0x401000", "count": 200 },
+      "output": { "path": "03-decompiled.c" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.strings.extractAdvanced",
+      "output": { "path": "04-strings-advanced.json" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.base64.decodeHeadless",
+      "output": { "path": "05-base64.json" },
+      "timeoutMs": 90000
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "FINAL_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Note:** Replace `0x401000` with the actual entry point or function address you want to decompile. `liftToIR` and `rellic.decompile` only support x86/x64 binaries.
 
 ---
 

@@ -11,7 +11,7 @@ import { StringRefProvider } from './stringRefTree';
 import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
-import { DisassemblerEngine, Instruction } from './disassemblerEngine';
+import { DisassemblerEngine, ImportLibrary, Instruction } from './disassemblerEngine';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
 import {
@@ -25,6 +25,7 @@ import {
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult } from './remillWrapper';
+import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { mapCapstoneToRemill } from './archMapper';
 import {
 	PipelineJobTemplate,
@@ -188,6 +189,206 @@ interface SaveJobAsProfileCommandOptions extends CommandOutputOptions {
 	quiet?: boolean;
 }
 
+export interface DisassembleAtInstructionEntry {
+	address: string;         // VA in hex
+	bytes: string;           // Hex with spaces (e.g. "48 89 5C 24 08")
+	mnemonic: string;
+	operands: string;
+	comment: string;         // Resolved reference or ""
+	size: number;
+	isContext: boolean;      // true for context instructions
+}
+
+export interface DisassembleAtResult {
+	address: string;         // VA requested in hex
+	count: number;           // Requested count
+	context: number;         // Requested context
+	actualCount: number;     // Total instructions returned (context + main)
+	instructions: DisassembleAtInstructionEntry[];
+	generatedAt: string;     // ISO 8601 timestamp
+}
+
+/**
+ * Builds a flat lookup map from ImportLibrary[] for O(1) address-based import resolution.
+ * Each import function address maps to its library name and function name.
+ */
+export function buildImportLookup(
+	imports: ImportLibrary[]
+): Map<number, { library: string; functionName: string }> {
+	const lookup = new Map<number, { library: string; functionName: string }>();
+	for (const lib of imports) {
+		for (const fn of lib.functions) {
+			lookup.set(fn.address, { library: lib.name, functionName: fn.name });
+		}
+	}
+	return lookup;
+}
+
+/**
+ * Pure function that resolves the comment for a disassembled instruction based on
+ * reference maps (strings, functions, imports) and user comments.
+ *
+ * Priority (descending): string > import > function > raw address > empty.
+ * User comments are prepended with " | " separator when a reference also exists.
+ */
+export function resolveInstructionComment(
+	instruction: { targetAddress?: number; comment?: string },
+	strings: Map<number, { string: string; address: number }>,
+	functions: Map<number, { name: string; address: number }>,
+	imports: { name: string; functions: { name: string; address: number }[] }[],
+	userComments: Map<number, string>,
+	instructionAddress: number
+): string {
+	let resolved = '';
+
+	const target = instruction.targetAddress;
+	if (target !== undefined && target !== null) {
+		const strRef = strings.get(target);
+		if (strRef) {
+			resolved = `-> "${strRef.string}" (0x${target.toString(16).toUpperCase()})`;
+		} else {
+			// Build import lookup inline for correctness — caller may also use buildImportLookup for batch
+			let importMatch: { library: string; functionName: string } | undefined;
+			for (const lib of imports) {
+				for (const fn of lib.functions) {
+					if (fn.address === target) {
+						importMatch = { library: lib.name, functionName: fn.name };
+						break;
+					}
+				}
+				if (importMatch) {
+					break;
+				}
+			}
+
+			if (importMatch) {
+				resolved = `-> import:${importMatch.library}!${importMatch.functionName} (0x${target.toString(16).toUpperCase()})`;
+			} else {
+				const funcRef = functions.get(target);
+				if (funcRef) {
+					resolved = `-> func:${funcRef.name} (0x${target.toString(16).toUpperCase()})`;
+				} else {
+					resolved = `-> 0x${target.toString(16).toUpperCase()}`;
+				}
+			}
+		}
+	}
+
+	const userComment = userComments.get(instructionAddress);
+	if (userComment) {
+		if (resolved) {
+			return `${userComment} | ${resolved}`;
+		}
+		return userComment;
+	}
+
+	return resolved;
+}
+
+export const DEFAULT_COUNT = 30;
+export const DEFAULT_CONTEXT = 0;
+export const MAX_INSTRUCTION_SIZE_X86 = 15;  // bytes
+export const MAX_INSTRUCTION_SIZE_ARM = 4;   // bytes
+
+/**
+ * Parses and validates the arguments for the disassembleAtHeadless command.
+ * Converts hex address string to number, applies defaults for count/context,
+ * and passes through file, output, quiet as-is.
+ */
+export function parseDisassembleAtAddress(args: any): { address: number; count: number; context: number; file?: string; output?: { path: string }; quiet?: boolean } {
+	// --- address (required, hex string) ---
+	const rawAddress: unknown = args?.address;
+	if (rawAddress === undefined || rawAddress === null || rawAddress === '') {
+		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+	}
+	if (typeof rawAddress !== 'string') {
+		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+	}
+	let hexStr = rawAddress;
+	if (hexStr.startsWith('0x') || hexStr.startsWith('0X')) {
+		hexStr = hexStr.slice(2);
+	}
+	if (hexStr.length === 0 || !/^[0-9a-fA-F]+$/.test(hexStr)) {
+		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+	}
+	const address = parseInt(hexStr, 16);
+	if (Number.isNaN(address)) {
+		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+	}
+
+	// --- count (optional, positive integer, default 30) ---
+	let count = DEFAULT_COUNT;
+	if (args?.count !== undefined && args?.count !== null) {
+		count = args.count;
+		if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) {
+			throw new Error("disassembleAtHeadless: 'count' must be a positive integer.");
+		}
+	}
+
+	// --- context (optional, non-negative integer, default 0) ---
+	let context = DEFAULT_CONTEXT;
+	if (args?.context !== undefined && args?.context !== null) {
+		context = args.context;
+		if (typeof context !== 'number' || !Number.isInteger(context) || context < 0) {
+			throw new Error("disassembleAtHeadless: 'context' must be a non-negative integer.");
+		}
+	}
+
+	return {
+		address,
+		count,
+		context,
+		file: args?.file,
+		output: args?.output,
+		quiet: args?.quiet,
+	};
+}
+
+/**
+ * Computes context instructions by backtracking from the target address.
+ * Disassembles forward from an estimated start point and returns the last
+ * `contextCount` instructions whose address is strictly before `targetAddress`.
+ *
+ * When the backtrack start falls before the binary base address, the base
+ * address is used instead, returning fewer context instructions than requested.
+ */
+export async function computeContextInstructions(
+	engine: DisassemblerEngine,
+	targetAddress: number,
+	contextCount: number,
+	maxInstructionSize: number
+): Promise<Instruction[]> {
+	if (contextCount <= 0) {
+		return [];
+	}
+
+	const baseAddress = engine.getBaseAddress();
+	const backtrackBytes = contextCount * maxInstructionSize;
+	let startAddr = targetAddress - backtrackBytes;
+
+	// Clamp to base address when backtrack goes before the buffer start
+	if (startAddr < baseAddress) {
+		startAddr = baseAddress;
+	}
+
+	const rangeSize = targetAddress - startAddr;
+	if (rangeSize <= 0) {
+		return [];
+	}
+
+	const allInstructions = await engine.disassembleRange(startAddr, rangeSize);
+
+	// Keep only instructions strictly before the target address
+	const beforeTarget = allInstructions.filter(instr => instr.address < targetAddress);
+
+	// Return the last contextCount instructions
+	if (beforeTarget.length <= contextCount) {
+		return beforeTarget;
+	}
+	return beforeTarget.slice(beforeTarget.length - contextCount);
+}
+
+
 export function activate(context: vscode.ExtensionContext): void {
 	// Use Factory to get the initial global engine (or specific if we knew context)
 	const factory = DisassemblerFactory.getInstance();
@@ -221,16 +422,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push({ dispose: () => remillWrapper.dispose() });
 	vscode.commands.executeCommand('setContext', 'hexcore:remillAvailable', remillWrapper.isAvailable());
 
+	const rellicWrapper = new RellicWrapper();
+	context.subscriptions.push({ dispose: () => rellicWrapper.dispose() });
+	vscode.commands.executeCommand('setContext', 'hexcore:rellicAvailable', rellicWrapper.isAvailable());
+
 	let shownExperimentalNotice = false;
 
 	const showNativeStatus = async (): Promise<void> => {
 		const disassembler = await engine.getDisassemblerAvailability();
 		const assembler = await engine.getAssemblerAvailability();
 		const remillAvailable = remillWrapper.isAvailable();
+		const rellicAvailable = rellicWrapper.isAvailable();
 
-		if (disassembler.available && assembler.available && remillAvailable) {
+		if (disassembler.available && assembler.available && remillAvailable && rellicAvailable) {
 			vscode.window.showInformationMessage(
-				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill).')
+				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill + Rellic).')
 			);
 			return;
 		}
@@ -249,6 +455,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (!remillAvailable) {
 			parts.push(
 				vscode.l10n.t('Remill: {0}', remillWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+		if (!rellicAvailable) {
+			parts.push(
+				vscode.l10n.t('Rellic: {0}', rellicWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
 			);
 		}
 
@@ -1366,6 +1577,292 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// -----------------------------------------------------------------------
+	// [Experimental] Decompile to pseudo-C (Lifting + Rellic)
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.rellic.decompile', async (arg?: unknown) => {
+			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
+				&& !((arg as any) instanceof vscode.Uri)
+				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>));
+
+			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const quiet = options.quiet === true;
+
+			if (!remillWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-remill is not available. Cannot lift machine code to IR.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			if (!rellicWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-rellic is not available. Install the prebuild or build from source.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const arch = engine.getArchitecture();
+			const mapping = mapCapstoneToRemill(arch);
+			if (!mapping.supported) {
+				const errorMsg = `Architecture '${arch}' is not supported by Remill.`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: String(arch), error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			let startAddress: number;
+			let size: number;
+			let functionName: string | undefined;
+
+			if (isHeadless && options.file) {
+				const filePath = String(options.file);
+				if (!engine.isFileLoaded() || engine.getFilePath() !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						const errorMsg = `Failed to load file: ${filePath}`;
+						if (quiet) {
+							return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+						}
+						vscode.window.showErrorMessage(errorMsg);
+						return undefined;
+					}
+				}
+				startAddress = parseAddressValue(options.startAddress as string | number | undefined) ?? engine.getBaseAddress();
+				size = typeof options.size === 'number' ? options.size : engine.getBufferSize();
+			} else if (isHeadless && options.functionAddress !== undefined) {
+				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
+				const func = engine.getFunctionAt(startAddress);
+				if (func) {
+					size = func.endAddress - func.address;
+					functionName = func.name;
+				} else {
+					size = typeof options.size === 'number' ? options.size : 256;
+				}
+			} else {
+				const addrInput = await vscode.window.showInputBox({
+					prompt: 'Start address (hex, e.g. 0x401000)',
+					placeHolder: '0x401000',
+				});
+				if (!addrInput) {
+					return undefined;
+				}
+				startAddress = parseInt(addrInput, 16);
+				if (isNaN(startAddress)) {
+					vscode.window.showErrorMessage(`Invalid address: ${addrInput}`);
+					return undefined;
+				}
+
+				const sizeInput = await vscode.window.showInputBox({
+					prompt: 'Size in bytes',
+					placeHolder: '256',
+					value: '256',
+				});
+				if (!sizeInput) {
+					return undefined;
+				}
+				size = parseInt(sizeInput, 10);
+				if (isNaN(size) || size <= 0) {
+					vscode.window.showErrorMessage(`Invalid size: ${sizeInput}`);
+					return undefined;
+				}
+			}
+
+			if (!engine.isFileLoaded()) {
+				const errorMsg = 'No binary file is loaded.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: `0x${startAddress.toString(16)}`, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const bytes = engine.getBytes(startAddress, size);
+			if (!bytes || bytes.length === 0) {
+				const errorMsg = `Address 0x${startAddress.toString(16)} is outside the loaded binary.`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: `0x${startAddress.toString(16)}`, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			// Step 1: Lift to IR
+			const liftResult = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Lifting to LLVM IR...', cancellable: false },
+				async () => remillWrapper.liftBytes(bytes, startAddress, arch)
+			);
+
+			if (!liftResult.success) {
+				const errorMsg = `Lift failed: ${liftResult.error}`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: `0x${startAddress.toString(16)}`, architecture: mapping.remillArch, error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			// Step 2: Decompile IR to pseudo-C
+			const decompileResult = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Decompiling to pseudo-C...', cancellable: false },
+				async () => rellicWrapper.decompile(liftResult.ir)
+			);
+
+			if (!decompileResult.success) {
+				const errorMsg = `Decompilation failed: ${decompileResult.error}`;
+				if (!quiet) {
+					const action = await vscode.window.showErrorMessage(errorMsg, 'View IR');
+					if (action === 'View IR') {
+						const doc = await vscode.workspace.openTextDocument({ content: liftResult.ir, language: 'llvm' });
+						await vscode.window.showTextDocument(doc, { preview: false });
+					}
+				}
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: `0x${startAddress.toString(16)}`, architecture: mapping.remillArch, error: decompileResult.error };
+				}
+				return undefined;
+			}
+
+			const fileName = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
+			const addressStr = `0x${startAddress.toString(16).padStart(8, '0')}`;
+			const header = buildPseudoCHeader({
+				fileName,
+				address: addressStr,
+				architecture: mapping.remillArch,
+				functionName,
+			});
+
+			const fullCode = header + decompileResult.code;
+
+			if (isHeadless && options.output) {
+				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, fullCode, 'utf-8');
+			}
+
+			if (quiet) {
+				return {
+					success: true,
+					code: fullCode,
+					functionCount: decompileResult.functionCount,
+					address: addressStr,
+					architecture: mapping.remillArch,
+					error: '',
+				};
+			}
+
+			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
+			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
+
+			return {
+				success: true,
+				code: fullCode,
+				functionCount: decompileResult.functionCount,
+				address: addressStr,
+				architecture: mapping.remillArch,
+				error: '',
+			};
+		})
+	);
+
+	// -----------------------------------------------------------------------
+	// [Experimental] Decompile IR to pseudo-C (direct IR input)
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.rellic.decompileIR', async (arg?: unknown) => {
+			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
+				&& !((arg as any) instanceof vscode.Uri)
+				&& ('file' in (arg as Record<string, unknown>) || 'irText' in (arg as Record<string, unknown>));
+
+			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const quiet = options.quiet === true;
+
+			if (!rellicWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-rellic is not available.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			let irText: string;
+
+			if (isHeadless && typeof options.irText === 'string') {
+				irText = options.irText;
+			} else if (isHeadless && typeof options.file === 'string') {
+				if (!fs.existsSync(options.file)) {
+					const errorMsg = `File not found: ${options.file}`;
+					if (quiet) {
+						return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					}
+					vscode.window.showErrorMessage(errorMsg);
+					return undefined;
+				}
+				irText = fs.readFileSync(options.file, 'utf-8');
+			} else {
+				const activeEditor = vscode.window.activeTextEditor;
+				if (!activeEditor) {
+					vscode.window.showErrorMessage('No active editor with LLVM IR content.');
+					return undefined;
+				}
+				irText = activeEditor.document.getText();
+			}
+
+			const decompileResult = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Decompiling IR to pseudo-C...', cancellable: false },
+				async () => rellicWrapper.decompile(irText)
+			);
+
+			if (!decompileResult.success) {
+				const errorMsg = `Decompilation failed: ${decompileResult.error}`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: decompileResult.error };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const fullCode = decompileResult.code;
+
+			if (isHeadless && options.output) {
+				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, fullCode, 'utf-8');
+			}
+
+			if (quiet) {
+				return {
+					success: true,
+					code: fullCode,
+					functionCount: decompileResult.functionCount,
+					address: '',
+					architecture: '',
+					error: '',
+				};
+			}
+
+			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
+			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
+
+			return {
+				success: true,
+				code: fullCode,
+				functionCount: decompileResult.functionCount,
+				address: '',
+				architecture: '',
+				error: '',
+			};
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.analyzeAll', async (arg?: vscode.Uri | AnalyzeAllCommandOptions) => {
 			const options = normalizeAnalyzeAllCommandOptions(arg);
@@ -1450,6 +1947,114 @@ export function activate(context: vscode.ExtensionContext): void {
 	// ============================================================================
 	// Headless Commands (Pipeline-safe, no UI prompts)
 	// ============================================================================
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.disassembleAtHeadless', async (arg?: Record<string, unknown>) => {
+			// 1. Parse and validate args
+			const params = parseDisassembleAtAddress(arg);
+
+			// 2. Load file if needed (reuse engine if same file)
+			if (params.file) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== params.file) {
+					const loaded = await engine.loadFile(params.file);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${params.file}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			// 3. Validate address is within binary range
+			const testBytes = engine.getBytes(params.address, 1);
+			if (!testBytes || testBytes.length === 0) {
+				throw new Error(`Address 0x${params.address.toString(16).toUpperCase()} is outside the binary range.`);
+			}
+
+			// 4. Determine max instruction size from architecture
+			const arch = engine.getArchitecture();
+			const maxInstructionSize = (arch === 'arm' || arch === 'arm64')
+				? MAX_INSTRUCTION_SIZE_ARM
+				: MAX_INSTRUCTION_SIZE_X86;
+
+			// 5. Compute context instructions (before target address)
+			let contextInstructions: Instruction[] = [];
+			if (params.context > 0) {
+				contextInstructions = await computeContextInstructions(
+					engine, params.address, params.context, maxInstructionSize
+				);
+			}
+
+			// 6. Disassemble main instructions
+			const estimatedSize = params.count * maxInstructionSize;
+			const rawMainInstructions = await engine.disassembleRange(params.address, estimatedSize);
+			const mainInstructions = rawMainInstructions.slice(0, params.count);
+
+			// 7. Prepare reference maps for comment resolution
+			const stringsMap = engine.getStringsMap();
+			const functionsMap = engine.getFunctionsMap();
+			const importsArray = engine.getImports();
+			const commentsMap = engine.getComments();
+
+			// 8. Format all instructions (context + main)
+			const allEntries: DisassembleAtInstructionEntry[] = [];
+
+			for (const instr of contextInstructions) {
+				const comment = resolveInstructionComment(
+					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+				);
+				allEntries.push({
+					address: `0x${instr.address.toString(16).toUpperCase()}`,
+					bytes: Array.from(instr.bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+					mnemonic: instr.mnemonic,
+					operands: instr.opStr,
+					comment,
+					size: instr.size,
+					isContext: true,
+				});
+			}
+
+			for (const instr of mainInstructions) {
+				const comment = resolveInstructionComment(
+					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+				);
+				allEntries.push({
+					address: `0x${instr.address.toString(16).toUpperCase()}`,
+					bytes: Array.from(instr.bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+					mnemonic: instr.mnemonic,
+					operands: instr.opStr,
+					comment,
+					size: instr.size,
+					isContext: false,
+				});
+			}
+
+			// 9. Build result JSON
+			const result: DisassembleAtResult = {
+				address: `0x${params.address.toString(16).toUpperCase()}`,
+				count: params.count,
+				context: params.context,
+				actualCount: allEntries.length,
+				instructions: allEntries,
+				generatedAt: new Date().toISOString(),
+			};
+
+			// 10. Write to file if output.path specified
+			if (params.output?.path) {
+				fs.mkdirSync(path.dirname(params.output.path), { recursive: true });
+				fs.writeFileSync(params.output.path, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			// 11. Show notification unless quiet
+			if (!params.quiet) {
+				vscode.window.showInformationMessage(
+					`Disassemble At: ${allEntries.length} instructions from 0x${params.address.toString(16).toUpperCase()}`
+				);
+			}
+
+			return result;
+		})
+	);
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.searchStringHeadless', async (arg?: Record<string, unknown>) => {
