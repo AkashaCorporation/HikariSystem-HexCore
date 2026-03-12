@@ -2440,6 +2440,289 @@ export class DisassemblerEngine {
 		}
 	}
 
+	// ============ v3.7: Junk Instruction Filtering ============
+
+	/**
+	 * Filter junk/obfuscation instructions from an instruction array.
+	 * Detects and removes common obfuscation patterns:
+	 *  - call next; pop reg (callfuscation)
+	 *  - add/sub reg, 0 (no-op arithmetic)
+	 *  - nop / nop dword [...]
+	 *  - push reg; pop reg (same register, identity)
+	 *  - xchg reg, reg (same register)
+	 *  - mov reg, reg (same register)
+	 *  - lea reg, [reg+0] / lea reg, [reg] (identity LEA)
+	 */
+	filterJunkInstructions(instructions: Instruction[]): { filtered: Instruction[]; junkCount: number; junkRatio: number } {
+		const filtered: Instruction[] = [];
+		let junkCount = 0;
+		const len = instructions.length;
+
+		for (let i = 0; i < len; i++) {
+			const curr = instructions[i];
+			const next = i + 1 < len ? instructions[i + 1] : null;
+			const mn = curr.mnemonic.toLowerCase();
+			const op = curr.opStr.toLowerCase().replace(/\s+/g, '');
+
+			// Pattern 1: call next_addr; pop reg (callfuscation)
+			if (mn === 'call' && next) {
+				const nextMn = next.mnemonic.toLowerCase();
+				if (nextMn === 'pop' && curr.targetAddress === next.address) {
+					junkCount += 2;
+					i++; // skip both
+					continue;
+				}
+			}
+
+			// Pattern 2: add/sub reg, 0
+			if ((mn === 'add' || mn === 'sub') && (op.endsWith(',0') || op.endsWith(',0x0'))) {
+				junkCount++;
+				continue;
+			}
+
+			// Pattern 3: nop (any variant)
+			if (mn === 'nop') {
+				junkCount++;
+				continue;
+			}
+
+			// Pattern 4: push reg; pop reg (same register)
+			if (mn === 'push' && next && next.mnemonic.toLowerCase() === 'pop') {
+				const pushReg = op.trim();
+				const popReg = next.opStr.toLowerCase().replace(/\s+/g, '').trim();
+				if (pushReg === popReg) {
+					junkCount += 2;
+					i++; // skip both
+					continue;
+				}
+			}
+
+			// Pattern 5: xchg reg, reg (same register)
+			if (mn === 'xchg') {
+				const parts = op.split(',');
+				if (parts.length === 2 && parts[0].trim() === parts[1].trim()) {
+					junkCount++;
+					continue;
+				}
+			}
+
+			// Pattern 6: mov reg, reg (same register)
+			if (mn === 'mov') {
+				const parts = op.split(',');
+				if (parts.length === 2 && parts[0].trim() === parts[1].trim()) {
+					junkCount++;
+					continue;
+				}
+			}
+
+			// Pattern 7: lea reg, [reg+0] or lea reg, [reg]
+			if (mn === 'lea') {
+				const parts = op.split(',');
+				if (parts.length === 2) {
+					const dst = parts[0].trim();
+					const src = parts[1].trim();
+					// Match [reg], [reg+0], [reg+0x0]
+					const leaMatch = src.match(/^\[(\w+)(?:\+0(?:x0)?)?\]$/);
+					if (leaMatch && leaMatch[1] === dst) {
+						junkCount++;
+						continue;
+					}
+				}
+			}
+
+			filtered.push(curr);
+		}
+
+		return {
+			filtered,
+			junkCount,
+			junkRatio: len > 0 ? junkCount / len : 0
+		};
+	}
+
+	// ============ v3.7: VM Detection & Analysis ============
+
+	/**
+	 * Detect VM-based obfuscation patterns in a function's instructions.
+	 * Heuristics:
+	 *  - Dispatcher: 3+ sequential cmp reg,imm followed by conditional jumps
+	 *  - Operand stacks: [rbp+rax*4-offset] memory patterns
+	 *  - Handler tables: indirect jumps via [reg*scale+base]
+	 *  - Junk ratio: high % of junk instructions
+	 */
+	detectVM(funcAddress?: number): {
+		vmDetected: boolean;
+		vmType: string;
+		dispatcher: string | null;
+		opcodeCount: number;
+		stackArrays: Array<{ base: string; type: string }>;
+		junkRatio: number;
+	} {
+		// Get instructions for the target function (or all if not specified)
+		let instrs: Instruction[] = [];
+		if (funcAddress !== undefined) {
+			const func = this.functions.get(funcAddress);
+			if (func) { instrs = func.instructions; }
+		} else {
+			// Analyze largest function
+			let largest: Function | undefined;
+			for (const f of this.functions.values()) {
+				if (!largest || f.instructions.length > largest.instructions.length) {
+					largest = f;
+				}
+			}
+			if (largest) { instrs = largest.instructions; }
+		}
+
+		if (instrs.length === 0) {
+			return { vmDetected: false, vmType: 'none', dispatcher: null, opcodeCount: 0, stackArrays: [], junkRatio: 0 };
+		}
+
+		// Junk ratio
+		const { junkRatio } = this.filterJunkInstructions(instrs);
+
+		// Dispatcher detection: find sequences of cmp reg,imm + jcc
+		let dispatcherAddr: string | null = null;
+		let maxOpcodeCount = 0;
+
+		for (let i = 0; i < instrs.length - 2; i++) {
+			let cmpCount = 0;
+			let startIdx = i;
+
+			while (i < instrs.length) {
+				const mn = instrs[i].mnemonic.toLowerCase();
+				if (mn === 'cmp') {
+					cmpCount++;
+					i++;
+					// Expect a conditional jump after cmp
+					if (i < instrs.length && instrs[i].isConditional && instrs[i].isJump) {
+						i++;
+					}
+				} else {
+					break;
+				}
+			}
+
+			if (cmpCount >= 3 && cmpCount > maxOpcodeCount) {
+				maxOpcodeCount = cmpCount;
+				dispatcherAddr = '0x' + instrs[startIdx].address.toString(16);
+			}
+		}
+
+		// Operand stack detection: look for [reg+reg*4-offset] patterns
+		const stackArrays: Array<{ base: string; type: string }> = [];
+		const stackPatternRegex = /\[(\w+)[+-]\w+\*4[+-](0x[\da-f]+|\d+)\]/i;
+		const seenStacks = new Set<string>();
+
+		for (const inst of instrs) {
+			const match = inst.opStr.match(stackPatternRegex);
+			if (match) {
+				const key = `${match[1]}-${match[2]}`;
+				if (!seenStacks.has(key)) {
+					seenStacks.add(key);
+					stackArrays.push({
+						base: `${match[1]}-${match[2]}`,
+						type: stackArrays.length === 0 ? 'operand-stack' : 'vm-program'
+					});
+				}
+			}
+		}
+
+		const vmDetected = maxOpcodeCount >= 3 || (junkRatio > 0.4 && stackArrays.length > 0);
+		const vmType = vmDetected
+			? (maxOpcodeCount >= 3 ? 'bytecode-interpreter' : 'obfuscated-vm')
+			: 'none';
+
+		return {
+			vmDetected,
+			vmType,
+			dispatcher: dispatcherAddr,
+			opcodeCount: maxOpcodeCount,
+			stackArrays,
+			junkRatio
+		};
+	}
+
+	// ============ v3.7: PRNG Analysis Helper ============
+
+	/**
+	 * Detect PRNG usage patterns in the analyzed binary.
+	 * Scans for PLT calls to srand/rand/random/srandom, identifies seed sources.
+	 */
+	detectPRNG(): {
+		prngDetected: boolean;
+		seedSource: string | null;
+		seedValue: number | null;
+		randCallCount: number;
+		callSites: Array<{ address: string; function: string; context: string }>;
+	} {
+		const callSites: Array<{ address: string; function: string; context: string }> = [];
+		let seedSource: string | null = null;
+		let seedValue: number | null = null;
+		let randCallCount = 0;
+		const prngFunctions = ['srand', 'rand', 'random', 'srandom'];
+
+		for (const func of this.functions.values()) {
+			for (let i = 0; i < func.instructions.length; i++) {
+				const inst = func.instructions[i];
+				if (!inst.isCall) { continue; }
+
+				// Check if this call targets a known PRNG function
+				const targetFunc = this.functions.get(inst.targetAddress ?? 0);
+				const targetName = targetFunc?.name?.toLowerCase() ?? '';
+
+				// Also check if the opStr references a PRNG name (PLT calls often show the symbol)
+				const opLower = inst.opStr.toLowerCase();
+				const matchedPrng = prngFunctions.find(fn => targetName.includes(fn) || opLower.includes(fn));
+
+				if (!matchedPrng) { continue; }
+
+				if (matchedPrng === 'rand' || matchedPrng === 'random') {
+					randCallCount++;
+				}
+
+				// For srand/srandom, look back for the seed value (mov edi, imm before call)
+				let context = matchedPrng;
+				if (matchedPrng === 'srand' || matchedPrng === 'srandom') {
+					// Look back up to 5 instructions for the seed loading
+					for (let j = Math.max(0, i - 5); j < i; j++) {
+						const prev = func.instructions[j];
+						const prevMn = prev.mnemonic.toLowerCase();
+						const prevOp = prev.opStr.toLowerCase();
+
+						// mov edi, <imm> or mov rdi, <imm> (System V ABI, first arg)
+						if (prevMn === 'mov' && (prevOp.startsWith('edi,') || prevOp.startsWith('rdi,'))) {
+							const parts = prevOp.split(',');
+							if (parts.length === 2) {
+								const valStr = parts[1].trim();
+								const parsed = parseInt(valStr, valStr.startsWith('0x') ? 16 : 10);
+								if (!isNaN(parsed)) {
+									seedValue = parsed;
+									seedSource = `immediate(${valStr})`;
+									context = `srand(${valStr})`;
+								}
+							}
+						}
+					}
+				}
+
+				callSites.push({
+					address: '0x' + inst.address.toString(16),
+					function: matchedPrng,
+					context
+				});
+			}
+		}
+
+		return {
+			prngDetected: callSites.length > 0,
+			seedSource,
+			seedValue,
+			randCallCount,
+			callSites
+		};
+	}
+
 	dispose(): void {
 		this.capstone.dispose();
 		this.capstoneInitialized = false;

@@ -1,0 +1,16 @@
+{
+  "name": "hexcore-helix",
+  "version": "0.2.0",
+  "description": "HexCore Helix — MLIR-based decompilation engine",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js"
+  },
+  "author": "HikariSystem",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0",
+    "vscode": "^1.75.0"
+  }
+}

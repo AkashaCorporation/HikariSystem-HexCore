@@ -1,0 +1,1117 @@
+"builtin.module"() ({
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i8 (ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_read_memory_8", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}, {llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, i64, i8)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], sym_name = "__remill_write_memory_8", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1, ...)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_flag_computation_carry", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1, ...)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_flag_computation_zero", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1, ...)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_flag_computation_sign", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1, ...)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_flag_computation_overflow", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i32 (ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], sym_name = "__remill_read_memory_32", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}, {llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, i64, i32)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], sym_name = "__remill_write_memory_32", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i64 (ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], sym_name = "__remill_read_memory_64", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.noundef}, {llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], sym_name = "__remill_write_memory_64", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13ADDI3RnWImE2RnImLb1EE2InImEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13ADDI3RnWImE2RnImLb1EES4_EEP6MemoryS6_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13SUBI3RnWImE2RnImLb1EE2InImEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13SUBI3RnWImE2RnIjLb1EES4_EEP6MemoryS6_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2MnIjE2InIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2MnImE2InImEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2RnIjLb1EE2InIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2RnImLb1EES2_EEP6MemoryS4_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2RnIjLb1EE2MnIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13CMPI2RnImLb1EE2MnImEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i8 ()>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_undefined_8", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14IMULI3RnWImE2RnImLb1EE2InImEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13INCI3MnWIjE2MnIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13INCI3RnWImE2RnIjLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13INCI3RnWImE2RnImLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13DECI3MnWIjE2MnIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13DECI3RnWImE2RnIjLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = readwrite, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_15SETNZI3RnWIhEEEP6MemoryS4_R5StateT_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}, {}, {llvm.nocapture, llvm.writeonly}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, ptr, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14CALLI2InImEEEP6MemoryS4_R5StateT_3RnWImES2_S9_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}, {}, {llvm.nocapture, llvm.writeonly}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, ptr, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14CALLI2MnImEEEP6MemoryS4_R5StateT_3RnWImE2InImES9_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13RETEP6MemoryR5State3RnWImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_compare_sle", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_compare_neq", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1)>, linkage = #llvm.linkage<external>, passthrough = ["no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_compare_uge", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1)>, linkage = #llvm.linkage<external>, passthrough = ["noduplicate", "noinline", "nounwind", "optnone", "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_compare_eq", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.zeroext}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<i1 (i1)>, linkage = #llvm.linkage<external>, passthrough = ["no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.zeroext}], sym_name = "__remill_compare_slt", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_12JLEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13JNZEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13JNLEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_12JZEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = readwrite, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_12JSEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.readonly}, {llvm.nocapture, llvm.writeonly}, {}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13JLEEP6MemoryR5State3RnWIhE2InImES7_S4_ImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = readwrite, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_18CDQE_EAXEP6MemoryR5State", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3RnWImE2InIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3MnWIjE2InIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3MnWIhE2RnIhLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3MnWIjE2RnIjLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3MnWImE2RnImLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3RnWImE2RnIjLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3RnWImE2RnImLb1EEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3RnWImE2MnIjEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13MOVI3RnWImE2MnImEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_15MOVZXI3RnWImE2MnIhEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_15MOVSXI3RnWImE2MnIjElEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_15MOVSXI3RnWImE2RnIjLb1EElEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.readnone}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_16DoINT3EP6MemoryR5State3RnWImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13ANDI3MnWIhE2MnIhE2InIhEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13ANDI3RnWIhE2RnIhLb1EE2InIhEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_12ORI3MnWIhE2MnIhE2InIhEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_12ORI3RnWIhE2RnIhLb1EE2InIhEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13XORI3RnWImE2RnIjLb1EES4_EEP6MemoryS6_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14TESTI2MnIhE2InIhEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14TESTI2RnIhLb1EE2InIhEEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14TESTI2RnIhLb1EES2_EEP6MemoryS4_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14TESTI2RnIjLb1EES2_EEP6MemoryS4_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14TESTI2RnImLb1EES2_EEP6MemoryS4_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13LEAI3RnWImE2MnIhEjEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.nocapture, llvm.nonnull, llvm.readnone}, {llvm.nocapture, llvm.writeonly}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13LEAI3RnWImE2MnIhEmEEP6MemoryS6_R5StateT_T0_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13POPI3RnWImEEEP6MemoryS4_R5StateT_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_14PUSHI2InImEEEP6MemoryS4_R5StateT_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {llvm.nocapture, llvm.writeonly}, {}, {}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, ptr, i64, i64)>, linkage = #llvm.linkage<external>, passthrough = ["alwaysinline", "mustprogress", "nounwind", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13SHLI3RnWImE2RnImLb1EE2InImEEEP6MemoryS8_R5StateT_T0_T1_", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "llvm.func"() <{CConv = #llvm.cconv<ccc>, arg_attrs = [{llvm.noundef, llvm.readnone, llvm.returned}, {llvm.align = 16 : i64, llvm.dereferenceable = 3504 : i64, llvm.nocapture, llvm.nonnull, llvm.noundef, llvm.writeonly}, {}, {llvm.nocapture, llvm.writeonly}], frame_pointer = #llvm.framePointerKind<all>, function_type = !llvm.func<ptr (ptr, ptr, i64, ptr)>, linkage = #llvm.linkage<external>, memory = #llvm.memory_effects<other = none, argMem = write, inaccessibleMem = none>, passthrough = ["alwaysinline", "mustprogress", "nofree", "norecurse", "nosync", "nounwind", "willreturn", ["min-legal-vector-width", "0"], "no-builtins", ["no-trapping-math", "true"], ["stack-protector-buffer-size", "8"], ["tune-cpu", "generic"]], res_attrs = [{llvm.noundef}], sym_name = "_ZN12_GLOBAL__N_13JMPI2InImEEEP6MemoryS4_R5StateT_3RnWImE", visibility_ = 0 : i64}> ({
+  }) : () -> ()
+  "helix_low.func"() <{entry_address = 5389876880 : ui64, sym_name = "sub_14142fe90"}> ({
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 15 : ui32, var_name = "rsi"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 16 : ui32, var_name = "rdi"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 3 : i32, var_id = 17 : ui32, var_name = "param_3"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 18 : ui32, var_name = "rbp"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 19 : ui32, var_name = "r12"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 20 : ui32, var_name = "r13"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 21 : ui32, var_name = "r14"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 22 : ui32, var_name = "r15"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 3 : i32, var_id = 23 : ui32, var_name = "param_4"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 3 : i32, var_id = 24 : ui32, var_name = "param_2"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 3 : i32, var_id = 25 : ui32, var_name = "param_1"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 26 : ui32, var_name = "rax"}> : () -> ()
+    "helix_high.var.decl"() <{storage = 1 : i32, var_id = 27 : ui32, var_name = "rbx"}> : () -> ()
+    "helix_high.var.decl"() <{stack_offset = -48 : i64, storage = 0 : i32, var_id = 0 : ui32, var_name = "var_30"}> : () -> ()
+    "helix_high.var.decl"() <{stack_offset = 80 : i64, storage = 3 : i32, var_id = 8 : ui32, var_name = "param_5"}> : () -> ()
+    %0 = "llvm.mlir.constant"() <{value = 16 : i64}> : () -> i64
+    %1 = "llvm.mlir.constant"() <{value = 32 : i64}> : () -> i64
+    %2 = "llvm.mlir.constant"() <{value = 24 : i64}> : () -> i64
+    %3 = "llvm.mlir.constant"() <{value = 80 : i64}> : () -> i64
+    %4 = "llvm.mlir.constant"() <{value = 256 : i64}> : () -> i64
+    %5 = "llvm.mlir.constant"() <{value = 3 : i64}> : () -> i64
+    %6 = "llvm.mlir.constant"() <{value = 2 : i64}> : () -> i64
+    %7 = "llvm.mlir.constant"() <{value = 4 : i64}> : () -> i64
+    %8 = "llvm.mlir.constant"() <{value = 40 : i64}> : () -> i64
+    %9 = "llvm.mlir.constant"() <{value = 8 : i64}> : () -> i64
+    %10 = "llvm.mlir.constant"() <{value = 5 : i64}> : () -> i64
+    %11 = "llvm.mlir.constant"() <{value = 18801275 : i64}> : () -> i64
+    %12 = "llvm.mlir.constant"() <{value = 4935 : i64}> : () -> i64
+    %13 = "llvm.mlir.constant"() <{value = 6478 : i64}> : () -> i64
+    %14 = "llvm.mlir.constant"() <{value = 56 : i64}> : () -> i64
+    %15 = "llvm.mlir.constant"() <{value = 7 : i64}> : () -> i64
+    %16 = "llvm.mlir.constant"() <{value = 5398 : i64}> : () -> i64
+    %17 = "llvm.mlir.constant"() <{value = 4294967295 : i64}> : () -> i64
+    %18 = "llvm.mlir.constant"() <{value = 584725 : i64}> : () -> i64
+    %19 = "llvm.mlir.constant"() <{value = 6 : i64}> : () -> i64
+    %20 = "llvm.mlir.constant"() <{value = 4649 : i64}> : () -> i64
+    %21 = "llvm.mlir.constant"() <{value = 48 : i64}> : () -> i64
+    %22 = "llvm.mlir.constant"() <{value = 726 : i64}> : () -> i64
+    %23 = "llvm.mlir.constant"() <{value = 771 : i64}> : () -> i64
+    %24 = "llvm.mlir.constant"() <{value = 793 : i64}> : () -> i64
+    %25 = "llvm.mlir.constant"() <{value = 18801845 : i64}> : () -> i64
+    %26 = "llvm.mlir.constant"() <{value = 685 : i64}> : () -> i64
+    %27 = "llvm.mlir.constant"() <{value = 877 : i64}> : () -> i64
+    %28 = "llvm.mlir.constant"() <{value = 72 : i64}> : () -> i64
+    %29 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    %30 = "helix_high.var.ref"() <{var_id = 18 : ui32, var_name = "rbp"}> : () -> i64
+    "helix_low.push"(%30) <{address = 5389876896 : ui64}> {callee_save_reg = "RBP", is_callee_save_push} : (i64) -> ()
+    %31 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+    "helix_low.push"(%31) <{address = 5389876898 : ui64}> {callee_save_reg = "R12", is_callee_save_push} : (i64) -> ()
+    %32 = "helix_high.var.ref"() <{var_id = 20 : ui32, var_name = "r13"}> : () -> i64
+    "helix_low.push"(%32) <{address = 5389876900 : ui64}> {callee_save_reg = "R13", is_callee_save_push} : (i64) -> ()
+    %33 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+    "helix_low.push"(%33) <{address = 5389876902 : ui64}> {callee_save_reg = "R14", is_callee_save_push} : (i64) -> ()
+    %34 = "helix_high.var.ref"() <{var_id = 22 : ui32, var_name = "r15"}> : () -> i64
+    "helix_low.push"(%34) <{address = 5389876904 : ui64}> {callee_save_reg = "R15", is_callee_save_push} : (i64) -> ()
+    %35 = "helix_high.var.ref"() <{var_id = 14 : ui32, var_name = "rsp"}> : () -> i64
+    "helix_high.assign"(%30, %35) : (i64, i64) -> ()
+    %36 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+    %37 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+    "helix_high.assign"(%37, %36) : (i64, i64) -> ()
+    %38 = "helix_high.int.lit"() <{address = 5389876917 : ui64, value = 0 : si64}> : () -> i64
+    %39 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+    "helix_high.assign"(%39, %38) : (i64, i64) -> ()
+    %40 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %41 = "llvm.zext"(%40) : (i64) -> i64
+    "helix_high.assign"(%32, %41) : (i64, i64) -> ()
+    %42 = "llvm.zext"(%29) : (i64) -> i64
+    "helix_high.assign"(%31, %42) : (i64, i64) -> ()
+    %43 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+    "helix_high.assign"(%34, %43) : (i64, i64) -> ()
+    %44 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%33, %44) : (i64, i64) -> ()
+    %45 = "llvm.add"(%37, %4) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %46 = "helix_low.mem.read"(%45) <{address = 5389876935 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+    %47 = "llvm.zext"(%46) : (i32) -> i64
+    %48 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%48, %47) : (i64, i64) -> ()
+    %49 = "llvm.zext"(%48) : (i64) -> i64
+    %50 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %51:4 = "helix_low.cmp"(%49, %50) <{address = 5389876937 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %52 = "arith.constant"() <{value = true}> : () -> i1
+    %53 = "arith.xori"(%51#1, %52) : (i1, i1) -> i1
+    "helix_high.if"(%53) ({
+      "helix_high.label"() <{name = "loc_irr_102"}> : () -> ()
+      %416 = "llvm.mlir.constant"() <{value = 5389876953 : i64}> : () -> i64
+      %417 = "llvm.add"(%416, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "llvm.mlir.constant"() <{value = 1 : i64}> : () -> i64
+      %419:4 = "helix_low.cmp"(%49, %418) <{address = 5389876956 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %420 = "llvm.add"(%417, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %421 = "arith.xori"(%419#1, %52) : (i1, i1) -> i1
+      "helix_low.jcc"(%421)[^bb3, ^bb1] <{address = 5389876958 : ui64, condition = "nz"}> : (i1) -> ()
+    }, {
+      %416 = "llvm.zext"(%39) : (i64) -> i64
+      %417 = "llvm.trunc"(%416) : (i64) -> i32
+      "helix_low.mem.write"(%37, %417) <{address = 5389876941 : ui64, bit_width = 32 : ui32}> : (i64, i32) -> ()
+      %418:3 = "helix_low.unaryop"(%45) <{address = 5389876947 : ui64, kind = 2 : i32}> {inferred_type = "bool"} : (i64) -> (i64, i1, i1)
+      "helix_low.mem.write"(%45, %418#0) <{address = 5389876947 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+      %419 = "helix_low.mem.read"(%45) <{address = 5389876953 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+      %420 = "llvm.zext"(%419) : (i32) -> i64
+      "helix_high.assign"(%48, %420) : (i64, i64) -> ()
+      "llvm.br"()[^bb0] : () -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb1] : () -> ()
+  ^bb1:  // 2 preds: ^bb0, ^bb0
+    "helix_high.label"() <{name = "loc_irr_101"}> : () -> ()
+    %54 = "llvm.add"(%420, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %55 = "llvm.sub"(%30, %8) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_high.assign"(%44, %55) : (i64, i64) -> ()
+    %56 = "llvm.add"(%54, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %57 = "llvm.add"(%56, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %58 = "llvm.sub"(%57, %11) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%58, %55) <{address = 5389876971 : ui64, target_name = "sub_140241c70"}> {arg_count = 1 : i32} : (i64, i64) -> ()
+    %59 = "llvm.add"(%57, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %60 = "helix_low.mem.read"(%37) <{address = 5389876973 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+    %61 = "llvm.zext"(%60) : (i32) -> i64
+    "helix_high.assign"(%43, %61) : (i64, i64) -> ()
+    %62 = "llvm.add"(%59, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %63 = "llvm.add"(%62, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %64 = "llvm.zext"(%31) : (i64) -> i64
+    "helix_high.assign"(%40, %64) : (i64, i64) -> ()
+    %65 = "llvm.add"(%63, %9) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %66 = "llvm.add"(%65, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_high.assign"(%44, %33) : (i64, i64) -> ()
+    %67 = "llvm.add"(%66, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %68 = "llvm.add"(%67, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %69 = "llvm.add"(%68, %12) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%69, %33, %61) <{address = 5389877001 : ui64, target_name = "sub_141431250"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %70 = "llvm.add"(%34, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %71 = "helix_low.mem.read"(%70) <{address = 5389877005 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    "helix_high.assign"(%44, %71) : (i64, i64) -> ()
+    "helix_high.assign"(%39, %50) : (i64, i64) -> ()
+    %72:4 = "helix_low.cmp"(%44, %50) <{address = 5389877015 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    "helix_high.if"(%72#1) ({
+      "helix_low.ret"() : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb2] : () -> ()
+  ^bb2:  // pred: ^bb1
+    "helix_high.label"() <{name = "loc_irr_103"}> : () -> ()
+    %73 = "helix_low.mem.read"(%44) <{address = 5389877020 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    "helix_high.assign"(%29, %73) : (i64, i64) -> ()
+    "helix_high.assign"(%43, %34) : (i64, i64) -> ()
+    %74 = "llvm.add"(%29, %2) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%74, %71, %34, %73, %64) <{address = 5389877027 : ui64}> {arg_count = 4 : i32} : (i64, i64, i64, i64, i64) -> ()
+    "helix_low.ret"() <{address = 5389877027 : ui64}> : () -> ()
+  ^bb3:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_100"}> : () -> ()
+    %75 = "llvm.add"(%420, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %76 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %77:3 = "helix_low.unaryop"(%76) <{address = 5389876960 : ui64, kind = 3 : i32}> {inferred_type = "uint64_t"} : (i64) -> (i64, i1, i1)
+    %78 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%78, %77#0) : (i64, i64) -> ()
+    %79 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %80 = "llvm.add"(%75, %9) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %81 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %82 = "llvm.add"(%80, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %83 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %84 = "llvm.add"(%82, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %85 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+    %86 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %87 = "llvm.mul"(%86, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %88 = "llvm.add"(%85, %87) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %89 = "helix_low.mem.read"(%88) <{address = 5389876974 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+    %90 = "llvm.zext"(%89) : (i32) -> i64
+    %91 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+    "helix_high.assign"(%91, %90) : (i64, i64) -> ()
+    %92 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %93 = "llvm.add"(%84, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %94 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+    %95 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%95, %94) : (i64, i64) -> ()
+    %96 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %97 = "llvm.add"(%93, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %98 = "llvm.add"(%97, %13) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%98, %94, %90) <{address = 5389876982 : ui64, target_name = "sub_141431844"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %99 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %100 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %101 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    %102 = "llvm.zext"(%101) : (i64) -> i64
+    %103 = "llvm.mlir.constant"() <{value = -1 : i64}> : () -> i64
+    %104:4 = "helix_low.cmp"(%102, %103) <{address = 5389876988 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %105 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %106 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%104#1) ({
+      "helix_high.label"() <{name = "loc_irr_113"}> : () -> ()
+      %416 = "llvm.mlir.constant"() <{value = 5389877101 : i64}> : () -> i64
+      %417 = "llvm.add"(%416, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+      "helix_high.assign"(%419, %418) : (i64, i64) -> ()
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "llvm.add"(%417, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+      %423 = "llvm.zext"(%422) : (i64) -> i64
+      %424 = "llvm.mlir.constant"() <{value = -1 : i64}> : () -> i64
+      %425:4 = "helix_low.cmp"(%423, %424) <{address = 5389877108 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %426 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %427 = "llvm.add"(%421, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %428 = "arith.constant"() <{value = true}> : () -> i1
+      %429 = "arith.xori"(%425#1, %428) : (i1, i1) -> i1
+      %430 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%429)[^bb13, ^bb11] <{address = 5389877110 : ui64, condition = "nz"}> : (i1) -> ()
+    }, {
+      %416 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      %417 = "llvm.zext"(%416) : (i64) -> i64
+      %418 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %419:4 = "helix_low.cmp"(%417, %418) <{address = 5389876992 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%419#2)[^bb6, ^bb4] <{address = 5389876994 : ui64, condition = "s"}> : (i1) -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb11] : () -> ()
+  ^bb4:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_107"}> : () -> ()
+    %107 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    %108 = "llvm.zext"(%107) : (i64) -> i64
+    %109 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+    %110 = "llvm.add"(%109, %8) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %111:4 = "helix_low.cmp"(%108, %110) <{address = 5389876998 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %112 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %113 = "arith.xori"(%111#2, %111#3) : (i1, i1) -> i1
+    %114 = "arith.constant"() <{value = true}> : () -> i1
+    %115 = "arith.xori"(%113, %114) : (i1, i1) -> i1
+    %116 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %117 = "arith.constant"() <{value = true}> : () -> i1
+    %118 = "arith.xori"(%115, %117) : (i1, i1) -> i1
+    "helix_high.if"(%118) ({
+      %416 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+      %417 = "llvm.add"(%416, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_low.mem.read"(%417) <{address = 5389877004 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      "helix_high.assign"(%419, %418) : (i64, i64) -> ()
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      "helix_high.assign"(%422, %421) : (i64, i64) -> ()
+      %423 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %424 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+      %425 = "llvm.mlir.constant"() <{value = 56 : i64}> : () -> i64
+      %426:5 = "helix_low.binop"(%424, %425) <{address = 5389877011 : ui64, kind = 3 : i32}> {inferred_type = "bool"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+      %427 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+      "helix_high.assign"(%427, %426#0) : (i64, i64) -> ()
+      %428 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %429 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      %430 = "llvm.mlir.constant"() <{value = 8 : i64}> : () -> i64
+      %431:5 = "helix_low.binop"(%429, %430) <{address = 5389877015 : ui64, kind = 0 : i32}> {inferred_type = "bool"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+      %432 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      "helix_high.assign"(%432, %431#0) : (i64, i64) -> ()
+      %433 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %434 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %435 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      %436 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+      %437:5 = "helix_low.binop"(%435, %436) <{address = 5389877022 : ui64, kind = 0 : i32}> {inferred_type = "bool"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+      %438 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      "helix_high.assign"(%438, %437#0) : (i64, i64) -> ()
+      %439 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %440 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      %441 = "llvm.add"(%440, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %442 = "helix_low.mem.read"(%441) <{address = 5389877026 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %443 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%443, %442) : (i64, i64) -> ()
+      %444 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %445 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      %446 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %447:4 = "helix_low.cmp"(%445, %446) <{address = 5389877029 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %448 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %449 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%447#1)[^bb7, ^bb5] <{address = 5389877031 : ui64, condition = "z"}> : (i1) -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb6] : () -> ()
+  ^bb5:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_109"}> : () -> ()
+    %119 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %120 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %121 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %122 = "helix_low.mem.read"(%121) <{address = 5389877042 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %123 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%123, %122) : (i64, i64) -> ()
+    %124 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %125 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %126 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%126, %125) : (i64, i64) -> ()
+    %127 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %128 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %129 = "llvm.add"(%128, %9) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%129, %125, %426#0, %437#0, %442) <{address = 5389877048 : ui64}> {arg_count = 4 : i32} : (i64, i64, i64, i64, i64) -> ()
+    %130 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %131 = "helix_high.var.ref"() <{var_id = 1 : ui32, var_name = "var_8"}> : () -> i64
+    %132 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%132, %131) : (i64, i64) -> ()
+    %133 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %134 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.goto"() <{label = "loc_irr_0"}> : () -> ()
+  ^bb6:  // 2 preds: ^bb0, ^bb4
+    "helix_high.label"() <{name = "loc_irr_106"}> : () -> ()
+    %135 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+    %136 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%136, %135) : (i64, i64) -> ()
+    %137 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %138 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "llvm.br"()[^bb7] : () -> ()
+  ^bb7:  // 2 preds: ^bb0, ^bb6
+    "helix_high.label"() <{name = "loc_irr_108"}> : () -> ()
+    %139 = "llvm.mlir.constant"() <{value = 5389877061 : i64}> : () -> i64
+    %140 = "llvm.add"(%139, %15) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %141 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %142 = "llvm.mlir.constant"() <{value = 5416951396 : i64}> : () -> i64
+    %143 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %144 = "llvm.add"(%140, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %145 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %146 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+    "helix_high.assign"(%146, %145) : (i64, i64) -> ()
+    %147 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %148 = "llvm.add"(%144, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %149 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %150 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %151:4 = "helix_low.cmp"(%149, %150) <{address = 5389877075 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %152 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %153 = "llvm.add"(%148, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %154 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%151#1) ({
+      %416 = "llvm.add"(%153, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %417 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+      %418 = "llvm.zext"(%417) : (i64) -> i64
+      %419 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %420:4 = "helix_low.cmp"(%418, %419) <{address = 5389877080 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %422 = "llvm.add"(%416, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %423 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%420#1)[^bb10, ^bb9] <{address = 5389877082 : ui64, condition = "z"}> : (i1) -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb8] : () -> ()
+  ^bb8:  // pred: ^bb7
+    "helix_high.label"() <{name = "loc_irr_112"}> : () -> ()
+    %155 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %156 = "helix_low.mem.read"(%155) <{address = 5389877080 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %157 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%157, %156) : (i64, i64) -> ()
+    %158 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %159 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %160 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %161 = "llvm.add"(%160, %2) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%161, %94, %90) <{address = 5389877087 : ui64}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %162 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_low.ret"() <{address = 5389877087 : ui64}> : () -> ()
+  ^bb9:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_111"}> : () -> ()
+    %163 = "llvm.add"(%422, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %164 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    %165 = "llvm.zext"(%164) : (i64) -> i64
+    %166 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+    "helix_high.assign"(%166, %165) : (i64, i64) -> ()
+    %167 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %168 = "llvm.add"(%163, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %169 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+    %170 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%170, %169) : (i64, i64) -> ()
+    %171 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %172 = "llvm.add"(%168, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %173 = "llvm.add"(%172, %16) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%173, %169, %165) <{address = 5389877092 : ui64, target_name = "sub_14143147a"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %174 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %175 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    "helix_high.assign"(%175, %17) : (i64, i64) -> ()
+    %176 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "llvm.br"()[^bb10] : () -> ()
+  ^bb10:  // 2 preds: ^bb0, ^bb9
+    "helix_high.label"() <{name = "loc_irr_110"}> : () -> ()
+    %177 = "helix_high.var.ref"() <{var_id = 7 : ui32, var_name = "var_40"}> : () -> i32
+    %178 = "llvm.zext"(%177) : (i32) -> i64
+    %179 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+    "helix_high.assign"(%179, %178) : (i64, i64) -> ()
+    %180 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "llvm.br"()[^bb0] : () -> ()
+  ^bb11:  // 2 preds: ^bb0, ^bb3
+    "helix_high.label"() <{name = "loc_irr_105"}> : () -> ()
+    %181 = "llvm.add"(%427, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %182 = "helix_high.var.ref"() <{var_id = 18 : ui32, var_name = "rbp"}> : () -> i64
+    %183 = "llvm.add"(%182, %3) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %184 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%184, %183) : (i64, i64) -> ()
+    %185 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %186 = "llvm.add"(%181, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %187 = "llvm.sub"(%186, %18) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%187, %183, %90) <{address = 5389877119 : ui64, target_name = "sub_1413a136a"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %188 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %189 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %190 = "helix_high.var.ref"() <{var_id = 18 : ui32, var_name = "rbp"}> : () -> i64
+    %191 = "llvm.add"(%190, %3) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %192 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+    %193:4 = "helix_low.cmp"(%191, %192) <{address = 5389877127 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %194 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %195 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%193#1) ({
+      "helix_high.label"() <{name = "loc_irr_115"}> : () -> ()
+      %416 = "llvm.mlir.constant"() <{value = 5389877159 : i64}> : () -> i64
+      %417 = "llvm.add"(%416, %19) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+      %419 = "llvm.add"(%418, %4) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %420 = "helix_low.mem.read"(%419) <{address = 5389877165 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+      %421 = "llvm.zext"(%420) : (i32) -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      "helix_high.assign"(%422, %421) : (i64, i64) -> ()
+      %423 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %424 = "llvm.add"(%417, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %425 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %426 = "llvm.add"(%424, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %427 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      %428:3 = "helix_low.unaryop"(%427) <{address = 5389877171 : ui64, kind = 3 : i32}> {inferred_type = "uint64_t"} : (i64) -> (i64, i1, i1)
+      %429 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      "helix_high.assign"(%429, %428#0) : (i64, i64) -> ()
+      %430 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %431 = "llvm.add"(%426, %9) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %432 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %433 = "llvm.add"(%431, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %434 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %435 = "llvm.add"(%433, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %436 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+      %437 = "llvm.zext"(%436) : (i64) -> i64
+      %438 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%438, %437) : (i64, i64) -> ()
+      %439 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %440 = "llvm.add"(%435, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %441 = "helix_high.var.ref"() <{var_id = 20 : ui32, var_name = "r13"}> : () -> i64
+      %442 = "llvm.zext"(%441) : (i64) -> i64
+      %443 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %444 = "llvm.add"(%440, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %445 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+      %446 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %447 = "llvm.mul"(%446, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %448 = "llvm.add"(%445, %447) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %449 = "helix_low.mem.read"(%448) <{address = 5389877193 : ui64, bit_width = 32 : ui32}> {inferred_type = "uint32_t"} : (i64) -> i32
+      %450 = "llvm.zext"(%449) : (i32) -> i64
+      %451 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+      "helix_high.assign"(%451, %450) : (i64, i64) -> ()
+      %452 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %453 = "llvm.add"(%444, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %454 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+      %455 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      "helix_high.assign"(%455, %454) : (i64, i64) -> ()
+      %456 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %457 = "llvm.add"(%453, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %458 = "llvm.add"(%457, %20) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      "helix_low.call"(%458, %454, %450) <{address = 5389877201 : ui64, target_name = "sub_1414311fa"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+      %459 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %460 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.ret"() : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb12] : () -> ()
+  ^bb12:  // pred: ^bb11
+    "helix_high.label"() <{name = "loc_irr_114"}> : () -> ()
+    %196 = "llvm.mlir.constant"() <{value = 5416951386 : i64}> : () -> i64
+    %197 = "helix_low.mem.read"(%196) <{address = 5389877136 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %198 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%198, %197) : (i64, i64) -> ()
+    %199 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %200 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %201 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %202 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %203:4 = "helix_low.cmp"(%201, %202) <{address = 5389877143 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %204 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %205 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %206 = "arith.constant"() <{value = true}> : () -> i1
+    %207 = "arith.xori"(%203#1, %206) : (i1, i1) -> i1
+    "helix_high.if"(%207) ({
+      %416 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %417 = "helix_low.mem.read"(%416) <{address = 5389877148 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      "helix_high.assign"(%418, %417) : (i64, i64) -> ()
+      %419 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      %423 = "llvm.add"(%422, %0) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      "helix_low.call"(%423, %197) <{address = 5389877159 : ui64}> {arg_count = 1 : i32} : (i64, i64) -> ()
+      %424 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.ret"() <{address = 5389877159 : ui64}> : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb0] : () -> ()
+  ^bb13:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_104"}> : () -> ()
+    %208 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    %209 = "llvm.zext"(%208) : (i64) -> i64
+    %210 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %211:4 = "helix_low.cmp"(%209, %210) <{address = 5389877112 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %212 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %213 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%211#2) ({
+      "helix_high.label"() <{name = "loc_irr_116"}> : () -> ()
+      %416 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+      %417 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%417, %416) : (i64, i64) -> ()
+      %418 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %419 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_high.yield"() : () -> ()
+    }, {
+      %416 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+      %417 = "llvm.zext"(%416) : (i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+      %419 = "llvm.add"(%418, %8) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %420:4 = "helix_low.cmp"(%417, %419) <{address = 5389877118 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %422 = "arith.xori"(%420#2, %420#3) : (i1, i1) -> i1
+      %423 = "arith.constant"() <{value = true}> : () -> i1
+      %424 = "arith.xori"(%422, %423) : (i1, i1) -> i1
+      %425 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%424)[^bb0, ^bb14] <{address = 5389877120 : ui64, condition = "nl"}> : (i1) -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb15] : () -> ()
+  ^bb14:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_117"}> : () -> ()
+    %214 = "helix_high.var.ref"() <{var_id = 21 : ui32, var_name = "r14"}> : () -> i64
+    %215 = "llvm.add"(%214, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %216 = "helix_low.mem.read"(%215) <{address = 5389877124 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %217 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    "helix_high.assign"(%217, %216) : (i64, i64) -> ()
+    %218 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %219 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+    %220 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    "helix_high.assign"(%220, %219) : (i64, i64) -> ()
+    %221 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %222 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    %223 = "llvm.mlir.constant"() <{value = 8 : i64}> : () -> i64
+    %224:5 = "helix_low.binop"(%222, %223) <{address = 5389877131 : ui64, kind = 0 : i32}> {inferred_type = "bool"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+    %225 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    "helix_high.assign"(%225, %224#0) : (i64, i64) -> ()
+    %226 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %227 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %228 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %229 = "llvm.mlir.constant"() <{value = 56 : i64}> : () -> i64
+    %230:5 = "helix_low.binop"(%228, %229) <{address = 5389877138 : ui64, kind = 3 : i32}> {inferred_type = "uint64_t"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+    %231 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%231, %230#0) : (i64, i64) -> ()
+    %232 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %233 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %234 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    %235 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %236:5 = "helix_low.binop"(%234, %235) <{address = 5389877145 : ui64, kind = 0 : i32}> {inferred_type = "bool"} : (i64, i64) -> (i64, i1, i1, i1, i1)
+    %237 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    "helix_high.assign"(%237, %236#0) : (i64, i64) -> ()
+    %238 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %239 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    %240 = "llvm.add"(%239, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %241 = "helix_low.mem.read"(%240) <{address = 5389877149 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %242 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%242, %241) : (i64, i64) -> ()
+    %243 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %244 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %245 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %246:4 = "helix_low.cmp"(%244, %245) <{address = 5389877152 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %247 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %248 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %249 = "arith.constant"() <{value = true}> : () -> i1
+    %250 = "arith.xori"(%246#1, %249) : (i1, i1) -> i1
+    "helix_high.if"(%250) ({
+      %416 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %417 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %419 = "helix_low.mem.read"(%418) <{address = 5389877165 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %420 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      "helix_high.assign"(%420, %419) : (i64, i64) -> ()
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      %423 = "llvm.add"(%422, %9) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      "helix_low.call"(%423, %241) <{address = 5389877168 : ui64}> {arg_count = 1 : i32} : (i64, i64) -> ()
+      %424 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %425 = "helix_high.var.ref"() <{var_id = 1 : ui32, var_name = "var_8"}> : () -> i64
+      %426 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%426, %425) : (i64, i64) -> ()
+      %427 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %428 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.ret"() : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb15] : () -> ()
+  ^bb15:  // 2 preds: ^bb13, ^bb14
+    "helix_high.label"() <{name = "loc_irr_118"}> : () -> ()
+    %251 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %252 = "llvm.mlir.constant"() <{value = 5416951290 : i64}> : () -> i64
+    %253:4 = "helix_low.cmp"(%251, %252) <{address = 5389877188 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %254 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %255 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+    %256 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%256, %255) : (i64, i64) -> ()
+    %257 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %258 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %259 = "helix_high.var.ref"() <{var_id = 0 : ui32, var_name = "var_30"}> : () -> i64
+    "helix_high.assign"(%259, %258) : (i64, i64) -> ()
+    %260 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %261 = "arith.constant"() <{value = true}> : () -> i1
+    %262 = "arith.xori"(%253#1, %261) : (i1, i1) -> i1
+    %263 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%262) ({
+      "helix_high.label"() <{name = "loc_irr_121"}> : () -> ()
+      %416 = "llvm.mlir.constant"() <{value = 5389877271 : i64}> : () -> i64
+      %417 = "llvm.add"(%416, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      "helix_high.assign"(%419, %418) : (i64, i64) -> ()
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "llvm.add"(%417, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+      %423 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %424:4 = "helix_low.cmp"(%422, %423) <{address = 5389877278 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %425 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %426 = "llvm.add"(%421, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %427 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%424#1)[^bb21, ^bb20] <{address = 5389877280 : ui64, condition = "z"}> : (i1) -> ()
+    }, {
+      %416 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      %417 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %418:4 = "helix_low.cmp"(%416, %417) <{address = 5389877200 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %419 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%418#1)[^bb0, ^bb16] <{address = 5389877202 : ui64, condition = "z"}> : (i1) -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb20] : () -> ()
+  ^bb16:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_122"}> : () -> ()
+    %264 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %265 = "helix_low.mem.read"(%264) <{address = 5389877205 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %266 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%266, %265) : (i64, i64) -> ()
+    %267 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %268 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %269 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %270 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%270, %269) : (i64, i64) -> ()
+    %271 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %272 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %273 = "llvm.add"(%272, %14) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%273, %269) <{address = 5389877215 : ui64}> {arg_count = 1 : i32} : (i64, i64) -> ()
+    %274 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %275 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %276 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    "helix_high.assign"(%276, %275) : (i64, i64) -> ()
+    %277 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %278 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %279 = "helix_low.mem.read"(%278) <{address = 5389877221 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %280 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%280, %279) : (i64, i64) -> ()
+    %281 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %282 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %283 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %284:4 = "helix_low.cmp"(%282, %283) <{address = 5389877224 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %285 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %286 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%284#1) ({
+      "helix_high.label"() <{name = "loc_irr_125"}> : () -> ()
+      %416 = "llvm.mlir.constant"() <{value = 5389877234 : i64}> : () -> i64
+      %417 = "llvm.add"(%416, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_high.var.ref"() <{var_id = 0 : ui32, var_name = "var_30"}> : () -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      "helix_high.assign"(%419, %418) : (i64, i64) -> ()
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "llvm.add"(%417, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %422 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %423 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %424:4 = "helix_low.cmp"(%422, %423) <{address = 5389877241 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %425 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %426 = "llvm.add"(%421, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %427 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%424#1)[^bb18, ^bb17] <{address = 5389877243 : ui64, condition = "z"}> : (i1) -> ()
+    }, {
+      %416 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %417 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %418:3 = "helix_low.unaryop"(%417) <{address = 5389877228 : ui64, kind = 2 : i32}> {inferred_type = "bool"} : (i64) -> (i64, i1, i1)
+      "helix_low.mem.write"(%416, %418#0) <{address = 5389877228 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+      %419 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %420 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %421 = "llvm.add"(%420, %21) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %422 = "helix_low.mem.read"(%421) <{address = 5389877232 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %423 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      "helix_high.assign"(%423, %422) : (i64, i64) -> ()
+      %424 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %425 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %426 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %427:3 = "helix_low.unaryop"(%426) <{address = 5389877234 : ui64, kind = 2 : i32}> {inferred_type = "bool"} : (i64) -> (i64, i1, i1)
+      "helix_low.mem.write"(%425, %427#0) <{address = 5389877234 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+      %428 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "llvm.br"()[^bb0] : () -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb17] : () -> ()
+  ^bb17:  // 2 preds: ^bb0, ^bb16
+    "helix_high.label"() <{name = "loc_irr_124"}> : () -> ()
+    %287 = "llvm.add"(%426, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %288 = "llvm.sub"(%287, %22) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%288, %418, %90) <{address = 5389877248 : ui64, target_name = "sub_14142fd2a"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %289 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_low.ret"() <{address = 5389877248 : ui64}> : () -> ()
+  ^bb18:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_123"}> : () -> ()
+    %290 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    %291 = "helix_low.mem.read"(%290) <{address = 5389877246 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %292 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%292, %291) : (i64, i64) -> ()
+    %293 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %294 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %295 = "helix_high.var.ref"() <{var_id = 0 : ui32, var_name = "var_30"}> : () -> i64
+    "helix_high.assign"(%295, %294) : (i64, i64) -> ()
+    %296 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %297 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %298 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %299:4 = "helix_low.cmp"(%297, %298) <{address = 5389877253 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %300 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %301 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%299#1) ({
+      "helix_high.label"() <{name = "loc_irr_127"}> : () -> ()
+      %416 = "helix_high.var.ref"() <{var_id = 1 : ui32, var_name = "var_8"}> : () -> i64
+      %417 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%417, %416) : (i64, i64) -> ()
+      %418 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "llvm.br"()[^bb0] : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb19] : () -> ()
+  ^bb19:  // pred: ^bb18
+    "helix_high.label"() <{name = "loc_irr_126"}> : () -> ()
+    %302 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %303 = "llvm.add"(%302, %21) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %304 = "helix_low.mem.read"(%303) <{address = 5389877259 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %305 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%305, %304) : (i64, i64) -> ()
+    %306 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %307 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %308 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %309:3 = "helix_low.unaryop"(%308) <{address = 5389877261 : ui64, kind = 2 : i32}> {inferred_type = "uint64_t"} : (i64) -> (i64, i1, i1)
+    "helix_low.mem.write"(%307, %309#0) <{address = 5389877261 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+    %310 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %311 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %312 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %313:3 = "helix_low.unaryop"(%312) <{address = 5389877263 : ui64, kind = 2 : i32}> {inferred_type = "uint64_t"} : (i64) -> (i64, i1, i1)
+    "helix_low.mem.write"(%311, %313#0) <{address = 5389877263 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+    %314 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %315 = "helix_high.var.ref"() <{var_id = 0 : ui32, var_name = "var_30"}> : () -> i64
+    %316 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%316, %315) : (i64, i64) -> ()
+    %317 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "llvm.br"()[^bb0] : () -> ()
+  ^bb20:  // 2 preds: ^bb0, ^bb15
+    "helix_high.label"() <{name = "loc_irr_120"}> : () -> ()
+    %318 = "llvm.add"(%426, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %319 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %320 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%320, %319) : (i64, i64) -> ()
+    %321 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %322 = "llvm.add"(%318, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %323 = "llvm.sub"(%322, %23) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%323, %319, %90) <{address = 5389877288 : ui64, target_name = "sub_14142fd25"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %324 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %325 = "helix_high.var.ref"() <{var_id = 0 : ui32, var_name = "var_30"}> : () -> i64
+    %326 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%326, %325) : (i64, i64) -> ()
+    %327 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %328 = "helix_high.var.ref"() <{var_id = 1 : ui32, var_name = "var_8"}> : () -> i64
+    %329 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    "helix_high.assign"(%329, %328) : (i64, i64) -> ()
+    %330 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "llvm.br"()[^bb21] : () -> ()
+  ^bb21:  // 2 preds: ^bb0, ^bb20
+    "helix_high.label"() <{name = "loc_irr_119"}> : () -> ()
+    %331 = "llvm.mlir.constant"() <{value = 5389877296 : i64}> : () -> i64
+    %332 = "llvm.add"(%331, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %333 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %334 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+    "helix_high.assign"(%334, %333) : (i64, i64) -> ()
+    %335 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %336 = "llvm.add"(%332, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %337 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %338 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %339:4 = "helix_low.cmp"(%337, %338) <{address = 5389877303 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %340 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %341 = "llvm.add"(%336, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %342 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%339#1) ({
+      "helix_high.label"() <{name = "loc_irr_130"}> : () -> ()
+      %416 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      %417 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %418:4 = "helix_low.cmp"(%416, %417) <{address = 5389877317 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %419 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.jcc"(%418#1)[^bb23, ^bb22] <{address = 5389877319 : ui64, condition = "z"}> : (i1) -> ()
+    }, {
+      %416 = "llvm.add"(%341, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %417 = "llvm.sub"(%416, %24) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      "helix_low.call"(%417, %255, %90) <{address = 5389877310 : ui64, target_name = "sub_14142fd25"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+      %418 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 1 : ui32, var_name = "var_8"}> : () -> i64
+      %420 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+      "helix_high.assign"(%420, %419) : (i64, i64) -> ()
+      %421 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "llvm.br"()[^bb0] : () -> ()
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb22] : () -> ()
+  ^bb22:  // 2 preds: ^bb0, ^bb21
+    "helix_high.label"() <{name = "loc_irr_129"}> : () -> ()
+    %343 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %344 = "helix_low.mem.read"(%343) <{address = 5389877322 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+    %345 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    "helix_high.assign"(%345, %344) : (i64, i64) -> ()
+    %346 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %347 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %348 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    %349 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%349, %348) : (i64, i64) -> ()
+    %350 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %351 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %352 = "llvm.add"(%351, %2) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%352, %348) <{address = 5389877332 : ui64}> {arg_count = 1 : i32} : (i64, i64) -> ()
+    %353 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_low.ret"() <{address = 5389877332 : ui64}> : () -> ()
+  ^bb23:  // pred: ^bb0
+    "helix_high.label"() <{name = "loc_irr_128"}> : () -> ()
+    %354 = "llvm.mlir.constant"() <{value = 5389877332 : i64}> : () -> i64
+    %355 = "llvm.add"(%354, %19) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %356 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+    %357 = "llvm.add"(%356, %4) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %358 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+    %359 = "llvm.add"(%358, %4) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %360:3 = "helix_low.unaryop"(%359) <{address = 5389877338 : ui64, kind = 3 : i32}> {inferred_type = "bool"} : (i64) -> (i64, i1, i1)
+    "helix_low.mem.write"(%357, %360#0) <{address = 5389877338 : ui64, bit_width = 64 : ui32}> : (i64, i64) -> ()
+    %361 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %362 = "llvm.add"(%355, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %363 = "helix_high.var.ref"() <{var_id = 18 : ui32, var_name = "rbp"}> : () -> i64
+    %364 = "llvm.sub"(%363, %8) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %365 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%365, %364) : (i64, i64) -> ()
+    %366 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %367 = "llvm.add"(%362, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %368 = "helix_high.var.ref"() <{var_id = 22 : ui32, var_name = "r15"}> : () -> i64
+    %369 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+    "helix_high.assign"(%369, %368) : (i64, i64) -> ()
+    %370 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %371 = "llvm.add"(%367, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %372 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %373 = "llvm.add"(%371, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %374 = "llvm.sub"(%373, %25) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%374, %364, %368) <{address = 5389877354 : ui64, target_name = "sub_140241bb5"}> {arg_count = 2 : i32} : (i64, i64, i64) -> ()
+    %375 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %376 = "llvm.add"(%373, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %377 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+    %378 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%378, %377) : (i64, i64) -> ()
+    %379 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %380 = "llvm.add"(%376, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %381 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %382 = "llvm.add"(%380, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %383 = "helix_high.var.ref"() <{var_id = 20 : ui32, var_name = "r13"}> : () -> i64
+    %384 = "llvm.zext"(%383) : (i64) -> i64
+    %385 = "helix_high.var.ref"() <{var_id = 23 : ui32, var_name = "param_4"}> : () -> i64
+    "helix_high.assign"(%385, %384) : (i64, i64) -> ()
+    %386 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %387 = "llvm.add"(%382, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %388 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %389 = "llvm.add"(%387, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %390 = "helix_high.var.ref"() <{var_id = 19 : ui32, var_name = "r12"}> : () -> i64
+    %391 = "llvm.zext"(%390) : (i64) -> i64
+    %392 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+    "helix_high.assign"(%392, %391) : (i64, i64) -> ()
+    %393 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %394 = "llvm.add"(%389, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %395 = "llvm.sub"(%394, %26) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%395, %377, %368, %391, %384) <{address = 5389877378 : ui64, target_name = "sub_14142fdd5"}> {arg_count = 4 : i32} : (i64, i64, i64, i64, i64) -> ()
+    %396 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %397 = "llvm.add"(%394, %7) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %398 = "helix_high.var.ref"() <{var_id = 8 : ui32, var_name = "param_5"}> : () -> i64
+    %399 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    "helix_high.assign"(%399, %398) : (i64, i64) -> ()
+    %400 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %401 = "llvm.add"(%397, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %402 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+    %403 = "llvm.zext"(%402) : (i64) -> i64
+    %404 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+    "helix_high.assign"(%404, %403) : (i64, i64) -> ()
+    %405 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %406 = "llvm.add"(%401, %5) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %407 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+    %408 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+    %409:4 = "helix_low.cmp"(%407, %408) <{address = 5389877387 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+    %410 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    %411 = "llvm.add"(%406, %6) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %412 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_high.if"(%409#1) ({
+      %416 = "helix_high.var.ref"() <{var_id = 22 : ui32, var_name = "r15"}> : () -> i64
+      %417 = "llvm.add"(%416, %1) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      %418 = "helix_low.mem.read"(%417) <{address = 5389877393 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %419 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      "helix_high.assign"(%419, %418) : (i64, i64) -> ()
+      %420 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %421 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %422 = "llvm.mlir.constant"() <{value = 0 : i64}> : () -> i64
+      %423:4 = "helix_low.cmp"(%421, %422) <{address = 5389877396 : ui64}> {inferred_type = "bool"} : (i64, i64) -> (i1, i1, i1, i1)
+      %424 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %425 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_high.if"(%423#1) ({
+        %436 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+        %437 = "llvm.zext"(%436) : (i64) -> i64
+        %438 = "helix_high.var.ref"() <{var_id = 26 : ui32, var_name = "rax"}> : () -> i64
+        "helix_high.assign"(%438, %437) : (i64, i64) -> ()
+        %439 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %440 = "helix_high.var.ref"() <{var_id = 9 : ui32, var_name = "param_18"}> : () -> i64
+        %441 = "helix_high.var.ref"() <{var_id = 27 : ui32, var_name = "rbx"}> : () -> i64
+        "helix_high.assign"(%441, %440) : (i64, i64) -> ()
+        %442 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        "llvm.br"()[^bb1] : () -> ()
+      ^bb1:  // pred: ^bb0
+        "helix_high.label"() <{name = "loc_irr_131"}> : () -> ()
+        %443 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %444 = "helix_high.var.ref"() <{var_id = 28 : ui32, var_name = "r11"}> : () -> i64
+        %445 = "llvm.add"(%444, %14) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+        %446 = "helix_low.mem.read"(%445) <{address = 5389877417 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+        %447 = "helix_high.var.ref"() <{var_id = 15 : ui32, var_name = "rsi"}> : () -> i64
+        "helix_high.assign"(%447, %446) : (i64, i64) -> ()
+        %448 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %449 = "helix_high.var.ref"() <{var_id = 28 : ui32, var_name = "r11"}> : () -> i64
+        %450 = "llvm.add"(%449, %28) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+        %451 = "helix_low.mem.read"(%450) <{address = 5389877421 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+        %452 = "helix_high.var.ref"() <{var_id = 16 : ui32, var_name = "rdi"}> : () -> i64
+        "helix_high.assign"(%452, %451) : (i64, i64) -> ()
+        %453 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %454 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %455 = "helix_low.pop"() <{address = 5389877426 : ui64}> {callee_save_reg = "R15", inferred_type = "uint64_t", is_callee_save_pop} : () -> i64
+        %456 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %457 = "helix_low.pop"() <{address = 5389877428 : ui64}> {callee_save_reg = "R14", inferred_type = "uint64_t", is_callee_save_pop} : () -> i64
+        %458 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %459 = "helix_low.pop"() <{address = 5389877430 : ui64}> {callee_save_reg = "R13", inferred_type = "uint64_t", is_callee_save_pop} : () -> i64
+        %460 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %461 = "helix_low.pop"() <{address = 5389877432 : ui64}> {callee_save_reg = "R12", inferred_type = "uint64_t", is_callee_save_pop} : () -> i64
+        %462 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %463 = "helix_low.pop"() <{address = 5389877433 : ui64}> {callee_save_reg = "RBP", inferred_type = "uint64_t", is_callee_save_pop} : () -> i64
+        %464 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        %465 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+        "helix_low.ret"() <{address = 5389877434 : ui64}> : () -> ()
+      }, {
+      }) : (i1) -> ()
+      "helix_low.jmp"()[^bb1] : () -> ()
+    ^bb1:  // pred: ^bb0
+      "helix_high.label"() <{name = "loc_irr_132"}> : () -> ()
+      %426 = "helix_high.var.ref"() <{var_id = 25 : ui32, var_name = "param_1"}> : () -> i64
+      %427 = "helix_low.mem.read"(%426) <{address = 5389877401 : ui64, bit_width = 64 : ui32}> {inferred_type = "uint64_t"} : (i64) -> i64
+      %428 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      "helix_high.assign"(%428, %427) : (i64, i64) -> ()
+      %429 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %430 = "helix_high.var.ref"() <{var_id = 22 : ui32, var_name = "r15"}> : () -> i64
+      %431 = "helix_high.var.ref"() <{var_id = 24 : ui32, var_name = "param_2"}> : () -> i64
+      "helix_high.assign"(%431, %430) : (i64, i64) -> ()
+      %432 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      %433 = "helix_high.var.ref"() <{var_id = 17 : ui32, var_name = "param_3"}> : () -> i64
+      %434 = "llvm.add"(%433, %2) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+      "helix_low.call"(%434, %418, %430, %427, %384) <{address = 5389877408 : ui64}> {arg_count = 4 : i32} : (i64, i64, i64, i64, i64) -> ()
+      %435 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+      "helix_low.ret"() <{address = 5389877408 : ui64}> : () -> ()
+    }, {
+    }) : (i1) -> ()
+    "helix_low.jmp"()[^bb24] : () -> ()
+  ^bb24:  // pred: ^bb23
+    "helix_high.label"() <{name = "loc_irr_133"}> : () -> ()
+    %413 = "llvm.add"(%411, %10) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    %414 = "llvm.sub"(%413, %27) <{overflowFlags = #llvm.overflow<none>}> : (i64, i64) -> i64
+    "helix_low.call"(%414, %398, %368, %391, %384) <{address = 5389877394 : ui64, target_name = "sub_14142fd25"}> {arg_count = 4 : i32} : (i64, i64, i64, i64, i64) -> ()
+    %415 = "arith.constant"() <{value = 0 : i64}> : () -> i64
+    "helix_low.ret"() <{address = 5389877394 : ui64}> : () -> ()
+  ^bb25:  // no predecessors
+    "helix_high.label"() <{name = "loc_irr_0"}> : () -> ()
+    "helix_low.ret"() : () -> ()
+  }) {calling_convention = "win64", has_return_value, win64_rbp_param_base_offset = 80 : i64} : () -> ()
+}) {dlti.dl_spec = #dlti.dl_spec<#dlti.dl_entry<i1, dense<8> : vector<2xi64>>, #dlti.dl_entry<i8, dense<8> : vector<2xi64>>, #dlti.dl_entry<i16, dense<16> : vector<2xi64>>, #dlti.dl_entry<f16, dense<16> : vector<2xi64>>, #dlti.dl_entry<i32, dense<32> : vector<2xi64>>, #dlti.dl_entry<f128, dense<128> : vector<2xi64>>, #dlti.dl_entry<f64, dense<64> : vector<2xi64>>, #dlti.dl_entry<i64, dense<64> : vector<2xi64>>, #dlti.dl_entry<f80, dense<128> : vector<2xi64>>, #dlti.dl_entry<!llvm.ptr, dense<64> : vector<4xi64>>, #dlti.dl_entry<"dlti.endianness", "little">, #dlti.dl_entry<"dlti.stack_alignment", 128 : i64>>} : () -> ()

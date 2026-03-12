@@ -140,6 +140,7 @@ UnicornWrapper::UnicornWrapper(const Napi::CallbackInfo& info)
 UnicornWrapper::~UnicornWrapper() {
 	if (!closed_ && engine_) {
 		CleanupHooks();
+		mappedBuffers_.clear();
 		uc_close(engine_);
 		engine_ = nullptr;
 		closed_ = true;
@@ -813,13 +814,17 @@ void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data)
 	callData->address = address;
 	callData->size = size;
 
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, CodeHookCallData* data) {
+	auto* raw = callData.release();
+	napi_status status = data->tsfn.NonBlockingCall(raw, [](Napi::Env env, Napi::Function callback, CodeHookCallData* data) {
 		callback.Call({
 			Napi::BigInt::New(env, data->address),
 			Napi::Number::New(env, data->size)
 		});
 		delete data;
 	});
+	if (status != napi_ok) {
+		delete raw;
+	}
 }
 
 void BlockHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data) {
@@ -830,13 +835,17 @@ void BlockHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data
 	callData->address = address;
 	callData->size = size;
 
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, BlockHookCallData* data) {
+	auto* raw = callData.release();
+	napi_status status = data->tsfn.NonBlockingCall(raw, [](Napi::Env env, Napi::Function callback, BlockHookCallData* data) {
 		callback.Call({
 			Napi::BigInt::New(env, data->address),
 			Napi::Number::New(env, data->size)
 		});
 		delete data;
 	});
+	if (status != napi_ok) {
+		delete raw;
+	}
 }
 
 void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data) {
@@ -849,7 +858,8 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 	callData->size = size;
 	callData->value = value;
 
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, MemHookCallData* data) {
+	auto* raw = callData.release();
+	napi_status status = data->tsfn.NonBlockingCall(raw, [](Napi::Env env, Napi::Function callback, MemHookCallData* data) {
 		callback.Call({
 			Napi::Number::New(env, data->type),
 			Napi::BigInt::New(env, data->address),
@@ -858,6 +868,9 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 		});
 		delete data;
 	});
+	if (status != napi_ok) {
+		delete raw;
+	}
 }
 
 void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data) {
@@ -939,7 +952,8 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	callData->value = value;
 	callData->result = true; // Already handled
 
-	data->tsfn.NonBlockingCall(callData.release(), [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* cd) {
+	auto* raw = callData.release();
+	napi_status status = data->tsfn.NonBlockingCall(raw, [](Napi::Env env, Napi::Function callback, InvalidMemHookCallData* cd) {
 		// Call JS callback for tracking/logging only — memory is already mapped
 		callback.Call({
 			Napi::Number::New(env, cd->type),
@@ -949,6 +963,9 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 		});
 		delete cd;
 	});
+	if (status != napi_ok) {
+		delete raw;
+	}
 
 	return true; // Fault handled, Unicorn retries the access
 }
@@ -1149,7 +1166,7 @@ Napi::Value UnicornWrapper::ContextSave(const Napi::CallbackInfo& info) {
 	// Create UnicornContext wrapper
 	Napi::Object contextObj = UnicornContext::constructor.New({});
 	UnicornContext* wrapper = Napi::ObjectWrap<UnicornContext>::Unwrap(contextObj);
-	wrapper->SetContext(context);
+	wrapper->SetContext(engine_, context);
 
 	return contextObj;
 }
@@ -1223,7 +1240,7 @@ Napi::Value UnicornWrapper::StateSave(const Napi::CallbackInfo& info) {
 
 	Napi::Object contextObj = UnicornContext::constructor.New({});
 	UnicornContext* wrapper = Napi::ObjectWrap<UnicornContext>::Unwrap(contextObj);
-	wrapper->SetContext(ctx); // Takes ownership
+	wrapper->SetContext(engine_, ctx); // Takes ownership
 
 	state.Set("context", contextObj);
 
@@ -1403,6 +1420,7 @@ Napi::Value UnicornWrapper::Close(const Napi::CallbackInfo& info) {
 	}
 
 	CleanupHooks();
+	mappedBuffers_.clear();
 
 	uc_err err = uc_close(engine_);
 	if (err != UC_ERR_OK) {

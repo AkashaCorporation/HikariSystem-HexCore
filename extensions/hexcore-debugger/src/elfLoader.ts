@@ -102,6 +102,7 @@ export class ELFLoader {
 	private nextStubOffset: number = 0;
 	private pieBase: bigint = 0n;
 	private is64Bit: boolean = true;
+	private permissiveMemoryMapping: boolean = false;
 
 	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager) {
 		this.emulator = emulator;
@@ -109,9 +110,12 @@ export class ELFLoader {
 	}
 
 	/**
-	 * Load an ELF file into the emulator
+	 * Load an ELF file into the emulator.
+	 * @param permissiveMemoryMapping When true, all LOAD segments are mapped as RWX.
+	 *   Required for VMs and self-modifying code that jump into .rodata/.data.
 	 */
-	load(fileBuffer: Buffer, arch?: ArchitectureType): ELFInfo {
+	load(fileBuffer: Buffer, arch?: ArchitectureType, permissiveMemoryMapping?: boolean): ELFInfo {
+		this.permissiveMemoryMapping = permissiveMemoryMapping ?? false;
 		// Verify ELF magic
 		if (fileBuffer[0] !== 0x7F || fileBuffer.toString('ascii', 1, 4) !== 'ELF') {
 			throw new Error('Not a valid ELF file');
@@ -161,7 +165,9 @@ export class ELFLoader {
 			}
 
 			const adjustedVaddr = seg.virtualAddress + this.pieBase;
-			const perms = this.elfFlagsToUnicorn(seg.flags);
+			const perms = this.permissiveMemoryMapping
+				? (PROT_READ | PROT_WRITE | PROT_EXEC)
+				: this.elfFlagsToUnicorn(seg.flags);
 			const pageSize = this.emulator.getPageSize();
 			const alignedAddr = (adjustedVaddr / BigInt(pageSize)) * BigInt(pageSize);
 			const alignedEnd = ((adjustedVaddr + BigInt(seg.memSize) + BigInt(pageSize) - 1n) / BigInt(pageSize)) * BigInt(pageSize);

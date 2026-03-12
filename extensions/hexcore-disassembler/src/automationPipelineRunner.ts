@@ -198,6 +198,8 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.rellic.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.rellic.decompileIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
 	['hexcore.yara.scanWorkspace', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command depends on workspace UI flow.' }],

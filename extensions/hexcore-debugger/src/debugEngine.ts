@@ -11,6 +11,7 @@ import { ELFLoader, ELFInfo } from './elfLoader';
 import { WinApiHooks, ApiCallLog } from './winApiHooks';
 import { LinuxApiHooks, ApiCallLog as LinuxApiCallLog } from './linuxApiHooks';
 import { TraceManager } from './traceManager';
+import { PrngMode } from './prng';
 
 export interface RegisterState {
 	rax: bigint;
@@ -40,11 +41,46 @@ export interface MemoryRegion {
 	name?: string;
 }
 
+export interface EmulationOptions {
+	permissiveMemoryMapping?: boolean;
+	prngMode?: PrngMode;
+	collectSideChannels?: boolean;
+	memoryDumps?: Array<{ address: string; size: number; trigger: 'breakpoint' | 'end' }>;
+	breakpointConfigs?: Array<{ address: string; autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }>;
+}
+
+export interface BreakpointSnapshot {
+	address: string;
+	registers: Record<string, string>;
+	stack: string; // base64
+	memoryDumps?: Array<{ address: string; size: number; data: string }>;
+	instructionsExecuted: number;
+}
+
+export interface SideChannelData {
+	basicBlockCounts: Array<{ address: string; count: number }>;
+	memoryAccesses: Array<{ address: string; size: number; type: 'read' | 'write'; pc: string }>;
+	branchStats: Array<{ address: string; taken: number; notTaken: number }>;
+	totalInstructions: number;
+}
+
 export class DebugEngine {
 	private targetPath?: string;
 	private isRunning: boolean = false;
 	private registers: Partial<RegisterState> = {};
 	private listeners: Array<(event: string, data?: any) => void> = [];
+
+	// Emulation options (v3.7)
+	private emulationOptions: EmulationOptions = {};
+	private breakpointSnapshots: BreakpointSnapshot[] = [];
+	private collectedMemoryDumps: Array<{ address: string; size: number; data: string; trigger: string }> = [];
+	private sideChannelData: SideChannelData = {
+		basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0
+	};
+	// Side-channel tracking state
+	private _scLastBBAddr: bigint = 0n;
+	private _scBBCountMap: Map<string, number> = new Map();
+	private _scBranchMap: Map<string, { taken: number; notTaken: number }> = new Map();
 
 	// Emulation components
 	private emulator?: UnicornWrapper;
@@ -95,8 +131,15 @@ export class DebugEngine {
 	/**
 	 * Start emulation for a binary file
 	 */
-	async startEmulation(filePath: string, arch?: ArchitectureType): Promise<void> {
+	async startEmulation(filePath: string, arch?: ArchitectureType, options?: EmulationOptions): Promise<void> {
 		this.targetPath = filePath;
+		this.emulationOptions = options ?? {};
+		this.breakpointSnapshots = [];
+		this.collectedMemoryDumps = [];
+		this.sideChannelData = { basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0 };
+		this._scLastBBAddr = 0n;
+		this._scBBCountMap.clear();
+		this._scBranchMap.clear();
 
 		// Reset ARM64 state for fresh emulation
 		this._arm64ExitRequested = false;
@@ -331,12 +374,13 @@ export class DebugEngine {
 	 */
 	private async loadELF(): Promise<void> {
 		this.elfLoader = new ELFLoader(this.emulator!, this.memoryManager!);
-		const elfInfo = this.elfLoader.load(this.fileBuffer!, this.architecture);
+		const elfInfo = this.elfLoader.load(this.fileBuffer!, this.architecture, this.emulationOptions.permissiveMemoryMapping);
 
 		this.baseAddress = elfInfo.entryPoint;
 
-		// Create Linux API hooks
-		this.linuxApiHooks = new LinuxApiHooks(this.emulator!, this.memoryManager!, this.architecture);
+		// Create Linux API hooks with PRNG mode
+		const prngMode = this.emulationOptions.prngMode ?? 'stub';
+		this.linuxApiHooks = new LinuxApiHooks(this.emulator!, this.memoryManager!, this.architecture, prngMode);
 		this.linuxApiHooks.setImageBase(elfInfo.baseAddress);
 		this.linuxApiHooks.setTraceManager(this._traceManager);
 		const exitImport = elfInfo.imports.find(imp => imp.name === 'exit' || imp.name === '_exit');
@@ -359,6 +403,9 @@ export class DebugEngine {
 
 		// Install syscall handler for direct syscalls
 		this.installSyscallHandler();
+
+		// Install side-channel collection hooks if requested
+		this.installSideChannelHooks();
 
 		// Enable synchronous execution for x64/x86 ELF to avoid
 		// STATUS_HEAP_CORRUPTION from emuStartAsync with multiple native hooks.
@@ -1627,6 +1674,118 @@ export class DebugEngine {
 		}
 
 		return {};
+	}
+
+	/**
+	 * Collect memory dumps configured in emulation options.
+	 * Called on breakpoint hit (trigger='breakpoint') or emulation end (trigger='end').
+	 */
+	async collectMemoryDumps(trigger: 'breakpoint' | 'end'): Promise<void> {
+		if (!this.emulator || !this.emulationOptions.memoryDumps) { return; }
+		for (const dump of this.emulationOptions.memoryDumps) {
+			if (dump.trigger !== trigger) { continue; }
+			try {
+				const address = BigInt(dump.address.startsWith('0x') ? dump.address : '0x' + dump.address);
+				const data = await this.emulator.readMemory(address, dump.size);
+				this.collectedMemoryDumps.push({
+					address: '0x' + address.toString(16),
+					size: dump.size,
+					data: data.toString('base64'),
+					trigger
+				});
+			} catch (e) {
+				console.warn(`[debugEngine] Memory dump failed at ${dump.address}: ${e}`);
+			}
+		}
+	}
+
+	/**
+	 * Take a snapshot at a breakpoint (registers + stack + optional memory ranges)
+	 */
+	async takeBreakpointSnapshot(bpConfig?: { autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }): Promise<void> {
+		if (!this.emulator || !bpConfig?.autoSnapshot) { return; }
+
+		const regs = this.getFullRegisters();
+		const state = this.emulator.getState();
+
+		// Read stack: RSP-64 to RSP+256
+		let stackData = '';
+		try {
+			const rsp = state.currentAddress; // Approximate — use actual RSP
+			const rspVal = this.architecture === 'x64'
+				? this.emulator.getRegistersX64().rsp
+				: BigInt(this.emulator.getRegistersX86().esp);
+			const stackStart = rspVal - 64n;
+			const buf = await this.emulator.readMemory(stackStart, 320);
+			stackData = buf.toString('base64');
+		} catch { /* stack read may fail */ }
+
+		// Read optional dump ranges
+		const dumpResults: Array<{ address: string; size: number; data: string }> = [];
+		if (bpConfig.dumpRanges) {
+			for (const range of bpConfig.dumpRanges) {
+				try {
+					const addr = BigInt(range.address.startsWith('0x') ? range.address : '0x' + range.address);
+					const data = await this.emulator.readMemory(addr, range.size);
+					dumpResults.push({
+						address: '0x' + addr.toString(16),
+						size: range.size,
+						data: data.toString('base64')
+					});
+				} catch { /* dump range read may fail */ }
+			}
+		}
+
+		this.breakpointSnapshots.push({
+			address: '0x' + state.currentAddress.toString(16),
+			registers: regs,
+			stack: stackData,
+			memoryDumps: dumpResults.length > 0 ? dumpResults : undefined,
+			instructionsExecuted: state.instructionsExecuted
+		});
+	}
+
+	/**
+	 * Get breakpoint snapshots collected during emulation
+	 */
+	getBreakpointSnapshots(): BreakpointSnapshot[] {
+		return this.breakpointSnapshots;
+	}
+
+	/**
+	 * Get memory dumps collected during emulation
+	 */
+	getCollectedMemoryDumps(): typeof this.collectedMemoryDumps {
+		return this.collectedMemoryDumps;
+	}
+
+	/**
+	 * Get side-channel analysis data
+	 */
+	getSideChannelData(): SideChannelData {
+		// Finalize: convert maps to arrays
+		this.sideChannelData.basicBlockCounts = Array.from(this._scBBCountMap.entries())
+			.map(([address, count]) => ({ address, count }))
+			.sort((a, b) => b.count - a.count);
+		this.sideChannelData.branchStats = Array.from(this._scBranchMap.entries())
+			.map(([address, stats]) => ({ address, ...stats }));
+		return this.sideChannelData;
+	}
+
+	/**
+	 * Install side-channel collection hooks.
+	 * Tracks instruction counts per address (basic block approximation).
+	 * Memory access tracking requires native hooks (future enhancement).
+	 */
+	installSideChannelHooks(): void {
+		if (!this.emulator || !this.emulationOptions.collectSideChannels) { return; }
+
+		// Track instruction execution counts per address via code hook
+		this.emulator.onCodeExecute((address, _size) => {
+			const addrStr = '0x' + address.toString(16);
+			this._scBBCountMap.set(addrStr, (this._scBBCountMap.get(addrStr) ?? 0) + 1);
+			this.sideChannelData.totalInstructions++;
+		});
 	}
 
 	/**

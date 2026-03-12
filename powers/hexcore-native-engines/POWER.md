@@ -116,7 +116,7 @@ extensions/hexcore-{name}/
     "install": "node ../../scripts/hexcore-native-install.js",
     "build": "node-gyp rebuild",
     "build:debug": "node-gyp rebuild --debug",
-    "prebuild": "prebuildify --napi --strip",
+    "make-prebuild": "prebuildify --napi --strip",
     "test": "node test/test.js",
     "clean": "node-gyp clean"
   },
@@ -272,7 +272,7 @@ export default binding;
 2. Para cada engine na matrix, ele:
    - Faz checkout do repo standalone (ex: `LXrdKnowkill/hexcore-capstone`)
    - Instala deps com `npm ci --ignore-scripts`
-   - Roda `npm run prebuild` → `prebuildify --napi --strip`
+   - Roda `npm run make-prebuild` → `prebuildify --napi --strip`
    - Empacota `prebuilds/` em `{name}-v{version}-napi-v8-win32-x64.tar.gz`
    - Faz upload como artifact do GitHub Actions
    - Se `HEXCORE_RELEASE_TOKEN` existe, cria/atualiza uma GitHub Release no repo da engine
@@ -406,7 +406,7 @@ npm run build
 npm run build:debug
 
 # Gerar prebuilds localmente
-npm run prebuild
+npm run make-prebuild
 
 # Testar
 npm test

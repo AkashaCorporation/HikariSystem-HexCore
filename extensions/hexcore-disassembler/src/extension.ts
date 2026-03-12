@@ -26,6 +26,7 @@ import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult } from './remillWrapper';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
+import { HelixWrapper } from './helixWrapper';
 import { mapCapstoneToRemill } from './archMapper';
 import {
 	PipelineJobTemplate,
@@ -53,6 +54,10 @@ interface AnalyzeAllCommandOptions {
 	maxFunctionSize?: number;
 	forceReload?: boolean;
 	includeInstructions?: boolean;
+	// v3.7 options
+	filterJunk?: boolean;
+	detectVM?: boolean;
+	detectPRNG?: boolean;
 }
 
 interface BuildFormulaCommandOptions {
@@ -113,6 +118,10 @@ interface AnalyzeAllResult {
 	functions: AnalyzeAllFunctionSummary[];
 	strings?: AnalyzeAllStringEntry[];
 	reportMarkdown: string;
+	// v3.7 analysis data
+	junkAnalysis?: { totalInstructions: number; junkCount: number; junkRatio: number };
+	vmDetection?: { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number };
+	prngDetection?: { prngDetected: boolean; seedSource: string | null; seedValue: number | null; randCallCount: number; callSites: Array<{ address: string; function: string; context: string }> };
 }
 
 interface BuildFormulaResult {
@@ -425,6 +434,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	const rellicWrapper = new RellicWrapper();
 	context.subscriptions.push({ dispose: () => rellicWrapper.dispose() });
 	vscode.commands.executeCommand('setContext', 'hexcore:rellicAvailable', rellicWrapper.isAvailable());
+
+	const helixWrapper = new HelixWrapper();
+	context.subscriptions.push({ dispose: () => helixWrapper.dispose() });
+	vscode.commands.executeCommand('setContext', 'hexcore:helixAvailable', helixWrapper.isAvailable());
 
 	let shownExperimentalNotice = false;
 
@@ -1376,10 +1389,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	// -----------------------------------------------------------------------
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.liftToIR', async (arg?: unknown) => {
-			// Headless mode: arg is an options object with file/startAddress/size
+			// Headless mode: arg is an options object with file/address/startAddress/size
 			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
 				&& !((arg as any) instanceof vscode.Uri)
-				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>));
+				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>) || 'address' in (arg as Record<string, unknown>));
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
@@ -1423,8 +1436,16 @@ export function activate(context: vscode.ExtensionContext): void {
 						return undefined;
 					}
 				}
-				startAddress = parseAddressValue(options.startAddress as string | number | undefined) ?? engine.getBaseAddress();
-				size = typeof options.size === 'number' ? options.size : engine.getBufferSize();
+				startAddress = parseAddressValue(options.address as string | number | undefined)
+					?? parseAddressValue(options.startAddress as string | number | undefined)
+					?? engine.getBaseAddress();
+				if (typeof options.size === 'number') {
+					size = options.size;
+				} else if (typeof options.count === 'number') {
+					size = options.count * 15; // conservative upper bound for x64 instruction length
+				} else {
+					size = engine.getBufferSize();
+				}
 			} else if (isHeadless && options.functionAddress !== undefined) {
 				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
 				const func = engine.getFunctionAt(startAddress);
@@ -1584,7 +1605,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('hexcore.rellic.decompile', async (arg?: unknown) => {
 			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
 				&& !((arg as any) instanceof vscode.Uri)
-				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>));
+				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>) || 'address' in (arg as Record<string, unknown>));
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
@@ -1635,8 +1656,16 @@ export function activate(context: vscode.ExtensionContext): void {
 						return undefined;
 					}
 				}
-				startAddress = parseAddressValue(options.startAddress as string | number | undefined) ?? engine.getBaseAddress();
-				size = typeof options.size === 'number' ? options.size : engine.getBufferSize();
+				startAddress = parseAddressValue(options.address as string | number | undefined)
+					?? parseAddressValue(options.startAddress as string | number | undefined)
+					?? engine.getBaseAddress();
+				if (typeof options.size === 'number') {
+					size = options.size;
+				} else if (typeof options.count === 'number') {
+					size = options.count * 15; // conservative upper bound for x64 instruction length
+				} else {
+					size = engine.getBufferSize();
+				}
 			} else if (isHeadless && options.functionAddress !== undefined) {
 				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
 				const func = engine.getFunctionAt(startAddress);
@@ -1863,6 +1892,204 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// -----------------------------------------------------------------------
+	// Helix — Decompile IR to pseudo-C (direct IR input)
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.helix.decompileIR', async (arg?: unknown) => {
+			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
+				&& !((arg as any) instanceof vscode.Uri)
+				&& ('file' in (arg as Record<string, unknown>) || 'irText' in (arg as Record<string, unknown>));
+
+			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const quiet = options.quiet === true;
+
+			if (!helixWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-helix is not available.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			let irText: string;
+
+			// irPath: explicit .ll file path for pipeline use (options.file is always the binary).
+			const irFilePath = typeof options.irPath === 'string' ? options.irPath : undefined;
+
+			if (isHeadless && typeof options.irText === 'string') {
+				irText = options.irText;
+			} else if (irFilePath) {
+				const resolved = path.isAbsolute(irFilePath)
+					? irFilePath
+					: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', irFilePath);
+				if (!fs.existsSync(resolved)) {
+					const errorMsg = `IR file not found: ${resolved}`;
+					if (quiet) {
+						return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					}
+					vscode.window.showErrorMessage(errorMsg);
+					return undefined;
+				}
+				irText = fs.readFileSync(resolved, 'utf-8');
+			} else if (isHeadless && typeof options.file === 'string') {
+				if (!fs.existsSync(options.file)) {
+					const errorMsg = `File not found: ${options.file}`;
+					if (quiet) {
+						return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					}
+					vscode.window.showErrorMessage(errorMsg);
+					return undefined;
+				}
+				irText = fs.readFileSync(options.file, 'utf-8');
+			} else {
+				const activeEditor = vscode.window.activeTextEditor;
+				if (!activeEditor) {
+					vscode.window.showErrorMessage('No active editor with LLVM IR content.');
+					return undefined;
+				}
+				irText = activeEditor.document.getText();
+			}
+
+			const decompileResult = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
+				async () => helixWrapper.decompileIr(irText)
+			);
+
+			if (!decompileResult.success) {
+				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: decompileResult.error };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const fullCode = decompileResult.source;
+
+			if (isHeadless && options.output) {
+				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, fullCode, 'utf-8');
+			}
+
+			if (quiet) {
+				return {
+					success: true,
+					code: fullCode,
+					functionCount: decompileResult.instructionCount,
+					address: decompileResult.entryAddress,
+					architecture: '',
+					error: '',
+				};
+			}
+
+			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
+			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
+
+			return {
+				success: true,
+				code: fullCode,
+				functionCount: decompileResult.instructionCount,
+				address: decompileResult.entryAddress,
+				architecture: '',
+				error: '',
+			};
+		})
+	);
+
+	// -----------------------------------------------------------------------
+	// Helix — Lift + Decompile (binary → IR → pseudo-C)
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.helix.decompile', async (arg?: unknown) => {
+			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
+				&& !((arg as any) instanceof vscode.Uri)
+				&& ('file' in (arg as Record<string, unknown>) || 'startAddress' in (arg as Record<string, unknown>) || 'address' in (arg as Record<string, unknown>));
+
+			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const quiet = options.quiet === true;
+
+			if (!remillWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-remill is not available. Cannot lift machine code to IR.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			if (!helixWrapper.isAvailable()) {
+				const errorMsg = 'hexcore-helix is not available. Install the prebuild or build from source.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			// Reutiliza a lógica de lift do hexcore.rellic.decompile via comando interno
+			const liftResult: LiftResult | undefined = await vscode.commands.executeCommand(
+				'hexcore.remill.lift', { ...options, quiet: true }
+			);
+
+			if (!liftResult || !liftResult.success) {
+				const errorMsg = liftResult?.error ?? 'Lift failed.';
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const decompileResult = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
+				async () => helixWrapper.decompileIr(liftResult.ir)
+			);
+
+			if (!decompileResult.success) {
+				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
+				if (quiet) {
+					return { success: false, code: '', functionCount: 0, address: String(liftResult.address ?? ''), architecture: '', error: errorMsg };
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
+			const fullCode = decompileResult.source;
+
+			if (isHeadless && options.output) {
+				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, fullCode, 'utf-8');
+			}
+
+			if (quiet) {
+				return {
+					success: true,
+					code: fullCode,
+					functionCount: decompileResult.instructionCount,
+					address: decompileResult.entryAddress || String(liftResult.address || ''),
+					architecture: '',
+					error: '',
+				};
+			}
+
+			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
+			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
+
+			return {
+				success: true,
+				code: fullCode,
+				functionCount: decompileResult.instructionCount,
+				address: decompileResult.entryAddress || String(liftResult.address || ''),
+				architecture: '',
+				error: '',
+			};
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.analyzeAll', async (arg?: vscode.Uri | AnalyzeAllCommandOptions) => {
 			const options = normalizeAnalyzeAllCommandOptions(arg);
@@ -1929,7 +2156,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			importProvider.refresh();
 			exportProvider.refresh();
 
-			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions, options.includeInstructions === true);
+			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions, options.includeInstructions === true, {
+				filterJunk: options.filterJunk,
+				detectVM: options.detectVM,
+				detectPRNG: options.detectPRNG
+			});
 			if (options.output) {
 				writeAnalyzeAllOutput(result, options.output);
 			}
@@ -2029,8 +2260,35 @@ export function activate(context: vscode.ExtensionContext): void {
 				});
 			}
 
+			// 8b. v3.7: Apply junk instruction filtering if requested
+			const filterJunk = arg?.filterJunk === true;
+			let junkAnalysis: { junkCount: number; junkRatio: number } | undefined;
+			if (filterJunk && mainInstructions.length > 0) {
+				const { filtered, junkCount, junkRatio } = engine.filterJunkInstructions(mainInstructions);
+				junkAnalysis = { junkCount, junkRatio };
+				// Re-format filtered instructions
+				const filteredEntries: DisassembleAtInstructionEntry[] = [];
+				for (const instr of filtered) {
+					const comment = resolveInstructionComment(
+						instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+					);
+					filteredEntries.push({
+						address: `0x${instr.address.toString(16).toUpperCase()}`,
+						bytes: Array.from(instr.bytes).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join(' '),
+						mnemonic: instr.mnemonic,
+						operands: instr.opStr,
+						comment,
+						size: instr.size,
+						isContext: false,
+					});
+				}
+				// Append filtered result (context + filtered main)
+				const allFiltered = [...allEntries.filter(e => e.isContext), ...filteredEntries];
+				(allEntries as any)._filtered = allFiltered;
+			}
+
 			// 9. Build result JSON
-			const result: DisassembleAtResult = {
+			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number } } = {
 				address: `0x${params.address.toString(16).toUpperCase()}`,
 				count: params.count,
 				context: params.context,
@@ -2038,6 +2296,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				instructions: allEntries,
 				generatedAt: new Date().toISOString(),
 			};
+
+			if (filterJunk && junkAnalysis) {
+				result.filteredInstructions = (allEntries as any)._filtered;
+				result.junkAnalysis = junkAnalysis;
+			}
 
 			// 10. Write to file if output.path specified
 			if (params.output?.path) {
@@ -2206,6 +2469,11 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 	if (raw.includeInstructions !== undefined) {
 		normalized.includeInstructions = raw.includeInstructions === true;
 	}
+
+	// v3.7 options
+	if (raw.filterJunk === true) { normalized.filterJunk = true; }
+	if (raw.detectVM === true) { normalized.detectVM = true; }
+	if (raw.detectPRNG === true) { normalized.detectPRNG = true; }
 
 	return normalized;
 }
@@ -2623,7 +2891,7 @@ function showDoctorReportInOutputChannel(report: PipelineDoctorReport): void {
 	outputChannel.show();
 }
 
-function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false): AnalyzeAllResult {
+function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false, v37Options?: { filterJunk?: boolean; detectVM?: boolean; detectPRNG?: boolean }): AnalyzeAllResult {
 	const functions = engine.getFunctions();
 	const MAX_INSTRUCTIONS_PER_FUNCTION = 200;
 
@@ -2674,6 +2942,32 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 			encoding: sr.encoding,
 			referencedBy: sr.references.map(addr => toHexAddress(addr))
 		}));
+	}
+
+	// v3.7: Junk analysis
+	if (v37Options?.filterJunk) {
+		let totalInstr = 0;
+		let totalJunk = 0;
+		for (const func of functions) {
+			const { junkCount } = engine.filterJunkInstructions(func.instructions);
+			totalInstr += func.instructions.length;
+			totalJunk += junkCount;
+		}
+		result.junkAnalysis = {
+			totalInstructions: totalInstr,
+			junkCount: totalJunk,
+			junkRatio: totalInstr > 0 ? totalJunk / totalInstr : 0
+		};
+	}
+
+	// v3.7: VM detection
+	if (v37Options?.detectVM) {
+		result.vmDetection = engine.detectVM();
+	}
+
+	// v3.7: PRNG detection
+	if (v37Options?.detectPRNG) {
+		result.prngDetection = engine.detectPRNG();
 	}
 
 	result.reportMarkdown = generateAnalyzeAllReport(result);

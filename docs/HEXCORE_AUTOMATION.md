@@ -1,4 +1,4 @@
-# HexCore Automation — v3.6.0
+# HexCore Automation — v3.7.0-beta.1
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -96,8 +96,10 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
 | `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble N instructions starting at a given address | x86, x64, ARM, ARM64, MIPS |
 | `hexcore.disasm.liftToIR` | 120s | Lift machine code to LLVM IR via Remill engine | x86, x64 |
-| `hexcore.rellic.decompile` | 180s | Decompile binary to pseudo-C (lift + decompile in one step) | x86, x64 |
-| `hexcore.rellic.decompileIR` | 120s | Decompile pre-lifted LLVM IR text to pseudo-C | x86, x64 |
+| `hexcore.rellic.decompile` | 180s | Decompile binary to pseudo-C via Rellic (lift + decompile in one step) | x86, x64 |
+| `hexcore.rellic.decompileIR` | 120s | Decompile pre-lifted LLVM IR text to pseudo-C via Rellic | x86, x64 |
+| `hexcore.helix.decompile` | 180s | **Decompile binary to pseudo-C via Helix MLIR pipeline** (lift + full pass pipeline in one step) | x86, x64 |
+| `hexcore.helix.decompileIR` | 180s | **Decompile pre-lifted .ll file to pseudo-C via Helix MLIR pipeline** — use `irPath` to specify the IR file | x86, x64 |
 
 ### Hex Viewer
 
@@ -166,6 +168,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.debug.emulate` | Opens file picker and UI |
 | `hexcore.debug.emulateWithArch` | Opens prompts and UI |
 | `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration |
+| `hexcore.helix.decompileUI` | Opens Helix decompile panel with editor integration |
 | `hexcore.pipeline.runJob` | Recursive pipeline invocation is not supported |
 
 ---
@@ -201,6 +204,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
 - **Rellic Decompiler** (Experimental) walks LLVM IR and emits pseudo-C with mnemonic annotations. No Clang AST or Z3 solver — real decompilation passes planned for v3.6.x.
+- **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step).
 
 ---
 
@@ -360,6 +364,94 @@ Decompile pre-lifted LLVM IR text to pseudo-C. Use this when you already have IR
 |-----------|------|---------|-------------|
 | `irText` | `string` | *(required)* | LLVM IR text to decompile. |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
+
+### `hexcore.helix.decompile`
+
+Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pipeline**: lifts machine code via Remill, then runs the full MLIR pass pipeline (RemillToHelixLow → HelixLowToHigh → StructureControlFlow → RecoverCallingConvention → PseudoCEmit). Produces significantly better output than Rellic — structured control flow, named parameters, struct field recovery, and a confidence score.
+
+```json
+{
+  "cmd": "hexcore.helix.decompile",
+  "args": {
+    "address": "0x14142FE90",
+    "count": 150
+  },
+  "output": { "path": "decompiled.helix.c" },
+  "timeoutMs": 180000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
+| `count` | `number` | `150` | Number of instructions to lift before decompiling. |
+| `output` | `{ path? }` | — | Output file path for pseudo-C code. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "code": "// sub_14142fe90 (0x14142fe90)\n// Confidence: 84.0% (High)\nint64_t sub_14142fe90(...) { ... }",
+  "confidence": 84.0,
+  "functionCount": 1,
+  "generatedAt": "2026-03-10T10:58:00.000Z"
+}
+```
+
+> **Note:** Helix requires LLVM IR from `liftToIR` internally. For large functions, prefer the two-step variant (`liftToIR` + `helix.decompileIR`) so you can inspect the IR separately.
+
+---
+
+### `hexcore.helix.decompileIR`
+
+Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use this as the second step of a two-step pipeline where the first step is `hexcore.disasm.liftToIR`. The `irPath` argument must point to the `.ll` file produced by `liftToIR` — use the same path as the `output.path` of that step (resolved from `outDir`).
+
+```json
+{
+  "cmd": "hexcore.helix.decompileIR",
+  "args": {
+    "irPath": "hexcore-reports\\my-output\\bone_pos_calc.ll"
+  },
+  "output": { "path": "bone_pos_calc.helix.c" },
+  "timeoutMs": 180000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `irPath` | `string` | *(required)* | Path to a `.ll` LLVM IR file. Relative paths are resolved from the workspace root. Absolute paths are used as-is. |
+| `output` | `{ path? }` | — | Output file path for pseudo-C code. Relative to `outDir`. |
+
+> **Important:** `irPath` must be the **path to the `.ll` file**, not inline IR text. The pipeline runner always sets `options.file` to the binary target, so `irPath` is the dedicated arg for specifying the IR file path.
+
+**Two-step pipeline example (recommended):**
+
+```json
+{
+  "file": "C:\\samples\\target.exe",
+  "outDir": "C:\\reports\\helix",
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x14142FE90", "count": 150 },
+      "output": { "path": "bone_pos_calc.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "C:\\reports\\helix\\bone_pos_calc.ll" },
+      "output": { "path": "bone_pos_calc.helix.c" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+> **Tip:** Use an absolute path for `irPath` when `outDir` is absolute — this avoids any workspace-root resolution ambiguity.
+
+---
 
 ### `hexcore.strings.extract`
 ```json
@@ -675,7 +767,48 @@ Relative output paths are resolved from `outDir`.
 ### `timed out after ...`
 - Increase `timeoutMs` for heavy binaries.
 - Lower `maxFunctions` and `maxFunctionSize` on `analyzeAll`.
+- Helix decompile can take up to 90s for large functions — use `timeoutMs: 180000` or higher.
 
 ### Missing report file
 - Check step status in `hexcore-pipeline.status.json`.
 - If step failed/timed out, output file will not be created.
+
+### `hexcore.helix.decompileIR` fails with "file not found"
+- The `irPath` must point to a `.ll` file that exists **before** this step runs.
+- Ensure `liftToIR` ran successfully (check its status in `hexcore-pipeline.status.json`).
+- Prefer absolute paths for `irPath` (e.g. `"C:\\reports\\helix\\bone_pos_calc.ll"`) to avoid workspace-root resolution issues.
+- Relative `irPath` values are resolved from the workspace root folder, not from `outDir`.
+
+---
+
+## Helix MLIR Decompiler — Common Gotchas
+
+### Correct command names (Helix)
+
+| Task | Correct command | Wrong command |
+|------|-----------------|---------------|
+| Decompile pre-lifted `.ll` file | `hexcore.helix.decompileIR` | ~~`hexcore.helix.decompile`~~ |
+| Lift + decompile in one step | `hexcore.helix.decompile` | — |
+| Interactive panel | `hexcore.helix.decompileUI` | — |
+
+### PE32 emulation — session lifecycle
+
+Always call `disposeHeadless` between emulation attempts:
+
+```json
+{ "cmd": "hexcore.debug.disposeHeadless" },
+{ "cmd": "hexcore.debug.emulateFullHeadless", "args": { ... } }
+```
+
+Skipping `disposeHeadless` causes `UC_ERR_MAP (code 11)` — Unicorn rejects re-mapping existing memory regions.
+
+### PE32 stack (`UC_ERR_READ_UNMAPPED`)
+
+`permissiveMemoryMapping: true` controls section R/W/X permissions but does NOT create a stack region. If ESP points to an unmapped address (e.g., `0x800eeffc`), redirect it before emulation:
+
+```json
+[
+  { "cmd": "hexcore.debug.emulateHeadless", "args": { "file": "target.exe", "arch": "x86" } },
+  { "cmd": "hexcore.debug.setRegisterHeadless", "args": { "register": "ESP", "value": "0x5f00000" } }
+]
+```

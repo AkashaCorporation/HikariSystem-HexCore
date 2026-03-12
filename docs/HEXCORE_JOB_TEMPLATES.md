@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.6.0
+# HexCore Job Templates — v3.7.0-beta.1
 
 Safe default `.hexcore_job.json` templates for users and AI agents.
 
@@ -124,17 +124,87 @@ Focused on disassembly, formula extraction, constant checking, string references
 
 ---
 
+## Template: Helix Decompile — Single Step (~2min)
+
+Decompile a single function to pseudo-C using the **Helix MLIR pipeline** in one shot. No prior `analyzeAll` needed. Best output quality: structured control flow, named parameters, struct field recovery, confidence score.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\helix",
+  "quiet": false,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": {
+        "address": "0x14142FE90",
+        "count": 150
+      },
+      "output": { "path": "bone_pos_calc.helix.c" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+**Notes:**
+- Replace `address` with the virtual address of the function you want to decompile.
+- `count` controls how many instructions are lifted (default `150`). Increase for larger functions.
+- Output includes a `// Confidence: XX.X% (High/Medium/Low)` header.
+- Only supports x86/x64 binaries.
+
+---
+
+## Template: Helix Decompile — Two-Step (Lift + Decompile) (~2–3min)
+
+Recommended when you want to inspect the raw LLVM IR **and** the final pseudo-C separately. Step 1 lifts machine code to `.ll`, Step 2 runs the Helix MLIR pipeline on it.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\helix",
+  "quiet": false,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x14142FE90",
+        "count": 150
+      },
+      "output": { "path": "bone_pos_calc.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": {
+        "irPath": "C:\\path\\to\\hexcore-reports\\helix\\bone_pos_calc.ll"
+      },
+      "output": { "path": "bone_pos_calc.helix.c" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `irPath` must be an **absolute path** to the `.ll` file produced by `liftToIR`. Use the same path as `outDir` + `output.path` from step 1.
+- If `liftToIR` fails, `decompileIR` will also fail (the `.ll` file won't exist). `continueOnError: true` lets you see both statuses in `hexcore-pipeline.status.json`.
+- Only supports x86/x64 binaries.
+
+---
+
 ## Template: Deep Reverse Engineering (Decompile)
 
-Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to pseudo-C, extract strings and Base64. Ideal for understanding complex functions in PE/ELF binaries.
-
-> **Note:** `hexcore.rellic.decompile` is Experimental in v3.5.x. It performs lift + decompile in one step.
+Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to pseudo-C via Helix, extract strings and Base64. Ideal for understanding complex functions in PE/ELF binaries.
 
 ```json
 {
   "file": "C:\\path\\to\\target.exe",
   "outDir": "C:\\path\\to\\hexcore-reports\\deep-reverse",
   "quiet": true,
+  "continueOnError": true,
   "steps": [
     { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
     {
@@ -155,9 +225,9 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
       "timeoutMs": 120000
     },
     {
-      "cmd": "hexcore.rellic.decompile",
-      "args": { "address": "0x401000", "count": 200 },
-      "output": { "path": "03-decompiled.c" },
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "C:\\path\\to\\hexcore-reports\\deep-reverse\\02-lifted.ll" },
+      "output": { "path": "03-decompiled.helix.c" },
       "timeoutMs": 180000
     },
     {
@@ -179,7 +249,11 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
 }
 ```
 
-**Note:** Replace `0x401000` with the actual entry point or function address you want to decompile. `liftToIR` and `rellic.decompile` only support x86/x64 binaries.
+**Notes:**
+- Replace `0x401000` with the function VA you want to decompile.
+- `liftToIR` and `helix.decompileIR` only support x86/x64 binaries.
+- Use absolute path for `irPath` (matches `outDir` + step 1 `output.path`).
+- For Rellic-style output (mnemonic comments), swap `hexcore.helix.decompileIR` with `hexcore.rellic.decompile`.
 
 ---
 
@@ -296,3 +370,47 @@ Run deep analysis then validate constants. No large intermediate files.
 - **`timed out after ...`** — Increase `timeoutMs` for heavy binaries. Lower `maxFunctions`/`maxFunctionSize` on `analyzeAll`.
 - **Missing report file** — Confirm step status is `ok` in `hexcore-pipeline.status.json`. Failed/timed-out steps do not produce output.
 - **`Command is not headless-safe`** — The command requires UI interaction. Check `docs/HEXCORE_AUTOMATION.md` for headless alternatives.
+
+---
+
+## Template: Helix Decompile — Loop/SIMD Functions (~3min)
+
+For functions with loop-at-entry patterns (backward branches to entry block) or heavy SIMD code that previously crashed the engine. These are now fully supported in v3.7.0-beta.1.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\helix-loop",
+  "quiet": false,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.debug.disposeHeadless",
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x140001728",
+        "count": 200
+      },
+      "output": { "path": "logic_1728.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": {
+        "irPath": "C:\\path\\to\\hexcore-reports\\helix-loop\\logic_1728.ll"
+      },
+      "output": { "path": "logic_1728.helix.c" },
+      "timeoutMs": 240000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `disposeHeadless` at the start prevents `UC_ERR_MAP` if a prior session was left open.
+- `irPath` must be an absolute path to the `.ll` file.
+- Functions with backward branches to the first block (common in loops at function entry) are now handled via `LLParser(UpgradeDebugInfo=false)` in the Helix engine.
+- Increase `count` for larger functions (>3000 bytes: use 300+).

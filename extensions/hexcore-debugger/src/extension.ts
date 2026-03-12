@@ -441,65 +441,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
-	// Read Memory Headless
-	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.readMemoryHeadless', async (arg?: Record<string, unknown>) => {
-			const addrStr = typeof arg?.address === 'string' ? arg.address : undefined;
-			const size = typeof arg?.size === 'number' ? arg.size : 256;
-			const quietMode = arg?.quiet === true;
-			const outputOptions = arg?.output as { path?: string } | undefined;
-
-			if (!addrStr) {
-				throw new Error('readMemoryHeadless requires an "address" argument (hex string).');
-			}
-
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
-
-			const address = BigInt(addrStr.startsWith('0x') ? addrStr : '0x' + addrStr);
-			const data = await engine.emulationReadMemory(address, size);
-
-			// Build hex dump
-			const hexLines: string[] = [];
-			const bytesPerLine = 16;
-			for (let i = 0; i < data.length; i += bytesPerLine) {
-				const addr = (address + BigInt(i)).toString(16).padStart(16, '0');
-				const bytes: string[] = [];
-				let ascii = '';
-				for (let j = 0; j < bytesPerLine; j++) {
-					if (i + j < data.length) {
-						const byte = data[i + j];
-						bytes.push(byte.toString(16).padStart(2, '0'));
-						ascii += (byte >= 0x20 && byte <= 0x7E) ? String.fromCharCode(byte) : '.';
-					}
-				}
-				hexLines.push(`${addr}  ${bytes.join(' ')}  |${ascii}|`);
-			}
-
-			const exportData = {
-				address: '0x' + address.toString(16),
-				size,
-				hexDump: hexLines.join('\n'),
-				ascii: data.toString('utf8').replace(/[^\x20-\x7E]/g, '.'),
-				raw: data.toString('base64'),
-				generatedAt: new Date().toISOString()
-			};
-
-			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
-				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
-			}
-
-			if (!quietMode) {
-				vscode.window.showInformationMessage(`Read ${size} bytes from 0x${address.toString(16)}`);
-			}
-
-			return exportData;
-		})
-	);
-
 	// Get Registers Headless
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.getRegistersHeadless', async (arg?: Record<string, unknown>) => {
@@ -723,6 +664,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Session counter to prevent stale emulateFullHeadless calls from disposing newer sessions
+	let emulateSessionId = 0;
+
 	// Emulate Full Headless — unified single-shot emulation (load → configure → run → collect → dispose)
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.emulateFullHeadless', async (arg?: Record<string, unknown>) => {
@@ -734,21 +678,53 @@ export function activate(context: vscode.ExtensionContext): void {
 			const arch = typeof arg?.arch === 'string' ? arg.arch as ArchitectureType : undefined;
 			const stdin = typeof arg?.stdin === 'string' ? arg.stdin : undefined;
 			const maxInstructions = typeof arg?.maxInstructions === 'number' ? arg.maxInstructions : 1_000_000;
-			const breakpoints = Array.isArray(arg?.breakpoints) ? arg.breakpoints as string[] : undefined;
 			const keepAlive = arg?.keepAlive === true;
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
+			// v3.7 options
+			const permissiveMemoryMapping = arg?.permissiveMemoryMapping === true;
+			const prngMode = typeof arg?.prngMode === 'string' ? arg.prngMode as 'glibc' | 'msvcrt' | 'stub' : undefined;
+			const collectSideChannels = arg?.collectSideChannels === true;
+			const memoryDumps = Array.isArray(arg?.memoryDumps) ? arg.memoryDumps as Array<{ address: string; size: number; trigger: 'breakpoint' | 'end' }> : undefined;
+
+			// Parse breakpoints — support both simple string[] and rich config objects
+			let simpleBreakpoints: string[] | undefined;
+			let breakpointConfigs: Array<{ address: string; autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }> | undefined;
+
+			if (Array.isArray(arg?.breakpoints)) {
+				const bpArr = arg.breakpoints;
+				if (bpArr.length > 0 && typeof bpArr[0] === 'string') {
+					simpleBreakpoints = bpArr as string[];
+				} else if (bpArr.length > 0 && typeof bpArr[0] === 'object') {
+					breakpointConfigs = bpArr as typeof breakpointConfigs;
+				}
+			}
+
 			console.log('[emulateFullHeadless] starting emulation...');
-			await engine.startEmulation(filePath, arch);
+			const mySession = ++emulateSessionId;
+			await engine.startEmulation(filePath, arch, {
+				permissiveMemoryMapping,
+				prngMode,
+				collectSideChannels,
+				memoryDumps,
+				breakpointConfigs
+			});
 
 			if (stdin) {
 				engine.setStdinBuffer(decodeEscapedInput(stdin));
 			}
 
-			if (breakpoints) {
-				for (const addr of breakpoints) {
+			// Set breakpoints (simple string addresses)
+			if (simpleBreakpoints) {
+				for (const addr of simpleBreakpoints) {
 					engine.emulationSetBreakpoint(BigInt(addr));
+				}
+			}
+			// Set breakpoints from rich config objects
+			if (breakpointConfigs) {
+				for (const bp of breakpointConfigs) {
+					engine.emulationSetBreakpoint(BigInt(bp.address));
 				}
 			}
 
@@ -762,17 +738,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				crashError = error.message || String(error);
 			}
 
+			// Collect end-of-emulation memory dumps
+			await engine.collectMemoryDumps('end');
+
 			const stateAfter = engine.getEmulationState();
 			const registers = engine.getFullRegisters();
 			const apiCalls = engine.getApiCallLog();
 			const stdout = engine.getStdoutBuffer();
 			const regions = await engine.getMemoryRegions();
 
-			if (!keepAlive) {
+			// Collect v3.7 data
+			const breakpointSnapshotsData = engine.getBreakpointSnapshots();
+			const memoryDumpsData = engine.getCollectedMemoryDumps();
+			const sideChannelDataResult = collectSideChannels ? engine.getSideChannelData() : undefined;
+
+			if (!keepAlive && mySession === emulateSessionId) {
 				engine.disposeEmulation();
 			}
 
-			const exportData = {
+			const exportData: Record<string, any> = {
 				file: filePath,
 				architecture: engine.getArchitecture(),
 				fileType: engine.getFileType(),
@@ -800,6 +784,17 @@ export function activate(context: vscode.ExtensionContext): void {
 				})),
 				generatedAt: new Date().toISOString()
 			};
+
+			// Include v3.7 data if present
+			if (breakpointSnapshotsData.length > 0) {
+				exportData.breakpointSnapshots = breakpointSnapshotsData;
+			}
+			if (memoryDumpsData.length > 0) {
+				exportData.memoryDumps = memoryDumpsData;
+			}
+			if (sideChannelDataResult) {
+				exportData.sideChannelData = sideChannelDataResult;
+			}
 
 			if (outputOptions?.path) {
 				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
@@ -937,6 +932,51 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!quietMode) {
 				vscode.window.showInformationMessage(`STDIN buffer set: ${exportData.bytesSet} bytes`);
+			}
+
+			return exportData;
+		})
+	);
+
+	// Read Memory Headless — read arbitrary memory range from active emulation (v3.7)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.readMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const addrStr = typeof arg?.address === 'string' ? arg.address : undefined;
+			const size = typeof arg?.size === 'number' ? arg.size : undefined;
+			const format = typeof arg?.format === 'string' ? arg.format : 'base64'; // 'base64' | 'hex'
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			if (!addrStr) {
+				throw new Error('readMemoryHeadless requires an "address" argument (hex string).');
+			}
+			if (!size || size <= 0) {
+				throw new Error('readMemoryHeadless requires a positive "size" argument.');
+			}
+
+			const state = engine.getEmulationState();
+			if (!state) {
+				throw new Error('No active emulation session.');
+			}
+
+			const address = BigInt(addrStr.startsWith('0x') ? addrStr : '0x' + addrStr);
+			const data = await engine.emulationReadMemory(address, size);
+
+			const exportData = {
+				address: '0x' + address.toString(16),
+				size: data.length,
+				data: format === 'hex' ? data.toString('hex') : data.toString('base64'),
+				format,
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`Read ${data.length} bytes from 0x${address.toString(16)}`);
 			}
 
 			return exportData;

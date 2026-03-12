@@ -40,6 +40,14 @@ export interface DecompileResult {
 const ASYNC_THRESHOLD = 65536; // 64KB
 
 /**
+ * IR optimizer step for the Remill → Rellic pipeline.
+ * - 'none': No optimization (raw IR)
+ * - 'llvm-passes': LLVM DCE/ConstFold passes (v3.7)
+ * - 'souper': Souper superoptimizer (v3.8 — planned)
+ */
+export type OptimizerStep = 'none' | 'llvm-passes' | 'souper';
+
+/**
  * Wrapper TypeScript para o módulo nativo hexcore-rellic.
  *
  * Gerencia o ciclo de vida do RellicDecompiler (criação sob demanda,
@@ -125,8 +133,11 @@ export class RellicWrapper {
 	 * Retorna DecompileResult com success=false se o módulo não está disponível.
 	 *
 	 * @param irText Texto LLVM IR para decompilar
+	 * @param optimizerStep Pipeline optimizer step (default: 'none').
+	 *   - 'llvm-passes': Apply LLVM DCE/ConstFold before decompilation (v3.7)
+	 *   - 'souper': Apply Souper superoptimizer (v3.8 — planned, not yet implemented)
 	 */
-	async decompile(irText: string): Promise<DecompileResult> {
+	async decompile(irText: string, optimizerStep: OptimizerStep = 'none'): Promise<DecompileResult> {
 		if (!this.available || !this.module) {
 			return {
 				success: false,
@@ -134,6 +145,15 @@ export class RellicWrapper {
 				error: 'hexcore-rellic is not available',
 				functionCount: 0,
 			};
+		}
+
+		// v3.7/v3.8: Optimizer pipeline hook
+		if (optimizerStep === 'souper') {
+			console.log('[rellic] Souper optimizer requested but not yet implemented (planned for v3.8)');
+			// Fall through to decompile without optimization
+		} else if (optimizerStep === 'llvm-passes') {
+			console.log('[rellic] LLVM passes optimization requested — will be applied natively in rellic_decompile_pipeline');
+			// The native module handles LLVM passes internally
 		}
 
 		try {

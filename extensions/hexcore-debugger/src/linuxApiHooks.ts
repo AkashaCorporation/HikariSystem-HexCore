@@ -8,6 +8,7 @@
 import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
 import { TraceManager, TraceEntry } from './traceManager';
+import { PRNG, PrngMode, createPRNG } from './prng';
 
 export interface ApiCallLog {
 	dll: string;
@@ -50,10 +51,16 @@ export class LinuxApiHooks {
 	/** Optional TraceManager for centralized trace recording */
 	private traceManager: TraceManager | null = null;
 
-	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager, arch: ArchitectureType) {
+	/** PRNG engine for srand/rand emulation */
+	private prng: PRNG | undefined;
+	private prngMode: PrngMode;
+
+	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager, arch: ArchitectureType, prngMode: PrngMode = 'stub') {
 		this.emulator = emulator;
 		this.memoryManager = memoryManager;
 		this.architecture = arch;
+		this.prngMode = prngMode;
+		this.prng = createPRNG(prngMode);
 		this.registerAllHandlers();
 	}
 
@@ -847,6 +854,33 @@ export class LinuxApiHooks {
 			const signed = n > 0x7FFFFFFF ? n - 0x100000000 : n;
 			return BigInt(Math.abs(signed));
 		});
+
+		// ============ PRNG Functions ============
+
+		// void srand(unsigned int seed)
+		const srandHandler = (args: bigint[]) => {
+			const seed = Number(args[0] & 0xFFFFFFFFn);
+			if (this.prng) {
+				this.prng.seed(seed);
+				console.log(`[srand] seed=${seed} (0x${seed.toString(16)}) mode=${this.prngMode}`);
+			} else {
+				console.log(`[srand] seed=${seed} (stub mode, ignored)`);
+			}
+			return 0n;
+		};
+		this.handlers.set('srand', srandHandler);
+		this.handlers.set('srandom', srandHandler);
+
+		// int rand(void)
+		const randHandler = (_args: bigint[]) => {
+			if (this.prng) {
+				const val = this.prng.rand();
+				return BigInt(val);
+			}
+			return 0n; // stub mode
+		};
+		this.handlers.set('rand', randHandler);
+		this.handlers.set('random', randHandler);
 
 		// ============ Environment ============
 

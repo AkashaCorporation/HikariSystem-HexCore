@@ -5,6 +5,30 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0-beta.1] - 2026-03-11 - "Helix MLIR Stability (Beta Part 1)"
+
+> **Stability & Bug-Fix Release** — Critical crash fixes in the Helix MLIR decompilation engine. Functions with loop-at-entry patterns (backward branches to the entry block) no longer crash the extension host. Calling convention recovery is now crash-free on all IR patterns. PE32 emulation gotchas documented.
+
+### Fixed
+
+- **Helix: Entry block predecessor crash (LLVM `abort()`)** — Extension host crashed with `Entry block to function must not have predecessors!` + `LLVM ERROR: Broken module found, compilation aborted!` when decompiling functions whose Remill-lifted IR had backward branches to the entry block (loop-at-entry pattern). Root cause: `parseIR()` internally calls `llvm::UpgradeDebugInfo()` which calls `llvm::verifyModule(FatalErrors=true)` before returning — crashing before any sanitization could run. Fix: replaced `llvm::parseIR()` with direct `LLParser::Run(UpgradeDebugInfo=false)` in `Pipeline::parseLLVMIR()`, then applies entry block sanitization (insert new empty entry block with unconditional branch). Functions like `0x140001728` from `partial_encryption.exe` (SIMD + loop) now decompile successfully.
+
+- **Helix: `RecoverCallingConvention` crash on large/unusual IR** — `DominanceInfo::getNode()` in MLIR 18.x crashes on certain IR patterns (massive single-block functions, nested regions). Root cause was `collectAbiCallArgs` → `findLatestRegWriteOnDomChain` → `domInfo.getNode()`. Fix: removed `DominanceInfo` entirely from `RecoverCallingConvention`. ABI argument recovery now uses block scan + predecessor search exclusively (`findLatestRegWriteInPredecessors` with configurable depth). HTB VVM challenge `05-banner.ll` (5973-line, 3-block function) now decompiles at 100% confidence.
+
+- **PE32 emulation: `UC_ERR_MAP (code 11)` on repeated calls** — Calling `hexcore.debug.emulateFullHeadless` multiple times without `hexcore.debug.disposeHeadless` between attempts caused duplicate memory region mapping (Unicorn rejects re-mapping existing regions). Fix: always call `disposeHeadless` before starting a new emulation session.
+
+- **PE32 emulation: `UC_ERR_READ_UNMAPPED (code 6)` on PE32 binaries** — Stack pointer (ESP) initialized to `0x800eeffc` but no stack memory region was mapped. `permissiveMemoryMapping` does not create a stack — it only controls section permission flags. Workaround: use multi-step approach (`emulateHeadless` + `setRegisterHeadless` to redirect ESP to an already-mapped heap region such as `0x5f00000`).
+
+### Notes
+
+- Helix engine `.node`: `hexcore-helix.win32-x64-msvc.node` rebuilt (11,878,400 bytes).
+- Helix engine library: `helix_engine.lib` rebuilt (43,056,284 bytes).
+- `helix_tool.exe` rebuilt and tested against `logic_1728.ll` — crash-free.
+- All previous Remill 1–7 test suite files pass without regressions.
+- `hexcore.helix.decompileIR` is the correct pipeline command for decompiling pre-lifted `.ll` files (not `hexcore.helix.decompile`).
+
+---
+
 ## [3.6.0] - 2026-02-21 - "Decompiler & Deep Analysis"
 
 > **Major Feature Release** — Rellic decompiler (experimental), disassembleAt headless command, emulateFullHeadless PE32 crash fix, searchString xref fix, and full pipeline integration for decompilation workflows.
