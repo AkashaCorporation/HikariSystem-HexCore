@@ -235,13 +235,13 @@ jobs:
       - name: Build C++ Engine
         working-directory: engine
         run: |
-          if (Test-Path "engine/CMakeLists.txt") {
-            cmake -S engine -B engine/build -G "Visual Studio 17 2022" -A x64 `
-              -DLLVM_DIR="$PWD/deps/llvm-mlir/lib/cmake/llvm" `
-              -DMLIR_DIR="$PWD/deps/llvm-mlir/lib/cmake/mlir"
-            cmake --build engine/build --config Release
+          if (Test-Path "CMakeLists.txt") {
+            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+              -DLLVM_DIR="${{ github.workspace }}/engine/deps/llvm-mlir/lib/cmake/llvm" `
+              -DMLIR_DIR="${{ github.workspace }}/engine/deps/llvm-mlir/lib/cmake/mlir"
+            cmake --build build --config Release
           } else {
-            Write-Host "No engine/CMakeLists.txt — skipping C++ build (engine lib may be in deps)"
+            Write-Host "No CMakeLists.txt — skipping C++ build (engine lib may be in deps)"
           }
 
       - name: Install Dependencies
