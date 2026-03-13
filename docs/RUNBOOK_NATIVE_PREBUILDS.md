@@ -61,7 +61,7 @@ cd C:\Users\Mazum\Desktop\vscode-main\extensions\hexcore-{name}
 Para cada engine na matrix:
 1. `actions/checkout` do repo standalone
 2. `npm ci --ignore-scripts` (instala devDependencies)
-3. `npm run prebuild` → `prebuildify --napi --strip`
+3. `npm run make-prebuild` → `prebuildify --napi --strip`
 4. Empacota `prebuilds/` em `.tar.gz`
 5. Upload como artifact do GitHub Actions
 6. Se `HEXCORE_RELEASE_TOKEN` existe → cria/atualiza GitHub Release no repo standalone

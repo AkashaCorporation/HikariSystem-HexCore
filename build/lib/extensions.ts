@@ -356,6 +356,7 @@ const nativeExtensions = [
 	'microsoft-authentication',
 	'hexcore-remill',
 	'hexcore-rellic',
+	'hexcore-helix',
 ];
 
 const excludedExtensions = [

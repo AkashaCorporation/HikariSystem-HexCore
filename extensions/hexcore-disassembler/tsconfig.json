@@ -15,7 +15,8 @@
 		"paths": {
 			"hexcore-capstone": ["../hexcore-capstone"],
 			"hexcore-remill": ["../hexcore-remill"],
-			"hexcore-rellic": ["../hexcore-rellic"]
+			"hexcore-rellic": ["../hexcore-rellic"],
+			"hexcore-helix": ["../hexcore-helix"]
 		}
 	},
 	"exclude": ["node_modules", ".vscode-test"]

@@ -106,7 +106,7 @@ node -e "const db = require('.'); const d = new db(':memory:'); console.log(d.pr
 ### Gerar Prebuilds Localmente
 ```powershell
 cd extensions/hexcore-better-sqlite3
-npm run prebuild  # prebuildify --napi --strip
+npm run make-prebuild  # prebuildify --napi --strip
 # Gera: prebuilds/win32-x64/node.napi.node
 ```
 

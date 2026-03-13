@@ -1,4 +1,4 @@
-# HexCore Automation — v3.7.0-beta.1
+# HexCore Automation — v3.7.0-beta.2
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -96,8 +96,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
 | `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble N instructions starting at a given address | x86, x64, ARM, ARM64, MIPS |
 | `hexcore.disasm.liftToIR` | 120s | Lift machine code to LLVM IR via Remill engine | x86, x64 |
-| `hexcore.rellic.decompile` | 180s | Decompile binary to pseudo-C via Rellic (lift + decompile in one step) | x86, x64 |
-| `hexcore.rellic.decompileIR` | 120s | Decompile pre-lifted LLVM IR text to pseudo-C via Rellic | x86, x64 |
+| `hexcore.rellic.decompile` | 180s | ~~Decompile binary to pseudo-C via Rellic~~ **(DEPRECATED — use `hexcore.helix.decompile`)** | x86, x64 |
+| `hexcore.rellic.decompileIR` | 120s | ~~Decompile pre-lifted LLVM IR text to pseudo-C via Rellic~~ **(DEPRECATED — use `hexcore.helix.decompileIR`)** | x86, x64 |
 | `hexcore.helix.decompile` | 180s | **Decompile binary to pseudo-C via Helix MLIR pipeline** (lift + full pass pipeline in one step) | x86, x64 |
 | `hexcore.helix.decompileIR` | 180s | **Decompile pre-lifted .ll file to pseudo-C via Helix MLIR pipeline** — use `irPath` to specify the IR file | x86, x64 |
 
@@ -167,7 +167,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.yara.threatReport` | Renders output from prior UI scan context |
 | `hexcore.debug.emulate` | Opens file picker and UI |
 | `hexcore.debug.emulateWithArch` | Opens prompts and UI |
-| `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration |
+| `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration **(DEPRECATED)** |
 | `hexcore.helix.decompileUI` | Opens Helix decompile panel with editor integration |
 | `hexcore.pipeline.runJob` | Recursive pipeline invocation is not supported |
 
@@ -186,8 +186,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.disasm.open` | `hexcore.disasm.openFile` |
 | `hexcore.debug.emulate.full` | `hexcore.debug.emulateFullHeadless` |
 | `hexcore.debug.run` | `hexcore.debug.emulateFullHeadless` |
-| `hexcore.decompile` | `hexcore.rellic.decompile` |
-| `hexcore.decompile.ir` | `hexcore.rellic.decompileIR` |
+| `hexcore.decompile` | `hexcore.helix.decompile` |
+| `hexcore.decompile.ir` | `hexcore.helix.decompileIR` |
 | `hexcore.liftir` | `hexcore.disasm.liftToIR` |
 | `hexcore.disasm.disassembleAt` | `hexcore.disasm.disassembleAtHeadless` |
 
@@ -203,7 +203,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
-- **Rellic Decompiler** (Experimental) walks LLVM IR and emits pseudo-C with mnemonic annotations. No Clang AST or Z3 solver — real decompilation passes planned for v3.6.x.
+- **Rellic Decompiler** **(DEPRECATED)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility but will be removed in a future release.
 - **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step).
 
 ---
@@ -309,7 +309,7 @@ Lift machine code to LLVM IR using the Remill engine. Requires a loaded binary w
 | `count` | `number` | `50` | Number of instructions to lift. |
 | `output` | `{ path? }` | — | Output file path for LLVM IR text. |
 
-### `hexcore.rellic.decompile` *(Experimental)*
+### `hexcore.rellic.decompile` *(Deprecated — use `hexcore.helix.decompile`)*
 
 Decompile binary to pseudo-C in one step: lifts machine code via Remill, then decompiles the LLVM IR via Rellic. This is the recommended single-shot decompile command for pipelines.
 
@@ -343,9 +343,9 @@ Decompile binary to pseudo-C in one step: lifts machine code via Remill, then de
 }
 ```
 
-> **Note:** Rellic is marked Experimental in v3.5.x. The pseudo-C output uses mnemonic comments (`// MOV`, `// ADD`, `// CMP`, `// JB`, etc.) to annotate each decompiled statement. Real Clang AST-based decompilation passes are planned for v3.6.x.
+> **Note:** Rellic is **deprecated** as of v3.7.0. Use `hexcore.helix.decompile` or `hexcore.helix.decompileIR` instead. Rellic remains functional for backward compatibility but produces lower-quality output compared to Helix.
 
-### `hexcore.rellic.decompileIR` *(Experimental)*
+### `hexcore.rellic.decompileIR` *(Deprecated — use `hexcore.helix.decompileIR`)*
 
 Decompile pre-lifted LLVM IR text to pseudo-C. Use this when you already have IR from `liftToIR` and want to decompile it separately.
 

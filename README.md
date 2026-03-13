@@ -32,8 +32,8 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
-- Native Capstone/Unicorn/LLVM MC/Remill/Rellic engines via N-API (no external installs)
-- Experimental decompilation pipeline: machine code → LLVM IR → pseudo-C
+- Native Capstone/Unicorn/LLVM MC/Remill/Helix engines via N-API (no external installs)
+- Decompilation pipeline: machine code → LLVM IR → pseudo-C via Helix MLIR engine
 - Headless automation pipeline for batch analysis
 - Tested and verified against real-world obfuscated custom VM CTF binaries
 
@@ -43,7 +43,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
 - **IR Lifting** — Machine code → LLVM IR translation via Remill engine
-- **Decompilation** — LLVM IR → pseudo-C via Rellic engine (experimental, x86/x64 only)
+- **Decompilation** — LLVM IR → pseudo-C via Helix MLIR engine (x86/x64, structured control flow, confidence scoring)
 - **Helix MLIR Decompiler** — C++23/MLIR pipeline with 7 analysis passes (v0.5.0: crash-free on loop-at-entry functions)
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
@@ -91,7 +91,11 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
 | **hexcore-remill** | 0.1.2 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
+| **hexcore-helix** | 0.5.0 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (7 analysis passes) |
+| **hexcore-rellic** | — | *(deprecated)* Rellic-based decompiler — superseded by Helix MLIR engine |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
+
+> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The `.node` binary is pre-built and ships with HexCore — no compilation needed for end users. Building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build (~131 MB deps).
 
 > **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and the Remill library itself (168 static libs, ~131 MB of pre-compiled dependencies). Building from source requires clang-cl, VS2022, and a dedicated build pipeline (`_rebuild_mt.py`). For development, download the pre-compiled deps from the [standalone repo releases](https://github.com/LXrdKnowkill/hexcore-remill/releases). End users receive the pre-built `.node` binary via CI — no compilation needed.
 

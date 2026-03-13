@@ -14,7 +14,7 @@
 - Repo: `LXrdKnowkill/hexcore-remill`
 - Required scripts:
   - `npm run build`
-  - `npm run prebuild`
+  - `npm run make-prebuild`
 - Required package fields:
   - `"name": "hexcore-remill"`
   - `"version": "x.y.z"`
@@ -27,7 +27,7 @@
 - Repo: `LXrdKnowkill/hexcore-rellic`
 - Required scripts:
   - `npm run build`
-  - `npm run prebuild`
+  - `npm run make-prebuild`
 - Required package fields:
   - `"name": "hexcore-rellic"`
   - `"version": "x.y.z"`

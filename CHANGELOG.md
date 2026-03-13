@@ -5,6 +5,32 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.0-beta.2] - 2026-03-12 - "Helix Build Integration"
+
+> **Build & Packaging Release** — Helix MLIR decompiler engine fully integrated into the CI/CD pipeline. Native prebuild fetch, `nativeExtensions` registration, and installer workflow updated for both Windows and Linux. Rellic marked deprecated in favor of Helix. Documentation updated across all automation and template docs.
+
+### Added
+
+- **Helix in `nativeExtensions` array** — `hexcore-helix` added to `build/lib/extensions.ts` `nativeExtensions` list. This routes the extension through `packageNativeLocalExtensionsStream` (bypasses `vsce npm list --production` check that fails on native-only extensions without declared npm dependencies).
+- **Helix prebuild fetch (Windows)** — Added `cd ../hexcore-helix && node ../../scripts/hexcore-native-install.js` to the "Fetch HexCore Native Prebuilds" step in `hexcore-installer.yml`. Downloads `hexcore-helix.win32-x64-msvc.node` from the standalone repo release.
+- **Helix prebuild fetch (Linux)** — Added dedicated "Fetch HexCore Helix Prebuilds (Linux)" step with `continue-on-error: true` (same pattern as Remill/Rellic Linux steps — Linux prebuilds may not exist yet).
+- **`tsconfig.json` paths mapping** — Added `"hexcore-helix": ["../hexcore-helix"]` to `extensions/hexcore-disassembler/tsconfig.json` paths (done in beta.1 prep, confirmed working).
+
+### Changed
+
+- **Rellic marked deprecated** — `hexcore-rellic` is now deprecated in favor of `hexcore-helix`. Rellic remains functional but Helix produces substantially better output (structured control flow, named parameters, confidence scoring). All templates updated to prefer Helix commands.
+- **Automation docs updated** — `HEXCORE_AUTOMATION.md` version bumped to v3.7.0-beta.2. Rellic commands annotated as deprecated. Helix commands already documented in beta.1.
+- **Job templates updated** — `HEXCORE_JOB_TEMPLATES.md` version bumped to v3.7.0-beta.2. Full Static Analysis and CTF Reverse templates now use `hexcore.helix.decompile` instead of `hexcore.rellic.decompile`.
+- **Command aliases updated** — `hexcore.decompile` now resolves to `hexcore.helix.decompile` (was `hexcore.rellic.decompile`). `hexcore.decompile.ir` now resolves to `hexcore.helix.decompileIR`.
+
+### Architecture Notes
+
+- Helix uses NAPI-RS (not node-gyp like other engines). The `.node` file naming convention is `hexcore-helix.win32-x64-msvc.node` (differs from the `hexcore_engine.win32-x64.node` pattern of Capstone/Unicorn/Remill/Rellic).
+- Helix standalone repo: `hexcore-helix` under the Helxi org.
+- 6 native engines total: Capstone, Unicorn, LLVM MC, Remill, Rellic (deprecated), Helix.
+
+---
+
 ## [3.7.0-beta.1] - 2026-03-11 - "Helix MLIR Stability (Beta Part 1)"
 
 > **Stability & Bug-Fix Release** — Critical crash fixes in the Helix MLIR decompilation engine. Functions with loop-at-entry patterns (backward branches to the entry block) no longer crash the extension host. Calling convention recovery is now crash-free on all IR patterns. PE32 emulation gotchas documented.

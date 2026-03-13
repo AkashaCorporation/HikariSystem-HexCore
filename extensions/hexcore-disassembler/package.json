@@ -253,6 +253,18 @@
 				"title": "[Experimental] Decompile IR to C",
 				"category": "HexCore Disassembler",
 				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.helix.decompile",
+				"title": "Helix: Decompile to C",
+				"category": "HexCore Disassembler",
+				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.helix.decompileIR",
+				"title": "Helix: Decompile IR to C",
+				"category": "HexCore Disassembler",
+				"icon": "$(beaker)"
 			}
 		],
 		"menus": {
@@ -283,6 +295,11 @@
 					"command": "hexcore.rellic.decompile",
 					"group": "navigation",
 					"when": "activeWebviewPanelId == hexcore.disassembler && hexcore:rellicAvailable && hexcore:remillAvailable"
+				},
+				{
+					"command": "hexcore.helix.decompile",
+					"group": "navigation",
+					"when": "activeWebviewPanelId == hexcore.disassembler && hexcore:helixAvailable && hexcore:remillAvailable"
 				}
 			],
 			"view/title": [

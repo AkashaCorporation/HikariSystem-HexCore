@@ -111,6 +111,11 @@ jobs:
           cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
+      - name: Fetch HexCore Helix Prebuilds (Windows)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-helix && node ../../scripts/hexcore-native-install.js
+
       - name: Fetch HexCore Remill Semantics
         run: |
           cd extensions/hexcore-remill
@@ -266,6 +271,11 @@ jobs:
         continue-on-error: true
         run: |
           cd extensions/hexcore-rellic && node ../../scripts/hexcore-native-install.js
+
+      - name: Fetch HexCore Helix Prebuilds (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-helix && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Remill Semantics (Linux)
         continue-on-error: true

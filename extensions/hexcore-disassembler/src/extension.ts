@@ -446,10 +446,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		const assembler = await engine.getAssemblerAvailability();
 		const remillAvailable = remillWrapper.isAvailable();
 		const rellicAvailable = rellicWrapper.isAvailable();
+		const helixAvailable = helixWrapper.isAvailable();
 
-		if (disassembler.available && assembler.available && remillAvailable && rellicAvailable) {
+		if (disassembler.available && assembler.available && remillAvailable && rellicAvailable && helixAvailable) {
 			vscode.window.showInformationMessage(
-				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill + Rellic).')
+				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill + Rellic + Helix).')
 			);
 			return;
 		}
@@ -473,6 +474,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (!rellicAvailable) {
 			parts.push(
 				vscode.l10n.t('Rellic: {0}', rellicWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+		if (!helixAvailable) {
+			parts.push(
+				vscode.l10n.t('Helix: {0}', helixWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
 			);
 		}
 
@@ -1903,11 +1909,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
+			const arch = engine.getArchitecture();
 
 			if (!helixWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-helix is not available.';
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -1927,7 +1934,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (!fs.existsSync(resolved)) {
 					const errorMsg = `IR file not found: ${resolved}`;
 					if (quiet) {
-						return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 					}
 					vscode.window.showErrorMessage(errorMsg);
 					return undefined;
@@ -1937,7 +1944,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (!fs.existsSync(options.file)) {
 					const errorMsg = `File not found: ${options.file}`;
 					if (quiet) {
-						return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 					}
 					vscode.window.showErrorMessage(errorMsg);
 					return undefined;
@@ -1954,13 +1961,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
-				async () => helixWrapper.decompileIr(irText)
+				async () => helixWrapper.decompileIr(irText, arch)
 			);
 
 			if (!decompileResult.success) {
 				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
+				console.error(`[hexcore-helix] decompileIR failed:`, decompileResult.error);
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: decompileResult.error };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: decompileResult.error };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -1979,7 +1987,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					code: fullCode,
 					functionCount: decompileResult.instructionCount,
 					address: decompileResult.entryAddress,
-					architecture: '',
+					architecture: arch,
 					error: '',
 				};
 			}
@@ -1993,7 +2001,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				code: fullCode,
 				functionCount: decompileResult.instructionCount,
 				address: decompileResult.entryAddress,
-				architecture: '',
+				architecture: arch,
 				error: '',
 			};
 		})
@@ -2010,11 +2018,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
+			const arch = engine.getArchitecture();
 
 			if (!remillWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-remill is not available. Cannot lift machine code to IR.';
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -2023,21 +2032,21 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!helixWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-helix is not available. Install the prebuild or build from source.';
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
 			}
 
-			// Reutiliza a lógica de lift do hexcore.rellic.decompile via comando interno
+			// Lift machine code to LLVM IR via liftToIR command
 			const liftResult: LiftResult | undefined = await vscode.commands.executeCommand(
-				'hexcore.remill.lift', { ...options, quiet: true }
+				'hexcore.disasm.liftToIR', { ...options, quiet: true, output: undefined }
 			);
 
 			if (!liftResult || !liftResult.success) {
 				const errorMsg = liftResult?.error ?? 'Lift failed.';
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: '', error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -2045,13 +2054,14 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
-				async () => helixWrapper.decompileIr(liftResult.ir)
+				async () => helixWrapper.decompileIr(liftResult.ir, arch)
 			);
 
 			if (!decompileResult.success) {
 				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
+				console.error(`[hexcore-helix] decompile failed:`, decompileResult.error);
 				if (quiet) {
-					return { success: false, code: '', functionCount: 0, address: String(liftResult.address ?? ''), architecture: '', error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: String(liftResult.address ?? ''), architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -2070,7 +2080,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					code: fullCode,
 					functionCount: decompileResult.instructionCount,
 					address: decompileResult.entryAddress || String(liftResult.address || ''),
-					architecture: '',
+					architecture: arch,
 					error: '',
 				};
 			}
@@ -2084,7 +2094,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				code: fullCode,
 				functionCount: decompileResult.instructionCount,
 				address: decompileResult.entryAddress || String(liftResult.address || ''),
-				architecture: '',
+				architecture: arch,
 				error: '',
 			};
 		})

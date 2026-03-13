@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.7.0-beta.1
+# HexCore Job Templates — v3.7.0-beta.2
 
 Safe default `.hexcore_job.json` templates for users and AI agents.
 
@@ -52,7 +52,7 @@ Comprehensive static analysis with advanced strings, Base64 detection, hex inspe
     { "cmd": "hexcore.disasm.analyzeAll", "args": { "maxFunctions": 3000, "maxFunctionSize": 65536, "forceReload": true }, "timeoutMs": 300000 },
     { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
     { "cmd": "hexcore.ioc.extract", "timeoutMs": 120000 },
-    { "cmd": "hexcore.rellic.decompile", "args": { "address": "entry", "count": 200 }, "output": { "path": "decompiled-entry.c" }, "timeoutMs": 180000, "continueOnError": true },
+    { "cmd": "hexcore.helix.decompile", "args": { "address": "entry", "count": 200 }, "output": { "path": "decompiled-entry.helix.c" }, "timeoutMs": 180000, "continueOnError": true },
     { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "FINAL_REPORT.md", "format": "md" }, "timeoutMs": 60000 }
   ]
 }
@@ -82,9 +82,9 @@ Focused on disassembly, formula extraction, constant checking, string references
       "timeoutMs": 240000
     },
     {
-      "cmd": "hexcore.rellic.decompile",
+      "cmd": "hexcore.helix.decompile",
       "args": { "address": "entry", "count": 300 },
-      "output": { "path": "02b-decompiled.c" },
+      "output": { "path": "02b-decompiled.helix.c" },
       "timeoutMs": 180000,
       "continueOnError": true
     },
@@ -253,7 +253,7 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
 - Replace `0x401000` with the function VA you want to decompile.
 - `liftToIR` and `helix.decompileIR` only support x86/x64 binaries.
 - Use absolute path for `irPath` (matches `outDir` + step 1 `output.path`).
-- For Rellic-style output (mnemonic comments), swap `hexcore.helix.decompileIR` with `hexcore.rellic.decompile`.
+- For Rellic-style output (mnemonic comments, deprecated), swap `hexcore.helix.decompileIR` with `hexcore.rellic.decompile`.
 
 ---
 

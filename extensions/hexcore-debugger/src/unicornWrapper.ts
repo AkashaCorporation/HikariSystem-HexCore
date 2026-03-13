@@ -547,32 +547,8 @@ export class UnicornWrapper {
 				}
 			}
 
-			// Post-migration verification: ensure RSP points to mapped memory.
-			// If the stack region was not migrated (e.g., memMap failed due to
-			// Unicorn merging adjacent regions), explicitly map it in the worker.
-			try {
-				const rsp = BigInt(this.uc.regRead(X86_REG.RSP));
-				const workerRegions = await this._x64ElfWorker.memRegions();
-				const rspMapped = workerRegions.some(r => rsp >= r.begin && rsp <= r.end);
-				if (!rspMapped) {
-					console.warn(`[x64-elf] RSP 0x${rsp.toString(16)} not in any worker region — mapping stack explicitly`);
-					const PROT = this.unicornModule!.PROT;
-					const stackBase = 0x7FFF0000n;
-					const stackSize = 0x100000;
-					await this._x64ElfWorker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
-					// Copy stack contents from in-process Unicorn
-					try {
-						const stackData = this.uc.memRead(stackBase, stackSize);
-						await this._x64ElfWorker.memWrite(stackBase, stackData);
-					} catch {
-						// Partial read is OK — stack may not be fully initialized
-					}
-					console.log(`[x64-elf] Stack explicitly mapped: 0x${stackBase.toString(16)} size=0x${stackSize.toString(16)}`);
-				}
-			} catch (verifyErr) {
-				console.warn(`[x64-elf] Post-migration RSP verification failed: ${verifyErr}`);
-			}
-
+			// Ensure stack is mapped in worker (automatic — replaces manual post-migration check)
+			await this.ensureWorkerStackMapped(this._x64ElfWorker, 'x64-elf');
 			console.log('[x64-elf] Worker started, state migrated from in-process Unicorn');
 		}
 	}
@@ -690,30 +666,16 @@ export class UnicornWrapper {
 			}
 		}
 
-		// Post-migration verification: ensure RSP/ESP points to mapped memory.
+		// Ensure stack is mapped in worker (automatic — replaces manual post-migration check)
+		await this.ensureWorkerStackMapped(this._pe32Worker, 'pe32');
+
+		// Debug: log worker regions after migration
 		try {
-			const spRegId = this.architecture === 'x64' ? X86_REG.RSP : X86_REG.ESP;
-			const spName = this.architecture === 'x64' ? 'RSP' : 'ESP';
-			const sp = BigInt(this.uc.regRead(spRegId));
 			const workerRegions = await this._pe32Worker.memRegions();
-			const spMapped = workerRegions.some(r => sp >= r.begin && sp <= r.end);
-			if (!spMapped) {
-				console.warn(`[pe32] ${spName} 0x${sp.toString(16)} not in any worker region — mapping stack explicitly`);
-				const PROT = this.unicornModule.PROT;
-				const stackBase = this.architecture === 'x64' ? 0x7FFF0000n : 0x00BF0000n;
-				const stackSize = 0x100000;
-				await this._pe32Worker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
-				try {
-					const stackData = this.uc.memRead(stackBase, stackSize);
-					await this._pe32Worker.memWrite(stackBase, stackData);
-				} catch {
-					// Partial read is OK — stack may not be fully initialized
-				}
-				console.log(`[pe32] Stack explicitly mapped: 0x${stackBase.toString(16)} size=0x${stackSize.toString(16)}`);
+			for (const r of workerRegions) {
+				console.log(`[pe32] worker region: 0x${r.begin.toString(16)}-0x${r.end.toString(16)} perms=${r.perms}`);
 			}
-		} catch (verifyErr) {
-			console.warn(`[pe32] Post-migration SP verification failed: ${verifyErr}`);
-		}
+		} catch (e) { console.warn('[pe32] failed to list worker regions:', e); }
 
 		console.log('[pe32] Worker started, state migrated from in-process Unicorn');
 	}
@@ -1270,6 +1232,50 @@ export class UnicornWrapper {
 			perms |= PROT.EXEC;
 		}
 		return perms;
+	}
+
+
+	/**
+	 * Ensure the stack region is mapped in a worker after state migration.
+	 * Automatically detects the SP register, checks if it's mapped, and
+	 * maps the stack region if needed. Replaces manual post-migration checks.
+	 */
+	private async ensureWorkerStackMapped(
+		worker: { memRegions(): Promise<Array<{ begin: bigint; end: bigint }>>; memMap(addr: bigint, size: number, perms: number): Promise<void>; memWrite(addr: bigint, data: Buffer): Promise<void> },
+		label: string
+	): Promise<void> {
+		if (!this.uc || !this.unicornModule) { return; }
+
+		const X86_REG = this.unicornModule.X86_REG;
+		const PROT = this.unicornModule.PROT;
+
+		const spRegId = this.architecture === 'x64' ? X86_REG.RSP
+			: this.architecture === 'x86' ? X86_REG.ESP
+			: this.unicornModule.ARM64_REG?.SP;
+		if (spRegId === undefined) { return; }
+
+		const spName = this.architecture === 'x64' ? 'RSP' : this.architecture === 'x86' ? 'ESP' : 'SP';
+
+		try {
+			const sp = BigInt(this.uc.regRead(spRegId));
+			const workerRegions = await worker.memRegions();
+			const spMapped = workerRegions.some(r => sp >= r.begin && sp <= r.end);
+			if (!spMapped) {
+				console.warn(`[${label}] ${spName} 0x${sp.toString(16)} not in any worker region — mapping stack automatically`);
+				const stackBase = this.architecture === 'x86' ? 0x00BF0000n : 0x7FFF0000n;
+				const stackSize = 0x100000;
+				await worker.memMap(stackBase, stackSize, PROT.READ | PROT.WRITE);
+				try {
+					const stackData = this.uc.memRead(stackBase, stackSize);
+					await worker.memWrite(stackBase, stackData);
+				} catch {
+					// Partial read is OK — stack may not be fully initialized
+				}
+				console.log(`[${label}] Stack automatically mapped: 0x${stackBase.toString(16)} size=0x${stackSize.toString(16)}`);
+			}
+		} catch (err) {
+			console.warn(`[${label}] ensureWorkerStackMapped failed: ${err}`);
+		}
 	}
 
 	/**

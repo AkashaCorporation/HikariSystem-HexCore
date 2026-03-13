@@ -301,6 +301,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.rellic.decompileIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.liftToIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.disassembleAtHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
 ]);
 
 export interface PipelineCapabilityEntry {
