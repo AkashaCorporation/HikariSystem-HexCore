@@ -228,36 +228,43 @@ jobs:
           $asset = "helix-llvm-mlir-deps-win32-x64.zip"
           $url = "https://github.com/LXrdKnowkill/hexcore-helix/releases/download/$tag/$asset"
           Write-Host "Downloading Helix LLVM/MLIR deps from $url ..."
-          Invoke-WebRequest -Uri $url -OutFile $asset
+
+          $maxRetries = 3
+          $retryCount = 0
+          $success = $false
+
+          while (-not $success -and $retryCount -lt $maxRetries) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $asset -TimeoutSec 600
+              $success = $true
+            } catch {
+              $retryCount++
+              Write-Host "Download failed (attempt $retryCount/$maxRetries): $_"
+              if ($retryCount -lt $maxRetries) {
+                Write-Host "Retrying in 10 seconds..."
+                Start-Sleep -Seconds 10
+              } else {
+                throw "Failed to download after $maxRetries attempts"
+              }
+            }
+          }
+
           New-Item -ItemType Directory -Force deps | Out-Null
           Expand-Archive -Path $asset -DestinationPath deps -Force
           Remove-Item $asset
 
-      - name: Build C++ Engine
+      - name: Verify Engine Lib
         working-directory: engine/engine
         run: |
-          if (Test-Path "CMakeLists.txt") {
-            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-              -DLLVM_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/llvm" `
-              -DMLIR_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/mlir"
-            cmake --build build --config Release
+          $libPath = "deps/llvm-mlir/engine/helix_engine.lib"
+          if (Test-Path $libPath) {
+            $size = (Get-Item $libPath).Length / 1MB
+            Write-Host "✓ helix_engine.lib found: $([math]::Round($size, 2)) MB"
           } else {
-            Write-Host "No CMakeLists.txt — skipping C++ build"
-          }
-
-      - name: Verify Engine Build
-        working-directory: engine/engine
-        run: |
-          if (Test-Path "build/Release/helix_engine.lib") {
-            $size = (Get-Item "build/Release/helix_engine.lib").Length
-            Write-Host "✓ helix_engine.lib found: $size bytes"
-          } else {
-            Write-Host "✗ helix_engine.lib NOT FOUND"
-            Write-Host "Build directory contents:"
-            if (Test-Path "build") {
-              Get-ChildItem build -Recurse | Select-Object FullName
-            } else {
-              Write-Host "(no build/ directory)"
+            Write-Host "✗ helix_engine.lib NOT FOUND at $libPath"
+            Write-Host "Deps directory contents:"
+            if (Test-Path "deps") {
+              Get-ChildItem deps -Recurse -Filter "*.lib" | Select-Object FullName
             }
             exit 1
           }
@@ -270,7 +277,7 @@ jobs:
         working-directory: engine
         env:
           LLVM_LIB_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib
-          HELIX_ENGINE_LIB: ${{ github.workspace }}/engine/engine/build/Release
+          HELIX_ENGINE_LIB: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/engine
         run: npm run build
 
       - name: Read Engine Version
