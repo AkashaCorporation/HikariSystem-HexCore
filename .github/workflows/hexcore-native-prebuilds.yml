@@ -229,8 +229,8 @@ jobs:
           $url = "https://github.com/LXrdKnowkill/hexcore-helix/releases/download/$tag/$asset"
           Write-Host "Downloading Helix LLVM/MLIR deps from $url ..."
           Invoke-WebRequest -Uri $url -OutFile $asset
-          New-Item -ItemType Directory -Force deps/llvm-mlir | Out-Null
-          Expand-Archive -Path $asset -DestinationPath deps/llvm-mlir -Force
+          New-Item -ItemType Directory -Force deps | Out-Null
+          Expand-Archive -Path $asset -DestinationPath deps -Force
           Remove-Item $asset
 
       - name: Build C++ Engine
