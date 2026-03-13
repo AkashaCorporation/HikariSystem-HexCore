@@ -233,18 +233,6 @@ jobs:
           Expand-Archive -Path $asset -DestinationPath deps -Force
           Remove-Item $asset
 
-      - name: Build C++ Engine
-        working-directory: engine/engine
-        run: |
-          if (Test-Path "CMakeLists.txt") {
-            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-              -DLLVM_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/llvm" `
-              -DMLIR_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/mlir"
-            cmake --build build --config Release
-          } else {
-            Write-Host "No CMakeLists.txt — skipping C++ build (engine lib may be in deps)"
-          }
-
       - name: Install Dependencies
         working-directory: engine
         run: npm ci --ignore-scripts
@@ -252,8 +240,7 @@ jobs:
       - name: Build NAPI-RS Module
         working-directory: engine
         env:
-          LLVM_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir
-          MLIR_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir
+          LLVM_LIB_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib
         run: npm run build
 
       - name: Read Engine Version
