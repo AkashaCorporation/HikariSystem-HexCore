@@ -233,6 +233,35 @@ jobs:
           Expand-Archive -Path $asset -DestinationPath deps -Force
           Remove-Item $asset
 
+      - name: Build C++ Engine
+        working-directory: engine/engine
+        run: |
+          if (Test-Path "CMakeLists.txt") {
+            cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+              -DLLVM_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/llvm" `
+              -DMLIR_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/mlir"
+            cmake --build build --config Release
+          } else {
+            Write-Host "No CMakeLists.txt — skipping C++ build"
+          }
+
+      - name: Verify Engine Build
+        working-directory: engine/engine
+        run: |
+          if (Test-Path "build/Release/helix_engine.lib") {
+            $size = (Get-Item "build/Release/helix_engine.lib").Length
+            Write-Host "✓ helix_engine.lib found: $size bytes"
+          } else {
+            Write-Host "✗ helix_engine.lib NOT FOUND"
+            Write-Host "Build directory contents:"
+            if (Test-Path "build") {
+              Get-ChildItem build -Recurse | Select-Object FullName
+            } else {
+              Write-Host "(no build/ directory)"
+            }
+            exit 1
+          }
+
       - name: Install Dependencies
         working-directory: engine
         run: npm ci --ignore-scripts
@@ -241,6 +270,7 @@ jobs:
         working-directory: engine
         env:
           LLVM_LIB_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib
+          HELIX_ENGINE_LIB: ${{ github.workspace }}/engine/engine/build/Release
         run: npm run build
 
       - name: Read Engine Version
