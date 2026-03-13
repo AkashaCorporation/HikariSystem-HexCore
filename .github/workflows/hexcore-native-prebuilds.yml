@@ -217,28 +217,29 @@ jobs:
         id: cache-helix-deps
         uses: actions/cache@v4
         with:
-          path: engine/deps/llvm-mlir
+          path: engine/engine/deps/llvm-mlir
           key: helix-llvm-mlir-win32-x64-${{ hashFiles('engine/crates/hexcore-helix/Cargo.toml') }}
 
       - name: Download Helix LLVM/MLIR Deps
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
-        working-directory: engine
+        working-directory: engine/engine
         run: |
           $tag = "v0.2.0"
           $asset = "helix-llvm-mlir-deps-win32-x64.zip"
           $url = "https://github.com/LXrdKnowkill/hexcore-helix/releases/download/$tag/$asset"
           Write-Host "Downloading Helix LLVM/MLIR deps from $url ..."
           Invoke-WebRequest -Uri $url -OutFile $asset
+          New-Item -ItemType Directory -Force deps/llvm-mlir | Out-Null
           Expand-Archive -Path $asset -DestinationPath deps/llvm-mlir -Force
           Remove-Item $asset
 
       - name: Build C++ Engine
-        working-directory: engine
+        working-directory: engine/engine
         run: |
           if (Test-Path "CMakeLists.txt") {
             cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
-              -DLLVM_DIR="${{ github.workspace }}/engine/deps/llvm-mlir/lib/cmake/llvm" `
-              -DMLIR_DIR="${{ github.workspace }}/engine/deps/llvm-mlir/lib/cmake/mlir"
+              -DLLVM_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/llvm" `
+              -DMLIR_DIR="${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib/cmake/mlir"
             cmake --build build --config Release
           } else {
             Write-Host "No CMakeLists.txt — skipping C++ build (engine lib may be in deps)"
@@ -251,8 +252,8 @@ jobs:
       - name: Build NAPI-RS Module
         working-directory: engine
         env:
-          LLVM_DIR: ${{ github.workspace }}/engine/deps/llvm-mlir
-          MLIR_DIR: ${{ github.workspace }}/engine/deps/llvm-mlir
+          LLVM_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir
+          MLIR_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir
         run: npm run build
 
       - name: Read Engine Version
