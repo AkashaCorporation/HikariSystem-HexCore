@@ -75,6 +75,7 @@ function deserialize(value) {
 let uc = null;     // The hexcore-unicorn module
 let engine = null; // The Unicorn instance
 const hookCallbacks = new Map(); // hookHandle → native hook handle
+let permissiveMemoryMapping = false; // When true, auto-map with RWX; when false, use restrictive perms
 
 function loadModule() {
 	const possiblePaths = [
@@ -121,6 +122,11 @@ const handlers = {
 			X86_REG: uc.X86_REG,
 			ARM64_REG: uc.ARM64_REG
 		};
+	},
+
+	// Set permissive memory mapping flag (Req 1.4: RWX for all ELF segments when true)
+	setPermissiveMapping(flag) {
+		permissiveMemoryMapping = !!flag;
 	},
 
 	version() {
@@ -328,8 +334,13 @@ const handlers = {
 					if (faultAddr >= 0x1000n && faultAddr <= 0x00007FFFFFFFFFFFn) {
 						const pageSize = BigInt(engine.pageSize);
 						const aligned = (faultAddr / pageSize) * pageSize;
+						// When permissiveMemoryMapping is true, map with RWX (UC_PROT_ALL = 7).
+						// When false, map with read+write only (no execute) to preserve
+						// segment permission semantics and catch UC_ERR_FETCH_PROT on
+						// non-executable regions.
+						const autoMapPerms = permissiveMemoryMapping ? 7 : 3; // 7=RWX, 3=RW
 						try {
-							engine.memMap(aligned, Number(pageSize), uc.PROT.ALL);
+							engine.memMap(aligned, Number(pageSize), autoMapPerms);
 							i--; // Retry this instruction
 							continue;
 						} catch { /* fall through to error */ }

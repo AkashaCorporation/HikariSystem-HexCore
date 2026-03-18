@@ -1,4 +1,4 @@
-# HexCore Automation — v3.7.0-beta.2
+# HexCore Automation — v3.7.1
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -62,6 +62,87 @@ Each step supports optional controls:
 | `retryDelayMs` | `1000` | Delay between retries (ms) |
 | `expectOutput` | `true` | Validate output file existence |
 | `continueOnError` | `false` | Continue remaining steps after failure |
+
+---
+
+## Conditional Branching (`onResult`) — v3.7.1
+
+Each step supports an optional `onResult` field that evaluates the step's JSON output and controls pipeline flow.
+
+```json
+{
+  "cmd": "hexcore.entropy.analyze",
+  "onResult": {
+    "field": "maxEntropy",
+    "operator": "gt",
+    "value": 7.5,
+    "action": "goto",
+    "actionValue": 5
+  }
+}
+```
+
+### onResult Schema
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `field` | `string` | Output JSON field to evaluate (e.g., `"maxEntropy"`, `"matchCount"`, `"stdout"`) |
+| `operator` | `string` | One of: `contains`, `equals`, `not`, `gt`, `lt`, `regex` |
+| `value` | `string \| number` | Comparison value |
+| `action` | `string` | One of: `skip`, `goto`, `abort`, `log` |
+| `actionValue` | `string \| number` | Parameter for action (step index for `goto`, count for `skip`, message for `abort`/`log`) |
+
+### Operators
+
+| Operator | Description |
+|----------|-------------|
+| `contains` | String representation of field contains value |
+| `equals` | Field strictly equals value |
+| `not` | Field does not equal value |
+| `gt` | Numeric field is greater than value |
+| `lt` | Numeric field is less than value |
+| `regex` | Field matches JavaScript RegExp pattern |
+
+### Actions
+
+| Action | Description |
+|--------|-------------|
+| `skip` | Skip next N steps (N = `actionValue`, default 1) |
+| `goto` | Jump to step index `actionValue` (0-based). Allows loops. |
+| `abort` | Stop pipeline with error message `actionValue` |
+| `log` | Log message `actionValue` and continue to next step |
+
+### Loop Protection
+
+`goto` actions that target already-executed steps are allowed (enabling loops), but a maximum of **100 iterations** is enforced. Exceeding this limit aborts the pipeline with a descriptive error.
+
+### Example: Adaptive Malware Triage
+
+```json
+{
+  "file": "C:\\samples\\suspect.exe",
+  "outDir": "C:\\reports\\adaptive",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.entropy.analyze",
+      "onResult": {
+        "field": "maxEntropy",
+        "operator": "gt",
+        "value": 7.5,
+        "action": "goto",
+        "actionValue": 3
+      }
+    },
+    { "cmd": "hexcore.strings.extract" },
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "filterJunk": true, "detectVM": true } },
+    { "cmd": "hexcore.yara.scan" },
+    { "cmd": "hexcore.pipeline.composeReport" }
+  ]
+}
+```
+
+When `maxEntropy > 7.5` (likely packed), the pipeline skips strings and disassembly, jumping directly to YARA scanning.
 
 ---
 
@@ -203,7 +284,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
-- **Rellic Decompiler** **(DEPRECATED)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility but will be removed in a future release.
+- **Rellic Decompiler** **(DEPRECATED — removal in v3.8.0)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook for v3.8 preparation.
 - **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step).
 
 ---
@@ -217,10 +298,22 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
   "args": {
     "maxFunctions": 2500,
     "maxFunctionSize": 65536,
-    "forceReload": true
+    "forceReload": true,
+    "filterJunk": true,
+    "detectVM": true,
+    "detectPRNG": true
   }
 }
 ```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `maxFunctions` | `number` | `1000` | Maximum functions to analyze. |
+| `maxFunctionSize` | `number` | `65536` | Maximum function size in bytes. |
+| `forceReload` | `boolean` | `false` | Force reload of binary file. |
+| `filterJunk` | `boolean` | `false` | Filter junk instructions (callfuscation, nop sleds, identity ops). Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
+| `detectVM` | `boolean` | `false` | Run VM obfuscation heuristics (dispatcher, handler tables, operand stacks). Reports `vmDetected`, `vmType`, `dispatcher`, `opcodeCount`. **(v3.7.1)** |
+| `detectPRNG` | `boolean` | `false` | Detect PRNG usage patterns (srand/rand call sites, seed extraction). Reports `prngDetected`, `seedSource`, `seedValue`, `randCallCount`. **(v3.7.1)** |
 
 ### `hexcore.disasm.buildFormula`
 ```json
@@ -274,7 +367,8 @@ Disassemble N instructions starting at a given virtual address. Requires prior `
   "cmd": "hexcore.disasm.disassembleAtHeadless",
   "args": {
     "address": "0x401000",
-    "count": 50
+    "count": 50,
+    "filterJunk": true
   },
   "output": { "path": "disasm-at-result.json" },
   "timeoutMs": 120000
@@ -285,6 +379,7 @@ Disassemble N instructions starting at a given virtual address. Requires prior `
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `20` | Number of instructions to disassemble. |
+| `filterJunk` | `boolean` | `false` | Filter junk instructions from output. Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
 | `output` | `{ path? }` | — | JSON output file path. |
 
 ### `hexcore.disasm.liftToIR`
@@ -318,7 +413,9 @@ Decompile binary to pseudo-C in one step: lifts machine code via Remill, then de
   "cmd": "hexcore.rellic.decompile",
   "args": {
     "address": "0x401000",
-    "count": 200
+    "count": 200,
+    "optimizerStep": "llvm-passes",
+    "optimizationPasses": ["dce", "constfold"]
   },
   "output": { "path": "decompiled.c" },
   "timeoutMs": 180000
@@ -329,6 +426,8 @@ Decompile binary to pseudo-C in one step: lifts machine code via Remill, then de
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `100` | Number of instructions to lift before decompiling. |
+| `optimizerStep` | `string` | `'llvm-passes'` | Optimizer: `'none'`, `'llvm-passes'` (DCE + ConstFold), `'souper'` (not yet implemented — hook for v3.8). **(v3.7.1)** |
+| `optimizationPasses` | `string[]` | — | Specific LLVM passes to run: `'dce'`, `'constfold'`, `'simplifycfg'`. Only used when `optimizerStep` is `'llvm-passes'`. **(v3.7.1)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
 **Returns:**
@@ -511,7 +610,17 @@ Unified single-shot emulation: loads the binary, optionally configures STDIN and
 		"stdin": "flag{test}\\n",
 		"maxInstructions": 500000,
 		"breakpoints": ["0x401000", "0x401050"],
-		"keepAlive": false
+		"keepAlive": false,
+		"permissiveMemoryMapping": false,
+		"prngMode": "glibc",
+		"prngSeed": 4919,
+		"collectSideChannels": true,
+		"memoryDumps": [
+			{ "address": "0x600000", "size": 4096, "trigger": "end" }
+		],
+		"breakpointConfigs": [
+			{ "address": "0x401000", "autoSnapshot": true, "dumpRanges": [{ "address": "0x600000", "size": 256 }] }
+		]
 	},
 	"output": { "path": "emulation-result.json" },
 	"timeoutMs": 300000
@@ -526,6 +635,12 @@ Unified single-shot emulation: loads the binary, optionally configures STDIN and
 | `maxInstructions` | `number` | `1000000` | Maximum instructions to execute before stopping. |
 | `breakpoints` | `string[]` | — | Array of `0x`-prefixed hex address strings where execution pauses. |
 | `keepAlive` | `boolean` | `false` | When `true`, preserves the emulation session after completion for subsequent commands. |
+| `permissiveMemoryMapping` | `boolean` | `false` | When `true`, maps all segments with RWX permissions. Required for self-modifying VMs that jump to .rodata/.data. **(v3.7.1)** |
+| `prngMode` | `string` | `'stub'` | PRNG implementation: `'glibc'` (344-state TYPE_3), `'msvcrt'` (LCG), `'stub'` (returns 0). **(v3.7.1)** |
+| `prngSeed` | `number` | `1` | Initial seed for PRNG. Only used when `prngMode` is `'glibc'` or `'msvcrt'`. **(v3.7.1)** |
+| `collectSideChannels` | `boolean` | `false` | When `true`, collects instruction counts per basic block, memory access patterns, and branch statistics. **(v3.7.1)** |
+| `memoryDumps` | `array` | — | Array of `{ address, size, trigger }` objects. `trigger` is `'breakpoint'` or `'end'`. **(v3.7.1)** |
+| `breakpointConfigs` | `array` | — | Array of `{ address, autoSnapshot?, dumpRanges? }` objects. When `autoSnapshot: true`, captures registers + stack + optional memory ranges at breakpoint, then continues. **(v3.7.1)** |
 | `output` | `{ path? }` | — | JSON output file path. Parent directories are created recursively. |
 | `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
 

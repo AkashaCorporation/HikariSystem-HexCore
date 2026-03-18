@@ -2141,7 +2141,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				try {
 					progress?.report({ message: 'Scanning for function prologs and references...' });
-					return engine.analyzeAll();
+					return engine.analyzeAll({ filterJunk: options.filterJunk, detectVM: options.detectVM });
 				} finally {
 					if (hasOverride) {
 						engine.setAnalysisLimits(defaultLimits.maxFunctions, defaultLimits.maxFunctionSize);
@@ -2297,8 +2297,22 @@ export function activate(context: vscode.ExtensionContext): void {
 				(allEntries as any)._filtered = allFiltered;
 			}
 
+			// 8c. v3.7.1: VM detection if requested
+			const detectVMFlag = arg?.detectVM === true;
+			let vmDetection: { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number } | undefined;
+			if (detectVMFlag) {
+				vmDetection = engine.detectVM();
+			}
+
+			// 8d. v3.7.1: PRNG detection if requested
+			const detectPRNGFlag = arg?.detectPRNG === true;
+			let prngDetection: { prngDetected: boolean; seedSource: string | null; seedValue: number | null; randCallCount: number; callSites: Array<{ address: string; function: string; context: string }> } | undefined;
+			if (detectPRNGFlag) {
+				prngDetection = engine.detectPRNG();
+			}
+
 			// 9. Build result JSON
-			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number } } = {
+			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number }; junkCount?: number; junkRatio?: number; vmDetection?: typeof vmDetection; prngDetection?: typeof prngDetection } = {
 				address: `0x${params.address.toString(16).toUpperCase()}`,
 				count: params.count,
 				context: params.context,
@@ -2310,6 +2324,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (filterJunk && junkAnalysis) {
 				result.filteredInstructions = (allEntries as any)._filtered;
 				result.junkAnalysis = junkAnalysis;
+				result.junkCount = junkAnalysis.junkCount;
+				result.junkRatio = junkAnalysis.junkRatio;
+			}
+
+			if (detectVMFlag && vmDetection) {
+				result.vmDetection = vmDetection;
+			}
+
+			if (detectPRNGFlag && prngDetection) {
+				result.prngDetection = prngDetection;
 			}
 
 			// 10. Write to file if output.path specified

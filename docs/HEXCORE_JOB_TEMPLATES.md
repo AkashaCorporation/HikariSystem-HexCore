@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.7.0-beta.2
+# HexCore Job Templates — v3.7.1
 
 Safe default `.hexcore_job.json` templates for users and AI agents.
 
@@ -414,3 +414,147 @@ For functions with loop-at-entry patterns (backward branches to entry block) or 
 - `irPath` must be an absolute path to the `.ll` file.
 - Functions with backward branches to the first block (common in loops at function entry) are now handled via `LLParser(UpgradeDebugInfo=false)` in the Helix engine.
 - Increase `count` for larger functions (>3000 bytes: use 300+).
+
+---
+
+## Template: Emulation with PRNG (v3.7.1)
+
+Emulate a crackme that uses glibc `rand()` with a known seed. Permissive memory mapping enabled for self-modifying VMs.
+
+```json
+{
+  "file": "C:\\path\\to\\crackme.elf",
+  "outDir": "C:\\path\\to\\hexcore-reports\\prng-emulation",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 },
+    {
+      "cmd": "hexcore.debug.emulateFullHeadless",
+      "args": {
+        "arch": "x64",
+        "stdin": "test_input\\n",
+        "maxInstructions": 500000,
+        "permissiveMemoryMapping": true,
+        "prngMode": "glibc",
+        "prngSeed": 4919,
+        "collectSideChannels": true,
+        "memoryDumps": [
+          { "address": "0x600000", "size": 4096, "trigger": "end" }
+        ],
+        "breakpointConfigs": [
+          { "address": "0x401200", "autoSnapshot": true }
+        ]
+      },
+      "output": { "path": "emulation-result.json" },
+      "timeoutMs": 300000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `prngMode: "glibc"` provides faithful 344-state TYPE_3 algorithm matching native glibc `rand()`.
+- Use `"msvcrt"` for Windows crackmes (LCG: `seed * 214013 + 2531011`).
+- `permissiveMemoryMapping: true` maps all segments with RWX — required for VMs that execute from .rodata/.data.
+- `collectSideChannels: true` captures instruction counts per basic block and branch statistics.
+- `breakpointConfigs` with `autoSnapshot: true` captures registers + stack at breakpoint, then continues.
+
+---
+
+## Template: VM Detection Pipeline (v3.7.1)
+
+Detect VM-based obfuscation, filter junk instructions, and detect PRNG patterns in a single pass.
+
+```json
+{
+  "file": "C:\\path\\to\\obfuscated.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\vm-detection",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": {
+        "maxFunctions": 2500,
+        "forceReload": true,
+        "filterJunk": true,
+        "detectVM": true,
+        "detectPRNG": true
+      },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": { "address": "0x401000", "count": 200, "filterJunk": true },
+      "output": { "path": "disasm-filtered.json" },
+      "timeoutMs": 120000
+    },
+    { "cmd": "hexcore.strings.extractAdvanced", "timeoutMs": 180000 },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "FINAL_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `filterJunk: true` removes callfuscation, nop sleds, identity ops. Reports `junkCount` and `junkRatio`.
+- `detectVM: true` identifies dispatcher patterns, handler tables, and operand stacks.
+- `detectPRNG: true` finds srand/rand call sites and extracts seed values.
+
+---
+
+## Template: Adaptive Pipeline with onResult Branching (v3.7.1)
+
+Uses `onResult` conditional branching to adapt the pipeline based on intermediate results. If entropy is high (likely packed), skip straight to YARA scanning.
+
+```json
+{
+  "file": "C:\\path\\to\\suspect.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\adaptive",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.entropy.analyze",
+      "output": { "path": "01-entropy.json" },
+      "timeoutMs": 90000,
+      "onResult": {
+        "field": "maxEntropy",
+        "operator": "gt",
+        "value": 7.5,
+        "action": "goto",
+        "actionValue": 4
+      }
+    },
+    { "cmd": "hexcore.strings.extract", "args": { "minLength": 5 }, "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "filterJunk": true, "detectVM": true },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "entry", "count": 200 },
+      "output": { "path": "03-decompiled.helix.c" },
+      "timeoutMs": 180000,
+      "continueOnError": true
+    },
+    { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
+    { "cmd": "hexcore.ioc.extract", "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "FINAL_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `onResult` on step 0: if `maxEntropy > 7.5`, jumps to step 4 (YARA scan), skipping strings/disassembly/decompile.
+- Operators: `contains`, `equals`, `not`, `gt`, `lt`, `regex`.
+- Actions: `skip` (skip N steps), `goto` (jump to step index), `abort` (stop pipeline), `log` (log and continue).
+- `goto` allows loops (max 100 iterations enforced).
+- See `docs/HEXCORE_AUTOMATION.md` for full `onResult` schema.

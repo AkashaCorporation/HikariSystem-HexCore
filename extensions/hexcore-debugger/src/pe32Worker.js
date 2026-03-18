@@ -82,6 +82,29 @@ let uc = null;     // The hexcore-unicorn module
 let engine = null; // The Unicorn instance
 let currentMode = null; // Architecture mode from initialize() — used for register heuristics
 const hookCallbacks = new Map(); // hookHandle → native hook handle
+let permissiveMemoryMapping = false; // When true, auto-map with RWX; when false, use restrictive perms
+
+/**
+ * Convert PE section characteristics to Unicorn protection flags.
+ * Used when permissiveMemoryMapping is false to apply section-specific permissions.
+ * @param {number} characteristics - PE section characteristics bitmask
+ * @returns {number} Unicorn protection flags (UC_PROT_READ | UC_PROT_WRITE | UC_PROT_EXEC)
+ */
+function sectionPermsToUnicorn(characteristics) {
+	// PE section characteristic flags
+	const IMAGE_SCN_MEM_EXECUTE = 0x20000000;
+	const IMAGE_SCN_MEM_READ = 0x40000000;
+	const IMAGE_SCN_MEM_WRITE = 0x80000000;
+
+	// UC_PROT constants: READ=1, WRITE=2, EXEC=4
+	let perms = 0;
+	if (characteristics & IMAGE_SCN_MEM_READ) { perms |= 1; }
+	if (characteristics & IMAGE_SCN_MEM_WRITE) { perms |= 2; }
+	if (characteristics & IMAGE_SCN_MEM_EXECUTE) { perms |= 4; }
+
+	// Ensure at least read permission (sections without any flags are still readable)
+	return perms || 1;
+}
 
 function loadModule() {
 	const possiblePaths = [
@@ -129,6 +152,11 @@ const handlers = {
 			X86_REG: uc.X86_REG,
 			ARM64_REG: uc.ARM64_REG
 		};
+	},
+
+	// Set permissive memory mapping flag (Req 1.3: RWX for all PE sections when true)
+	setPermissiveMapping(flag) {
+		permissiveMemoryMapping = !!flag;
 	},
 
 	version() {
@@ -341,8 +369,13 @@ const handlers = {
 					if (faultAddr >= 0x1000n && faultAddr <= maxAddr) {
 						const pageSize = BigInt(engine.pageSize);
 						const aligned = (faultAddr / pageSize) * pageSize;
+						// When permissiveMemoryMapping is true, map with RWX (UC_PROT_ALL = 7).
+						// When false, map with read+write only (no execute) to preserve
+						// section permission semantics and catch UC_ERR_FETCH_PROT on
+						// non-executable regions.
+						const autoMapPerms = permissiveMemoryMapping ? 7 : 3; // 7=RWX, 3=RW
 						try {
-							engine.memMap(aligned, Number(pageSize), uc.PROT.ALL);
+							engine.memMap(aligned, Number(pageSize), autoMapPerms);
 							i--; // Retry this instruction
 							continue;
 						} catch { /* fall through to error */ }

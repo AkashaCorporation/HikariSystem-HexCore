@@ -681,6 +681,30 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Set permissive memory mapping flag on the PE32 worker.
+	 * When true, the worker auto-maps faulted pages with RWX permissions.
+	 * When false, auto-mapped pages use RW only (no execute) to preserve
+	 * section permission semantics.
+	 */
+	async setPe32PermissiveMapping(flag: boolean): Promise<void> {
+		if (this._pe32Worker) {
+			await this._pe32Worker.setPermissiveMapping(flag);
+		}
+	}
+
+	/**
+	 * Set permissive memory mapping flag on the x64 ELF worker.
+	 * When true, the worker auto-maps faulted pages with RWX permissions.
+	 * When false, auto-mapped pages use RW only (no execute) to preserve
+	 * segment permission semantics.
+	 */
+	async setX64ElfPermissiveMapping(flag: boolean): Promise<void> {
+		if (this._x64ElfWorker) {
+			await this._x64ElfWorker.setPermissiveMapping(flag);
+		}
+	}
+
+	/**
 	 * PE32 worker-based execution loop.
 	 *
 	 * Runs emulation in the worker process using executeBatch(), with
@@ -1251,7 +1275,7 @@ export class UnicornWrapper {
 
 		const spRegId = this.architecture === 'x64' ? X86_REG.RSP
 			: this.architecture === 'x86' ? X86_REG.ESP
-			: this.unicornModule.ARM64_REG?.SP;
+				: this.unicornModule.ARM64_REG?.SP;
 		if (spRegId === undefined) { return; }
 
 		const spName = this.architecture === 'x64' ? 'RSP' : this.architecture === 'x86' ? 'ESP' : 'SP';

@@ -5,6 +5,82 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.1] - 2026-03-18 - "Dynamic Intelligence + XOR Massive Update"
+
+> **Feature Release** — Two major feature sets shipped together as the first stable release since v3.7.0-beta.2. (1) Dynamic Intelligence: robust emulation (permissive memory mapping, faithful glibc/MSVCRT PRNG), advanced disassembly analysis (junk filtering, VM detection, PRNG pattern detection), runtime memory inspection (dumps, breakpoint auto-snapshots, side-channel analysis, dumpAndDisassemble), Rellic IR optimization passes with Souper hook for v3.8, and conditional pipeline branching (`onResult`). (2) XOR Massive Update: complete overhaul of the `hexcore-strings` deobfuscation engine from 3 scanners to 9, with centralized scoring, PE section awareness, and 19 new property-based tests. All features maintain full backward compatibility. Rellic marked deprecated — removal planned for v3.8.0.
+
+### Added — Dynamic Intelligence
+
+- **Permissive Memory Mapping** — `permissiveMemoryMapping: true` in `emulateFullHeadless` maps all PE sections and ELF segments with RWX permissions, allowing self-modifying VMs to execute from .rodata/.data without UC_ERR_FETCH_PROT. Supported in DebugEngine, PE32 Worker, and x64 ELF Worker.
+- **glibc PRNG** — `prngMode: 'glibc'` provides faithful 344-state TYPE_3 algorithm. `srand(seed)` initializes the 31-word state table using LCG `16807 * state[i-1] % 2147483647`. `rand()` returns `(state[i-31] + state[i-3]) >>> 1`. Matches native glibc output for any seed.
+- **MSVCRT PRNG** — `prngMode: 'msvcrt'` provides faithful LCG: `seed = seed * 214013 + 2531011`, returns `(seed >> 16) & 0x7FFF`. Matches native MSVCRT output for any seed.
+- **PRNG Stub Preservation** — `prngMode: 'stub'` (default) returns 0 for all `rand()` calls, preserving backward compatibility. Invalid mode values fall back to stub with warning.
+- **Memory Dumps** — `memoryDumps` array in `emulateFullHeadless` captures arbitrary memory ranges at breakpoints or end of execution. Each dump includes address, size, and base64-encoded data.
+- **Breakpoint Auto-Snapshots** — `breakpointConfigs` with `autoSnapshot: true` automatically captures registers, stack, and optional memory ranges when breakpoints are hit, then continues execution.
+- **Side-Channel Analysis** — `collectSideChannels: true` installs instrumentation hooks collecting instruction counts per basic block, memory access patterns, and branch statistics via `SideChannelData`.
+- **Runtime Memory Disassembly** — `dumpAndDisassemble(address, size)` combines memory reading and Capstone disassembly for analyzing runtime-decrypted VM handlers and shellcode.
+- **DisassemblerEngine `loadBuffer()`** — Accept raw buffer with base address for disassembly without file on disk.
+- **Junk Instruction Filtering** — `filterJunk: true` in `analyzeAll` and `disassembleAtHeadless` detects and removes 7 junk patterns: call/pop (callfuscation), add/sub zero, nop sleds, push/pop same reg, xchg same reg, mov same reg, identity LEA. Reports `junkCount` and `junkRatio`.
+- **VM Detection Heuristics** — `detectVM: true` in `analyzeAll` identifies dispatcher patterns (3+ cmp/jcc chains), handler tables (indirect jumps via `[reg*scale+base]`), and operand stacks (`[reg+reg*scale-offset]`). Reports `vmDetected`, `vmType`, `dispatcher`, `opcodeCount`, `stackArrays`, `junkRatio`.
+- **PRNG Pattern Detection** — `detectPRNG: true` in `analyzeAll` scans for srand/rand/random/srandom call sites, extracts seed values via 5-instruction lookback on argument registers. Reports `prngDetected`, `seedSource`, `seedValue`, `randCallCount`, `callSites`.
+- **Rellic `optimizationPasses`** — New parameter `optimizationPasses: string[]` allows specifying LLVM passes (`'dce'`, `'constfold'`, `'simplifycfg'`) before Rellic decompilation. Default `optimizerStep` is `'llvm-passes'` (DCE + ConstFold).
+- **Souper Pipeline Hook** — `optimizerStep: 'souper'` logs "not yet implemented" and falls through to decompilation. Architecture ready for v3.8 Souper superoptimizer integration.
+- **Pipeline `onResult` Conditional Branching** (GitHub Issue #16) — New `onResult` field in pipeline steps evaluates step output and controls flow. Operators: `contains`, `equals`, `not`, `gt`, `lt`, `regex`. Actions: `skip` (skip N steps), `goto` (jump to step index), `abort` (stop pipeline), `log` (log and continue). Loop protection: max 100 iterations.
+- **`normalizeStep()` onResult Validation** — Validates `onResult` fields during step normalization, rejecting invalid operators/actions with descriptive errors.
+- **`evaluateOnResult()` / `applyOnResultAction()`** — Exported functions for onResult evaluation and action application, enabling property-based testing.
+- **24 Property-Based Tests (Dynamic Intelligence)** — Comprehensive PBT suite across 7 test files covering PRNG oracle properties, permissive mapping toggle, junk filter metamorphic properties, VM detection heuristics, PRNG detection, onResult evaluation/action/normalization, and loop protection.
+
+### Added — XOR Massive Update (`hexcore-strings`)
+
+- **Scoring Engine (`scoringEngine.ts`)** — Centralized string quality scoring replacing per-module `scoreRun` functions. Weights: printability (0.4), English frequency (0.3), bigrams (0.15), length (0.15), spaces (0.1). New bonuses: URL (+0.15), Windows path (+0.10), registry key (+0.10). Penalties: all-digits (0.3×), repeated characters (0.5×). Exports `scoreString`, `scoreStringDetailed`, `ScoringOptions`, `ScoreBreakdown`.
+- **PE Section Parser (`peSectionParser.ts`)** — Parses PE headers (MZ → e_lfanew → PE signature → COFF → section table) to map file offsets to section names (.text, .data, .rdata, .rsrc, etc.). Exports `parsePESections`, `getSectionForOffset`, `PESectionMap`, `PESectionInfo`. Gracefully handles non-PE buffers.
+- **Known-Plaintext Attack (`knownPlaintextAttack.ts`)** — Derives XOR keys by XOR-ing known plaintext patterns against ciphertext at every offset. Built-in `MALWARE_PATTERNS`: `http://`, `https://`, `MZ`, `This program`, `.exe`, `.dll`, `.sys`, `cmd.exe`, `powershell`, `HKEY_`, `SOFTWARE\`, null-padding. Extends partial keys via frequency analysis. Discards keys producing <30% printable bytes. Supports `customPlaintextPatterns` option.
+- **Composite Cipher (`compositeCipher.ts`)** — Detects ADD (byte subtraction), SUB (byte addition), and ROT-N (alphabetic rotation, N=1–25) obfuscation. Tests all 255 key values for ADD/SUB and all 25 rotations for ROT. Reports operation type and key value in results.
+- **Wide String XOR (`wideStringXor.ts`)** — Detects XOR-obfuscated UTF-16LE strings by checking for alternating null bytes after decoding. Converts UTF-16LE → UTF-8 for display. Tests single-byte and multi-byte XOR on word-aligned pairs. Uses `ignoreNullBytes: true` in scoring.
+- **Positional XOR (`positionalXor.ts`)** — Two derivation modes: counter-linear (`decoded[i] = buffer[i] ^ ((base + i * step) & 0xFF)`, base 0x00–0xFF, step 1–8) and block-rotate (key of N bytes rotated every M bytes, keySizes [2,4,8], blockSizes [16,32,64,128,256]). Quick-check on first 256 bytes discards candidates with <5% printable.
+- **Rolling XOR Extended (`rollingXorExt.ts`)** — Rolling XOR with window size 1–4: `decoded[i] = buffer[i] ^ XOR(buffer[i-1]...buffer[i-N])`. Tests 256 seed values for the first byte. Quick-check on 256 bytes per seed×window combination. Reports `windowSize` in results.
+- **Layered XOR (`layeredXor.ts`)** — Cascaded multi-layer XOR decoding (up to 3 layers). After each layer, computes entropy per 256-byte block; if high-entropy regions (>7.0) are adjacent to low-entropy regions (<4.0), applies a second layer. Time-bounded at 2× single-layer cost via `performance.now()`. Reports full `layerKeys` sequence.
+- **Kasiski Detector (`kasiskiDetector.ts`)** — Detects Vigenère-style key lengths via Kasiski Examination (repeated 3+ byte sequences, GCD of distances) with Index of Coincidence fallback (IC > 0.05 threshold). Supports configurable `maxKeyLength` (default 64). Used by `multiByteXor.ts` for dynamic key size candidates.
+- **9-Scanner Orchestrator Pipeline** — `extension.ts` now runs scanners in sequence: xorBruteForce → multiByteXor → knownPlaintext → compositeCipher → wideString → positional → rollingExt → layered → stackStrings. PE pre-scan reads first 2KB to parse sections and prioritize .data/.rdata/.rsrc. Global dedup via unified `seen` set. Cap: 5000 results total, 2000 per scanner.
+- **PE Section Attribution** — Each result now includes optional `section` field (e.g., `.data`, `.rdata`) when the result offset falls within a known PE section.
+- **Individual Scanner Toggle Options** — New options on `hexcore.strings.extractAdvanced`: `enableKnownPlaintext`, `enableCompositeCipher`, `enableWideString`, `enablePositionalXor`, `enableRollingExt`, `enableLayeredXor`. All default to `true`.
+- **`targetSections` Option** — Restricts scanning to specific PE sections (e.g., `[".data", ".rdata"]`). Results outside target sections are discarded.
+- **`customPlaintextPatterns` Option** — Adds user-defined byte patterns to the known-plaintext attack in addition to built-in `MALWARE_PATTERNS`.
+- **Updated Report Generator (`reportGenerator.ts`)** — Statistical summary at top (result count + average confidence per method). Separate sections for each new method: XOR-wide, XOR-layered, XOR-counter, XOR-block-rotate, XOR-rolling-ext, ADD, SUB, ROT, XOR-known-plaintext. "Section" column in tables when PE sections are available. XOR-layered rows show full key sequence. XOR-known-plaintext rows indicate originating pattern.
+- **19 Property-Based Tests (XOR)** — PBT suite covering: ADD/SUB round-trip (P1), ROT round-trip (P2), layered XOR round-trip (P3), positional XOR round-trip (P4), rolling XOR extended round-trip (P5), multi-byte XOR arbitrary key round-trip (P6), wide string detection round-trip (P7), known-plaintext key recovery (P8), known-plaintext discard threshold (P9), Kasiski key length detection (P10), scoring bonus detection (P11), scoring repetition penalty (P12), wide string null byte scoring (P13), scoring backward compatibility (P14), result metadata completeness (P15), uniform key discard (P16), result count cap (P17), method enable/disable filtering (P18), PE section target filtering (P19).
+
+### Changed
+
+- **Debugger version** — `hexcore-debugger` bumped to `2.2.0`.
+- **Disassembler version** — `hexcore-disassembler` bumped to `1.5.0`.
+- **`hexcore-strings` version** — Bumped to `1.3.0`.
+- **Pipeline runner** — `for` loop converted to `while` with manual index for `onResult` branching support.
+- **`MAX_LOOP_ITERATIONS`** — Exported constant (100) for pipeline loop protection.
+- **Rellic marked deprecated** — All documentation updated to indicate Rellic removal in v3.8.0. Use Helix instead.
+- **`multiByteXor.ts`** — Scoring replaced by centralized `scoreString` from `scoringEngine.ts`. Frequency assumptions expanded from `[0x00, 0x20]` to `[0x00, 0x20, 0x65, 0xFF, 0x90, 0xCC]`. Kasiski integration for dynamic key size candidates. Uniform key discard (all bytes equal).
+
+### Architecture Notes
+
+- No native engines were modified in v3.7.1 — all changes are TypeScript-only.
+- PRNG implementations are pure TypeScript, no native dependencies.
+- Junk filtering, VM detection, and PRNG detection are pure functions operating on `Instruction[]` arrays.
+- `onResult` evaluation reads step output from JSON files generated by headless commands.
+- Souper hook is a no-op placeholder — actual integration requires LLVM/Souper native work in v3.8.
+- All XOR scanner modules are pure functions with no VS Code API dependencies, enabling direct unit and property testing.
+- Backward compatibility preserved: existing `hexcore.strings.extractAdvanced` calls without new options behave identically to v1.2.0.
+
+### Backlog Items Resolved
+
+| Item | Description |
+|------|-------------|
+| #6 | PRNG Analysis Helper (static detection) |
+| #16 | Pipeline Conditional Branching (onResult) |
+| #28 | Runtime Memory Disassembly (dumpAndDisassemble) |
+| #29 | Memory Dumps + Breakpoint Auto-Snapshots |
+| #30 | VM Detection Heuristics |
+
+---
+
 ## [3.7.0-beta.2] - 2026-03-12 - "Helix Build Integration"
 
 > **Build & Packaging Release** — Helix MLIR decompiler engine fully integrated into the CI/CD pipeline. Native prebuild fetch, `nativeExtensions` registration, and installer workflow updated for both Windows and Linux. Rellic marked deprecated in favor of Helix. Documentation updated across all automation and template docs.

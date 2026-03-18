@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-03-11):** `v3.7.0-beta.1` "Helix MLIR Stability (Beta Part 1)" — Critical crash fixes in the Helix MLIR engine: loop-at-entry functions now decompile successfully, calling convention recovery crash-free on all IR patterns. See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-03-14):** `v3.7.1` "Dynamic Intelligence + Pipeline Branching" — Permissive memory mapping, faithful glibc/MSVCRT PRNG emulation, junk instruction filtering, VM detection heuristics, PRNG pattern detection, memory dumps, breakpoint auto-snapshots, side-channel analysis, runtime memory disassembly, `onResult` conditional pipeline branching, and Rellic IR optimization passes. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
@@ -45,7 +45,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **IR Lifting** — Machine code → LLVM IR translation via Remill engine
 - **Decompilation** — LLVM IR → pseudo-C via Helix MLIR engine (x86/x64, structured control flow, confidence scoring)
 - **Helix MLIR Decompiler** — C++23/MLIR pipeline with 7 analysis passes (v0.5.0: crash-free on loop-at-entry functions)
-- **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation
+- **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
 - **Hex Viewer** — Virtual scrolling, data inspector, bookmarks, structure templates
@@ -55,7 +55,10 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **YARA Scanning** — Rule loading, match highlighting, custom rules
 - **IOC Extraction** — Binary-aware IOC detection (IPs, URLs, domains, pipes, wallets)
 - **Minidump Analysis** — Windows crash dump forensics with thread/module/memory parsing
-- **Automation** — Headless pipeline system for batch binary analysis
+- **Automation** — Headless pipeline system with conditional branching (`onResult`) for adaptive workflows
+- **Junk Filtering** — Detect and remove obfuscation junk (callfuscation, nop sleds, identity ops)
+- **VM Detection** — Automatic detection of VM-based obfuscation (dispatchers, handler tables, operand stacks)
+- **PRNG Detection** — Static detection of srand/rand patterns with seed extraction
 
 ---
 
@@ -65,8 +68,8 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.0 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation |
-| **Disassembler** | 1.4.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting |
+| **Debugger** | 2.2.0 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation, PRNG modes, side-channel analysis |
+| **Disassembler** | 1.5.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting, junk filtering, VM detection |
 | **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
 | **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
@@ -92,7 +95,7 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-better-sqlite3** | 2.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
 | **hexcore-remill** | 0.1.2 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
 | **hexcore-helix** | 0.5.0 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (7 analysis passes) |
-| **hexcore-rellic** | — | *(deprecated)* Rellic-based decompiler — superseded by Helix MLIR engine |
+| **hexcore-rellic** | — | *(deprecated — removal in v3.8.0)* Rellic-based decompiler — superseded by Helix MLIR engine |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
 > **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The `.node` binary is pre-built and ships with HexCore — no compilation needed for end users. Building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build (~131 MB deps).
@@ -182,6 +185,7 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
 - **Extension preflight** — Auto-activates required extensions before each step
 - **Capability audit** — `hexcore.pipeline.listCapabilities` exports headless/interactive capability map
 - **Safety model** — Interactive commands are explicitly blocked in pipeline mode with clear errors
+- **Conditional branching** — `onResult` field enables skip/goto/abort/log based on step output (v3.7.1)
 - **Output** — JSON/Markdown reports + `hexcore-pipeline.status.json` + `hexcore-pipeline.log`
 
 All analysis extensions support headless execution with `file`, `output`, and `quiet` parameters.

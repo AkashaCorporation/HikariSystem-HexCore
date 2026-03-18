@@ -3,6 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { scoreString, isPrintable, extractPrintableRuns, formatKeyHex, PrintableRun } from './scoringEngine';
+import { detectKeyLengths } from './kasiskiDetector';
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -22,9 +25,28 @@ export interface MultiByteXorResult {
 	/** Size of the key in bytes. */
 	keySize: number;
 	/** The XOR method used: multi-byte, rolling, or increment. */
-	method: 'multi-byte' | 'rolling' | 'increment';
+	method: 'multi-byte' | 'rolling' | 'increment'
+	| 'XOR-wide' | 'XOR-layered' | 'XOR-counter'
+	| 'XOR-block-rotate' | 'XOR-rolling-ext'
+	| 'XOR-known-plaintext'
+	| 'ADD' | 'SUB' | 'ROT';
 	/** Confidence score 0–1 based on printability and bigram frequency. */
 	confidence: number;
+	// --- New optional fields ---
+	/** PE section name where the string was found */
+	section?: string;
+	/** For layered XOR: sequence of keys per layer */
+	layerKeys?: string[];
+	/** For known-plaintext: pattern that originated the key */
+	knownPattern?: string;
+	/** For counter/block-rotate: derivation parameters */
+	derivationParams?: { type: string; base?: number; step?: number; blockSize?: number };
+	/** For rolling-ext: window size */
+	windowSize?: number;
+	/** For ROT: rotation value N */
+	rotValue?: number;
+	/** For wide strings: original byte length */
+	originalByteLength?: number;
 }
 
 /**
@@ -41,7 +63,29 @@ export interface MultiByteXorOptions {
 	enableRolling?: boolean;
 	/** Enable XOR with increment mode (default: true). */
 	enableIncrement?: boolean;
+	// --- New optional fields ---
+	/** Enable automatic key length detection via Kasiski/IC (default: true). */
+	enableAutoKeyDetection?: boolean;
+	/** Enable known-plaintext attack. */
+	enableKnownPlaintext?: boolean;
+	/** Enable composite cipher (ADD/SUB/ROT). */
+	enableCompositeCipher?: boolean;
+	/** Enable layered XOR. */
+	enableLayeredXor?: boolean;
+	/** Enable wide string XOR. */
+	enableWideString?: boolean;
+	/** Enable positional XOR. */
+	enablePositionalXor?: boolean;
+	/** Enable rolling XOR extended. */
+	enableRollingExt?: boolean;
+	/** Custom plaintext patterns for known-plaintext attack. */
+	customPlaintextPatterns?: string[];
+	/** Target PE sections to scan. */
+	targetSections?: string[];
+	/** Enable expanded frequency guesses (default: true). */
+	expandedFrequencyGuesses?: boolean;
 }
+
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -59,25 +103,6 @@ const QUICK_CHECK_SAMPLE = 256;
 
 /** Minimum printable ratio in quick-check to proceed with full decode. */
 const QUICK_CHECK_THRESHOLD = 0.05;
-
-/**
- * Common English bigrams used for scoring decoded text quality.
- * Higher bigram hit rate = more likely to be real text.
- */
-const COMMON_BIGRAMS = new Set<string>([
-	'th', 'he', 'in', 'er', 'an', 're', 'on', 'at', 'en', 'nd',
-	'ti', 'es', 'or', 'te', 'of', 'ed', 'is', 'it', 'al', 'ar',
-	'st', 'to', 'nt', 'ng', 'se', 'ha', 'as', 'ou', 'io', 'le',
-	'no', 'us', 'co', 'me', 'de', 'hi', 'ri', 'ro', 'ic', 'ne',
-]);
-
-/**
- * Common English letter frequencies for scoring.
- */
-const ENGLISH_FREQ = new Set<number>([
-	0x20, 0x65, 0x74, 0x61, 0x6F, 0x69, 0x6E, 0x73, 0x68, 0x72, // ' etaoinshr'
-	0x64, 0x6C, 0x63, 0x75, 0x6D, 0x77, 0x66, 0x67, 0x79, 0x70, // 'dlcumwfgyp'
-]);
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -102,17 +127,30 @@ export function multiByteXorScan(
 	baseOffset: number,
 	options?: MultiByteXorOptions,
 ): MultiByteXorResult[] {
-	const keySizes = options?.keySizes ?? DEFAULT_KEY_SIZES;
+	const fixedKeySizes = options?.keySizes ?? DEFAULT_KEY_SIZES;
 	const minLength = options?.minLength ?? DEFAULT_MIN_LENGTH;
 	const minConfidence = options?.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
 	const enableRolling = options?.enableRolling ?? true;
 	const enableIncrement = options?.enableIncrement ?? true;
+	const enableAutoKeyDetection = options?.enableAutoKeyDetection ?? true;
 
 	const results: MultiByteXorResult[] = [];
 	const seen = new Set<string>();
 
+	// --- Determine key sizes to test ---
+	let keySizes: number[];
+	if (enableAutoKeyDetection) {
+		const kasiskiResult = detectKeyLengths(buffer);
+		const dynamicSizes = kasiskiResult.candidateLengths;
+		// Merge fixed + dynamic, deduplicate
+		const merged = new Set<number>([...fixedKeySizes, ...dynamicSizes]);
+		keySizes = [...merged].sort((a, b) => a - b);
+	} else {
+		keySizes = fixedKeySizes;
+	}
+
 	// --- Multi-byte XOR via frequency analysis ---
-	scanMultiByte(buffer, baseOffset, keySizes, minLength, minConfidence, results, seen);
+	scanMultiByte(buffer, baseOffset, keySizes, minLength, minConfidence, results, seen, options);
 
 	// --- Rolling XOR ---
 	if (enableRolling && results.length < MAX_TOTAL_RESULTS) {
@@ -137,7 +175,7 @@ export function multiByteXorScan(
 
 
 // ---------------------------------------------------------------------------
-// Multi-byte XOR (Task 9.1)
+// Multi-byte XOR
 // ---------------------------------------------------------------------------
 
 /**
@@ -146,8 +184,10 @@ export function multiByteXorScan(
  * For each key size N:
  * 1. Group bytes by position `i % N` (N groups).
  * 2. For each group, find the most frequent byte value.
- * 3. Derive candidate key assuming most frequent byte is space (0x20) or null (0x00).
+ * 3. Derive candidate key assuming most frequent byte is one of the
+ *    expanded frequency guesses.
  * 4. Decode buffer with candidate key and extract printable runs.
+ * 5. Discard uniform keys (all bytes same) — equivalent to single-byte XOR.
  */
 function scanMultiByte(
 	buffer: Buffer,
@@ -157,7 +197,10 @@ function scanMultiByte(
 	minConfidence: number,
 	results: MultiByteXorResult[],
 	seen: Set<string>,
+	options?: MultiByteXorOptions,
 ): void {
+	const useExpanded = options?.expandedFrequencyGuesses ?? true;
+
 	for (const keySize of keySizes) {
 		if (buffer.length < keySize) {
 			continue;
@@ -166,8 +209,10 @@ function scanMultiByte(
 		// Find most frequent byte per position group
 		const mostFrequent = findMostFrequentPerGroup(buffer, keySize);
 
-		// Try two assumptions: most frequent byte is space (0x20) or null (0x00)
-		const assumptions: number[] = [0x20, 0x00];
+		// Expanded frequency guesses: null, space, 'e', padding, NOP, INT3
+		const assumptions: number[] = useExpanded
+			? [0x00, 0x20, 0x65, 0xFF, 0x90, 0xCC]
+			: [0x20, 0x00];
 
 		for (const assumed of assumptions) {
 			const candidateKey = Buffer.alloc(keySize);
@@ -177,6 +222,11 @@ function scanMultiByte(
 
 			// Skip all-zero keys (no-op)
 			if (candidateKey.every(b => b === 0)) {
+				continue;
+			}
+
+			// Discard uniform keys (all bytes same) — equivalent to single-byte XOR
+			if (keySize > 1 && candidateKey.every(b => b === candidateKey[0])) {
 				continue;
 			}
 
@@ -199,6 +249,7 @@ function scanMultiByte(
 		}
 	}
 }
+
 
 /**
  * Find the most frequent byte value for each position group `i % keySize`.
@@ -232,7 +283,7 @@ function findMostFrequentPerGroup(buffer: Buffer, keySize: number): number[] {
 
 
 // ---------------------------------------------------------------------------
-// Rolling XOR (Task 9.2)
+// Rolling XOR
 // ---------------------------------------------------------------------------
 
 /**
@@ -290,7 +341,7 @@ function scanRolling(
 }
 
 // ---------------------------------------------------------------------------
-// XOR with Increment (Task 9.3)
+// XOR with Increment
 // ---------------------------------------------------------------------------
 
 /**
@@ -345,42 +396,9 @@ function scanIncrement(
 // Shared Helpers
 // ---------------------------------------------------------------------------
 
-interface PrintableRun {
-	start: number;
-	length: number;
-}
-
-/**
- * Extract contiguous runs of printable ASCII characters from a decoded buffer.
- */
-function extractPrintableRuns(decoded: Buffer, minLength: number): PrintableRun[] {
-	const runs: PrintableRun[] = [];
-	let runStart = 0;
-	let runLength = 0;
-
-	for (let i = 0; i < decoded.length; i++) {
-		if (isPrintable(decoded[i])) {
-			if (runLength === 0) {
-				runStart = i;
-			}
-			runLength++;
-		} else {
-			if (runLength >= minLength) {
-				runs.push({ start: runStart, length: runLength });
-			}
-			runLength = 0;
-		}
-	}
-
-	if (runLength >= minLength) {
-		runs.push({ start: runStart, length: runLength });
-	}
-
-	return runs;
-}
-
 /**
  * Collect scored results from printable runs into the results array.
+ * Uses the centralized scoreString from scoringEngine.
  */
 function collectResults(
 	decoded: Buffer,
@@ -396,7 +414,7 @@ function collectResults(
 	const keyHex = formatKeyHex(key);
 
 	for (const run of runs) {
-		const confidence = scoreRun(decoded, run.start, run.length);
+		const confidence = scoreString(decoded, run.start, run.length);
 		if (confidence < minConfidence) {
 			continue;
 		}
@@ -423,81 +441,4 @@ function collectResults(
 			return;
 		}
 	}
-}
-
-/**
- * Score a printable run based on printability ratio and bigram frequency.
- *
- * Scoring factors:
- * 1. Printability ratio (0.4 weight)
- * 2. English character frequency match (0.3 weight)
- * 3. Bigram frequency bonus (up to 0.15)
- * 4. Length bonus (up to 0.15)
- * 5. Penalty for all-digits
- */
-function scoreRun(decoded: Buffer, start: number, length: number): number {
-	let printableCount = 0;
-	let frequentCount = 0;
-	let spaceCount = 0;
-	let digitCount = 0;
-	let bigramHits = 0;
-
-	for (let i = start; i < start + length; i++) {
-		const byte = decoded[i];
-		if (isPrintable(byte)) { printableCount++; }
-		if (ENGLISH_FREQ.has(byte)) { frequentCount++; }
-		if (byte === 0x20) { spaceCount++; }
-		if (byte >= 0x30 && byte <= 0x39) { digitCount++; }
-
-		// Check bigrams
-		if (i > start) {
-			const bigram = String.fromCharCode(decoded[i - 1], decoded[i]).toLowerCase();
-			if (COMMON_BIGRAMS.has(bigram)) {
-				bigramHits++;
-			}
-		}
-	}
-
-	const printRatio = printableCount / length;
-	const freqRatio = frequentCount / length;
-	const bigramRatio = length > 1 ? bigramHits / (length - 1) : 0;
-
-	// Base score from printability
-	let score = printRatio * 0.4;
-
-	// Bonus for English-like character distribution
-	score += freqRatio * 0.3;
-
-	// Bonus for bigram frequency
-	score += Math.min(bigramRatio * 0.5, 0.15);
-
-	// Bonus for having spaces (real strings often have spaces)
-	if (spaceCount > 0 && spaceCount < length * 0.3) {
-		score += 0.1;
-	}
-
-	// Bonus for longer strings
-	if (length >= 12) { score += 0.03; }
-	if (length >= 24) { score += 0.02; }
-
-	// Penalty for all-digits
-	if (digitCount > length * 0.8) {
-		score *= 0.3;
-	}
-
-	return Math.min(1.0, score);
-}
-
-/**
- * Check if a byte is printable ASCII (space through tilde, plus tab/newline/CR).
- */
-function isPrintable(byte: number): boolean {
-	return (byte >= 0x20 && byte <= 0x7E) || byte === 0x09 || byte === 0x0A || byte === 0x0D;
-}
-
-/**
- * Format a key buffer as a hex string (e.g. "0xDEADBEEF").
- */
-function formatKeyHex(key: Buffer): string {
-	return '0x' + Array.from(key).map(b => b.toString(16).toUpperCase().padStart(2, '0')).join('');
 }

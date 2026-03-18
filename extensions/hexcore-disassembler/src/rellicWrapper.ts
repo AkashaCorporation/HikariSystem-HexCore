@@ -15,9 +15,13 @@ interface RellicModule {
 	version: string;
 }
 
+interface RellicDecompileOptions {
+	optimizationPasses?: string[];
+}
+
 interface RellicDecompilerInstance {
-	decompile(irText: string): DecompileResult;
-	decompileAsync(irText: string): Promise<DecompileResult>;
+	decompile(irText: string, options?: RellicDecompileOptions): DecompileResult;
+	decompileAsync(irText: string, options?: RellicDecompileOptions): Promise<DecompileResult>;
 	close(): void;
 	isOpen(): boolean;
 }
@@ -133,11 +137,20 @@ export class RellicWrapper {
 	 * Retorna DecompileResult com success=false se o módulo não está disponível.
 	 *
 	 * @param irText Texto LLVM IR para decompilar
-	 * @param optimizerStep Pipeline optimizer step (default: 'none').
-	 *   - 'llvm-passes': Apply LLVM DCE/ConstFold before decompilation (v3.7)
+	 * @param optimizerStep Pipeline optimizer step (default: 'llvm-passes').
+	 *   - 'none': No optimization — raw IR passes directly to Rellic
+	 *   - 'llvm-passes': Apply LLVM DCE/ConstFold/InstSimplify before decompilation (v3.7.1)
 	 *   - 'souper': Apply Souper superoptimizer (v3.8 — planned, not yet implemented)
+	 * @param optimizationPasses Optional list of specific LLVM passes to apply
+	 *   (e.g. ['dce', 'constfold', 'junk-filter']). When provided and
+	 *   optimizerStep is 'llvm-passes', only these passes are applied.
+	 *   When omitted, the native module applies all default passes.
 	 */
-	async decompile(irText: string, optimizerStep: OptimizerStep = 'none'): Promise<DecompileResult> {
+	async decompile(
+		irText: string,
+		optimizerStep: OptimizerStep = 'llvm-passes',
+		optimizationPasses?: string[]
+	): Promise<DecompileResult> {
 		if (!this.available || !this.module) {
 			return {
 				success: false,
@@ -147,23 +160,31 @@ export class RellicWrapper {
 			};
 		}
 
+		// Build native options based on optimizer step
+		let nativeOptions: RellicDecompileOptions | undefined;
+
 		// v3.7/v3.8: Optimizer pipeline hook
 		if (optimizerStep === 'souper') {
-			console.log('[rellic] Souper optimizer requested but not yet implemented (planned for v3.8)');
-			// Fall through to decompile without optimization
+			console.warn('[rellic] Souper optimizer not yet implemented (planned for v3.8)');
+			// Fall through to decompile without optimization — no native options
 		} else if (optimizerStep === 'llvm-passes') {
 			console.log('[rellic] LLVM passes optimization requested — will be applied natively in rellic_decompile_pipeline');
-			// The native module handles LLVM passes internally
+			// When specific passes are provided, forward them to the native module
+			if (optimizationPasses && optimizationPasses.length > 0) {
+				nativeOptions = { optimizationPasses };
+			}
+			// When omitted, the native module applies all default passes
 		}
+		// 'none': no optimization, no native options
 
 		try {
 			const decompiler = this.ensureDecompiler();
 
 			if (irText.length > ASYNC_THRESHOLD) {
-				return await decompiler.decompileAsync(irText);
+				return await decompiler.decompileAsync(irText, nativeOptions);
 			}
 
-			return decompiler.decompile(irText);
+			return decompiler.decompile(irText, nativeOptions);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return {

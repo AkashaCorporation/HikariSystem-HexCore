@@ -8,6 +8,17 @@ import * as vscode from 'vscode';
 
 export type PipelineOutputFormat = 'json' | 'md';
 
+export type OnResultOperator = 'contains' | 'equals' | 'not' | 'gt' | 'lt' | 'regex';
+export type OnResultAction = 'skip' | 'goto' | 'abort' | 'log';
+
+export interface OnResultRule {
+	field: string;
+	operator: OnResultOperator;
+	value: string | number;
+	action: OnResultAction;
+	actionValue?: string | number;
+}
+
 export interface PipelineOutputOptions {
 	path?: string;
 	format?: PipelineOutputFormat;
@@ -22,6 +33,7 @@ export interface PipelineStep {
 	expectOutput?: boolean;
 	retryCount?: number;
 	retryDelayMs?: number;
+	onResult?: OnResultRule;
 }
 
 export interface PipelineJobFile {
@@ -171,6 +183,74 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.disasm.disassembleAt', 'hexcore.disasm.disassembleAtHeadless'],
 ]);
 
+/**
+ * COMMAND_CAPABILITIES — Registry of all pipeline-supported commands.
+ *
+ * Each entry maps a command identifier to its capability metadata:
+ *   - `headless`          — Whether the command supports headless (non-interactive) execution.
+ *   - `defaultTimeoutMs`  — Default timeout in milliseconds for the command.
+ *   - `validateOutput`    — Whether the runner should validate the output file after execution.
+ *   - `reason`            — (Optional) Why a command is not headless-capable.
+ *   - `cancelCommand`     — (Optional) Command to invoke if the step times out.
+ *
+ * ## Conditional Branching with `onResult` (v3.7.1 — Issue #16)
+ *
+ * Any {@link PipelineStep} may include an optional `onResult` field of type
+ * {@link OnResultRule} to enable conditional branching based on step output.
+ * When a step completes and has an `onResult` rule, the runner evaluates the
+ * rule against the step's output JSON and executes the specified action.
+ * Steps without `onResult` proceed sequentially (backward compatible).
+ *
+ * ### Available Operators ({@link OnResultOperator})
+ *   - `contains` — Checks if the string representation of the output field
+ *                   contains the specified value as a substring.
+ *   - `equals`   — Checks strict equality (string or numeric).
+ *   - `not`      — Checks inequality (inverse of `equals`).
+ *   - `gt`       — Checks if the numeric output field is greater than the value.
+ *   - `lt`       — Checks if the numeric output field is less than the value.
+ *   - `regex`    — Compiles the value as a RegExp and tests against the field.
+ *
+ * ### Available Actions ({@link OnResultAction})
+ *   - `skip`  — Skip the next N steps (N = `actionValue`, default 1).
+ *               Next executed step: `currentIndex + N + 1`.
+ *   - `goto`  — Jump to the step at index `actionValue` (0-based).
+ *               Target must be within `[0, steps.length - 1]`.
+ *   - `abort` — Stop the pipeline immediately with an error.
+ *               `actionValue` is used as the abort reason message.
+ *   - `log`   — Log a message (`actionValue`) and continue to the next step.
+ *
+ * ### Loop Protection
+ * The runner enforces a maximum of {@link MAX_LOOP_ITERATIONS} (100) non-sequential
+ * jumps per pipeline run. If exceeded, the pipeline aborts with a descriptive error
+ * indicating the loop location. This prevents infinite loops from `goto` actions.
+ *
+ * ### Example `.hexcore_job.json` with `onResult`
+ * ```json
+ * {
+ *   "file": "challenge.exe",
+ *   "outDir": "./reports",
+ *   "steps": [
+ *     {
+ *       "cmd": "hexcore.entropy.analyze",
+ *       "onResult": {
+ *         "field": "maxEntropy",
+ *         "operator": "gt",
+ *         "value": 7.5,
+ *         "action": "goto",
+ *         "actionValue": 3
+ *       }
+ *     },
+ *     { "cmd": "hexcore.strings.extract" },
+ *     { "cmd": "hexcore.disasm.analyzeAll" },
+ *     { "cmd": "hexcore.yara.scan" }
+ *   ]
+ * }
+ * ```
+ *
+ * @see {@link OnResultRule} for the rule schema
+ * @see {@link evaluateOnResult} for operator evaluation logic
+ * @see {@link applyOnResultAction} for action execution logic
+ */
 const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.filetype.detect', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.hashcalc.calculate', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
@@ -388,6 +468,54 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 	};
 }
 
+export const MAX_LOOP_ITERATIONS = 100;
+
+export function evaluateOnResult(rule: OnResultRule, stepOutput: Record<string, unknown>): boolean {
+	const fieldValue = stepOutput[rule.field];
+	if (fieldValue === undefined) {
+		return false;
+	}
+
+	switch (rule.operator) {
+		case 'contains':
+			return String(fieldValue).includes(String(rule.value));
+		case 'equals':
+			return fieldValue === rule.value || String(fieldValue) === String(rule.value);
+		case 'not':
+			return fieldValue !== rule.value && String(fieldValue) !== String(rule.value);
+		case 'gt':
+			return Number(fieldValue) > Number(rule.value);
+		case 'lt':
+			return Number(fieldValue) < Number(rule.value);
+		case 'regex':
+			return new RegExp(String(rule.value)).test(String(fieldValue));
+		default:
+			return false;
+	}
+}
+
+export function applyOnResultAction(rule: OnResultRule, currentIndex: number, totalSteps: number, logPath: string): number {
+	switch (rule.action) {
+		case 'skip':
+			return currentIndex + 1 + Number(rule.actionValue ?? 1);
+		case 'goto': {
+			const target = Number(rule.actionValue);
+			if (target < 0 || target >= totalSteps) {
+				throw new Error(`onResult goto target ${target} is out of bounds [0, ${totalSteps - 1}]`);
+			}
+			return target;
+		}
+		case 'abort':
+			appendLog(logPath, `[onResult] ABORT: ${rule.actionValue ?? 'condition matched'}`);
+			return -1;
+		case 'log':
+			appendLog(logPath, `[onResult] LOG: ${rule.actionValue ?? 'condition matched'}`);
+			return currentIndex + 1;
+		default:
+			return currentIndex + 1;
+	}
+}
+
 export class AutomationPipelineRunner {
 	public async runJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineRunStatus> {
 		const absoluteJobPath = path.resolve(jobFilePath);
@@ -444,8 +572,10 @@ export class AutomationPipelineRunner {
 		appendLog(logPath, '='.repeat(60));
 
 		let failed = false;
+		let index = 0;
+		let loopCounter = 0;
 
-		for (let index = 0; index < job.steps.length; index++) {
+		while (index < job.steps.length) {
 			const step = job.steps[index];
 			const resolvedCommand = resolveCommand(step.cmd);
 			const capability = COMMAND_CAPABILITIES.get(resolvedCommand);
@@ -480,6 +610,7 @@ export class AutomationPipelineRunner {
 				if (!step.continueOnError) {
 					break;
 				}
+				index++;
 				continue;
 			}
 
@@ -502,6 +633,7 @@ export class AutomationPipelineRunner {
 				if (!step.continueOnError) {
 					break;
 				}
+				index++;
 				continue;
 			}
 
@@ -525,6 +657,7 @@ export class AutomationPipelineRunner {
 				if (!step.continueOnError) {
 					break;
 				}
+				index++;
 				continue;
 			}
 
@@ -603,6 +736,41 @@ export class AutomationPipelineRunner {
 			if (!completed && executionError && !step.continueOnError) {
 				break;
 			}
+
+			// Step output capture for onResult evaluation
+			let stepOutputData: Record<string, unknown> | undefined;
+			if (completed && step.onResult && output?.path) {
+				try {
+					const content = fs.readFileSync(output.path, 'utf8');
+					stepOutputData = JSON.parse(content);
+				} catch {
+					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for onResult evaluation`);
+				}
+			}
+
+			// Evaluate onResult conditional branching
+			if (completed && step.onResult && stepOutputData) {
+				const matched = evaluateOnResult(step.onResult, stepOutputData);
+				if (matched) {
+					const nextIndex = applyOnResultAction(step.onResult, index, job.steps.length, logPath);
+					if (nextIndex === -1) {
+						failed = true;
+						break;
+					}
+					if (nextIndex !== index + 1) {
+						loopCounter++;
+						if (loopCounter > MAX_LOOP_ITERATIONS) {
+							appendLog(logPath, `[Step ${index + 1}] ERROR: Maximum loop iterations (${MAX_LOOP_ITERATIONS}) exceeded`);
+							failed = true;
+							break;
+						}
+					}
+					index = nextIndex;
+					continue;
+				}
+			}
+
+			index++;
 		}
 
 		status.finishedAt = new Date().toISOString();
@@ -762,7 +930,7 @@ function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolea
 	};
 }
 
-function normalizeStep(step: unknown, index: number, jobFilePath: string): PipelineStep {
+export function normalizeStep(step: unknown, index: number, jobFilePath: string): PipelineStep {
 	if (!isRecord(step)) {
 		throw new Error(`Invalid step at index ${index} in ${jobFilePath}: expected object`);
 	}
@@ -788,6 +956,37 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 		};
 	}
 
+	let onResult: OnResultRule | undefined;
+	if (step.onResult !== undefined) {
+		if (!isRecord(step.onResult)) {
+			throw new Error(`Step ${index}: onResult must be an object`);
+		}
+		const or = step.onResult as Record<string, unknown>;
+		const validOperators: readonly string[] = ['contains', 'equals', 'not', 'gt', 'lt', 'regex'];
+		const validActions: readonly string[] = ['skip', 'goto', 'abort', 'log'];
+
+		if (typeof or.field !== 'string' || !or.field) {
+			throw new Error(`Step ${index}: onResult.field must be a non-empty string`);
+		}
+		if (!validOperators.includes(String(or.operator))) {
+			throw new Error(`Step ${index}: onResult.operator must be one of: ${validOperators.join(', ')}`);
+		}
+		if (or.value === undefined) {
+			throw new Error(`Step ${index}: onResult.value is required`);
+		}
+		if (!validActions.includes(String(or.action))) {
+			throw new Error(`Step ${index}: onResult.action must be one of: ${validActions.join(', ')}`);
+		}
+
+		onResult = {
+			field: or.field,
+			operator: or.operator as OnResultOperator,
+			value: or.value as string | number,
+			action: or.action as OnResultAction,
+			actionValue: or.actionValue as string | number | undefined
+		};
+	}
+
 	return {
 		cmd,
 		args,
@@ -796,7 +995,8 @@ function normalizeStep(step: unknown, index: number, jobFilePath: string): Pipel
 		timeoutMs,
 		expectOutput,
 		retryCount,
-		retryDelayMs
+		retryDelayMs,
+		onResult
 	};
 }
 

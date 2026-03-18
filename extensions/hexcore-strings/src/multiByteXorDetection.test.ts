@@ -49,10 +49,13 @@ function englishLikeTextArb(minLen: number, maxLen: number): fc.Arbitrary<string
  * and no key byte is 0x20 (which would leave spaces unchanged, making
  * detection trivial but also potentially confusing the frequency analysis
  * since the encoded byte would still be 0x20).
+ * Also ensures the key is not uniform (all bytes same) since uniform keys
+ * are now correctly discarded by the scanner (Requirement 10.3).
  */
 function nonTrivialKeyArb(size: number): fc.Arbitrary<Buffer> {
 	return fc.uint8Array({ minLength: size, maxLength: size })
 		.filter(arr => arr.every(b => b !== 0x00))
+		.filter(arr => size <= 1 || !arr.every(b => b === arr[0]))
 		.map(arr => Buffer.from(arr));
 }
 

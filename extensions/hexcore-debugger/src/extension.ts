@@ -752,6 +752,33 @@ export function activate(context: vscode.ExtensionContext): void {
 			const memoryDumpsData = engine.getCollectedMemoryDumps();
 			const sideChannelDataResult = collectSideChannels ? engine.getSideChannelData() : undefined;
 
+			// v3.7.1: dumpAndDisassemble — disassemble collected memory dumps (Reqs 8.1, 8.4)
+			const dumpDisassemblyResults: Array<{
+				dump: { address: string; size: number; data: string };
+				instructions: Array<{ address: string; mnemonic: string; opStr: string; size: number; bytes: string }>;
+			}> = [];
+			if (memoryDumpsData.length > 0) {
+				for (const dump of memoryDumpsData) {
+					try {
+						const result = await engine.dumpAndDisassemble(dump.address, dump.size);
+						dumpDisassemblyResults.push({
+							dump: result.dump,
+							instructions: result.instructions.map(i => ({
+								address: '0x' + i.address.toString(16),
+								mnemonic: i.mnemonic,
+								opStr: i.opStr,
+								size: i.size,
+								bytes: Buffer.isBuffer(i.bytes)
+									? i.bytes.toString('hex')
+									: Array.from(i.bytes as ArrayLike<number>).map((b: number) => b.toString(16).padStart(2, '0')).join('')
+							}))
+						});
+					} catch (err: any) {
+						console.warn(`[emulateFullHeadless] dumpAndDisassemble failed for ${dump.address}: ${err.message}`);
+					}
+				}
+			}
+
 			if (!keepAlive && mySession === emulateSessionId) {
 				engine.disposeEmulation();
 			}
@@ -791,6 +818,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			if (memoryDumpsData.length > 0) {
 				exportData.memoryDumps = memoryDumpsData;
+			}
+			if (dumpDisassemblyResults.length > 0) {
+				exportData.dumpDisassembly = dumpDisassemblyResults;
 			}
 			if (sideChannelDataResult) {
 				exportData.sideChannelData = sideChannelDataResult;

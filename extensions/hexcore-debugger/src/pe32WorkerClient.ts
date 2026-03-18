@@ -252,6 +252,15 @@ export class Pe32WorkerClient {
 		return await this.call('getConstants') as Record<string, unknown>;
 	}
 
+	/**
+	 * Set permissive memory mapping flag on the worker.
+	 * When true, auto-mapped pages use RWX (UC_PROT_ALL = 7).
+	 * When false, auto-mapped pages use RW only (no execute).
+	 */
+	async setPermissiveMapping(flag: boolean): Promise<void> {
+		await this.call('setPermissiveMapping', flag);
+	}
+
 	async version(): Promise<{ major: number; minor: number; string: string }> {
 		return await this.call('version') as { major: number; minor: number; string: string };
 	}

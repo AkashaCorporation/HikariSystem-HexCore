@@ -13,6 +13,22 @@ import { LinuxApiHooks, ApiCallLog as LinuxApiCallLog } from './linuxApiHooks';
 import { TraceManager } from './traceManager';
 import { PrngMode } from './prng';
 
+// Types from hexcore-disassembler (cross-extension, loaded via require at runtime)
+interface DisassemblerInstruction {
+	address: number;
+	bytes: Buffer;
+	mnemonic: string;
+	opStr: string;
+	size: number;
+	comment?: string;
+	isCall: boolean;
+	isJump: boolean;
+	isRet: boolean;
+	isConditional: boolean;
+	targetAddress?: number;
+}
+type CapstoneArchitectureConfig = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'mips64';
+
 export interface RegisterState {
 	rax: bigint;
 	rbx: bigint;
@@ -357,7 +373,18 @@ export class DebugEngine {
 
 				return { returnValue, newPc: returnAddress };
 			});
+
+			// Pass permissiveMemoryMapping flag to the PE32 worker via IPC.
+			// When true, the worker auto-maps faulted pages with RWX (UC_PROT_ALL).
+			// When false (default), auto-mapped pages use RW only to preserve
+			// section permission semantics (Req 1.1, 1.3).
+			if (this.emulationOptions.permissiveMemoryMapping) {
+				await this.emulator!.setPe32PermissiveMapping(true);
+			}
 		}
+
+		// Install side-channel collection hooks if requested
+		this.installSideChannelHooks();
 
 		this.emit('pe-loaded', {
 			imageBase: peInfo.imageBase,
@@ -378,8 +405,13 @@ export class DebugEngine {
 
 		this.baseAddress = elfInfo.entryPoint;
 
-		// Create Linux API hooks with PRNG mode
-		const prngMode = this.emulationOptions.prngMode ?? 'stub';
+		// Create Linux API hooks with PRNG mode (Req 4.3: validate and fall back to 'stub')
+		const validPrngModes: readonly string[] = ['glibc', 'msvcrt', 'stub'];
+		let prngMode = this.emulationOptions.prngMode ?? 'stub';
+		if (!validPrngModes.includes(prngMode)) {
+			console.warn(`[debugEngine] Invalid prngMode '${prngMode}', falling back to 'stub'`);
+			prngMode = 'stub';
+		}
 		this.linuxApiHooks = new LinuxApiHooks(this.emulator!, this.memoryManager!, this.architecture, prngMode);
 		this.linuxApiHooks.setImageBase(elfInfo.baseAddress);
 		this.linuxApiHooks.setTraceManager(this._traceManager);
@@ -413,6 +445,14 @@ export class DebugEngine {
 		// migrates all memory regions and registers to the worker process.
 		if (this.architecture === 'x64' || this.architecture === 'x86') {
 			await this.emulator!.setElfSyncMode(true);
+
+			// Pass permissiveMemoryMapping flag to the x64 ELF worker via IPC.
+			// When true, the worker auto-maps faulted pages with RWX (UC_PROT_ALL).
+			// When false (default), auto-mapped pages use RW only to preserve
+			// segment permission semantics (Req 1.2, 1.4).
+			if (this.emulationOptions.permissiveMemoryMapping) {
+				await this.emulator!.setX64ElfPermissiveMapping(true);
+			}
 		}
 
 		// Set instruction pointer to entry point
@@ -436,7 +476,19 @@ export class DebugEngine {
 	 */
 	private async loadRawBinary(): Promise<void> {
 		const loadBase = 0x400000n;
-		await this.emulator!.loadCode(this.fileBuffer!, loadBase);
+
+		// Req 1.5, 1.6: Respect permissiveMemoryMapping flag.
+		// When true, map with RWX so self-modifying code / VM handlers can
+		// write and then execute from the same region without UC_ERR_FETCH_PROT.
+		// When false (default), map with RX — raw binaries are code, so they
+		// need read + execute but not write unless explicitly requested.
+		const permissive = this.emulationOptions.permissiveMemoryMapping ?? false;
+		if (permissive) {
+			await this.emulator!.mapMemory(loadBase, this.fileBuffer!.length, 'rwx');
+		} else {
+			await this.emulator!.mapMemory(loadBase, this.fileBuffer!.length, 'rx');
+		}
+		await this.emulator!.writeMemory(loadBase, this.fileBuffer!);
 		this.baseAddress = loadBase;
 
 		// Initialize heap
@@ -446,6 +498,9 @@ export class DebugEngine {
 		const stackBase = 0x7FFF0000n;
 		await this.emulator!.setupStack(stackBase);
 		await this.setupArm64Stack();
+
+		// Install side-channel collection hooks if requested
+		this.installSideChannelHooks();
 
 		const ipReg = this.architecture === 'arm64' ? 'pc' : (this.architecture === 'x64' ? 'rip' : 'eip');
 		await this.emulator!.setRegister(ipReg, loadBase);
@@ -1786,6 +1841,83 @@ export class DebugEngine {
 			this._scBBCountMap.set(addrStr, (this._scBBCountMap.get(addrStr) ?? 0) + 1);
 			this.sideChannelData.totalInstructions++;
 		});
+	}
+
+	/**
+	 * Dump memory at the given address and disassemble it on-the-fly.
+	 * Handles partially unmapped regions gracefully by dumping only the mapped portion.
+	 * Requirements: 8.1, 8.4, 8.5
+	 */
+	async dumpAndDisassemble(
+		address: string,
+		size: number
+	): Promise<{
+		dump: { address: string; size: number; data: string };
+		instructions: DisassemblerInstruction[];
+	}> {
+		if (!this.emulator) {
+			throw new Error('Emulator not initialized');
+		}
+
+		const addr = BigInt(address.startsWith('0x') ? address : '0x' + address);
+
+		// Read memory — handle partially unmapped regions (Req 8.5)
+		let data: Buffer;
+		let actualSize = size;
+		try {
+			data = await this.emulator.readMemory(addr, size);
+		} catch {
+			// Partially unmapped — try progressively smaller reads page by page
+			data = Buffer.alloc(0);
+			const PAGE_SIZE = 0x1000;
+			let offset = 0;
+			while (offset < size) {
+				const chunkSize = Math.min(PAGE_SIZE, size - offset);
+				try {
+					const chunk = await this.emulator.readMemory(addr + BigInt(offset), chunkSize);
+					data = Buffer.concat([data, chunk]);
+					offset += chunkSize;
+				} catch {
+					// This page is unmapped — stop here
+					console.warn(`[debugEngine] dumpAndDisassemble: unmapped region at 0x${(addr + BigInt(offset)).toString(16)}, dumping ${data.length} of ${size} bytes`);
+					break;
+				}
+			}
+			actualSize = data.length;
+		}
+
+		// Disassemble the raw buffer using DisassemblerEngine (cross-extension)
+		let instructions: DisassemblerInstruction[] = [];
+		if (data.length > 0) {
+			const archMap: Record<string, CapstoneArchitectureConfig> = {
+				'x86': 'x86',
+				'x64': 'x64',
+				'arm': 'arm',
+				'arm64': 'arm64',
+				'mips': 'mips',
+				'riscv': 'x64' // fallback — riscv not supported by Capstone config
+			};
+			const capstoneArch: CapstoneArchitectureConfig = archMap[this.architecture] ?? 'x64';
+
+			// Dynamic require to avoid rootDir cross-extension compilation issues
+			const { DisassemblerEngine } = require('../../hexcore-disassembler/src/disassemblerEngine');
+			const disasm = new DisassemblerEngine();
+			try {
+				disasm.loadBuffer(data, Number(addr), capstoneArch);
+				instructions = await disasm.disassembleRange(Number(addr), data.length);
+			} finally {
+				disasm.dispose();
+			}
+		}
+
+		return {
+			dump: {
+				address: '0x' + addr.toString(16),
+				size: actualSize,
+				data: data.toString('base64')
+			},
+			instructions
+		};
 	}
 
 	/**

@@ -136,6 +136,9 @@ export class DisassemblerEngine {
 	// Cache for text section byte-pattern scan results
 	private _textScanCache?: Map<number, number[]>;
 
+	// v3.7.1: VM detection results from last analyzeAll() with detectVM: true
+	private _vmDetectionResults?: Map<number, { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number }>;
+
 	constructor() {
 		this.capstone = new CapstoneWrapper();
 		this.llvmMc = new LlvmMcWrapper();
@@ -274,9 +277,20 @@ export class DisassemblerEngine {
 	}
 
 	/**
+	 * Load a raw buffer for disassembly without a file on disk.
+	 * After calling this, use disassembleRange() to disassemble the buffer contents.
+	 * Requirements: 8.2, 8.3
+	 */
+	loadBuffer(buffer: Buffer, baseAddress: number, arch: ArchitectureConfig): void {
+		this.fileBuffer = buffer;
+		this.baseAddress = baseAddress;
+		this.architecture = arch;
+	}
+
+	/**
 	 * Full analysis: entry point + exports + prolog scan + re-analyze empty functions
 	 */
-	async analyzeAll(): Promise<number> {
+	async analyzeAll(options?: { filterJunk?: boolean; detectVM?: boolean }): Promise<number> {
 		if (!this.fileBuffer) {
 			return 0;
 		}
@@ -304,8 +318,30 @@ export class DisassemblerEngine {
 		// Build string cross-references
 		this.buildStringXrefs();
 
+		// v3.7.1: Apply junk instruction filtering to all analyzed functions
+		if (options?.filterJunk) {
+			for (const func of this.functions.values()) {
+				if (func.instructions.length > 0) {
+					const { filtered } = this.filterJunkInstructions(func.instructions);
+					func.instructions = filtered;
+				}
+			}
+		}
+
+		// v3.7.1: Run VM detection on all analyzed functions
+		if (options?.detectVM) {
+			this._vmDetectionResults = new Map();
+			for (const func of this.functions.values()) {
+				if (func.instructions.length > 0) {
+					const vmResult = this.detectVM(func.address);
+					this._vmDetectionResults.set(func.address, vmResult);
+				}
+			}
+		}
+
 		return this.functions.size - countBefore;
 	}
+
 
 	/**
 	 * Detect architecture from file headers
@@ -2191,6 +2227,14 @@ export class DisassemblerEngine {
 
 	getArchitecture(): ArchitectureConfig {
 		return this.architecture;
+	}
+
+	/**
+	 * Returns per-function VM detection results from the last `analyzeAll({ detectVM: true })` call.
+	 * Returns undefined if VM detection was not run.
+	 */
+	getVmDetectionResults(): Map<number, { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number }> | undefined {
+		return this._vmDetectionResults;
 	}
 
 	getBaseAddress(): number {
