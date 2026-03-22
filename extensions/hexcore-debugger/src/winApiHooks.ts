@@ -31,6 +31,9 @@ export class WinApiHooks {
 	private lastError: number = 0;
 	private tickCount: number = 0;
 	private nextHandle: number = 0x100;
+	private commandLineAPtr: bigint = 0n;
+	private commandLineWPtr: bigint = 0n;
+	private winMainCommandLineWPtr: bigint = 0n;
 
 	// Module handle tracking
 	private moduleHandles: Map<string, bigint> = new Map();
@@ -71,8 +74,9 @@ export class WinApiHooks {
 
 		const handler = this.handlers.get(key) || this.handlers.get(keyNoExt);
 
-		// Read arguments based on calling convention
-		const args = this.readArguments(6); // Read up to 6 args
+		// Read arguments based on calling convention.
+		// A few Win32 APIs we emulate here use 7-8 parameters.
+		const args = this.readArguments(8);
 
 		let returnValue = 0n;
 		if (handler) {
@@ -211,6 +215,160 @@ export class WinApiHooks {
 		buf.write(str, 'ascii');
 		buf[str.length] = 0;
 		this.emulator.writeMemorySync(address, buf);
+	}
+
+	/**
+	 * Write a null-terminated UTF-16LE string to emulator memory
+	 */
+	private writeStringW(address: bigint, str: string): void {
+		const buf = Buffer.from(str + '\0', 'utf16le');
+		this.emulator.writeMemorySync(address, buf);
+	}
+
+	private ensureAsciiString(value: string, existingPtr: bigint): bigint {
+		if (existingPtr !== 0n) {
+			return existingPtr;
+		}
+		const ptr = this.memoryManager.heapAlloc(value.length + 1, true);
+		if (ptr === 0n) {
+			return 0n;
+		}
+		this.writeStringA(ptr, value);
+		return ptr;
+	}
+
+	private ensureWideString(value: string, existingPtr: bigint): bigint {
+		if (existingPtr !== 0n) {
+			return existingPtr;
+		}
+		const bytes = Buffer.byteLength(value + '\0', 'utf16le');
+		const ptr = this.memoryManager.heapAlloc(bytes, true);
+		if (ptr === 0n) {
+			return 0n;
+		}
+		this.writeStringW(ptr, value);
+		return ptr;
+	}
+
+	private getCommandLineA(): bigint {
+		this.commandLineAPtr = this.ensureAsciiString('HexCore.exe', this.commandLineAPtr);
+		return this.commandLineAPtr;
+	}
+
+	private getCommandLineW(): bigint {
+		this.commandLineWPtr = this.ensureWideString('HexCore.exe', this.commandLineWPtr);
+		return this.commandLineWPtr;
+	}
+
+	private getWinMainCommandLineW(): bigint {
+		this.winMainCommandLineWPtr = this.ensureWideString('', this.winMainCommandLineWPtr);
+		return this.winMainCommandLineWPtr;
+	}
+
+	private readVariadicArgs(argListPtr: bigint, maxCount: number = 8): bigint[] {
+		if (argListPtr === 0n) {
+			return [];
+		}
+		const args: bigint[] = [];
+		for (let i = 0; i < maxCount; i++) {
+			try {
+				const entryPtr = argListPtr + BigInt(i * 8);
+				const buf = this.emulator.readMemorySync(entryPtr, 8);
+				args.push(buf.readBigUInt64LE(0));
+			} catch {
+				break;
+			}
+		}
+		return args;
+	}
+
+	private simpleFormatA(format: string, args: bigint[]): string {
+		let result = '';
+		let argIdx = 0;
+		let i = 0;
+
+		while (i < format.length) {
+			if (format[i] !== '%') {
+				result += format[i];
+				i++;
+				continue;
+			}
+
+			i++;
+			if (i >= format.length) {
+				break;
+			}
+
+			while (i < format.length && '-+0 #'.includes(format[i])) { i++; }
+			while (i < format.length && format[i] >= '0' && format[i] <= '9') { i++; }
+			if (i < format.length && format[i] === '.') {
+				i++;
+				while (i < format.length && format[i] >= '0' && format[i] <= '9') { i++; }
+			}
+
+			let lengthMod = '';
+			if (i < format.length && (format[i] === 'l' || format[i] === 'h' || format[i] === 'z')) {
+				lengthMod += format[i];
+				i++;
+				if (i < format.length && format[i] === 'l') {
+					lengthMod += format[i];
+					i++;
+				}
+			}
+
+			if (i >= format.length) {
+				break;
+			}
+
+			const spec = format[i];
+			const arg = argIdx < args.length ? args[argIdx] : 0n;
+
+			switch (spec) {
+				case '%':
+					result += '%';
+					break;
+				case 's':
+					result += lengthMod.startsWith('l') ? this.readStringW(arg) : this.readStringA(arg);
+					argIdx++;
+					break;
+				case 'c':
+					result += String.fromCharCode(Number(arg & 0xFFn));
+					argIdx++;
+					break;
+				case 'd':
+				case 'i': {
+					const val = Number(arg & 0xFFFFFFFFn);
+					const signed = val > 0x7FFFFFFF ? val - 0x100000000 : val;
+					result += signed.toString();
+					argIdx++;
+					break;
+				}
+				case 'u':
+					result += (arg & 0xFFFFFFFFn).toString();
+					argIdx++;
+					break;
+				case 'x':
+					result += (arg & 0xFFFFFFFFn).toString(16);
+					argIdx++;
+					break;
+				case 'X':
+					result += (arg & 0xFFFFFFFFn).toString(16).toUpperCase();
+					argIdx++;
+					break;
+				case 'p':
+					result += '0x' + arg.toString(16);
+					argIdx++;
+					break;
+				default:
+					result += '%' + spec;
+					argIdx++;
+					break;
+			}
+
+			i++;
+		}
+
+		return result;
 	}
 
 	/**
@@ -394,6 +552,109 @@ export class WinApiHooks {
 			return 1n;
 		});
 
+		this.handlers.set('kernel32!GetSystemTimeAsFileTime', (args) => {
+			const [fileTimePtr] = args;
+			if (fileTimePtr !== 0n) {
+				const now = BigInt(Date.now());
+				const unixEpochToFileTime = 11644473600000n;
+				const fileTime = (now + unixEpochToFileTime) * 10000n;
+				const buf = Buffer.alloc(8);
+				buf.writeBigUInt64LE(fileTime);
+				try {
+					this.emulator.writeMemorySync(fileTimePtr, buf);
+				} catch { /* ignore */ }
+			}
+			return 0n;
+		});
+
+		this.handlers.set('kernel32!GetSystemInfo', (args) => {
+			const [systemInfoPtr] = args;
+			if (systemInfoPtr !== 0n) {
+				const buf = Buffer.alloc(this.architecture === 'x64' ? 48 : 36);
+				buf.writeUInt16LE(this.architecture === 'x64' ? 9 : 0, 0); // PROCESSOR_ARCHITECTURE_AMD64 / INTEL
+				buf.writeUInt32LE(0x1000, 4); // dwPageSize
+				if (this.architecture === 'x64') {
+					buf.writeBigUInt64LE(0x10000n, 8); // lpMinimumApplicationAddress
+					buf.writeBigUInt64LE(0x00007FFFFFFEFFFFn, 16); // lpMaximumApplicationAddress
+					buf.writeBigUInt64LE(1n, 24); // dwActiveProcessorMask
+					buf.writeUInt32LE(8, 32); // dwNumberOfProcessors
+					buf.writeUInt32LE(8664, 36); // dwProcessorType / PROCESSOR_AMD_X8664
+					buf.writeUInt32LE(0x10000, 40); // dwAllocationGranularity
+					buf.writeUInt16LE(6, 44); // wProcessorLevel
+					buf.writeUInt16LE(0x3A09, 46); // wProcessorRevision
+				} else {
+					buf.writeUInt32LE(0x10000, 8);
+					buf.writeUInt32LE(0x7FFEFFFF, 12);
+					buf.writeUInt32LE(1, 16);
+					buf.writeUInt32LE(4, 20);
+					buf.writeUInt32LE(586, 24); // Pentium-class placeholder
+					buf.writeUInt32LE(0x10000, 28);
+					buf.writeUInt16LE(6, 32);
+					buf.writeUInt16LE(0x3A09, 34);
+				}
+				try {
+					this.emulator.writeMemorySync(systemInfoPtr, buf);
+				} catch { /* ignore */ }
+			}
+			return 0n;
+		});
+
+		this.handlers.set('kernel32!GetNativeSystemInfo', (args) => {
+			return this.handlers.get('kernel32!GetSystemInfo')!(args);
+		});
+
+		this.handlers.set('kernel32!K32GetProcessMemoryInfo', (args) => {
+			const [_processHandle, countersPtr, cb] = args;
+			if (countersPtr === 0n) {
+				this.lastError = 87; // ERROR_INVALID_PARAMETER
+				return 0n;
+			}
+
+			const requestedSize = Number(cb & 0xFFFFFFFFn);
+			const regions = this.memoryManager.getAllocations();
+			let workingSet = 0n;
+			for (const region of regions) {
+				workingSet += BigInt(region.size);
+			}
+
+			const size = this.architecture === 'x64' ? 72 : 40;
+			const buf = Buffer.alloc(size);
+			buf.writeUInt32LE(size, 0);
+			buf.writeUInt32LE(0, 4); // PageFaultCount
+
+			if (this.architecture === 'x64') {
+				buf.writeBigUInt64LE(workingSet, 8);   // PeakWorkingSetSize
+				buf.writeBigUInt64LE(workingSet, 16);  // WorkingSetSize
+				buf.writeBigUInt64LE(workingSet / 4n, 24);
+				buf.writeBigUInt64LE(workingSet / 4n, 32);
+				buf.writeBigUInt64LE(workingSet / 8n, 40);
+				buf.writeBigUInt64LE(workingSet / 8n, 48);
+				buf.writeBigUInt64LE(workingSet, 56);  // PagefileUsage
+				buf.writeBigUInt64LE(workingSet, 64);  // PeakPagefileUsage
+			} else {
+				const ws32 = Number(workingSet & 0xFFFFFFFFn);
+				buf.writeUInt32LE(ws32, 8);
+				buf.writeUInt32LE(ws32, 12);
+				buf.writeUInt32LE(Math.floor(ws32 / 4), 16);
+				buf.writeUInt32LE(Math.floor(ws32 / 4), 20);
+				buf.writeUInt32LE(Math.floor(ws32 / 8), 24);
+				buf.writeUInt32LE(Math.floor(ws32 / 8), 28);
+				buf.writeUInt32LE(ws32, 32);
+				buf.writeUInt32LE(ws32, 36);
+			}
+
+			try {
+				this.emulator.writeMemorySync(countersPtr, requestedSize > 0 ? buf.subarray(0, Math.min(requestedSize, buf.length)) : buf);
+			} catch {
+				return 0n;
+			}
+			return 1n;
+		});
+
+		this.handlers.set('psapi!GetProcessMemoryInfo', (args) => {
+			return this.handlers.get('kernel32!K32GetProcessMemoryInfo')!(args);
+		});
+
 		// ===== File I/O (stubs) =====
 		this.handlers.set('kernel32!CreateFileA', (_args) => {
 			return 0xFFFFFFFFFFFFFFFFn; // INVALID_HANDLE_VALUE - we don't support file I/O
@@ -470,12 +731,176 @@ export class WinApiHooks {
 
 		// ===== Environment =====
 		this.handlers.set('kernel32!GetCommandLineA', (_args) => {
-			// Return pointer to empty string at a known location
-			return 0n;
+			return this.getCommandLineA();
 		});
 
 		this.handlers.set('kernel32!GetCommandLineW', (_args) => {
+			return this.getCommandLineW();
+		});
+
+		this.handlers.set('kernel32!GetStartupInfoW', (args) => {
+			const [startupInfoPtr] = args;
+			if (startupInfoPtr !== 0n) {
+				const size = this.architecture === 'x64' ? 104 : 68;
+				const buf = Buffer.alloc(size);
+				buf.writeUInt32LE(size, 0);
+				// dwFlags = 0, all handles zeroed, desktop/title empty.
+				try {
+					this.emulator.writeMemorySync(startupInfoPtr, buf);
+				} catch { /* ignore */ }
+			}
 			return 0n;
+		});
+
+		this.handlers.set('kernel32!GetStartupInfoA', (args) => {
+			return this.handlers.get('kernel32!GetStartupInfoW')!(args);
+		});
+
+		this.handlers.set('kernel32!WideCharToMultiByte', (args) => {
+			const [codePage, _flags, widePtr, cchWideChar, multiPtr, cbMultiByte] = args;
+			if (widePtr === 0n) {
+				return 0n;
+			}
+
+			const wideCount = Number(BigInt.asIntN(32, cchWideChar));
+			const outCapacity = Number(BigInt.asIntN(32, cbMultiByte));
+			const useUtf8 = Number(codePage & 0xFFFFFFFFn) === 65001;
+
+			let text = '';
+			let includeNull = false;
+			try {
+				if (wideCount === 0) {
+					return 0n;
+				}
+				if (wideCount < 0) {
+					text = this.readStringW(widePtr);
+					includeNull = true;
+				} else {
+					const buf = this.emulator.readMemorySync(widePtr, wideCount * 2);
+					text = buf.toString('utf16le');
+				}
+			} catch {
+				return 0n;
+			}
+
+			const encoded = Buffer.from(includeNull ? text + '\0' : text, useUtf8 ? 'utf8' : 'latin1');
+
+			if (multiPtr === 0n || outCapacity <= 0) {
+				return BigInt(encoded.length);
+			}
+
+			if (encoded.length > outCapacity) {
+				this.lastError = 122; // ERROR_INSUFFICIENT_BUFFER
+				return 0n;
+			}
+
+			try {
+				this.emulator.writeMemorySync(multiPtr, encoded);
+			} catch {
+				return 0n;
+			}
+
+			return BigInt(encoded.length);
+		});
+
+		this.handlers.set('kernel32!MultiByteToWideChar', (args) => {
+			const [codePage, _flags, multiPtr, cbMultiByte, widePtr, cchWideChar] = args;
+			if (multiPtr === 0n) {
+				return 0n;
+			}
+
+			const inputCount = Number(BigInt.asIntN(32, cbMultiByte));
+			const outCapacity = Number(BigInt.asIntN(32, cchWideChar));
+			const useUtf8 = Number(codePage & 0xFFFFFFFFn) === 65001;
+
+			let text = '';
+			let includeNull = false;
+			try {
+				if (inputCount === 0) {
+					return 0n;
+				}
+				if (inputCount < 0) {
+					const bytes = this.emulator.readMemorySync(multiPtr, 512);
+					const end = bytes.indexOf(0);
+					const slice = end >= 0 ? bytes.subarray(0, end) : bytes;
+					text = slice.toString(useUtf8 ? 'utf8' : 'latin1');
+					includeNull = true;
+				} else {
+					const bytes = this.emulator.readMemorySync(multiPtr, inputCount);
+					text = bytes.toString(useUtf8 ? 'utf8' : 'latin1');
+				}
+			} catch {
+				return 0n;
+			}
+
+			const wideBuf = Buffer.from(includeNull ? text + '\0' : text, 'utf16le');
+			const wideChars = Math.floor(wideBuf.length / 2);
+
+			if (widePtr === 0n || outCapacity <= 0) {
+				return BigInt(wideChars);
+			}
+
+			if (wideChars > outCapacity) {
+				this.lastError = 122; // ERROR_INSUFFICIENT_BUFFER
+				return 0n;
+			}
+
+			try {
+				this.emulator.writeMemorySync(widePtr, wideBuf);
+			} catch {
+				return 0n;
+			}
+
+			return BigInt(wideChars);
+		});
+
+		this.handlers.set('api-ms-win-crt-runtime-l1-1-0.dll!_get_wide_winmain_command_line', (_args) => {
+			return this.getWinMainCommandLineW();
+		});
+
+		this.handlers.set('api-ms-win-crt-stdio-l1-1-0.dll!__stdio_common_vsprintf_s', (args) => {
+			const [_options, bufferPtr, bufferCount, formatPtr, _locale, argListPtr] = args;
+			if (bufferPtr === 0n || formatPtr === 0n) {
+				this.lastError = 87; // ERROR_INVALID_PARAMETER
+				return BigInt(-1);
+			}
+
+			const capacity = Number(bufferCount & 0xFFFFFFFFFFFFFFFFn);
+			if (capacity <= 0) {
+				this.lastError = 122; // ERROR_INSUFFICIENT_BUFFER
+				return BigInt(-1);
+			}
+
+			let format = '';
+			try {
+				format = this.readStringA(formatPtr);
+			} catch {
+				return BigInt(-1);
+			}
+
+			const vaArgs = this.readVariadicArgs(argListPtr, 16);
+			const rendered = this.simpleFormatA(format, vaArgs);
+			const bytes = Buffer.from(rendered + '\0', 'ascii');
+
+			if (bytes.length > capacity) {
+				this.lastError = 122; // ERROR_INSUFFICIENT_BUFFER
+				try {
+					this.emulator.writeMemorySync(bufferPtr, Buffer.from([0]));
+				} catch { /* ignore */ }
+				return BigInt(-1);
+			}
+
+			try {
+				this.emulator.writeMemorySync(bufferPtr, bytes);
+			} catch {
+				return BigInt(-1);
+			}
+
+			return BigInt(rendered.length);
+		});
+
+		this.handlers.set('ucrtbase.dll!__stdio_common_vsprintf_s', (args) => {
+			return this.handlers.get('api-ms-win-crt-stdio-l1-1-0.dll!__stdio_common_vsprintf_s')!(args);
 		});
 
 		// ===== CRT / ntdll =====

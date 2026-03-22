@@ -3,14 +3,15 @@ name: HexCore Binary Analysis
 description: Skill para analise de binarios com ferramentas HexCore integradas ao editor
 ---
 
-# HexCore Binary Analysis Skill — v3.5.4
+# HexCore Binary Analysis Skill — v3.7.1
 
 ## Overview
 
-HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSystem HexCore). It includes 20 extensions with 5 native engines (Capstone, Unicorn, Remill, LLVM MC, better-sqlite3) and a full automation pipeline.
+HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSystem HexCore). It includes 20+ extensions with 6 native engines (Capstone, Unicorn, Remill, LLVM MC, better-sqlite3, Helix) and a full automation pipeline with conditional branching.
 
-> **Current version:** v3.5.4 "Stability & Isolation" (2026-02-19)
-> **Engine versions:** capstone 1.3.2 | unicorn 1.2.1 | llvm-mc 1.0.0 | better-sqlite3 2.0.0 | remill 0.1.2
+> **Current version:** v3.7.1 "Dynamic Intelligence + Pipeline Branching" (2026-03-14)
+> **Engine versions:** capstone 1.3.2 | unicorn 1.2.1 | llvm-mc 1.0.0 | better-sqlite3 2.0.0 | remill 0.1.2 | helix 0.5.0
+> **Deprecated:** hexcore-rellic (superseded by Helix MLIR — removal planned for v3.8.0)
 
 ---
 
@@ -25,24 +26,35 @@ HexCore is a VS Code fork for reverse engineering and binary analysis (HikariSys
 | **hexcore-remill** | 0.1.2 | LLVM IR lifting | x86, x64, ARM64 only |
 | **hexcore-llvm-mc** | 1.0.0 | Assembly/encoding | x86, x64, ARM, ARM64, MIPS, RISC-V, PPC, SPARC |
 | **hexcore-better-sqlite3** | 2.0.0 | SQLite database | N/A |
+| **hexcore-helix** | 0.5.0 | MLIR decompiler (IR → pseudo-C) | x86, x64 |
+| **hexcore-rellic** | — | ~~Rellic decompiler~~ **(DEPRECATED — removal in v3.8.0)** | x86, x64 |
 
-### Disassembler (`hexcore-disassembler` v1.3.0)
+### Disassembler (`hexcore-disassembler` v1.5.0)
 
-Professional disassembler with Capstone engine, ELF/PE parsing, CFG, xrefs, patching, and the pipeline runner.
+Professional disassembler with Capstone engine, ELF/PE parsing, CFG, xrefs, patching, the pipeline runner, and advanced analysis (junk filtering, VM detection, PRNG detection).
 
 **Headless commands (pipeline-safe):**
-- `hexcore.disasm.analyzeAll` — Deep analysis (prolog scan + xrefs)
+- `hexcore.disasm.analyzeAll` — Deep analysis (prolog scan + xrefs). New args: `filterJunk`, `detectVM`, `detectPRNG`
 - `hexcore.disasm.buildFormula` — Symbolic expression extraction (**x86/x64 only**)
 - `hexcore.disasm.checkConstants` — Validate numeric annotations
 - `hexcore.disasm.searchStringHeadless` — Search string references
 - `hexcore.disasm.exportASMHeadless` — Export assembly to file
-- `hexcore.pipeline.runJob` — Run automation job
+- `hexcore.disasm.disassembleAtHeadless` — Disassemble N instructions at address. New args: `filterJunk`
+- `hexcore.disasm.liftToIR` — Lift to LLVM IR (Remill, x86/x64/ARM64)
+- `hexcore.disasm.dumpAndDisassemble` — Dump emulation memory + disassemble in one step (v3.7.1)
+- `hexcore.pipeline.runJob` — Run automation job (now with `onResult` conditional branching)
 - `hexcore.pipeline.listCapabilities` — Export capability map
 - `hexcore.pipeline.validateJob` — Preflight validation
 - `hexcore.pipeline.validateWorkspace` — Batch validation
 - `hexcore.pipeline.createPresetJob` — Generate job from preset
 - `hexcore.pipeline.saveJobAsProfile` — Save job as profile
 - `hexcore.pipeline.doctor` — Diagnose health
+
+**Analysis features (v3.7.1):**
+- `filterJunkInstructions()` — Detect and remove 7 junk patterns (callfuscation, nop sleds, identity ops)
+- `detectVM()` — VM obfuscation heuristics (dispatcher, handler tables, operand stacks)
+- `detectPRNG()` — Static PRNG pattern detection (srand/rand call sites, seed extraction)
+- `loadBuffer()` — Accept raw buffer for disassembly without file on disk (runtime memory)
 
 **Interactive commands (need UI):**
 - `hexcore.disasm.openFile`, `analyzeFile`, `goToAddress`, `findXrefs`, `addComment`, `renameFunction`, `showCFG`, `searchString`, `exportASM`, `patchInstruction`, `nopInstruction`, `assemble`, `assembleMultiple`, `savePatchedFile`, `setSyntax`, `showLlvmVersion`, `nativeStatus`
@@ -52,21 +64,29 @@ Professional disassembler with Capstone engine, ELF/PE parsing, CFG, xrefs, patc
 
 **Architecture auto-detection:** Reads ELF `e_machine` / PE `Machine` headers. Supports x86, x64, ARM, ARM64, MIPS. Defaults to x64 for raw files.
 
-### Debugger (`hexcore-debugger` v2.0.1)
+### Debugger (`hexcore-debugger` v2.2.0)
 
-Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, syscall handling, and API call tracing.
+Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, syscall handling, API call tracing, faithful PRNG emulation, side-channel analysis, and breakpoint auto-snapshots.
 
 **Process isolation & Smart Sync:** x64 ELF and ARM64 ELF emulation run in dedicated child processes (`x64ElfWorker.js`, `arm64Worker.js`) to prevent Unicorn heap corruption from crashing the VS Code extension host. The worker communicates via JSON-RPC over IPC. A unique **Smart Sync** architecture instantly synchronizes heap memory (e.g. dynamically allocated strings) from the Worker to the Host before evaluating any API hook (such as `__printf_chk`, `getline`, or `puts`), guaranteeing flawless validation of complex obfuscated VMs (like active advanced HTB CTFs). PE emulation and other architectures run in-process.
 
 **Headless commands (pipeline-safe):**
-- `hexcore.debug.emulateFullHeadless` — **Unified single-shot emulation** (load → configure → run → collect → dispose). Recommended for pipeline jobs. Args: `{ file, arch?, stdin?, maxInstructions?, breakpoints?, keepAlive?, output?, quiet? }`. Aliases: `hexcore.debug.emulate.full`, `hexcore.debug.run`
-- `hexcore.debug.writeMemoryHeadless` — Write data to emulation memory. Args: `{ address, data, output?, quiet? }`. Data accepts base64 or `0x`-prefixed hex.
-- `hexcore.debug.setRegisterHeadless` — Set CPU register value. Args: `{ name, value, output?, quiet? }`. Value accepts hex string or decimal.
-- `hexcore.debug.setStdinHeadless` — Set STDIN buffer for emulation. Args: `{ input, output?, quiet? }`. Supports escape sequences (`\n`, `\t`, `\r`, `\\`).
-- `hexcore.debug.disposeHeadless` — Dispose emulation session (idempotent, safe to call without active session). Args: `{ output?, quiet? }`
+- `hexcore.debug.emulateFullHeadless` — **Unified single-shot emulation** (load → configure → run → collect → dispose). New v3.7.1 args: `permissiveMemoryMapping`, `prngMode`, `prngSeed`, `collectSideChannels`, `memoryDumps`, `breakpointConfigs` (with `autoSnapshot`). Aliases: `hexcore.debug.emulate.full`, `hexcore.debug.run`
+- `hexcore.debug.writeMemoryHeadless` — Write data to emulation memory
+- `hexcore.debug.setRegisterHeadless` — Set CPU register value
+- `hexcore.debug.setStdinHeadless` — Set STDIN buffer for emulation
+- `hexcore.debug.disposeHeadless` — Dispose emulation session (idempotent)
 - `hexcore.debug.snapshotHeadless` — Save emulation snapshot
 - `hexcore.debug.restoreSnapshotHeadless` — Restore emulation snapshot
 - `hexcore.debug.exportTraceHeadless` — Export API/libc call trace as JSON
+
+**v3.7.1 Emulation Features:**
+- **Permissive Memory Mapping** — `permissiveMemoryMapping: true` maps all segments with RWX permissions, allowing self-modifying VMs to jump to .rodata/.data without UC_ERR_FETCH_PROT
+- **PRNG Modes** — `prngMode: 'glibc'` (344-state TYPE_3 algorithm), `'msvcrt'` (LCG: seed * 214013 + 2531011), `'stub'` (returns 0, default). Faithful implementations that match native rand() sequences for any seed.
+- **Memory Dumps** — `memoryDumps: [{ address, size, trigger: 'breakpoint'|'end' }]` captures arbitrary memory ranges during emulation
+- **Breakpoint Auto-Snapshots** — `breakpointConfigs: [{ address, autoSnapshot: true, dumpRanges? }]` automatically captures registers, stack, and optional memory ranges at breakpoints, then continues execution
+- **Side-Channel Analysis** — `collectSideChannels: true` installs instrumentation hooks to collect instruction counts per basic block, memory access patterns, and branch statistics
+- **Runtime Memory Disassembly** — `dumpAndDisassemble(address, size)` combines memory reading and Capstone disassembly in one operation for analyzing runtime-decrypted code
 
 **Interactive commands (need UI):**
 - `hexcore.debug.emulate` — Start emulation (auto-detect arch)
@@ -138,6 +158,7 @@ Emulation-based debugger using Unicorn engine with PE/ELF loading, API hooking, 
 - **Auto:** HexCore watches `.hexcore_job.json` and runs on create/change
 - **Manual:** Run `hexcore.pipeline.runJob`
 - **Validate first:** Run `hexcore.pipeline.validateJob` for preflight check
+- **Conditional branching:** Use `onResult` in pipeline steps to skip, goto, abort, or log based on step output (v3.7.1)
 
 ### Job Contract
 
@@ -181,30 +202,37 @@ Jobs produce in `outDir`:
 7. ~~**Hex viewer has no headless dump**~~ — **RESOLVED in v3.5.2**: `hexcore.hexview.dumpHeadless` and `hexcore.hexview.searchHeadless` are pipeline-safe.
 8. ~~**Strings XOR is 1-byte only**~~ — **RESOLVED in v3.5.2**: `extractAdvanced` now supports multi-byte XOR (2, 4, 8, 16 bytes), rolling XOR, and XOR with increment.
 9. **Prebuilds are win32-x64 only** — Linux/macOS need `node-gyp rebuild` fallback.
+10. **Rellic is DEPRECATED** — Superseded by Helix MLIR engine in v3.7.0. Remains functional for backward compatibility but will be removed in v3.8.0. Use `hexcore.helix.decompile` / `hexcore.helix.decompileIR` instead.
 
 ---
 
 ## What Agents CAN Do
 
 1. **Create `.hexcore_job.json`** files and run analysis via `hexcore.pipeline.runJob`
-2. **Read pipeline output** from `hexcore-pipeline.status.json` and step output files
-3. **Interpret results** — entropy reports, string extractions, YARA matches, IOC lists
-4. **Validate jobs** with `hexcore.pipeline.validateJob` before execution
-5. **Use presets** via `hexcore.pipeline.createPresetJob` for quick setup
-6. **Search strings headlessly** via `hexcore.disasm.searchStringHeadless`
-7. **Export assembly headlessly** via `hexcore.disasm.exportASMHeadless`
-8. **Analyze ELF binaries** via `hexcore.elfanalyzer.analyze` (sections, segments, symbols, security)
-9. **Decode Base64** via `hexcore.base64.decodeHeadless`
-10. **Dump hex ranges** via `hexcore.hexview.dumpHeadless`
-11. **Search hex patterns** via `hexcore.hexview.searchHeadless`
-12. **Run full emulation headlessly** via `hexcore.debug.emulateFullHeadless` (single-shot: load → configure → run → collect → dispose)
-13. **Write emulation memory** via `hexcore.debug.writeMemoryHeadless`
-14. **Set CPU registers** via `hexcore.debug.setRegisterHeadless`
-15. **Set STDIN buffer** via `hexcore.debug.setStdinHeadless`
-16. **Dispose emulation sessions** via `hexcore.debug.disposeHeadless`
-17. **Save/restore emulation snapshots** via `hexcore.debug.snapshotHeadless` / `restoreSnapshotHeadless`
-18. **Export API call traces** via `hexcore.debug.exportTraceHeadless`
-19. **Compose unified reports** via `hexcore.pipeline.composeReport`
+2. **Use `onResult` conditional branching** in pipeline steps to build adaptive workflows (skip, goto, abort, log)
+3. **Read pipeline output** from `hexcore-pipeline.status.json` and step output files
+4. **Interpret results** — entropy reports, string extractions, YARA matches, IOC lists
+5. **Validate jobs** with `hexcore.pipeline.validateJob` before execution
+6. **Use presets** via `hexcore.pipeline.createPresetJob` for quick setup
+7. **Search strings headlessly** via `hexcore.disasm.searchStringHeadless`
+8. **Export assembly headlessly** via `hexcore.disasm.exportASMHeadless`
+9. **Analyze ELF binaries** via `hexcore.elfanalyzer.analyze` (sections, segments, symbols, security)
+10. **Decode Base64** via `hexcore.base64.decodeHeadless`
+11. **Dump hex ranges** via `hexcore.hexview.dumpHeadless`
+12. **Search hex patterns** via `hexcore.hexview.searchHeadless`
+13. **Run full emulation headlessly** via `hexcore.debug.emulateFullHeadless` with permissive memory mapping, PRNG modes, side-channel analysis, memory dumps, and breakpoint auto-snapshots
+14. **Write emulation memory** via `hexcore.debug.writeMemoryHeadless`
+15. **Set CPU registers** via `hexcore.debug.setRegisterHeadless`
+16. **Set STDIN buffer** via `hexcore.debug.setStdinHeadless`
+17. **Dispose emulation sessions** via `hexcore.debug.disposeHeadless`
+18. **Save/restore emulation snapshots** via `hexcore.debug.snapshotHeadless` / `restoreSnapshotHeadless`
+19. **Export API call traces** via `hexcore.debug.exportTraceHeadless`
+20. **Compose unified reports** via `hexcore.pipeline.composeReport`
+21. **Filter junk instructions** via `filterJunk: true` in `analyzeAll` / `disassembleAtHeadless` args
+22. **Detect VM obfuscation** via `detectVM: true` in `analyzeAll` args
+23. **Detect PRNG patterns** via `detectPRNG: true` in `analyzeAll` args
+24. **Dump and disassemble runtime memory** via `dumpAndDisassemble` for analyzing decrypted code
+25. **Decompile to pseudo-C** via `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step)
 
 ## What Agents CANNOT Do
 
@@ -251,8 +279,11 @@ Jobs produce in `outDir`:
 
 ```
 1. hexcore.debug.emulateFullHeadless    → Single-shot emulation (recommended for pipeline jobs)
-   Args: { file, arch?, stdin?, maxInstructions?, breakpoints?, keepAlive?, output? }
-   Returns: FullEmulationResult with registers, apiCalls, stdout, memoryRegions, crash status
+   Args: { file, arch?, stdin?, maxInstructions?, breakpoints?, keepAlive?,
+           permissiveMemoryMapping?, prngMode?, prngSeed?,
+           collectSideChannels?, memoryDumps?, breakpointConfigs?, output? }
+   Returns: FullEmulationResult with registers, apiCalls, stdout, memoryRegions,
+            crash status, snapshots, dumps, sideChannels
 
 For advanced multi-step emulation (keepAlive: true):
 2. hexcore.debug.emulateFullHeadless    → Start with keepAlive: true
@@ -278,4 +309,4 @@ For advanced multi-step emulation (keepAlive: true):
 
 ---
 
-*HexCore v3.5.4 "Stability & Isolation" — Powered by Capstone 1.3.2 / Unicorn 1.2.1 / LLVM MC 1.0.0 / Remill 0.1.2*
+*HexCore v3.7.1 "Dynamic Intelligence + Pipeline Branching" — Powered by Capstone 1.3.2 / Unicorn 1.2.1 / LLVM MC 1.0.0 / Remill 0.1.2 / Helix 0.5.0*

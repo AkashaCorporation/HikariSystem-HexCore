@@ -12,6 +12,7 @@
 #include <capstone/capstone.h>
 #include <vector>
 #include <string>
+#include <utility>
 
 // Forward declaration
 class DisasmAsyncWorker;
@@ -55,6 +56,7 @@ private:
     cs_arch arch_;
     cs_mode mode_;
     bool detailEnabled_;
+    std::vector<std::pair<cs_opt_type, size_t>> asyncOptionState_;
 
     // Class reference for preventing garbage collection during async ops
     static Napi::FunctionReference constructor;
@@ -128,6 +130,8 @@ private:
      * @returns String - error message
      */
     Napi::Value StrError(const Napi::CallbackInfo& info);
+
+    void RememberAsyncOption(cs_opt_type type, size_t value);
 
     // Helper methods
     Napi::Object InstructionToObject(Napi::Env env, cs_insn* insn);

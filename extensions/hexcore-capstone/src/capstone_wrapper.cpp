@@ -206,7 +206,7 @@ Napi::Value CapstoneWrapper::DisasmAsync(const Napi::CallbackInfo& info) {
 		std::move(codeVec),
 		address,
 		count,
-		detailEnabled_
+		asyncOptionState_
 	);
 
 	worker->Queue();
@@ -813,8 +813,24 @@ Napi::Value CapstoneWrapper::SetOption(const Napi::CallbackInfo& info) {
 	if (type == CS_OPT_DETAIL) {
 		detailEnabled_ = (value == CS_OPT_ON);
 	}
+	if (type == CS_OPT_MODE) {
+		mode_ = static_cast<cs_mode>(value);
+	}
+
+	RememberAsyncOption(type, value);
 
 	return Napi::Boolean::New(env, true);
+}
+
+void CapstoneWrapper::RememberAsyncOption(cs_opt_type type, size_t value) {
+	for (auto& option : asyncOptionState_) {
+		if (option.first == type) {
+			option.second = value;
+			return;
+		}
+	}
+
+	asyncOptionState_.push_back({ type, value });
 }
 
 /**

@@ -12,6 +12,7 @@
 #include <cstring>
 #include <variant>
 #include <optional>
+#include <utility>
 
 // ============================================================================
 // Intermediate structures for transferring data from worker thread to main
@@ -315,7 +316,7 @@ public:
 		std::vector<uint8_t> code,
 		uint64_t address,
 		size_t count,
-		bool includeDetail
+		std::vector<std::pair<cs_opt_type, size_t>> optionState
 	) : Napi::AsyncWorker(env),
 		deferred_(Napi::Promise::Deferred::New(env)),
 		arch_(arch),
@@ -323,9 +324,17 @@ public:
 		code_(std::move(code)),
 		address_(address),
 		count_(count),
-		includeDetail_(includeDetail),
+		includeDetail_(false),
+		optionState_(std::move(optionState)),
 		numInsns_(0),
-		error_(CS_ERR_OK) {}
+		error_(CS_ERR_OK) {
+
+		for (const auto& option : optionState_) {
+			if (option.first == CS_OPT_DETAIL) {
+				includeDetail_ = (option.second == CS_OPT_ON);
+			}
+		}
+	}
 
 	~DisasmAsyncWorker() {}
 
@@ -346,9 +355,13 @@ public:
 			return;
 		}
 
-		// Set detail option if requested
-		if (includeDetail_) {
-			cs_option(handle, CS_OPT_DETAIL, CS_OPT_ON);
+		for (const auto& option : optionState_) {
+			err = cs_option(handle, option.first, option.second);
+			if (err != CS_ERR_OK) {
+				error_ = err;
+				cs_close(&handle);
+				return;
+			}
 		}
 
 		cs_insn* insn = nullptr;
@@ -450,6 +463,7 @@ private:
 	uint64_t address_;
 	size_t count_;
 	bool includeDetail_;
+	std::vector<std::pair<cs_opt_type, size_t>> optionState_;
 
 	// Results from Execute()
 	size_t numInsns_;

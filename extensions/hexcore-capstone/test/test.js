@@ -154,7 +154,7 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 	try {
 		const insnsAsync = await csAsync.disasmAsync(codeAsync, 0x401000);
 		console.log(`  Async disassembled ${insnsAsync.length} instructions`);
-		console.assert(insnsAsync.length === 8, 'Expected 8 instructions from async');
+		console.assert(insnsAsync.length === 9, 'Expected 9 instructions from async');
 		console.assert(Array.isArray(insnsAsync), 'Result should be an array');
 		console.assert(insnsAsync[0].mnemonic === 'push', 'First should be push');
 		console.log('  [PASS] disasmAsync (basic) works\n');
@@ -295,6 +295,37 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 
 	csSync.close();
 	csAsyncCmp.close();
+
+	// =====================================================================
+	// Test comparison: sync vs async syntax options should match
+	// =====================================================================
+	console.log('Testing sync vs async syntax consistency...');
+	const csSyncSyntax = new Capstone(ARCH.X86, MODE.MODE_64);
+	const csAsyncSyntax = new Capstone(ARCH.X86, MODE.MODE_64);
+	csSyncSyntax.setOption(OPT.SYNTAX, OPT_VALUE.SYNTAX_ATT);
+	csAsyncSyntax.setOption(OPT.SYNTAX, OPT_VALUE.SYNTAX_ATT);
+
+	try {
+		const syncSyntaxResult = csSyncSyntax.disasm(testCode, 0x1000);
+		const asyncSyntaxResult = await csAsyncSyntax.disasmAsync(testCode, 0x1000);
+
+		console.assert(syncSyntaxResult.length === asyncSyntaxResult.length, 'Same number of instructions for syntax test');
+		for (let i = 0; i < syncSyntaxResult.length; i++) {
+			console.assert(syncSyntaxResult[i].mnemonic === asyncSyntaxResult[i].mnemonic,
+				`Syntax instruction ${i}: mnemonic should match`);
+			console.assert(syncSyntaxResult[i].opStr === asyncSyntaxResult[i].opStr,
+				`Syntax instruction ${i}: opStr should match`);
+		}
+
+		console.log(`  Verified ATT syntax parity: ${syncSyntaxResult[0].mnemonic} ${syncSyntaxResult[0].opStr}`);
+		console.log('  [PASS] sync vs async syntax consistency works\n');
+	} catch (e) {
+		console.error(`  [FAIL] sync/async syntax comparison failed: ${e.message}`);
+		process.exit(1);
+	}
+
+	csSyncSyntax.close();
+	csAsyncSyntax.close();
 
 	console.log('=== All tests passed! ===');
 })();

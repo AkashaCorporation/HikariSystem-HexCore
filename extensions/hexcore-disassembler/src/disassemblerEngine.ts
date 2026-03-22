@@ -203,11 +203,26 @@ export class DisassemblerEngine {
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				this.capstoneInitialized = false;
-				this.capstoneError = message;
+				this.capstoneError = `${message} ${this.getDisassemblerFallbackMessage()}`.trim();
 				console.warn('Capstone initialization failed, falling back to basic decoder:', error);
 			}
 		} else if (this.capstone.getArchitecture() !== this.architecture) {
 			await this.capstone.setArchitecture(this.architecture);
+		}
+	}
+
+	private getDisassemblerFallbackMessage(): string {
+		switch (this.architecture) {
+			case 'x86':
+			case 'x64':
+			case 'arm':
+			case 'arm64':
+				return 'Fallback: basic built-in decoder is available for this architecture.';
+			case 'mips':
+			case 'mips64':
+				return `Fallback: no safe instruction decoder exists for ${this.architecture}; HexCore will expose raw byte directives instead of guessing instruction semantics.`;
+			default:
+				return `Fallback: no safe decoder exists for architecture '${this.architecture}'.`;
 		}
 	}
 
@@ -431,6 +446,7 @@ export class DisassemblerEngine {
 		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
 		const isARM64 = this.architecture === 'arm64';
 		const isARM32 = this.architecture === 'arm';
+		const isStructuredFallback = isARM64 || isARM32 || this.architecture === 'x86' || this.architecture === 'x64';
 
 		if (isARM64 || isARM32) {
 			// ARM: Fixed-width 4-byte instructions
@@ -445,7 +461,7 @@ export class DisassemblerEngine {
 				offset += 4;
 				addr += 4;
 			}
-		} else {
+		} else if (isStructuredFallback) {
 			// x86/x64: Variable-length instructions
 			while (offset < endOffset && instructions.length < 1000) {
 				const inst = this.disassembleInstructionFallback(offset, addr);
@@ -470,6 +486,25 @@ export class DisassemblerEngine {
 					offset++;
 					addr++;
 				}
+			}
+		} else {
+			while (offset < endOffset && instructions.length < 1000) {
+				const dataByte = this.fileBuffer![offset];
+				const inst = this.createInstruction(
+					addr,
+					Buffer.from([dataByte]),
+					'.byte',
+					`0x${dataByte.toString(16).padStart(2, '0').toUpperCase()}`,
+					1,
+					false,
+					false,
+					false,
+					false
+				);
+				instructions.push(inst);
+				this.instructions.set(addr, inst);
+				offset++;
+				addr++;
 			}
 		}
 
@@ -1776,6 +1811,18 @@ export class DisassemblerEngine {
 			return existing;
 		}
 
+		if (!this.isAnalyzableFunctionAddress(address)) {
+			return {
+				address,
+				name: name || `sub_${address.toString(16).toUpperCase()}`,
+				size: 0,
+				endAddress: address,
+				instructions: [],
+				callers: [],
+				callees: []
+			};
+		}
+
 		const instructions = await this.disassembleRange(address, this.maxFunctionSize);
 
 		if (instructions.length === 0) {
@@ -1942,6 +1989,23 @@ export class DisassemblerEngine {
 		}
 
 		return func;
+	}
+
+	private isAnalyzableFunctionAddress(address: number): boolean {
+		if (!this.fileBuffer || !Number.isFinite(address) || address <= 0) {
+			return false;
+		}
+
+		if (this.sections.length > 0) {
+			return this.sections.some(section =>
+				(section.isCode || section.isExecutable) &&
+				address >= section.virtualAddress &&
+				address < section.virtualAddress + Math.max(section.virtualSize, section.rawSize)
+			);
+		}
+
+		const offset = this.addressToOffset(address);
+		return offset >= 0 && offset < this.fileBuffer.length;
 	}
 
 	/**
@@ -2351,19 +2415,27 @@ export class DisassemblerEngine {
 		}
 	}
 
-	async getDisassemblerAvailability(): Promise<{ available: boolean; error?: string }> {
+	async getDisassemblerAvailability(): Promise<{ available: boolean; error?: string; fallbackMode?: 'basic-decoder' | 'raw-byte' }> {
 		await this.ensureCapstoneInitialized();
 		return {
 			available: this.capstoneInitialized,
-			error: this.capstoneError ?? this.capstone.getLastError()
+			error: this.capstoneError ?? this.capstone.getLastError(),
+			fallbackMode: this.capstoneInitialized
+				? undefined
+				: ((this.architecture === 'x86' || this.architecture === 'x64' || this.architecture === 'arm' || this.architecture === 'arm64')
+					? 'basic-decoder'
+					: 'raw-byte')
 		};
 	}
 
-	async getAssemblerAvailability(): Promise<{ available: boolean; error?: string }> {
+	async getAssemblerAvailability(): Promise<{ available: boolean; error?: string; cpu?: string; features?: string; addressSemanticsNote?: string }> {
 		await this.ensureLlvmMcInitialized();
 		return {
 			available: this.llvmMcInitialized,
-			error: this.llvmMcError ?? this.llvmMc.getLastError()
+			error: this.llvmMcError ?? this.llvmMc.getLastError(),
+			cpu: this.llvmMc.getCpu(),
+			features: this.llvmMc.getFeatures(),
+			addressSemanticsNote: this.llvmMc.getAddressSemanticsNote()
 		};
 	}
 
@@ -2372,7 +2444,7 @@ export class DisassemblerEngine {
 		if (!this.llvmMcInitialized) {
 			return { success: false, bytes: Buffer.alloc(0), size: 0, statement: code, error: this.llvmMcError ?? 'LLVM MC not available' };
 		}
-		return this.llvmMc.assemble(code, address ? BigInt(address) : undefined);
+		return this.llvmMc.assembleAsync(code, address !== undefined ? BigInt(address) : undefined);
 	}
 
 	async assembleMultiple(instructions: string[], startAddress?: number): Promise<AssembleResult[]> {
@@ -2383,7 +2455,7 @@ export class DisassemblerEngine {
 				error: this.llvmMcError ?? 'LLVM MC not available'
 			}));
 		}
-		return this.llvmMc.assembleMultiple(instructions, startAddress ? BigInt(startAddress) : undefined);
+		return this.llvmMc.assembleMultiple(instructions, startAddress !== undefined ? BigInt(startAddress) : undefined);
 	}
 
 	async patchInstruction(address: number, newInstruction: string): Promise<PatchResult> {
@@ -2479,9 +2551,21 @@ export class DisassemblerEngine {
 	}
 
 	setAssemblySyntax(syntax: 'intel' | 'att'): void {
+		this.llvmMc.setSyntax(syntax);
+	}
+
+	async setAssemblerTargetOptions(options: { cpu?: string; features?: string }): Promise<void> {
+		await this.llvmMc.setTargetOptions(options);
 		if (this.llvmMcInitialized) {
-			this.llvmMc.setSyntax(syntax);
+			this.llvmMcError = this.llvmMc.getLastError();
 		}
+	}
+
+	getAssemblerTargetOptions(): { cpu: string; features: string } {
+		return {
+			cpu: this.llvmMc.getCpu(),
+			features: this.llvmMc.getFeatures()
+		};
 	}
 
 	// ============ v3.7: Junk Instruction Filtering ============

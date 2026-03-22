@@ -506,6 +506,115 @@ Detect VM-based obfuscation, filter junk instructions, and detect PRNG patterns 
 
 ---
 
+## Template: PE64 Runtime Trace Loop (Wave 2)
+
+Capture the API trace of a stable PE/x64 runtime loop after a long `continueHeadless` window. Useful for identifying repeated WinAPI / CRT contracts once the worker runtime is stable.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\pe64-trace-loop",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.debug.emulateHeadless",
+      "args": {
+        "arch": "x64",
+        "permissiveMemoryMapping": true
+      },
+      "output": { "path": "01-init.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.continueHeadless",
+      "args": { "maxSteps": 50000 },
+      "output": { "path": "02-run-50000.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.getStateHeadless",
+      "output": { "path": "03-state.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.exportTraceHeadless",
+      "output": { "path": "04-trace.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.disposeHeadless",
+      "output": { "path": "05-dispose.json" },
+      "timeoutMs": 30000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `executionBackend` in `01-init.json`, `02-run-50000.json`, and `03-state.json` should show which runtime path actually ran.
+- `03-state.json` is the easiest place to inspect the loop PC before adding breakpoints.
+- `04-trace.json` is the best artifact for comparing repeated API cycles between builds.
+
+---
+
+## Template: PE64 Breakpoint Loop (Wave 2)
+
+Set a breakpoint on a known runtime loop PC and export the trace after the session pauses there. Useful once `trace-loop` identifies a repeated address.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\pe64-break-loop",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.debug.emulateHeadless",
+      "args": {
+        "arch": "x64",
+        "permissiveMemoryMapping": true
+      },
+      "output": { "path": "01-init.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.setBreakpointHeadless",
+      "args": {
+        "address": "0x141388c80"
+      },
+      "output": { "path": "02-breakpoint.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.continueHeadless",
+      "args": { "maxSteps": 50000 },
+      "output": { "path": "03-run.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.getStateHeadless",
+      "output": { "path": "04-state.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.exportTraceHeadless",
+      "output": { "path": "05-trace.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.disposeHeadless",
+      "output": { "path": "06-dispose.json" },
+      "timeoutMs": 30000
+    }
+  ]
+}
+```
+
+**Notes:**
+- Replace `0x141388c80` with the current loop PC from `getStateHeadless`.
+- `setBreakpointHeadless` now writes its output file correctly, so the pipeline can validate `02-breakpoint.json`.
+
+---
+
 ## Template: Adaptive Pipeline with onResult Branching (v3.7.1)
 
 Uses `onResult` conditional branching to adapt the pipeline based on intermediate results. If entropy is high (likely packed), skip straight to YARA scanning.

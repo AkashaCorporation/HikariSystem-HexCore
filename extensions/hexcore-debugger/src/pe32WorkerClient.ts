@@ -82,6 +82,7 @@ export interface Pe32ExecuteBatchResult {
 	error: string | null;
 	stubHit: boolean;
 	stubAddress: bigint | null;
+	faultInfo?: Record<string, unknown> | null;
 }
 
 export interface X64Registers {
@@ -105,13 +106,19 @@ export class Pe32WorkerClient {
 	private ready = false;
 	private readyPromise: Promise<void> | null = null;
 	private pageSize = 0x1000;
+	private lastStartError: string | null = null;
+
+	private static readonly START_TIMEOUT_MS = 15000;
 
 	/**
 	 * Spawn the worker process.
 	 */
 	async start(): Promise<void> {
-		if (this.worker) {
+		if (this.worker && this.ready) {
 			return;
+		}
+		if (this.readyPromise) {
+			return this.readyPromise;
 		}
 
 		const workerPath = path.join(__dirname, '..', 'src', 'pe32Worker.js');
@@ -150,67 +157,85 @@ export class Pe32WorkerClient {
 			});
 		}
 
-		this.worker.on('message', (msg: Record<string, unknown>) => {
-			if (msg.type === 'ready') {
-				this.ready = true;
-				return;
-			}
-			if (msg.type === 'hook-event') {
-				// Hook events from native hooks (for future use)
-				return;
-			}
+		this.ready = false;
+		this.lastStartError = null;
 
-			const id = msg.id as number;
-			const pending = this.pending.get(id);
-			if (!pending) {
-				return;
-			}
-			this.pending.delete(id);
-
-			if (msg.error) {
-				pending.reject(new Error(msg.error as string));
-			} else {
-				pending.resolve(deserialize(msg.result));
-			}
-		});
-
-		// Relay worker stdout/stderr so diagnostic output is visible
-		if (this.worker.stdout) {
-			this.worker.stdout.on('data', (chunk: Buffer) => {
-				process.stdout.write(`[pe32Worker:stdout] ${chunk}`);
-			});
-		}
-		if (this.worker.stderr) {
-			this.worker.stderr.on('data', (chunk: Buffer) => {
-				process.stderr.write(`[pe32Worker:stderr] ${chunk}`);
-			});
-		}
-
-		this.worker.on('exit', (code, signal) => {
-			console.log(`[pe32Worker] exited: code=${code}, signal=${signal}`);
-			this.worker = null;
-			this.ready = false;
-			// Reject all pending calls
-			for (const [, p] of this.pending) {
-				p.reject(new Error(`PE32 worker exited with code ${code}`));
-			}
-			this.pending.clear();
-		});
-
-		this.worker.on('error', (err) => {
-			console.error(`[pe32Worker] error: ${err.message}`);
-		});
-
-		// Wait for the worker to be ready
-		this.readyPromise = new Promise<void>((resolve) => {
-			const check = () => {
-				if (this.ready) {
-					resolve();
+		this.readyPromise = new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const finish = (error?: Error) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timeoutHandle);
+				this.readyPromise = null;
+				if (error) {
+					this.lastStartError = error.message;
+					reject(error);
 				} else {
-					setTimeout(check, 10);
+					this.lastStartError = null;
+					resolve();
 				}
 			};
-			check();
+
+			const timeoutHandle = setTimeout(() => {
+				finish(new Error(`PE32 worker failed to become ready within ${Pe32WorkerClient.START_TIMEOUT_MS}ms`));
+			}, Pe32WorkerClient.START_TIMEOUT_MS);
+
+			this.worker!.on('message', (msg: Record<string, unknown>) => {
+				if (msg.type === 'ready') {
+					this.ready = true;
+					finish();
+					return;
+				}
+				if (msg.type === 'hook-event') {
+					return;
+				}
+
+				const id = msg.id as number;
+				const pending = this.pending.get(id);
+				if (!pending) {
+					return;
+				}
+				this.pending.delete(id);
+
+				if (msg.error) {
+					pending.reject(new Error(msg.error as string));
+				} else {
+					pending.resolve(deserialize(msg.result));
+				}
+			});
+
+			if (this.worker!.stdout) {
+				this.worker!.stdout.on('data', (chunk: Buffer) => {
+					process.stdout.write(`[pe32Worker:stdout] ${chunk}`);
+				});
+			}
+			if (this.worker!.stderr) {
+				this.worker!.stderr.on('data', (chunk: Buffer) => {
+					process.stderr.write(`[pe32Worker:stderr] ${chunk}`);
+				});
+			}
+
+			this.worker!.on('exit', (code, signal) => {
+				console.log(`[pe32Worker] exited: code=${code}, signal=${signal}`);
+				this.worker = null;
+				this.ready = false;
+				if (!settled) {
+					finish(new Error(`PE32 worker exited before ready (code=${code}, signal=${signal})`));
+				}
+				for (const [, p] of this.pending) {
+					p.reject(new Error(`PE32 worker exited with code ${code}`));
+				}
+				this.pending.clear();
+			});
+
+			this.worker!.on('error', (err) => {
+				console.error(`[pe32Worker] error: ${err.message}`);
+				if (!settled) {
+					finish(new Error(`PE32 worker process error: ${err.message}`));
+				}
+			});
 		});
 
 		await this.readyPromise;
@@ -221,7 +246,12 @@ export class Pe32WorkerClient {
 	 */
 	private call(method: string, ...args: unknown[]): Promise<unknown> {
 		if (!this.worker) {
-			return Promise.reject(new Error('PE32 worker not started'));
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`PE32 worker not started${suffix}`));
+		}
+		if (!this.ready) {
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`PE32 worker is not ready${suffix}`));
 		}
 
 		const id = this.nextId++;
@@ -323,14 +353,23 @@ export class Pe32WorkerClient {
 		stubRangeEnd: bigint,
 		terminalRanges?: Array<{ start: bigint; end: bigint }>
 	): Promise<Pe32ExecuteBatchResult> {
-		const result = await this.call('executeBatch', startPc, count, terminalAddresses, stubRangeStart, stubRangeEnd, terminalRanges ?? []) as Record<string, unknown>;
+		const result = await this.call(
+			'executeBatch',
+			startPc,
+			count,
+			terminalAddresses,
+			terminalRanges ?? [],
+			stubRangeStart,
+			stubRangeEnd
+		) as Record<string, unknown>;
 		return {
 			pc: result.pc as bigint,
 			instructionsExecuted: result.instructionsExecuted as number,
 			stopped: result.stopped as boolean,
 			error: result.error as string | null,
 			stubHit: result.stubHit as boolean,
-			stubAddress: result.stubAddress as bigint | null
+			stubAddress: result.stubAddress as bigint | null,
+			faultInfo: (result.faultInfo as Record<string, unknown> | null | undefined) ?? null
 		};
 	}
 
@@ -439,6 +478,7 @@ export class Pe32WorkerClient {
 			console.log('[pe32Worker] Worker process disposed.');
 		}
 		this.ready = false;
+		this.readyPromise = null;
 		for (const [, p] of this.pending) {
 			p.reject(new Error('PE32 worker disposed'));
 		}
@@ -447,5 +487,9 @@ export class Pe32WorkerClient {
 
 	isAlive(): boolean {
 		return this.worker !== null && this.ready;
+	}
+
+	getLastStartError(): string | null {
+		return this.lastStartError;
 	}
 }

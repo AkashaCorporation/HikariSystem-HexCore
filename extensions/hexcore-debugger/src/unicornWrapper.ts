@@ -161,6 +161,7 @@ export type InterruptCallback = (intno: number) => void;
 export type AsyncInterruptCallback = (intno: number) => Promise<void>;
 
 export type ArchitectureType = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'riscv';
+export type ExecutionBackend = 'in-process' | 'worker-arm64' | 'worker-x64-elf' | 'worker-pe32';
 
 export class UnicornWrapper {
 	private unicornModule?: UnicornModule;
@@ -179,6 +180,7 @@ export class UnicornWrapper {
 	private memoryHooks: Map<number, MemoryHookCallback> = new Map();
 	private breakpoints: Set<bigint> = new Set();
 	private savedContext?: UnicornContext;
+	private savedStateMeta?: EmulationState;
 	private activeHookHandles: number[] = [];
 	// Flag set by API interceptors when they redirect execution (popReturnAddress)
 	private _apiHookRedirected: boolean = false;
@@ -186,6 +188,7 @@ export class UnicornWrapper {
 	// Native bindings block direct memWrite/regWrite during emulation.
 	private deferredMemoryWrites: Array<{ address: bigint; data: Buffer }> = [];
 	private deferredRegisterWrites: Map<string, bigint | number> = new Map();
+	private _lastFaultInfo?: Record<string, unknown>;
 
 	// Configurable callbacks for memory faults and interrupts
 	private memoryFaultHandler?: MemoryFaultCallback;
@@ -290,16 +293,28 @@ export class UnicornWrapper {
 			// ACG/CFG restrictions that crash Unicorn's JIT backend.
 			console.log('[arm64] Starting ARM64 worker process...');
 			this._arm64Worker = new Arm64WorkerClient();
-			await this._arm64Worker.start();
+			try {
+				await this._arm64Worker.start();
 
-			const { arch: ucArch, mode } = this.getArchMode(arch);
-			const initResult = await this._arm64Worker.initialize(ucArch, mode);
-			console.log(`[arm64] Worker initialized: version=${initResult.version}, pageSize=${initResult.pageSize}`);
+				const { arch: ucArch, mode } = this.getArchMode(arch);
+				const initResult = await this._arm64Worker.initialize(ucArch, mode);
+				console.log(`[arm64] Worker initialized: version=${initResult.version}, pageSize=${initResult.pageSize}`);
 
-			this.initialized = true;
-			this.state.isReady = true;
-			console.log(`Unicorn initialized via worker: ${arch} (version: ${initResult.version})`);
-			return;
+				this.initialized = true;
+				this.state.isReady = true;
+				console.log(`Unicorn initialized via worker: ${arch} (version: ${initResult.version})`);
+				return;
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (this._arm64Worker) {
+					this._arm64Worker.dispose();
+					this._arm64Worker = undefined;
+				}
+				this.initialized = false;
+				this.state.isReady = false;
+				this.lastError = `ARM64 worker startup failed: ${message}`;
+				throw new Error(this.lastError);
+			}
 		}
 
 		const { arch: ucArch, mode } = this.getArchMode(arch);
@@ -495,10 +510,20 @@ export class UnicornWrapper {
 			// Unicorn to the worker. This isolates emuStart from the
 			// Electron extension host heap, avoiding STATUS_HEAP_CORRUPTION.
 			this._x64ElfWorker = new X64ElfWorkerClient();
-			await this._x64ElfWorker.start();
+			try {
+				await this._x64ElfWorker.start();
 
-			const { arch: ucArch, mode } = this.getArchMode(this.architecture);
-			await this._x64ElfWorker.initialize(ucArch, mode);
+				const { arch: ucArch, mode } = this.getArchMode(this.architecture);
+				await this._x64ElfWorker.initialize(ucArch, mode);
+			} catch (error: unknown) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (this._x64ElfWorker) {
+					this._x64ElfWorker.dispose();
+					this._x64ElfWorker = undefined;
+				}
+				this.lastError = `x64 ELF worker startup failed: ${message}`;
+				throw new Error(this.lastError);
+			}
 
 			// Migrate all mapped memory regions from in-process to worker
 			// NOTE: Unicorn memRegions() returns end as INCLUSIVE (last valid byte),
@@ -598,10 +623,20 @@ export class UnicornWrapper {
 		// Start Pe32WorkerClient and migrate state from in-process
 		// Unicorn to the worker.
 		this._pe32Worker = new Pe32WorkerClient();
-		await this._pe32Worker.start();
+		try {
+			await this._pe32Worker.start();
 
-		const { arch: ucArch, mode } = this.getArchMode(this.architecture);
-		await this._pe32Worker.initialize(ucArch, mode);
+			const { arch: ucArch, mode } = this.getArchMode(this.architecture);
+			await this._pe32Worker.initialize(ucArch, mode);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			if (this._pe32Worker) {
+				this._pe32Worker.dispose();
+				this._pe32Worker = undefined;
+			}
+			this.lastError = `PE32 worker startup failed: ${message}`;
+			throw new Error(this.lastError);
+		}
 
 		// Migrate all mapped memory regions from in-process to worker
 		// NOTE: Unicorn memRegions() returns end as INCLUSIVE (last valid byte),
@@ -749,25 +784,17 @@ export class UnicornWrapper {
 					break;
 				}
 
-				// Read PC from worker
-				currentPc = await this._pe32Worker.regRead(pcRegId) as bigint;
-				this.state.currentAddress = currentPc;
-
-				// Breakpoint check (skip on first instruction)
-				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
-					this.state.isPaused = true;
-					return;
-				}
-				isFirstInstruction = false;
-
 				// Fire code hooks (API interception) before executing.
 				// Pull worker registers → in-process Unicorn for sync API compatibility.
 				this._apiHookRedirected = false;
+				let workerStackPointer: bigint | undefined;
 
 				if (this.codeHooks.size > 0 && this.uc) {
 					try {
 						if (isX64) {
 							const workerRegs = await this._pe32Worker.readAllX64Registers();
+							currentPc = BigInt(workerRegs.rip);
+							workerStackPointer = BigInt(workerRegs.rsp);
 							const REG = this.unicornModule.X86_REG;
 							this.uc.regWrite(REG.RAX, workerRegs.rax);
 							this.uc.regWrite(REG.RBX, workerRegs.rbx);
@@ -789,6 +816,8 @@ export class UnicornWrapper {
 							this.uc.regWrite(REG.RFLAGS, workerRegs.rflags);
 						} else {
 							const workerRegs = await this._pe32Worker.readAllX86Registers();
+							currentPc = BigInt(workerRegs.eip);
+							workerStackPointer = BigInt(workerRegs.esp);
 							const REG = this.unicornModule.X86_REG;
 							this.uc.regWrite(REG.EAX, Number(workerRegs.eax));
 							this.uc.regWrite(REG.EBX, Number(workerRegs.ebx));
@@ -804,9 +833,9 @@ export class UnicornWrapper {
 
 						// Sync stack memory from worker → in-process Unicorn
 						try {
-							const spRegVal = isX64
+							const spRegVal = workerStackPointer ?? (isX64
 								? BigInt(await this._pe32Worker.regRead(X86_REG.RSP))
-								: BigInt(await this._pe32Worker.regRead(X86_REG.ESP));
+								: BigInt(await this._pe32Worker.regRead(X86_REG.ESP)));
 							const syncBase = spRegVal - 64n;
 							const syncSize = 256;
 							const stackData = await this._pe32Worker.memRead(syncBase, syncSize);
@@ -817,7 +846,19 @@ export class UnicornWrapper {
 					} catch {
 						// Best-effort sync — if it fails, hooks will see stale data
 					}
+				} else {
+					// Read PC from worker when register block sync is not needed.
+					currentPc = await this._pe32Worker.regRead(pcRegId) as bigint;
 				}
+
+				this.state.currentAddress = currentPc;
+
+				// Breakpoint check (skip on first instruction)
+				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
 
 				this.codeHooks.forEach(cb => cb(currentPc, 0));
 
@@ -959,8 +1000,10 @@ export class UnicornWrapper {
 
 				if (result.error) {
 					this.state.lastError = result.error;
+					this._lastFaultInfo = result.faultInfo ?? undefined;
 					break;
 				}
+				this._lastFaultInfo = undefined;
 
 				if (result.stubHit && result.stubAddress !== null) {
 					// Worker hit a WinAPI stub address — dispatch on the host side.
@@ -1604,8 +1647,10 @@ export class UnicornWrapper {
 
 				if (result.error) {
 					this.state.lastError = result.error;
+					this._lastFaultInfo = result.faultInfo ?? undefined;
 					break;
 				}
+				this._lastFaultInfo = undefined;
 
 				if (result.stopped) {
 					// Terminal address reached
@@ -1694,17 +1739,6 @@ export class UnicornWrapper {
 					break;
 				}
 
-				// Read PC from worker
-				currentPc = await this._x64ElfWorker.regRead(X86_REG.RIP) as bigint;
-				this.state.currentAddress = currentPc;
-
-				// Breakpoint check (skip on first instruction)
-				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
-					this.state.isPaused = true;
-					return;
-				}
-				isFirstInstruction = false;
-
 				// Fire code hooks (API interception) before executing.
 				// The linuxApiHooks handlers use sync register/memory reads
 				// (getRegistersX64, readMemorySync, writeMemorySync, setRegisterSync)
@@ -1715,11 +1749,14 @@ export class UnicornWrapper {
 				// the worker into the in-process Unicorn BEFORE firing hooks, and push
 				// any mutations back to the worker AFTER hooks complete.
 				this._apiHookRedirected = false;
+				let workerStackPointer: bigint | undefined;
 
 				if (this.codeHooks.size > 0 && this.uc) {
 					// Pull worker registers → in-process Unicorn
 					try {
 						const workerRegs = await this._x64ElfWorker.readAllRegisters();
+						currentPc = BigInt(workerRegs.rip);
+						workerStackPointer = BigInt(workerRegs.rsp);
 						const REG = this.unicornModule.X86_REG;
 						this.uc.regWrite(REG.RAX, workerRegs.rax);
 						this.uc.regWrite(REG.RBX, workerRegs.rbx);
@@ -1746,7 +1783,7 @@ export class UnicornWrapper {
 						// sync it, the API hook will read stale host memory and fetch garbage
 						// (like "hexcore" from argv) instead of the real return address.
 						try {
-							const rsp = BigInt(workerRegs.rsp);
+							const rsp = workerStackPointer ?? BigInt(workerRegs.rsp);
 							// Read 256 bytes around RSP (mostly above RSP since it grows down)
 							const syncBase = rsp - 64n;
 							const syncSize = 256;
@@ -1774,7 +1811,19 @@ export class UnicornWrapper {
 					} catch {
 						// Best-effort sync — if it fails, hooks will see stale data
 					}
+				} else {
+					// Read PC from worker when register block sync is not needed.
+					currentPc = await this._x64ElfWorker.regRead(X86_REG.RIP) as bigint;
 				}
+
+				this.state.currentAddress = currentPc;
+
+				// Breakpoint check (skip on first instruction)
+				if (this.breakpoints.has(currentPc) && !isFirstInstruction) {
+					this.state.isPaused = true;
+					return;
+				}
+				isFirstInstruction = false;
 
 				this.codeHooks.forEach(cb => cb(currentPc, 0));
 
@@ -1892,8 +1941,10 @@ export class UnicornWrapper {
 
 				if (result.error) {
 					this.state.lastError = result.error;
+					this._lastFaultInfo = result.faultInfo ?? undefined;
 					break;
 				}
+				this._lastFaultInfo = undefined;
 
 				if (result.stopped) {
 					let isTerminalRange = false;
@@ -3135,6 +3186,8 @@ export class UnicornWrapper {
 	 * Save current state (snapshot)
 	 */
 	async saveState(): Promise<void> {
+		this.savedStateMeta = { ...this.state };
+
 		if (this._arm64Worker) {
 			if (this._workerContextId !== undefined) {
 				await this._arm64Worker.contextFree(this._workerContextId);
@@ -3175,6 +3228,9 @@ export class UnicornWrapper {
 				throw new Error('No saved state');
 			}
 			await this._arm64Worker.contextRestore(this._workerContextId);
+			if (this.savedStateMeta) {
+				this.state = { ...this.savedStateMeta };
+			}
 			return;
 		}
 		if (this._x64ElfWorker) {
@@ -3182,6 +3238,9 @@ export class UnicornWrapper {
 				throw new Error('No saved state');
 			}
 			await this._x64ElfWorker.contextRestore(this._workerContextId);
+			if (this.savedStateMeta) {
+				this.state = { ...this.savedStateMeta };
+			}
 			return;
 		}
 		if (this._pe32Worker) {
@@ -3189,12 +3248,18 @@ export class UnicornWrapper {
 				throw new Error('No saved state');
 			}
 			await this._pe32Worker.contextRestore(this._workerContextId);
+			if (this.savedStateMeta) {
+				this.state = { ...this.savedStateMeta };
+			}
 			return;
 		}
 		if (!this.uc || !this.savedContext) {
 			throw new Error('No saved state');
 		}
 		this.uc.contextRestore(this.savedContext);
+		if (this.savedStateMeta) {
+			this.state = { ...this.savedStateMeta };
+		}
 	}
 
 	/**
@@ -3243,6 +3308,23 @@ export class UnicornWrapper {
 
 	getLastError(): string | undefined {
 		return this.lastError;
+	}
+
+	getLastFaultInfo(): Record<string, unknown> | undefined {
+		return this._lastFaultInfo;
+	}
+
+	getExecutionBackend(): ExecutionBackend {
+		if (this._arm64Worker) {
+			return 'worker-arm64';
+		}
+		if (this._x64ElfWorker) {
+			return 'worker-x64-elf';
+		}
+		if (this._pe32Worker) {
+			return 'worker-pe32';
+		}
+		return 'in-process';
 	}
 
 	/**

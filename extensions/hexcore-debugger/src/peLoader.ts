@@ -43,6 +43,16 @@ const TEB_ADDRESS = 0x7FFDE000n;
 const TEB_SIZE = 0x2000;
 const PEB_ADDRESS = 0x7FFD0000n;
 const PEB_SIZE = 0x1000;
+const TLS_STORAGE_BASE = 0x7FFB0000n;
+const TLS_STORAGE_SIZE = 0x10000;
+const TLS_VECTOR_ADDRESS = 0x7FFC0000n;
+const TLS_VECTOR_SIZE = 0x10000;
+
+// Keep these aligned with DebugEngine.loadPE()/setupStack().
+const DEFAULT_STACK_BASE = 0x7FFF0000n;
+const DEFAULT_STACK_SIZE = 0x100000n;
+const DEFAULT_STACK_LIMIT = DEFAULT_STACK_BASE;
+const DEFAULT_STACK_TOP = DEFAULT_STACK_BASE + DEFAULT_STACK_SIZE;
 
 export class PELoader {
 	private emulator: UnicornWrapper;
@@ -101,6 +111,10 @@ export class PELoader {
 		const relocDirRVA = fileBuffer.readUInt32LE(dataDirectoryOffset + 40);
 		const relocDirSize = fileBuffer.readUInt32LE(dataDirectoryOffset + 44);
 
+		// TLS directory (IMAGE_DIRECTORY_ENTRY_TLS = 9)
+		const tlsDirRVA = fileBuffer.readUInt32LE(dataDirectoryOffset + 72);
+		const tlsDirSize = fileBuffer.readUInt32LE(dataDirectoryOffset + 76);
+
 		// Parse sections
 		const sectionTableOffset = peOffset + 24 + sizeOfOptionalHeader;
 		const sections = this.parseSections(fileBuffer, sectionTableOffset, numberOfSections, imageBase);
@@ -122,6 +136,11 @@ export class PELoader {
 
 		// Setup TEB and PEB
 		this.setupTebPeb(is64Bit, imageBase);
+
+		// Setup a minimal static TLS block if the image declares one.
+		if (tlsDirRVA > 0 && tlsDirSize > 0) {
+			this.setupStaticTls(fileBuffer, tlsDirRVA, tlsDirSize, sections, imageBase, is64Bit);
+		}
 
 		this.peInfo = {
 			is64Bit,
@@ -364,6 +383,11 @@ export class PELoader {
 	 * Setup minimal TEB (Thread Environment Block) and PEB (Process Environment Block)
 	 */
 	private setupTebPeb(is64Bit: boolean, imageBase: bigint): void {
+		// Map a minimal TLS pointer vector so gs:[0x58]/fs:[0x2c] lookups do not
+		// collapse into low-page reads during CRT/runtime initialization.
+		this.emulator.mapMemoryRaw(TLS_VECTOR_ADDRESS, TLS_VECTOR_SIZE, 3); // RW
+		this.memoryManager.trackAllocation(TLS_VECTOR_ADDRESS, TLS_VECTOR_SIZE, 3, 'TLS-vector');
+
 		// Map TEB
 		this.emulator.mapMemoryRaw(TEB_ADDRESS, TEB_SIZE, 3); // RW
 		this.memoryManager.trackAllocation(TEB_ADDRESS, TEB_SIZE, 3, 'TEB');
@@ -374,30 +398,43 @@ export class PELoader {
 
 		const teb = Buffer.alloc(TEB_SIZE);
 		const peb = Buffer.alloc(PEB_SIZE);
+		const tlsVector = Buffer.alloc(TLS_VECTOR_SIZE);
 
 		if (is64Bit) {
+			// NT_TIB64
+			teb.writeBigUInt64LE(DEFAULT_STACK_TOP, 0x08);   // StackBase
+			teb.writeBigUInt64LE(DEFAULT_STACK_LIMIT, 0x10); // StackLimit
+
 			// TEB64: offset 0x30 = pointer to self (TEB)
 			teb.writeBigUInt64LE(TEB_ADDRESS, 0x30);
+			// TEB64: offset 0x40 = ProcessId (fake)
+			teb.writeUInt32LE(0x1000, 0x40);
+			// TEB64: offset 0x48 = ThreadId (fake)
+			teb.writeUInt32LE(0x1004, 0x48);
+			// TEB64: offset 0x58 = ThreadLocalStoragePointer
+			teb.writeBigUInt64LE(TLS_VECTOR_ADDRESS, 0x58);
 			// TEB64: offset 0x60 = pointer to PEB
 			teb.writeBigUInt64LE(PEB_ADDRESS, 0x60);
-			// TEB64: offset 0x48 = ProcessId (fake)
-			teb.writeUInt32LE(0x1000, 0x48);
-			// TEB64: offset 0x40 = ThreadId (fake)
-			teb.writeUInt32LE(0x1004, 0x40);
 
 			// PEB64: offset 0x02 = BeingDebugged (FALSE - anti-anti-debug)
 			peb[0x02] = 0;
 			// PEB64: offset 0x10 = ImageBaseAddress
 			peb.writeBigUInt64LE(imageBase, 0x10);
 		} else {
+			// NT_TIB32
+			teb.writeUInt32LE(Number(DEFAULT_STACK_TOP & 0xFFFFFFFFn), 0x04);   // StackBase
+			teb.writeUInt32LE(Number(DEFAULT_STACK_LIMIT & 0xFFFFFFFFn), 0x08); // StackLimit
+
 			// TEB32: offset 0x18 = pointer to self
 			teb.writeUInt32LE(Number(TEB_ADDRESS & 0xFFFFFFFFn), 0x18);
+			// TEB32: offset 0x20 = ProcessId
+			teb.writeUInt32LE(0x1000, 0x20);
+			// TEB32: offset 0x24 = ThreadId
+			teb.writeUInt32LE(0x1004, 0x24);
+			// TEB32: offset 0x2C = ThreadLocalStoragePointer
+			teb.writeUInt32LE(Number(TLS_VECTOR_ADDRESS & 0xFFFFFFFFn), 0x2C);
 			// TEB32: offset 0x30 = pointer to PEB
 			teb.writeUInt32LE(Number(PEB_ADDRESS & 0xFFFFFFFFn), 0x30);
-			// TEB32: offset 0x24 = ProcessId
-			teb.writeUInt32LE(0x1000, 0x24);
-			// TEB32: offset 0x20 = ThreadId
-			teb.writeUInt32LE(0x1004, 0x20);
 
 			// PEB32: offset 0x02 = BeingDebugged (FALSE)
 			peb[0x02] = 0;
@@ -405,6 +442,7 @@ export class PELoader {
 			peb.writeUInt32LE(Number(imageBase & 0xFFFFFFFFn), 0x08);
 		}
 
+		this.emulator.writeMemory(TLS_VECTOR_ADDRESS, tlsVector);
 		this.emulator.writeMemory(TEB_ADDRESS, teb);
 		this.emulator.writeMemory(PEB_ADDRESS, peb);
 
@@ -412,15 +450,98 @@ export class PELoader {
 		const regConsts = this.emulator.getX86RegConstants();
 		if (regConsts) {
 			if (is64Bit) {
-				this.emulator.setRegister('rsp', 0n); // Will be set by setupStack
-				// GS base points to TEB on x64 Windows
+				// GS base points to TEB on x64 Windows.
 				try {
-					// GS_BASE is used by x64 Windows for TEB access
-					this.emulator.setRegister('rax', 0n); // Temp - GS_BASE set below
+					this.emulator.setRegisterSync('gs_base', TEB_ADDRESS);
 				} catch {
-					// GS_BASE register may not be directly writable on all unicorn versions
+					// GS_BASE register may not be directly writable on all Unicorn builds.
+				}
+			} else {
+				// FS base points to TEB on x86 Windows.
+				try {
+					this.emulator.setRegisterSync('fs_base', TEB_ADDRESS);
+				} catch {
+					// FS_BASE register may not be directly writable on all Unicorn builds.
 				}
 			}
+		}
+	}
+
+	/**
+	 * Setup a minimal static TLS block for PE images that use IMAGE_TLS_DIRECTORY.
+	 * This mirrors the loader behavior enough for gs:[0x58]/fs:[0x2c] consumers:
+	 * slot 0 is populated and the module's _tls_index is set to 0.
+	 */
+	private setupStaticTls(
+		buf: Buffer,
+		tlsDirRVA: number,
+		_tlsDirSize: number,
+		sections: PESection[],
+		imageBase: bigint,
+		is64Bit: boolean
+	): void {
+		const tlsDirOffset = this.rvaToFileOffset(tlsDirRVA, sections, imageBase);
+		if (tlsDirOffset < 0) {
+			return;
+		}
+
+		let startAddressOfRawData = 0n;
+		let endAddressOfRawData = 0n;
+		let addressOfIndex = 0n;
+		let sizeOfZeroFill = 0;
+
+		if (is64Bit) {
+			if (tlsDirOffset + 40 > buf.length) {
+				return;
+			}
+			startAddressOfRawData = buf.readBigUInt64LE(tlsDirOffset);
+			endAddressOfRawData = buf.readBigUInt64LE(tlsDirOffset + 8);
+			addressOfIndex = buf.readBigUInt64LE(tlsDirOffset + 16);
+			sizeOfZeroFill = buf.readUInt32LE(tlsDirOffset + 32);
+		} else {
+			if (tlsDirOffset + 24 > buf.length) {
+				return;
+			}
+			startAddressOfRawData = BigInt(buf.readUInt32LE(tlsDirOffset));
+			endAddressOfRawData = BigInt(buf.readUInt32LE(tlsDirOffset + 4));
+			addressOfIndex = BigInt(buf.readUInt32LE(tlsDirOffset + 8));
+			sizeOfZeroFill = buf.readUInt32LE(tlsDirOffset + 16);
+		}
+
+		let template = Buffer.alloc(0);
+		const rawSizeBig = endAddressOfRawData > startAddressOfRawData ? endAddressOfRawData - startAddressOfRawData : 0n;
+		if (rawSizeBig > 0n) {
+			const rawSize = Number(rawSizeBig);
+			if (rawSize > 0 && rawSize <= TLS_STORAGE_SIZE) {
+				try {
+					template = Buffer.from(this.emulator.readMemorySync(startAddressOfRawData, rawSize));
+				} catch {
+					template = Buffer.alloc(0);
+				}
+			}
+		}
+
+		const pageSize = this.emulator.getPageSize();
+		const tlsDataBytes = Math.max(pageSize, Math.ceil((template.length + sizeOfZeroFill) / pageSize) * pageSize);
+		this.emulator.mapMemoryRaw(TLS_STORAGE_BASE, tlsDataBytes, 3); // RW
+		this.memoryManager.trackAllocation(TLS_STORAGE_BASE, tlsDataBytes, 3, 'TLS-data');
+
+		const tlsData = Buffer.alloc(tlsDataBytes);
+		template.copy(tlsData, 0);
+		this.emulator.writeMemory(TLS_STORAGE_BASE, tlsData);
+
+		const vectorEntry = Buffer.alloc(is64Bit ? 8 : 4);
+		if (is64Bit) {
+			vectorEntry.writeBigUInt64LE(TLS_STORAGE_BASE, 0);
+		} else {
+			vectorEntry.writeUInt32LE(Number(TLS_STORAGE_BASE & 0xFFFFFFFFn), 0);
+		}
+		this.emulator.writeMemory(TLS_VECTOR_ADDRESS, vectorEntry);
+
+		if (addressOfIndex !== 0n) {
+			const indexBuf = Buffer.alloc(4);
+			indexBuf.writeUInt32LE(0, 0);
+			this.emulator.writeMemorySync(addressOfIndex, indexBuf);
 		}
 	}
 

@@ -78,6 +78,7 @@ export interface ExecuteBatchResult {
 	syscallEncountered: boolean;
 	syscallPc: bigint | null;
 	syscallType: 'syscall' | 'int80' | null;
+	faultInfo?: Record<string, unknown> | null;
 }
 
 export interface X64Registers {
@@ -95,13 +96,19 @@ export class X64ElfWorkerClient {
 	private ready = false;
 	private readyPromise: Promise<void> | null = null;
 	private pageSize = 0x1000;
+	private lastStartError: string | null = null;
+
+	private static readonly START_TIMEOUT_MS = 15000;
 
 	/**
 	 * Spawn the worker process.
 	 */
 	async start(): Promise<void> {
-		if (this.worker) {
+		if (this.worker && this.ready) {
 			return;
+		}
+		if (this.readyPromise) {
+			return this.readyPromise;
 		}
 
 		const workerPath = path.join(__dirname, '..', 'src', 'x64ElfWorker.js');
@@ -140,67 +147,85 @@ export class X64ElfWorkerClient {
 			});
 		}
 
-		this.worker.on('message', (msg: Record<string, unknown>) => {
-			if (msg.type === 'ready') {
-				this.ready = true;
-				return;
-			}
-			if (msg.type === 'hook-event') {
-				// Hook events from native hooks (for future use)
-				return;
-			}
+		this.ready = false;
+		this.lastStartError = null;
 
-			const id = msg.id as number;
-			const pending = this.pending.get(id);
-			if (!pending) {
-				return;
-			}
-			this.pending.delete(id);
-
-			if (msg.error) {
-				pending.reject(new Error(msg.error as string));
-			} else {
-				pending.resolve(deserialize(msg.result));
-			}
-		});
-
-		// Relay worker stdout/stderr so diagnostic output is visible
-		if (this.worker.stdout) {
-			this.worker.stdout.on('data', (chunk: Buffer) => {
-				process.stdout.write(`[x64ElfWorker:stdout] ${chunk}`);
-			});
-		}
-		if (this.worker.stderr) {
-			this.worker.stderr.on('data', (chunk: Buffer) => {
-				process.stderr.write(`[x64ElfWorker:stderr] ${chunk}`);
-			});
-		}
-
-		this.worker.on('exit', (code, signal) => {
-			console.log(`[x64ElfWorker] exited: code=${code}, signal=${signal}`);
-			this.worker = null;
-			this.ready = false;
-			// Reject all pending calls
-			for (const [, p] of this.pending) {
-				p.reject(new Error(`X64 ELF worker exited with code ${code}`));
-			}
-			this.pending.clear();
-		});
-
-		this.worker.on('error', (err) => {
-			console.error(`[x64ElfWorker] error: ${err.message}`);
-		});
-
-		// Wait for the worker to be ready
-		this.readyPromise = new Promise<void>((resolve) => {
-			const check = () => {
-				if (this.ready) {
-					resolve();
+		this.readyPromise = new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const finish = (error?: Error) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timeoutHandle);
+				this.readyPromise = null;
+				if (error) {
+					this.lastStartError = error.message;
+					reject(error);
 				} else {
-					setTimeout(check, 10);
+					this.lastStartError = null;
+					resolve();
 				}
 			};
-			check();
+
+			const timeoutHandle = setTimeout(() => {
+				finish(new Error(`X64 ELF worker failed to become ready within ${X64ElfWorkerClient.START_TIMEOUT_MS}ms`));
+			}, X64ElfWorkerClient.START_TIMEOUT_MS);
+
+			this.worker!.on('message', (msg: Record<string, unknown>) => {
+				if (msg.type === 'ready') {
+					this.ready = true;
+					finish();
+					return;
+				}
+				if (msg.type === 'hook-event') {
+					return;
+				}
+
+				const id = msg.id as number;
+				const pending = this.pending.get(id);
+				if (!pending) {
+					return;
+				}
+				this.pending.delete(id);
+
+				if (msg.error) {
+					pending.reject(new Error(msg.error as string));
+				} else {
+					pending.resolve(deserialize(msg.result));
+				}
+			});
+
+			if (this.worker!.stdout) {
+				this.worker!.stdout.on('data', (chunk: Buffer) => {
+					process.stdout.write(`[x64ElfWorker:stdout] ${chunk}`);
+				});
+			}
+			if (this.worker!.stderr) {
+				this.worker!.stderr.on('data', (chunk: Buffer) => {
+					process.stderr.write(`[x64ElfWorker:stderr] ${chunk}`);
+				});
+			}
+
+			this.worker!.on('exit', (code, signal) => {
+				console.log(`[x64ElfWorker] exited: code=${code}, signal=${signal}`);
+				this.worker = null;
+				this.ready = false;
+				if (!settled) {
+					finish(new Error(`X64 ELF worker exited before ready (code=${code}, signal=${signal})`));
+				}
+				for (const [, p] of this.pending) {
+					p.reject(new Error(`X64 ELF worker exited with code ${code}`));
+				}
+				this.pending.clear();
+			});
+
+			this.worker!.on('error', (err) => {
+				console.error(`[x64ElfWorker] error: ${err.message}`);
+				if (!settled) {
+					finish(new Error(`X64 ELF worker process error: ${err.message}`));
+				}
+			});
 		});
 
 		await this.readyPromise;
@@ -211,7 +236,12 @@ export class X64ElfWorkerClient {
 	 */
 	private call(method: string, ...args: unknown[]): Promise<unknown> {
 		if (!this.worker) {
-			return Promise.reject(new Error('X64 ELF worker not started'));
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`X64 ELF worker not started${suffix}`));
+		}
+		if (!this.ready) {
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`X64 ELF worker is not ready${suffix}`));
 		}
 
 		const id = this.nextId++;
@@ -319,7 +349,8 @@ export class X64ElfWorkerClient {
 			error: result.error as string | null,
 			syscallEncountered: result.syscallEncountered as boolean,
 			syscallPc: result.syscallPc as bigint | null,
-			syscallType: result.syscallType as 'syscall' | 'int80' | null
+			syscallType: result.syscallType as 'syscall' | 'int80' | null,
+			faultInfo: (result.faultInfo as Record<string, unknown> | null | undefined) ?? null
 		};
 	}
 
@@ -419,6 +450,7 @@ export class X64ElfWorkerClient {
 			this.worker = null;
 		}
 		this.ready = false;
+		this.readyPromise = null;
 		for (const [, p] of this.pending) {
 			p.reject(new Error('X64 ELF worker disposed'));
 		}
@@ -427,5 +459,9 @@ export class X64ElfWorkerClient {
 
 	isAlive(): boolean {
 		return this.worker !== null && this.ready;
+	}
+
+	getLastStartError(): string | null {
+		return this.lastStartError;
 	}
 }

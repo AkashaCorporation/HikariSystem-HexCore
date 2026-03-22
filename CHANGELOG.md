@@ -5,6 +5,79 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.2] - 2026-03-22 - "Headless Hardening + Runtime Convergence"
+
+> **Stabilization & Architecture Release** — Focused convergence release ahead of the `3.8.0` Helix-first transition. `v3.7.2` hardens the automation-first HexCore stack across three fronts: (1) wrapper fidelity for Capstone and LLVM MC, (2) worker/runtime stability for Unicorn-backed debugger flows, and (3) first-round Remill/Helix precision fixes so LLVM IR and decompiler output stop lying in high-impact control-flow cases.
+
+### Added
+
+- **Richer Headless Debugger Metadata** — Headless debugger outputs now expose `executionBackend` and, on faulted runs, structured `faultInfo` to make worker-vs-in-process mode and unmapped-memory failures visible to operators and pipeline jobs.
+- **`permissiveMemoryMapping` in `emulateHeadless`** — The lighter headless emulation entry point now accepts `permissiveMemoryMapping`, allowing more aggressive PE/x64 runtime experiments without forcing the full emulation command surface.
+- **Expanded PE/CRT Runtime Contracts** — Added or strengthened WinAPI/CRT hook coverage used by real PE64 samples, including `GetSystemTimeAsFileTime`, `GetSystemInfo`, `GetNativeSystemInfo`, `GetCommandLineA/W`, `GetStartupInfoA/W`, `K32GetProcessMemoryInfo`, `psapi!GetProcessMemoryInfo`, `_get_wide_winmain_command_line`, `WideCharToMultiByte`, `MultiByteToWideChar`, and `__stdio_common_vsprintf_s`.
+- **Wave 2 Runtime Diagnostics Notes** — Added dedicated runtime findings and updated automation/job-template docs covering `executionBackend`, `faultInfo`, `permissiveMemoryMapping`, trace-loop jobs, and breakpoint-loop jobs.
+- **Remill LLVM Optimization Pass Pipeline (Phase 5.5)** — The Remill wrapper now runs a curated sequence of LLVM passes on lifted IR before output: SROA → mem2reg → EarlyCSE → InstCombine → SimplifyCFG → DCE → ADCE → DSE → InstCombine → SimplifyCFG. A double-round of InstCombine + SimplifyCFG catches opportunities exposed by dead store elimination. Eliminates flag computation intrinsics, redundant State store/load sequences, and trampolim blocks. IR size reduced by ~55% on reference functions. Enabled by default via `optimizeIR: true`.
+- **Remill Boundary Detection (`LiftOptions`)** — New configurable limits prevent the wrapper from generating oversized IR for large functions: `maxInstructions` (default: 2000), `maxBasicBlocks` (default: 500), `maxBytes` (default: 32KB). Result includes `truncated`, `nextAddress`, and `truncationReason` for chunked lifting support.
+- **Remill CALL Target Recording** — Phase 1 pre-decode now detects direct and indirect function calls, records external call targets in `LiftResult.callTargets[]`, and creates proper basic block boundaries at CALL fall-through addresses.
+- **Remill SSA Value Naming (Phase 6)** — All unnamed LLVM values and basic blocks receive explicit names (`%v0`, `%v1`, `%bb_0`, ...) before IR printing, eliminating SSA numbering parse failures in downstream `.ll` consumers.
+- **Remill `LiftOptions` JS API** — `liftBytes()` now accepts an optional third argument: `{ maxInstructions, maxBasicBlocks, maxBytes, splitAtCalls, optimizeIR }`. All options have sensible defaults and are backward-compatible.
+- **Helix Smart Parenthesization** — The Pseudo-C emitter now uses a full C operator precedence table (15 levels) to decide when parentheses are needed. Binary expressions like `(rbp - 0x31)` are emitted as `rbp - 0x31`; nested arithmetic like `(a + (b * c))` becomes `a + b * c`. All 50+ expression handlers across HelixHigh, HelixMid, HelixLow, LLVM, and Arith dialects were updated.
+- **Helix Vtable Pattern Recovery** — Indirect calls through vtable offsets (e.g., `CALL [RAX+0x18]`) are now detected during HelixLow-to-Mid conversion. The vtable offset is propagated as an attribute through the 3-tier pipeline (Low→Mid→High) and emitted as `obj->vfunc_0x18(args)`. Fixes a regression from v0.6.0 where the Mid tier lost target expression info.
+- **Helix PC Alloca Detection** — Robust fallback for PC register tracking when the Remill IR uses a GEP into the State struct (not a plain alloca) for `%PC`. The engine detects the PC pointer by matching the first `store entryAddr` and tracks all subsequent stores to the same pointer. Includes a per-block SSA evaluation cache that prevents address drift from mutated `trackedValues`.
+- **Helix Label Deduplication & Goto Elimination** — Labels at the same address now receive unique suffixes (`loc_1405d3e75`, `loc_1405d3e75_2`). A new Phase 4.6 in StructureControlFlow removes trivial gotos that jump to the immediately following block (natural fallthroughs).
+- **Helix Memory CMP/TEST Dereference** — When Remill semantics indicate a memory-source operand (`CMP [addr], imm` / `TEST [addr], imm`), the engine now emits a `MemReadOp` to load the value before comparing. Fixes `if (0x142dde25a != 0)` (always-true address comparison) → `if (*0x142dde25a != 0)` (correct value comparison).
+
+### Changed
+
+- **Capstone Async Option Parity** — The async disassembly path now replays the supported native handle options instead of effectively preserving only `DETAIL`, bringing the wrapper closer to real engine behavior.
+- **LLVM MC Wrapper Surface** — The product wrapper now exposes more of the native assembly surface, including CPU/features knobs and clearer trust boundaries around `assembleMultiple`.
+- **Disassembler Function Discovery** — Indirect memory operands are no longer accepted as if they were real direct branch/call targets, eliminating large classes of fake discovered functions.
+- **Worker Lifecycle Alignment** — ARM64, x64 ELF, and PE32 worker clients now share a more consistent startup/ready/error/cleanup model, including stronger startup diagnostics and better system-Node fallback behavior.
+- **Headless Documentation Refresh** — `HEXCORE_AUTOMATION.md` and `HEXCORE_JOB_TEMPLATES.md` were refreshed to reflect the real Wave 2 debugger surface and current Helix-first workflow.
+- **`hexcore-remill` version** — Bumped to `0.2.0`. Default lifting behavior now applies LLVM optimization passes and boundary limits automatically. Reference function `sub_1405d3e00` (7,500 bytes, 235 blocks) dropped from ~16,700 lines to ~7,500 lines of IR. Helix output for the same function went from 60+ blocks with unresolved gotos to a clean 24-line function at 100% confidence.
+
+### Fixed
+
+- **Ghost Function Pollution in Deep Analysis** — Fixed a high-impact function-discovery bug where indirect targets such as `[rip + 0x10]` were misread as real addresses, producing hundreds of zero-byte or tiny fake functions like `sub_10`, `sub_18`, and `sub_20`.
+- **ARM64 Worker Startup Failure** — Fixed the `ARM64 worker not started` failure mode by hardening worker bootstrap, readiness checks, and startup error reporting.
+- **Repeated-Run `UC_ERR_MAP` Regressions** — Debugger sessions now clean previous emulation state before remapping, preventing duplicate-map failures when rerunning headless jobs back to back.
+- **PE64 RIP / Register Desynchronization** — Fixed stale register snapshots and x64 program-counter truncation in the PE worker path so `currentAddress`, `rip`, and headless register dumps stay coherent after execution.
+- **Snapshot / Restore Metadata Drift** — Restoring a snapshot now restores both machine state and HexCore-side execution metadata, preventing mismatches between registers, `currentAddress`, and `instructionsExecuted`.
+- **PE x64 TEB / GS Runtime Gaps** — Fixed Windows x64 emulation gaps around `GS_BASE`, TEB, TLS-vector, and TLS-data setup so real PE64 targets can execute substantially deeper before hitting bogus unmapped-memory faults.
+- **PE Import Stub Dispatch** — Fixed the PE worker batch/stub dispatch argument ordering bug that prevented import-hook paths from activating reliably in worker mode.
+- **`setBreakpointHeadless` Output Contract** — The headless breakpoint command now writes its declared output file correctly instead of succeeding without producing the expected artifact.
+- **Remill Conditional Branch Lowering** — Fixed a major lowering bug where lifted conditional branches could collapse into `br i1 true`; the wrapper now uses real branch state instead of placeholder always-taken control flow.
+- **Remill `NEXT_PC` Propagation** — Fixed unsafe `%NEXT_PC` inheritance across conditional predecessors, improving PC/NEXT-PC stamping at basic-block boundaries in lifted LLVM IR.
+- **Helix MLIR Stability** — Fixed a fatal MLIR liveness assertion caused by values escaping newly structured regions, allowing previously crashing decompilation cases to complete and produce output again.
+- **Helix Indirect Call Honesty** — Unresolved indirect-call rendering was improved so Helix stops pretending obviously internal branch targets are clean direct calls. The instruction address is no longer used as a fake callee address (`__indirect_1405d3e0f` → `__indirect_call`); vtable calls show `obj->vfunc_0xNN()` instead.
+- **Helix PC Address Tracking** — Fixed all decompiled instructions showing the same address (`// 0x1405d3e75` everywhere) due to SSA re-evaluation of `load NEXT_PC` seeing mutated `trackedValues`. Each instruction now carries its correct unique binary address.
+- **Helix `loc_irr_*` Labels** — Irreducible control flow labels changed from meaningless counters (`loc_irr_100`, `loc_irr_103`) to hex addresses from the binary (`loc_1405d3e75`, `loc_1405d42a8`).
+- **Helix VarRefOp / UndefOp / RetOp Emission** — Fixed `/* unhandled: helix_high.var.ref */` appearing as statements, `/* undef */` in expressions, and missing `helix_low.ret` handler.
+- **Remill Prebuild Loading Priority** — Discovered that `index.js` loads prebuilds before `build/Release/`, silently ignoring newly compiled `.node` files. Resolved by ensuring the build output is copied to the prebuild directory.
+- **Remill SSA Numbering Errors** — Multi-block lifting inserted instructions into different blocks out of creation order and the strip phase removed referenced values, producing `expected to be numbered '%894' or greater` parse errors. Fixed by explicit value naming in Phase 6.
+- **Remill Missing CALL Fall-Through Leaders** — Function call instructions did not create basic block boundaries at their fall-through addresses, causing CALL instructions to be merged into larger blocks instead of properly splitting the CFG.
+
+### Architecture Notes
+
+- `v3.7.2` is the stabilization bridge into `v3.8.0`, not the full IPC redesign. Shared-memory / zero-copy IPC groundwork improved, but backlog item `#31` is not fully implemented in this release.
+- Real-world runtime validation improved substantially on both ARM64 and PE64 targets. Representative Wave 2 validation now survives repeated-run, snapshot/restore, and long PE64 worker sessions that previously failed early.
+- Standalone native repos were advanced in parallel with the monorepo work:
+  - `hexcore-capstone` `1.3.3`
+  - `hexcore-llvm-mc` `1.0.1`
+  - `hexcore-unicorn` `1.2.2`
+  - `hexcore-remill` `0.2.0` — LLVM optimization passes, boundary detection, SSA fix
+  - `hexcore-helix` `0.7.0` — Smart parens, vtable recovery, PC tracking, label dedup, memory CMP dereference
+- The Remill LLVM pass pipeline uses the New Pass Manager (LLVM 18.1.8). All required libraries (`LLVMPasses`, `LLVMScalarOpts`, `LLVMInstCombine`, `LLVMAnalysis`, `LLVMTransformUtils`) were already present in deps — no new dependencies added. The `.node` binary grew from ~10.6 MB to ~17 MB due to linking the pass infrastructure.
+- The pass pipeline is a prerequisite for the Souper superoptimizer planned in v3.8.0. Souper works best on pre-cleaned IR; the passes remove the obvious noise so Souper can focus on non-trivial optimizations.
+- `optimizeIR: false` is the recommended escape hatch for malware analysis scenarios where DCE/ADCE might remove intentional junk code that analysts need to study.
+- Standalone `hexcore-remill` published at `AkashaCorporation/hexcore-remill` v0.2.0.
+
+### Notes
+
+- Rellic remains transitional and deprecated. Helix is the strategic decompiler direction going into `v3.8.0`.
+- `v3.8.0` remains the release where larger decompiler architecture work, including Souper-era changes and final Rellic removal, is expected to mature.
+
+---
+
 ## [3.7.1] - 2026-03-18 - "Dynamic Intelligence + XOR Massive Update"
 
 > **Feature Release** — Two major feature sets shipped together as the first stable release since v3.7.0-beta.2. (1) Dynamic Intelligence: robust emulation (permissive memory mapping, faithful glibc/MSVCRT PRNG), advanced disassembly analysis (junk filtering, VM detection, PRNG pattern detection), runtime memory inspection (dumps, breakpoint auto-snapshots, side-channel analysis, dumpAndDisassemble), Rellic IR optimization passes with Souper hook for v3.8, and conditional pipeline branching (`onResult`). (2) XOR Massive Update: complete overhaul of the `hexcore-strings` deobfuscation engine from 3 scanners to 9, with centralized scoring, PE section awareness, and 19 new property-based tests. All features maintain full backward compatibility. Rellic marked deprecated — removal planned for v3.8.0.

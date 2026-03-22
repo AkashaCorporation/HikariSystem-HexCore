@@ -384,61 +384,6 @@ Napi::Value LlvmMcWrapper::AssembleMultiple(const Napi::CallbackInfo& info) {
 	}
 
 	try {
-		// --- Setup LLVM Pipeline Reuse ---
-		llvm::SourceMgr srcMgr;
-		llvm::MCTargetOptions mcOptions;
-		mcOptions.MCUseDwarfDirectory = llvm::MCTargetOptions::DisableDwarfDirectory;
-
-		llvm::Triple tripleObj(triple_);
-		auto objFileInfo = std::make_unique<llvm::MCObjectFileInfo>();
-
-		llvm::MCContext ctx(tripleObj, asmInfo_.get(), regInfo_.get(),
-							subtargetInfo_.get(), &srcMgr, &mcOptions);
-		objFileInfo->initMCObjectFileInfo(ctx, false, false);
-		ctx.setObjectFileInfo(objFileInfo.get());
-
-		// Use a vector to capture output bytes
-		llvm::SmallVector<char, 1024> codeBuffer;
-		llvm::raw_svector_ostream vecOS(codeBuffer);
-
-		auto codeEmitter = std::unique_ptr<llvm::MCCodeEmitter>(
-			target_->createMCCodeEmitter(*instrInfo_, ctx));
-
-		auto asmBackend = std::unique_ptr<llvm::MCAsmBackend>(
-			target_->createMCAsmBackend(*subtargetInfo_, *regInfo_, mcOptions));
-
-		auto objectWriter = asmBackend->createObjectWriter(vecOS);
-
-		auto streamer = std::unique_ptr<llvm::MCStreamer>(
-			target_->createMCObjectStreamer(
-				tripleObj, ctx, std::move(asmBackend),
-				std::move(objectWriter), std::move(codeEmitter),
-				*subtargetInfo_, true, false, false));
-
-		if (!streamer) {
-			Napi::Error::New(env, "Failed to create MC streamer").ThrowAsJavaScriptException();
-			return env.Undefined();
-		}
-
-		// Create initial parser
-		auto parser = llvm::createMCAsmParser(srcMgr, ctx, *streamer, *asmInfo_);
-		auto targetParser = std::unique_ptr<llvm::MCTargetAsmParser>(
-			target_->createMCAsmParser(*subtargetInfo_, *parser, *instrInfo_, mcOptions));
-
-		if (!targetParser) {
-			Napi::Error::New(env, "Failed to create target parser").ThrowAsJavaScriptException();
-			return env.Undefined();
-		}
-
-		if (intelSyntax_ && (triple_.find("x86") != std::string::npos ||
-							triple_.find("i386") != std::string::npos ||
-							triple_.find("i686") != std::string::npos)) {
-			parser->setAssemblerDialect(1); // 1 = Intel syntax
-		}
-
-		parser->setTargetParser(*targetParser);
-
-		// --- Loop through instructions ---
 		for (uint32_t i = 0; i < inputArray.Length(); i++) {
 			Napi::Value item = inputArray.Get(i);
 			if (!item.IsString()) {
@@ -448,37 +393,14 @@ Napi::Value LlvmMcWrapper::AssembleMultiple(const Napi::CallbackInfo& info) {
 			}
 
 			std::string code = item.As<Napi::String>().Utf8Value();
-
-			// Note: We need to ensure newline for proper parsing
-			if (!code.empty() && code.back() != '\n') {
-				code += '\n';
-			}
-
-			// Record size before processing this instruction
-			size_t sizeBefore = codeBuffer.size();
-
-			// Add new buffer to SourceMgr
-			auto buffer = llvm::MemoryBuffer::getMemBufferCopy(code);
-			srcMgr.AddNewSourceBuffer(std::move(buffer), llvm::SMLoc());
-
-			// Run parser - it picks up the last added buffer
-			if (parser->Run(false)) {
-				std::string err = "Assembly failed at index " + std::to_string(i);
-				Napi::Error::New(env, err).ThrowAsJavaScriptException();
-				return env.Undefined();
-			}
-
-			// Calculate bytes added for this instruction (Approximation)
-			// Note: This relies on the assembler writing eagerly.
-			// Relaxation/Fixups might change sizes later, but for visualization this is usually sufficient.
-			size_t sizeAfter = codeBuffer.size();
-			size_t instSize = sizeAfter - sizeBefore;
-
-			// Extract bytes
-			// SAFETY: Ensure we don't read out of bounds if size didn't increase
 			std::vector<uint8_t> bytes;
-			if (instSize > 0) {
-				bytes.assign(codeBuffer.begin() + sizeBefore, codeBuffer.end());
+			std::string error;
+			if (!AssembleCode(code, currentAddress, bytes, error)) {
+				Napi::Error::New(
+					env,
+					"Assembly failed at index " + std::to_string(i) + ": " + error
+				).ThrowAsJavaScriptException();
+				return env.Undefined();
 			}
 
 			// Create result object
@@ -491,13 +413,6 @@ Napi::Value LlvmMcWrapper::AssembleMultiple(const Napi::CallbackInfo& info) {
 			results.Set(i, result);
 			currentAddress += bytes.size();
 		}
-
-		// Finalize the stream (resolves fixups, writes symbol table, etc.)
-		streamer->finish();
-
-		// Note: After finish(), codeBuffer might grow due to relaxation.
-		// We do *not* update the individual instruction bytes here because we can't easily map them back.
-		// The sizes returned above are "pre-relaxation" estimates in some cases.
 
 	} catch (const std::exception& e) {
 		Napi::Error::New(env, std::string("LLVM Assembly Error: ") + e.what()).ThrowAsJavaScriptException();

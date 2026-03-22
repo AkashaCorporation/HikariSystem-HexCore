@@ -92,14 +92,22 @@ export class LlvmMcWrapper {
 	private assembler?: LlvmMcInstance;
 	private architecture: ArchitectureConfig = 'x64';
 	private syntax: 'intel' | 'att' = 'intel';
+	private cpu: string = '';
+	private features: string = '';
 	private initialized: boolean = false;
 	private lastError?: string;
 
 	/**
 	 * Initialize the LLVM MC assembler
 	 */
-	async initialize(arch: ArchitectureConfig): Promise<void> {
+	async initialize(arch: ArchitectureConfig, options?: { cpu?: string; features?: string }): Promise<void> {
 		this.architecture = arch;
+		if (options?.cpu !== undefined) {
+			this.cpu = this.normalizeTargetOption(options.cpu);
+		}
+		if (options?.features !== undefined) {
+			this.features = this.normalizeTargetOption(options.features);
+		}
 
 		// Try to load hexcore-llvm-mc from the extensions folder
 		const possiblePaths = [
@@ -127,11 +135,18 @@ export class LlvmMcWrapper {
 		}
 
 		const triple = this.getTriple(arch, module);
-		this.assembler = new module.LlvmMc(triple);
+		this.assembler = new module.LlvmMc(
+			triple,
+			this.cpu || undefined,
+			this.features || undefined
+		);
 
-		// Set Intel syntax for x86
+		// Respect the configured syntax for x86-family targets.
 		if (arch === 'x86' || arch === 'x64') {
-			this.assembler.setOption(module.OPTION.SYNTAX, module.SYNTAX.INTEL);
+			const syntaxValue = this.syntax === 'intel'
+				? module.SYNTAX.INTEL
+				: module.SYNTAX.ATT;
+			this.assembler.setOption(module.OPTION.SYNTAX, syntaxValue);
 		}
 
 		this.initialized = true;
@@ -175,6 +190,10 @@ export class LlvmMcWrapper {
 		}
 	}
 
+	private normalizeTargetOption(value: string | undefined): string {
+		return value?.trim() ?? '';
+	}
+
 	/**
 	 * Assemble a single instruction
 	 */
@@ -185,6 +204,34 @@ export class LlvmMcWrapper {
 
 		try {
 			const result = this.assembler.assemble(code, address);
+			return {
+				success: true,
+				bytes: result.bytes,
+				size: result.size,
+				statement: result.statement
+			};
+		} catch (error: any) {
+			return {
+				success: false,
+				bytes: Buffer.alloc(0),
+				size: 0,
+				statement: code,
+				error: error.message
+			};
+		}
+	}
+
+	/**
+	 * Assemble a single instruction or block asynchronously.
+	 * This surfaces the native non-blocking path for headless/programmatic callers.
+	 */
+	async assembleAsync(code: string, address?: bigint): Promise<AssembleResult> {
+		if (!this.assembler) {
+			return { success: false, bytes: Buffer.alloc(0), size: 0, statement: code, error: 'Assembler not initialized' };
+		}
+
+		try {
+			const result = await this.assembler.assembleAsync(code, address);
 			return {
 				success: true,
 				bytes: result.bytes,
@@ -389,6 +436,18 @@ export class LlvmMcWrapper {
 		return this.syntax;
 	}
 
+	getCpu(): string {
+		return this.assembler?.getCpu() ?? this.cpu;
+	}
+
+	getFeatures(): string {
+		return this.assembler?.getFeatures() ?? this.features;
+	}
+
+	getAddressSemanticsNote(): string {
+		return 'The LLVM MC address parameter is forwarded to result metadata, but standalone assembly may still rely on object/section layout instead of exact PC-aware placement.';
+	}
+
 	/**
 	 * Check if initialized
 	 */
@@ -406,6 +465,25 @@ export class LlvmMcWrapper {
 	async setArchitecture(arch: ArchitectureConfig): Promise<void> {
 		this.dispose();
 		await this.initialize(arch);
+	}
+
+	/**
+	 * Persist CPU / feature preferences and reinitialize the native assembler
+	 * when an instance is already active.
+	 */
+	async setTargetOptions(options: { cpu?: string; features?: string }): Promise<void> {
+		const nextCpu = options.cpu !== undefined ? this.normalizeTargetOption(options.cpu) : this.cpu;
+		const nextFeatures = options.features !== undefined ? this.normalizeTargetOption(options.features) : this.features;
+		const changed = nextCpu !== this.cpu || nextFeatures !== this.features;
+
+		this.cpu = nextCpu;
+		this.features = nextFeatures;
+
+		if (!changed || !this.initialized) {
+			return;
+		}
+
+		await this.setArchitecture(this.architecture);
 	}
 
 	/**

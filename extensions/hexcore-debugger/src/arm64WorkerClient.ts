@@ -15,6 +15,7 @@
 
 import * as child_process from 'child_process';
 import * as path from 'path';
+import * as fs from 'fs';
 
 // ---- BigInt-safe serialization (mirrors arm64Worker.js) ----
 
@@ -76,6 +77,7 @@ interface ExecuteBatchResult {
 	error: string | null;
 	svcEncountered: boolean;
 	svcPc: bigint | null;
+	faultInfo?: Record<string, unknown> | null;
 }
 
 export interface Arm64Registers {
@@ -98,90 +100,124 @@ export class Arm64WorkerClient {
 	private ready = false;
 	private readyPromise: Promise<void> | null = null;
 	private pageSize = 0x1000;
+	private lastStartError: string | null = null;
+
+	private static readonly START_TIMEOUT_MS = 15000;
 
 	/**
 	 * Spawn the worker process.
 	 */
 	async start(): Promise<void> {
-		if (this.worker) {
+		if (this.worker && this.ready) {
 			return;
+		}
+		if (this.readyPromise) {
+			return this.readyPromise;
 		}
 
 		const workerPath = path.join(__dirname, '..', 'src', 'arm64Worker.js');
+		const systemNode = this.findSystemNode();
+		const env = { ...process.env };
 
-		// Run the worker using the current process.execPath (Electron binary)
-		// with ELECTRON_RUN_AS_NODE=1 so it behaves as plain Node.js.
-		// This bypasses Chromium's UtilityProcess security restrictions
-		// (ACG/CFG) that prevent Unicorn's QEMU TCG JIT from allocating
-		// executable memory.
-		const env = { ...process.env, ELECTRON_RUN_AS_NODE: '1' };
-		this.worker = child_process.fork(workerPath, [], {
-			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
-			env,
-			execArgv: []
-		});
-
-		this.worker.on('message', (msg: Record<string, unknown>) => {
-			if (msg.type === 'ready') {
-				this.ready = true;
-				return;
-			}
-			if (msg.type === 'hook-event') {
-				// Hook events from native hooks (for future use)
-				return;
-			}
-
-			const id = msg.id as number;
-			const pending = this.pending.get(id);
-			if (!pending) {
-				return;
-			}
-			this.pending.delete(id);
-
-			if (msg.error) {
-				pending.reject(new Error(msg.error as string));
-			} else {
-				pending.resolve(deserialize(msg.result));
-			}
-		});
-
-		// Relay worker stdout/stderr so diagnostic output is visible
-		if (this.worker.stdout) {
-			this.worker.stdout.on('data', (chunk: Buffer) => {
-				process.stdout.write(`[arm64worker:stdout] ${chunk}`);
+		if (systemNode) {
+			console.log(`[arm64worker] Using system Node.js: ${systemNode}`);
+			this.worker = child_process.fork(workerPath, [], {
+				stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+				execPath: systemNode,
+				env,
+				execArgv: []
 			});
-		}
-		if (this.worker.stderr) {
-			this.worker.stderr.on('data', (chunk: Buffer) => {
-				process.stderr.write(`[arm64worker:stderr] ${chunk}`);
+		} else {
+			console.warn('[arm64worker] System Node.js not found, falling back to Electron binary');
+			env.ELECTRON_RUN_AS_NODE = '1';
+			this.worker = child_process.fork(workerPath, [], {
+				stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
+				env,
+				execArgv: []
 			});
 		}
 
-		this.worker.on('exit', (code, signal) => {
-			console.log(`[arm64worker] exited: code=${code}, signal=${signal}`);
-			this.worker = null;
-			this.ready = false;
-			// Reject all pending calls
-			for (const [, p] of this.pending) {
-				p.reject(new Error(`ARM64 worker exited with code ${code}`));
-			}
-			this.pending.clear();
-		});
+		this.ready = false;
+		this.lastStartError = null;
 
-		this.worker.on('error', (err) => {
-			console.error(`[arm64worker] error: ${err.message}`);
-		});
-
-		// Wait for the worker to be ready
-		this.readyPromise = new Promise<void>((resolve) => {
-			const check = () => {
-				if (this.ready) {
-					resolve();
+		this.readyPromise = new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const finish = (error?: Error) => {
+				if (settled) {
+					return;
+				}
+				settled = true;
+				clearTimeout(timeoutHandle);
+				this.readyPromise = null;
+				if (error) {
+					this.lastStartError = error.message;
+					reject(error);
 				} else {
-					setTimeout(check, 10);
+					this.lastStartError = null;
+					resolve();
 				}
 			};
-			check();
+
+			const timeoutHandle = setTimeout(() => {
+				finish(new Error(`ARM64 worker failed to become ready within ${Arm64WorkerClient.START_TIMEOUT_MS}ms`));
+			}, Arm64WorkerClient.START_TIMEOUT_MS);
+
+			this.worker!.on('message', (msg: Record<string, unknown>) => {
+				if (msg.type === 'ready') {
+					this.ready = true;
+					finish();
+					return;
+				}
+				if (msg.type === 'hook-event') {
+					// Hook events from native hooks (for future use)
+					return;
+				}
+
+				const id = msg.id as number;
+				const pending = this.pending.get(id);
+				if (!pending) {
+					return;
+				}
+				this.pending.delete(id);
+
+				if (msg.error) {
+					pending.reject(new Error(msg.error as string));
+				} else {
+					pending.resolve(deserialize(msg.result));
+				}
+			});
+
+			// Relay worker stdout/stderr so diagnostic output is visible
+			if (this.worker!.stdout) {
+				this.worker!.stdout.on('data', (chunk: Buffer) => {
+					process.stdout.write(`[arm64worker:stdout] ${chunk}`);
+				});
+			}
+			if (this.worker!.stderr) {
+				this.worker!.stderr.on('data', (chunk: Buffer) => {
+					process.stderr.write(`[arm64worker:stderr] ${chunk}`);
+				});
+			}
+
+			this.worker!.on('exit', (code, signal) => {
+				console.log(`[arm64worker] exited: code=${code}, signal=${signal}`);
+				this.worker = null;
+				this.ready = false;
+				if (!settled) {
+					finish(new Error(`ARM64 worker exited before ready (code=${code}, signal=${signal})`));
+				}
+				for (const [, p] of this.pending) {
+					p.reject(new Error(`ARM64 worker exited with code ${code}`));
+				}
+				this.pending.clear();
+			});
+
+			this.worker!.on('error', (err) => {
+				console.error(`[arm64worker] error: ${err.message}`);
+				if (!settled) {
+					finish(new Error(`ARM64 worker process error: ${err.message}`));
+				}
+			});
 		});
 
 		await this.readyPromise;
@@ -192,7 +228,12 @@ export class Arm64WorkerClient {
 	 */
 	private call(method: string, ...args: unknown[]): Promise<unknown> {
 		if (!this.worker) {
-			return Promise.reject(new Error('ARM64 worker not started'));
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`ARM64 worker not started${suffix}`));
+		}
+		if (!this.ready) {
+			const suffix = this.lastStartError ? `: ${this.lastStartError}` : '';
+			return Promise.reject(new Error(`ARM64 worker is not ready${suffix}`));
 		}
 
 		const id = this.nextId++;
@@ -287,7 +328,8 @@ export class Arm64WorkerClient {
 			stopped: result.stopped as boolean,
 			error: result.error as string | null,
 			svcEncountered: result.svcEncountered as boolean,
-			svcPc: result.svcPc as bigint | null
+			svcPc: result.svcPc as bigint | null,
+			faultInfo: (result.faultInfo as Record<string, unknown> | null | undefined) ?? null
 		};
 	}
 
@@ -330,6 +372,7 @@ export class Arm64WorkerClient {
 			this.worker = null;
 		}
 		this.ready = false;
+		this.readyPromise = null;
 		for (const [, p] of this.pending) {
 			p.reject(new Error('ARM64 worker disposed'));
 		}
@@ -338,5 +381,59 @@ export class Arm64WorkerClient {
 
 	isAlive(): boolean {
 		return this.worker !== null && this.ready;
+	}
+
+	getLastStartError(): string | null {
+		return this.lastStartError;
+	}
+
+	/**
+	 * Locate a system Node.js binary that does NOT share the Electron executable path.
+	 * This aligns ARM64 startup behavior with the x64/PE32 worker strategy.
+	 */
+	private findSystemNode(): string | null {
+		const candidates: string[] = [];
+
+		const nvmHome = process.env.NVM_HOME;
+		if (nvmHome) {
+			try {
+				const dirs = fs.readdirSync(nvmHome).filter(d => {
+					try { return fs.statSync(path.join(nvmHome, d, 'node.exe')).isFile(); } catch { return false; }
+				});
+				for (const d of dirs) {
+					candidates.push(path.join(nvmHome, d, 'node.exe'));
+				}
+			} catch { /* ignore */ }
+		}
+
+		const nvmSymlink = process.env.NVM_SYMLINK;
+		if (nvmSymlink) {
+			candidates.push(path.join(nvmSymlink, 'node.exe'));
+		}
+
+		candidates.push('C:\\Program Files\\nodejs\\node.exe');
+		candidates.push('C:\\Program Files (x86)\\nodejs\\node.exe');
+
+		const pathDirs = (process.env.PATH || '').split(path.delimiter);
+		for (const dir of pathDirs) {
+			const candidate = path.join(dir, 'node.exe');
+			if (!candidates.includes(candidate)) {
+				candidates.push(candidate);
+			}
+		}
+
+		candidates.push('/usr/local/bin/node', '/usr/bin/node');
+
+		for (const candidate of candidates) {
+			try {
+				if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+					if (path.resolve(candidate) !== path.resolve(process.execPath)) {
+						return candidate;
+					}
+				}
+			} catch { /* ignore */ }
+		}
+
+		return null;
 	}
 }

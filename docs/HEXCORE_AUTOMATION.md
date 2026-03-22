@@ -193,6 +193,13 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
+| `hexcore.debug.emulateHeadless` | 30s | Start emulation session only (load + configure, no automatic run) | x86, x64, ARM64 |
+| `hexcore.debug.continueHeadless` | 30s | Continue active emulation session for `maxSteps` instructions | x86, x64, ARM64 |
+| `hexcore.debug.stepHeadless` | 30s | Single-step or N-step active session | x86, x64, ARM64 |
+| `hexcore.debug.readMemoryHeadless` | 30s | Read arbitrary memory range from active session | x86, x64, ARM64 |
+| `hexcore.debug.getRegistersHeadless` | 30s | Export current register set from active session | x86, x64, ARM64 |
+| `hexcore.debug.getStateHeadless` | 30s | Export current emulation state, regions, and API call log | x86, x64, ARM64 |
+| `hexcore.debug.setBreakpointHeadless` | 30s | Set one or more breakpoints in active session | x86, x64, ARM64 |
 | `hexcore.debug.emulateFullHeadless` | 300s | Unified single-shot emulation (load → configure → run → collect → dispose) | x86, x64, ARM64 |
 | `hexcore.debug.writeMemoryHeadless` | 30s | Write data to emulation memory (requires active session) | x86, x64, ARM64 |
 | `hexcore.debug.setRegisterHeadless` | 30s | Set CPU register value (requires active session) | x86, x64, ARM64 |
@@ -201,6 +208,13 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.debug.snapshotHeadless` | 60s | Save emulation snapshot (requires active session) | x86, x64, ARM64 |
 | `hexcore.debug.restoreSnapshotHeadless` | 60s | Restore emulation snapshot (requires saved snapshot) | x86, x64, ARM64 |
 | `hexcore.debug.exportTraceHeadless` | 60s | Export API/libc call trace as JSON | x86, x64, ARM64 |
+
+**Wave 2 runtime note**
+
+- `hexcore.debug.emulateHeadless`, `continueHeadless`, and `getStateHeadless` now expose `executionBackend` in their JSON output.
+- `continueHeadless` and `getStateHeadless` may also include `faultInfo` when emulation stops on `UC_ERR_FETCH_UNMAPPED`, `UC_ERR_READ_UNMAPPED`, or `UC_ERR_WRITE_UNMAPPED`.
+- `hexcore.debug.emulateHeadless` accepts `permissiveMemoryMapping: true` for PE/ELF worker paths.
+- `hexcore.debug.setBreakpointHeadless` now supports `output.path` correctly in pipeline jobs.
 
 ### Report Composer
 

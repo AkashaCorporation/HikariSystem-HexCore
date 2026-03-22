@@ -457,8 +457,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		const parts: string[] = [];
 		if (!disassembler.available) {
+			const fallbackNote = disassembler.fallbackMode === 'basic-decoder'
+				? vscode.l10n.t(' (fallback: basic decoder)')
+				: disassembler.fallbackMode === 'raw-byte'
+					? vscode.l10n.t(' (fallback: raw byte directives)')
+					: '';
 			parts.push(
-				vscode.l10n.t('Capstone: {0}', disassembler.error ?? vscode.l10n.t('Unavailable'))
+				vscode.l10n.t('Capstone: {0}{1}', disassembler.error ?? vscode.l10n.t('Unavailable'), fallbackNote)
 			);
 		}
 		if (!assembler.available) {
@@ -3318,4 +3323,3 @@ function toErrorMessage(error: unknown): string {
 	}
 	return String(error);
 }
-

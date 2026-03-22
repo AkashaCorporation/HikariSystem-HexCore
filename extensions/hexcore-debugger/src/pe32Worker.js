@@ -80,9 +80,88 @@ function deserialize(value) {
 
 let uc = null;     // The hexcore-unicorn module
 let engine = null; // The Unicorn instance
+let currentArch = null; // Architecture from initialize() — used for register heuristics
 let currentMode = null; // Architecture mode from initialize() — used for register heuristics
 const hookCallbacks = new Map(); // hookHandle → native hook handle
 let permissiveMemoryMapping = false; // When true, auto-map with RWX; when false, use restrictive perms
+
+function collectCandidateDiagnostics(candidates, maxAddr) {
+	if (!engine) {
+		return { selected: 0n, candidates: [] };
+	}
+
+	let regions = [];
+	try {
+		regions = engine.memRegions();
+	} catch {
+		regions = [];
+	}
+
+	const diagnostics = [];
+	let selected = 0n;
+
+	for (const candidate of candidates) {
+		try {
+			const value = BigInt(engine.regRead(candidate.regId));
+			const inRange = value >= 0x1000n && value <= maxAddr;
+			const mapped = inRange && regions.some(r => {
+				const begin = BigInt(r.begin);
+				const end = BigInt(r.end);
+				return value >= begin && value <= end;
+			});
+			diagnostics.push({
+				register: candidate.name,
+				value: value.toString(),
+				inRange,
+				mapped
+			});
+			if (selected === 0n && inRange && !mapped) {
+				selected = value;
+			}
+		} catch (error) {
+			diagnostics.push({
+				register: candidate.name,
+				error: error.message || String(error)
+			});
+		}
+	}
+
+	return { selected, candidates: diagnostics };
+}
+
+function firstUnmappedCandidate(regIds, maxAddr) {
+	if (!engine) {
+		return 0n;
+	}
+
+	let regions = [];
+	try {
+		regions = engine.memRegions();
+	} catch {
+		regions = [];
+	}
+
+	for (const regId of regIds) {
+		try {
+			const value = BigInt(engine.regRead(regId));
+			if (value < 0x1000n || value > maxAddr) {
+				continue;
+			}
+			const mapped = regions.some(r => {
+				const begin = BigInt(r.begin);
+				const end = BigInt(r.end);
+				return value >= begin && value <= end;
+			});
+			if (!mapped) {
+				return value;
+			}
+		} catch {
+			// Ignore heuristic read failures.
+		}
+	}
+
+	return 0n;
+}
 
 /**
  * Convert PE section characteristics to Unicorn protection flags.
@@ -132,6 +211,7 @@ const handlers = {
 			engine.close();
 		}
 		engine = new uc.Unicorn(arch, mode);
+		currentArch = arch;
 		currentMode = mode;
 		return {
 			handle: engine.handle,
@@ -259,7 +339,9 @@ const handlers = {
 		}
 
 		const X86_REG = uc.X86_REG;
-		const isX86Mode = currentMode !== null && !(currentMode & 0x40000000); // MODE.64 = 1 << 30
+		const isX86Mode =
+			currentArch === uc.ARCH.X86 &&
+			currentMode === uc.MODE.MODE_32;
 		const pcReg = isX86Mode ? X86_REG.EIP : X86_REG.RIP;
 
 		const results = {
@@ -268,7 +350,8 @@ const handlers = {
 			stopped: false,
 			error: null,
 			stubHit: false,
-			stubAddress: null
+			stubAddress: null,
+			faultInfo: null
 		};
 
 		const terminals = new Set(terminalAddresses.map(a => BigInt(a)));
@@ -330,38 +413,52 @@ const handlers = {
 				if (codeMatch) {
 					const errCode = Number(codeMatch[1]);
 					let faultAddr = 0n;
+					let candidateDiagnostics = [];
+					let attemptedMap = false;
+					let selectedAutoMapPerms = null;
+					let alignedAddress = null;
 
 					if (errCode === 8) {
 						// UC_ERR_FETCH_UNMAPPED: PC points to unmapped code
 						faultAddr = BigInt(engine.regRead(pcReg));
 					} else if (isX86Mode) {
-						// UC_ERR_READ_UNMAPPED / UC_ERR_WRITE_UNMAPPED (x86):
-						// Heuristic: ESP is the most common data fault source (stack access)
-						faultAddr = BigInt(engine.regRead(X86_REG.ESP));
-
-						// If ESP is in a low/null region, try EBP
-						if (faultAddr < 0x1000n) {
-							faultAddr = BigInt(engine.regRead(X86_REG.EBP));
-						}
-
-						// Last resort: use EIP
-						if (faultAddr < 0x1000n) {
-							faultAddr = BigInt(engine.regRead(X86_REG.EIP));
-						}
+						const candidateSet = [
+							{ name: 'esp', regId: X86_REG.ESP },
+							{ name: 'ebp', regId: X86_REG.EBP },
+							{ name: 'ecx', regId: X86_REG.ECX },
+							{ name: 'edx', regId: X86_REG.EDX },
+							{ name: 'esi', regId: X86_REG.ESI },
+							{ name: 'edi', regId: X86_REG.EDI },
+							{ name: 'eax', regId: X86_REG.EAX },
+							{ name: 'ebx', regId: X86_REG.EBX },
+							{ name: 'eip', regId: X86_REG.EIP }
+						];
+						const candidateResult = collectCandidateDiagnostics(candidateSet, 0xFFFFFFFFn);
+						faultAddr = candidateResult.selected;
+						candidateDiagnostics = candidateResult.candidates;
 					} else {
-						// UC_ERR_READ_UNMAPPED / UC_ERR_WRITE_UNMAPPED (x64):
-						// Heuristic: RSP is the most common data fault source (stack access)
-						faultAddr = BigInt(engine.regRead(X86_REG.RSP));
-
-						// If RSP is in a low/null region, try RBP
-						if (faultAddr < 0x1000n) {
-							faultAddr = BigInt(engine.regRead(X86_REG.RBP));
-						}
-
-						// Last resort: use RIP
-						if (faultAddr < 0x1000n) {
-							faultAddr = BigInt(engine.regRead(X86_REG.RIP));
-						}
+						const candidateSet = [
+							{ name: 'rsp', regId: X86_REG.RSP },
+							{ name: 'rbp', regId: X86_REG.RBP },
+							{ name: 'rcx', regId: X86_REG.RCX },
+							{ name: 'rdx', regId: X86_REG.RDX },
+							{ name: 'r8', regId: X86_REG.R8 },
+							{ name: 'r9', regId: X86_REG.R9 },
+							{ name: 'rsi', regId: X86_REG.RSI },
+							{ name: 'rdi', regId: X86_REG.RDI },
+							{ name: 'rax', regId: X86_REG.RAX },
+							{ name: 'rbx', regId: X86_REG.RBX },
+							{ name: 'r10', regId: X86_REG.R10 },
+							{ name: 'r11', regId: X86_REG.R11 },
+							{ name: 'r12', regId: X86_REG.R12 },
+							{ name: 'r13', regId: X86_REG.R13 },
+							{ name: 'r14', regId: X86_REG.R14 },
+							{ name: 'r15', regId: X86_REG.R15 },
+							{ name: 'rip', regId: X86_REG.RIP }
+						];
+						const candidateResult = collectCandidateDiagnostics(candidateSet, 0x00007FFFFFFFFFFFn);
+						faultAddr = candidateResult.selected;
+						candidateDiagnostics = candidateResult.candidates;
 					}
 
 					// Reject NULL page and very high addresses
@@ -369,17 +466,31 @@ const handlers = {
 					if (faultAddr >= 0x1000n && faultAddr <= maxAddr) {
 						const pageSize = BigInt(engine.pageSize);
 						const aligned = (faultAddr / pageSize) * pageSize;
+						alignedAddress = aligned.toString();
 						// When permissiveMemoryMapping is true, map with RWX (UC_PROT_ALL = 7).
 						// When false, map with read+write only (no execute) to preserve
 						// section permission semantics and catch UC_ERR_FETCH_PROT on
 						// non-executable regions.
 						const autoMapPerms = permissiveMemoryMapping ? 7 : 3; // 7=RWX, 3=RW
+						selectedAutoMapPerms = autoMapPerms;
 						try {
+							attemptedMap = true;
 							engine.memMap(aligned, Number(pageSize), autoMapPerms);
 							i--; // Retry this instruction
 							continue;
 						} catch { /* fall through to error */ }
 					}
+
+					results.faultInfo = {
+						errCode,
+						currentPc: currentPc.toString(),
+						faultAddress: faultAddr.toString(),
+						alignedAddress,
+						permissiveMemoryMapping,
+						attemptedMap,
+						autoMapPerms: selectedAutoMapPerms,
+						candidates: candidateDiagnostics
+					};
 				}
 
 				results.error = msg;

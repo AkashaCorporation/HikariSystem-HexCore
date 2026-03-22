@@ -231,9 +231,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Save snapshot
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.saveSnapshot', () => {
+		vscode.commands.registerCommand('hexcore.debug.saveSnapshot', async () => {
 			try {
-				engine.saveSnapshot();
+				await engine.saveSnapshot();
 				vscode.window.showInformationMessage('Snapshot saved');
 			} catch (error: any) {
 				vscode.window.showErrorMessage(`Failed to save snapshot: ${error.message}`);
@@ -243,9 +243,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// Restore snapshot
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.debug.restoreSnapshot', () => {
+		vscode.commands.registerCommand('hexcore.debug.restoreSnapshot', async () => {
 			try {
-				engine.restoreSnapshot();
+				await engine.restoreSnapshot();
 				registerProvider.refresh();
 				memoryProvider.refresh();
 				vscode.window.showInformationMessage('Snapshot restored');
@@ -269,10 +269,11 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const arch = typeof arg?.arch === 'string' ? arg.arch as ArchitectureType : undefined;
 			const stdin = typeof arg?.stdin === 'string' ? arg.stdin : undefined;
+			const permissiveMemoryMapping = arg?.permissiveMemoryMapping === true;
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			await engine.startEmulation(filePath, arch);
+			await engine.startEmulation(filePath, arch, { permissiveMemoryMapping });
 
 			if (stdin) {
 				engine.setStdinBuffer(stdin);
@@ -284,7 +285,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			const exportData = {
 				file: filePath,
 				architecture: engine.getArchitecture(),
+				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),
+				permissiveMemoryMapping,
 				entryPoint: state ? '0x' + state.currentAddress.toString(16) : '0x0',
 				memoryRegions: regions.map(r => ({
 					address: '0x' + r.address.toString(16),
@@ -344,13 +347,20 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			const stateAfter = engine.getEmulationState();
-			const registers = engine.getFullRegisters();
+			const registers = await engine.getFullRegistersAsync();
 			const apiCalls = engine.getApiCallLog();
 			const stdout = engine.getStdoutBuffer();
+			const terminatedWithError = Boolean(stateAfter?.lastError);
+			const effectiveError = crashError || stateAfter?.lastError || undefined;
+			const faultInfo = engine.getLastFaultInfo();
 
 			const exportData = {
 				crashed,
 				crashError: crashError || undefined,
+				terminatedWithError,
+				error: effectiveError,
+				faultInfo,
+				executionBackend: engine.getExecutionBackend(),
 				state: stateAfter ? {
 					isRunning: stateAfter.isRunning,
 					isPaused: stateAfter.isPaused,
@@ -375,7 +385,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			if (!quietMode) {
-				const status = crashed ? `CRASHED: ${crashError}` : 'OK';
+				const status = crashed
+					? `CRASHED: ${crashError}`
+					: terminatedWithError
+						? `ERROR: ${effectiveError}`
+						: 'OK';
 				vscode.window.showInformationMessage(
 					`Emulation ${status}: ${exportData.instructionsRan} instructions, ${apiCalls.length} API calls`
 				);
@@ -401,7 +415,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			for (let i = 0; i < count; i++) {
 				await engine.emulationStep();
-				const regs = engine.getFullRegisters();
+				const regs = await engine.getFullRegistersAsync();
 				const s = engine.getEmulationState();
 				steps.push({
 					address: s ? '0x' + s.currentAddress.toString(16) : '0x0',
@@ -452,10 +466,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				throw new Error('No active emulation session. Call emulateHeadless first.');
 			}
 
-			const registers = engine.getFullRegisters();
+			const registers = await engine.getFullRegistersAsync();
 
 			const exportData = {
 				architecture: engine.getArchitecture(),
+				executionBackend: engine.getExecutionBackend(),
 				registers,
 				generatedAt: new Date().toISOString()
 			};
@@ -477,6 +492,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.debug.setBreakpointHeadless', async (arg?: Record<string, unknown>) => {
 			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
 
 			const state = engine.getEmulationState();
 			if (!state) {
@@ -511,7 +527,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Breakpoints set: ${set.join(', ')}`);
 			}
 
-			return { breakpoints: set, generatedAt: new Date().toISOString() };
+			const exportData = { breakpoints: set, generatedAt: new Date().toISOString() };
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			return exportData;
 		})
 	);
 
@@ -522,10 +544,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
 			const state = engine.getEmulationState();
-			const registers = engine.getFullRegisters();
+			const registers = await engine.getFullRegistersAsync();
 			const regions = await engine.getMemoryRegions();
 			const apiCalls = engine.getApiCallLog();
 			const stdout = engine.getStdoutBuffer();
+			const faultInfo = engine.getLastFaultInfo();
 
 			const exportData = {
 				state: state ? {
@@ -537,8 +560,10 @@ export function activate(context: vscode.ExtensionContext): void {
 					lastError: state.lastError
 				} : null,
 				architecture: engine.getArchitecture(),
+				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),
 				registers,
+				faultInfo,
 				memoryRegions: regions.map(r => ({
 					address: '0x' + r.address.toString(16),
 					size: r.size,
@@ -578,7 +603,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				throw new Error('No active emulation session. Call emulateHeadless first.');
 			}
 
-			engine.saveSnapshot();
+			await engine.saveSnapshot();
 
 			const exportData = {
 				success: true,
@@ -610,16 +635,17 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			try {
-				engine.restoreSnapshot();
+				await engine.restoreSnapshot();
 			} catch {
 				throw new Error('No snapshot available. Call snapshotHeadless first.');
 			}
 
-			const registers = engine.getFullRegisters();
+			const registers = await engine.getFullRegistersAsync();
 			const updatedState = engine.getEmulationState();
 
 			const exportData = {
 				success: true,
+				executionBackend: engine.getExecutionBackend(),
 				registers,
 				state: {
 					currentAddress: updatedState ? '0x' + updatedState.currentAddress.toString(16) : '0x0',
@@ -742,10 +768,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			await engine.collectMemoryDumps('end');
 
 			const stateAfter = engine.getEmulationState();
-			const registers = engine.getFullRegisters();
+			const registers = await engine.getFullRegistersAsync();
 			const apiCalls = engine.getApiCallLog();
 			const stdout = engine.getStdoutBuffer();
 			const regions = await engine.getMemoryRegions();
+			const terminatedWithError = Boolean(stateAfter?.lastError);
+			const effectiveError = crashError || stateAfter?.lastError || undefined;
+			const faultInfo = engine.getLastFaultInfo();
 
 			// Collect v3.7 data
 			const breakpointSnapshotsData = engine.getBreakpointSnapshots();
@@ -786,9 +815,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			const exportData: Record<string, any> = {
 				file: filePath,
 				architecture: engine.getArchitecture(),
+				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),
 				crashed,
 				crashError: crashError || undefined,
+				terminatedWithError,
+				error: effectiveError,
+				faultInfo,
 				state: stateAfter ? {
 					isRunning: stateAfter.isRunning,
 					isPaused: stateAfter.isPaused,

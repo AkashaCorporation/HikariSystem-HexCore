@@ -4,7 +4,7 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'fs';
-import { UnicornWrapper, ArchitectureType, EmulationState } from './unicornWrapper';
+import { UnicornWrapper, ArchitectureType, EmulationState, ExecutionBackend } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
 import { PELoader, PEInfo } from './peLoader';
 import { ELFLoader, ELFInfo } from './elfLoader';
@@ -148,6 +148,13 @@ export class DebugEngine {
 	 * Start emulation for a binary file
 	 */
 	async startEmulation(filePath: string, arch?: ArchitectureType, options?: EmulationOptions): Promise<void> {
+		// Headless callers frequently reuse the same DebugEngine instance across
+		// multiple jobs. Always start from a clean emulator state to avoid stale
+		// mappings and worker state triggering UC_ERR_MAP on the next session.
+		if (this.emulator || this.memoryManager || this.apiHooks || this.linuxApiHooks || this.isRunning) {
+			this.disposeEmulation();
+		}
+
 		this.targetPath = filePath;
 		this.emulationOptions = options ?? {};
 		this.breakpointSnapshots = [];
@@ -1425,10 +1432,10 @@ export class DebugEngine {
 		}
 
 		if (this.architecture === 'x64') {
-			const regs = this.emulator.getRegistersX64();
+			const regs = await this.emulator.getRegistersX64Async();
 			this.registers = regs;
 		} else if (this.architecture === 'x86') {
-			const regs = this.emulator.getRegistersX86();
+			const regs = await this.emulator.getRegistersX86Async();
 			this.registers = {
 				rax: BigInt(regs.eax),
 				rbx: BigInt(regs.ebx),
@@ -1584,23 +1591,23 @@ export class DebugEngine {
 	/**
 	 * Save emulation snapshot
 	 */
-	saveSnapshot(): void {
+	async saveSnapshot(): Promise<void> {
 		if (!this.emulator) {
 			throw new Error('Emulator not initialized');
 		}
-		this.emulator.saveState();
+		await this.emulator.saveState();
 		this.emit('snapshot-saved');
 	}
 
 	/**
 	 * Restore emulation snapshot
 	 */
-	restoreSnapshot(): void {
+	async restoreSnapshot(): Promise<void> {
 		if (!this.emulator) {
 			throw new Error('Emulator not initialized');
 		}
-		this.emulator.restoreState();
-		this.updateEmulationRegisters();
+		await this.emulator.restoreState();
+		await this.updateEmulationRegisters();
 		this.emit('snapshot-restored');
 	}
 
@@ -1693,6 +1700,20 @@ export class DebugEngine {
 		return this.fileType;
 	}
 
+	getExecutionBackend(): ExecutionBackend {
+		if (!this.emulator) {
+			return 'in-process';
+		}
+		return this.emulator.getExecutionBackend();
+	}
+
+	getLastFaultInfo(): Record<string, unknown> | undefined {
+		if (!this.emulator) {
+			return undefined;
+		}
+		return this.emulator.getLastFaultInfo();
+	}
+
 	/**
 	 * Get full ARM64 register set (not x86-mapped)
 	 */
@@ -1702,12 +1723,8 @@ export class DebugEngine {
 		}
 
 		if (this.architecture === 'arm64') {
-			const regs = this.emulator.getRegistersArm64();
-			const result: Record<string, string> = {};
-			for (const [key, value] of Object.entries(regs)) {
-				result[key] = '0x' + (value as bigint).toString(16);
-			}
-			return result;
+			// ARM64 register reads are async when the worker backend is active.
+			return {};
 		}
 
 		if (this.architecture === 'x64') {
@@ -1729,6 +1746,41 @@ export class DebugEngine {
 		}
 
 		return {};
+	}
+
+	async getFullRegistersAsync(): Promise<Record<string, string>> {
+		if (!this.emulator) {
+			return {};
+		}
+
+		if (this.architecture === 'arm64') {
+			const regs = await this.emulator.getRegistersArm64();
+			const result: Record<string, string> = {};
+			for (const [key, value] of Object.entries(regs)) {
+				result[key] = '0x' + (value as bigint).toString(16);
+			}
+			return result;
+		}
+
+		if (this.architecture === 'x64') {
+			const regs = await this.emulator.getRegistersX64Async();
+			const result: Record<string, string> = {};
+			for (const [key, value] of Object.entries(regs)) {
+				result[key] = '0x' + (value as bigint).toString(16);
+			}
+			return result;
+		}
+
+		if (this.architecture === 'x86') {
+			const regs = await this.emulator.getRegistersX86Async();
+			const result: Record<string, string> = {};
+			for (const [key, value] of Object.entries(regs)) {
+				result[key] = '0x' + (value as number).toString(16);
+			}
+			return result;
+		}
+
+		return this.getFullRegisters();
 	}
 
 	/**
@@ -1760,7 +1812,7 @@ export class DebugEngine {
 	async takeBreakpointSnapshot(bpConfig?: { autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }): Promise<void> {
 		if (!this.emulator || !bpConfig?.autoSnapshot) { return; }
 
-		const regs = this.getFullRegisters();
+		const regs = await this.getFullRegistersAsync();
 		const state = this.emulator.getState();
 
 		// Read stack: RSP-64 to RSP+256

@@ -203,8 +203,21 @@ export class CapstoneWrapper {
 		// --- Target address parsing ---
 		let targetAddress: number | undefined;
 		if ((isCall || isJump) && inst.opStr) {
-			// Match hex address: #0x... or 0x...
-			const match = inst.opStr.match(/#?0x([0-9a-fA-F]+)/);
+			// Only capture direct immediate branch/call targets.
+			// Examples accepted:
+			//   call 0x140001000
+			//   jne 0x140001234
+			//   bl #0x401000
+			//
+			// Examples rejected:
+			//   jmp rax
+			//   call qword ptr [rip + 0x10]
+			//   br x8
+			const directImmediate = inst.opStr.trim();
+			const isIndirectTarget = directImmediate.includes('[') || directImmediate.includes(']');
+			const match = !isIndirectTarget
+				? directImmediate.match(/^#?0x([0-9a-fA-F]+)$/)
+				: null;
 			if (match) {
 				targetAddress = parseInt(match[1], 16);
 			}

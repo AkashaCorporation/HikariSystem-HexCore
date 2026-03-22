@@ -27,6 +27,17 @@ class IntrinsicTable;
 }  // namespace remill
 
 /**
+ * Options to control lifting boundaries and prevent oversized IR.
+ */
+struct LiftOptions {
+	size_t maxInstructions = 2000;    // Max decoded instructions per lift
+	size_t maxBasicBlocks  = 500;     // Max basic block leaders
+	size_t maxBytes        = 32768;   // Max bytes to decode (32KB)
+	bool   splitAtCalls    = true;    // Record external CALL targets
+	bool   optimizeIR      = true;    // Run LLVM passes (mem2reg, instcombine, simplifycfg, dce)
+};
+
+/**
  * Result of lifting a single instruction or block of bytes.
  */
 struct LiftResult {
@@ -35,6 +46,12 @@ struct LiftResult {
 	std::string error;       // Error message if !success
 	uint64_t address;        // Start address
 	uint64_t bytesConsumed;  // How many input bytes were consumed
+
+	// Boundary detection metadata
+	bool truncated = false;            // True if limits were hit before all bytes consumed
+	uint64_t nextAddress = 0;          // Where to continue lifting (valid if truncated)
+	std::vector<uint64_t> callTargets; // Discovered external CALL targets
+	std::string truncationReason;      // "max_instructions" | "max_blocks" | "max_bytes"
 };
 
 /**
@@ -53,7 +70,8 @@ public:
 	~RemillLifter();
 
 	// Public for AsyncWorker access
-	LiftResult DoLift(const uint8_t* bytes, size_t length, uint64_t address);
+	LiftResult DoLift(const uint8_t* bytes, size_t length, uint64_t address,
+	                   const LiftOptions& options = LiftOptions{});
 	Napi::Object LiftResultToJS(Napi::Env env, const LiftResult& result);
 
 private:
