@@ -1,0 +1,10 @@
+node_modules/**
+build/**
+*.log
+*.map
+.gitignore
+README.md
+
+# NAPI-RS binaries: force include (overrides .gitignore)
+# These are downloaded by hexcore-native-install.js at build time
+!*.node

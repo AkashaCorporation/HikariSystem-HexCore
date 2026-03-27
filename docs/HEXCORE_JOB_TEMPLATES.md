@@ -667,3 +667,153 @@ Uses `onResult` conditional branching to adapt the pipeline based on intermediat
 - Actions: `skip` (skip N steps), `goto` (jump to step index), `abort` (stop pipeline), `log` (log and continue).
 - `goto` allows loops (max 100 iterations enforced).
 - See `docs/HEXCORE_AUTOMATION.md` for full `onResult` schema.
+
+---
+
+## v3.7.3 Templates
+
+New templates covering dynamic memory search, RTTI class hierarchy extraction, AOB signature scanning, batch string intelligence, and step-reference pipelines introduced in v3.7.3.
+
+---
+
+## Template: Dynamic Analysis with Memory Search (v3.7.3)
+
+Emulate a PE in headless mode, run it forward, then search RAM for decrypted payload markers (MZ header and ASCII strings) while the session is still alive.
+
+```json
+{
+  "name": "Dynamic Analysis + Memory Pattern Search",
+  "description": "Emulate a PE, search for decrypted payload markers in RAM",
+  "file": "${file}",
+  "outDir": "./results",
+  "steps": [
+    { "cmd": "hexcore.debug.emulateHeadless", "args": { "file": "${file}", "arch": "x64", "keepAlive": true }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.debug.continueHeadless", "args": { "maxInstructions": 500000 }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.debug.searchMemoryHeadless", "args": { "pattern": "4D 5A 90 00", "encoding": "hex", "regions": "heap" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.debug.searchMemoryHeadless", "args": { "pattern": "This program", "encoding": "ascii", "regions": "all" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 }
+  ]
+}
+```
+
+**Notes:**
+- `keepAlive: true` keeps the emulator session open after `emulateHeadless` so subsequent steps can read its memory.
+- `searchMemoryHeadless` with `encoding: "hex"` accepts space-separated byte strings (`4D 5A 90 00` = MZ header).
+- `regions: "heap"` narrows the search to heap-allocated memory; use `"all"` to scan every mapped region.
+- Always end with `disposeHeadless` to release the Unicorn engine handle.
+
+---
+
+## Template: RTTI Class Hierarchy Analysis (v3.7.3)
+
+Extract C++ class names and inheritance chains from a PE binary via the RTTI scanner. Requires a prior `analyzeAll` pass to populate the function index.
+
+```json
+{
+  "name": "RTTI Class Discovery",
+  "description": "Extract C++ class names from PE binary via RTTI scan",
+  "file": "${file}",
+  "outDir": "./results",
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.rttiScanHeadless", "args": { "file": "${file}" }, "timeoutMs": 120000 }
+  ]
+}
+```
+
+**Notes:**
+- `analyzeAll` must run first — `rttiScanHeadless` uses the populated function index to locate vtables.
+- Works on MSVC-compiled PE/PE+ binaries; GCC/Clang ELF RTTI support is experimental in v3.7.3.
+- Results include class name, vtable address, base-class list, and method count per class.
+
+---
+
+## Template: AOB Signature Scan (v3.7.3)
+
+Search for trainer-style array-of-bytes patterns with wildcard support. Useful for locating game engine functions, cheat-engine style offsets, or stable code signatures across builds.
+
+```json
+{
+  "name": "AOB Signature Scan",
+  "description": "Search for byte patterns (trainer-style AOB scan)",
+  "file": "${file}",
+  "outDir": "./results",
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.searchBytesHeadless", "args": { "pattern": "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC 20", "maxResults": 50 }, "timeoutMs": 120000 }
+  ]
+}
+```
+
+**Notes:**
+- `??` is the wildcard token — matches any single byte at that position.
+- `maxResults` caps the hit list; omit or set to `0` for unlimited results (can be slow on large binaries).
+- `analyzeAll` is required beforehand so `searchBytesHeadless` operates on the decoded instruction stream rather than raw bytes, which reduces false positives inside data sections.
+
+---
+
+## Template: Batch String Intelligence (v3.7.3)
+
+Submit multiple search terms in a single `searchStringHeadless` call. More efficient than chaining individual queries, and produces a single consolidated result file.
+
+```json
+{
+  "name": "Batch String Intelligence",
+  "description": "Search for multiple suspicious strings in one pass",
+  "file": "${file}",
+  "outDir": "./results",
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": {
+        "queries": ["password", "encrypt", "decrypt", "key", "token", "secret", "admin", "root"]
+      },
+      "output": { "path": "string-intel.json" },
+      "timeoutMs": 120000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `queries` accepts an array of strings — all terms are searched in one pass against the string index built by `analyzeAll`.
+- Results are grouped per query in the output JSON, each with address, section, and surrounding context.
+- Case-insensitive by default; add `"caseSensitive": true` to `args` if exact casing matters.
+
+---
+
+## Template: Full Decompilation Pipeline with Step References (v3.7.3)
+
+Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler using a `$step[N].output` reference — no hardcoded absolute paths required.
+
+```json
+{
+  "name": "Full Decompilation Pipeline with Step References",
+  "description": "Lift → Decompile using step output referencing",
+  "file": "${file}",
+  "outDir": "./results",
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x140001000", "size": 4096 },
+      "output": { "path": "lifted.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "irPath": "$step[1].output" },
+      "output": { "path": "decompiled.helix.c" },
+      "timeoutMs": 180000,
+      "continueOnError": true
+    }
+  ]
+}
+```
+
+**Notes:**
+- `$step[N].output` resolves to the `output.path` of step N at runtime, relative to `outDir`. Step indices are zero-based.
+- This eliminates hardcoded paths and makes the template portable across machines and `outDir` values.
+- `size` (bytes) is used instead of `count` (instructions) when the region boundary is known; both are accepted by `liftToIR`.
+- `continueOnError: true` on the decompile step ensures `hexcore-pipeline.status.json` is written even if Helix returns a partial result.

@@ -1,19 +1,26 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
+// Copyright (c) HikariSystem. All rights reserved.
+// Licensed under the MIT License. See LICENSE in the project root.
 'use strict';
 
 const path = require('path');
 const fs = require('fs');
 
 if (process.platform === 'win32') {
-	const unicornDir = path.join(__dirname, 'deps', 'unicorn');
-	const unicornDll = path.join(unicornDir, 'unicorn.dll');
-	if (fs.existsSync(unicornDll)) {
-		const pathEntries = (process.env.PATH || '').split(';');
-		if (!pathEntries.includes(unicornDir)) {
-			process.env.PATH = `${unicornDir};${process.env.PATH || ''}`;
+	// Search for unicorn.dll in multiple locations:
+	// 1. deps/unicorn/ (dev / standard layout)
+	// 2. prebuilds/win32-x64/ (installed via hexcore-native-install.js)
+	const dllCandidates = [
+		path.join(__dirname, 'deps', 'unicorn'),
+		path.join(__dirname, 'prebuilds', `${process.platform}-${process.arch}`)
+	];
+	for (const dir of dllCandidates) {
+		const dll = path.join(dir, 'unicorn.dll');
+		if (fs.existsSync(dll)) {
+			const pathEntries = (process.env.PATH || '').split(';');
+			if (!pathEntries.includes(dir)) {
+				process.env.PATH = `${dir};${process.env.PATH || ''}`;
+			}
+			break;
 		}
 	}
 }

@@ -42,6 +42,7 @@
 		"onCommand:hexcore.debug.snapshotHeadless",
 		"onCommand:hexcore.debug.restoreSnapshotHeadless",
 		"onCommand:hexcore.debug.exportTraceHeadless",
+		"onCommand:hexcore.debug.searchMemoryHeadless",
 		"onView:hexcore.debugger.view",
 		"onView:hexcore.debugger.trace"
 	],
@@ -125,6 +126,11 @@
 			{
 				"command": "hexcore.debug.readMemoryHeadless",
 				"title": "Emulate: Read Memory (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.searchMemoryHeadless",
+				"title": "Emulate: Search Memory Pattern (Headless)",
 				"category": "HexCore Automation"
 			},
 			{

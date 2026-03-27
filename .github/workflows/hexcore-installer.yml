@@ -111,6 +111,37 @@ jobs:
           cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
+      - name: Verify Unicorn Runtime DLL
+        run: |
+          $unicornDir = "extensions/hexcore-unicorn"
+          $dllPaths = @(
+            "$unicornDir/deps/unicorn/unicorn.dll",
+            "$unicornDir/prebuilds/win32-x64/unicorn.dll"
+          )
+          $found = $false
+          foreach ($p in $dllPaths) {
+            if (Test-Path $p) {
+              $size = (Get-Item $p).Length / 1MB
+              Write-Host "✓ unicorn.dll found at $p ($([math]::Round($size, 2)) MB)"
+              $found = $true
+              break
+            }
+          }
+          if (-not $found) {
+            Write-Host "✗ unicorn.dll NOT FOUND — emulation will fail at runtime"
+            Write-Host "Attempting manual download from GitHub Release..."
+            cd $unicornDir
+            $version = node -p "require('./package.json').version"
+            $tag = "v$version"
+            New-Item -ItemType Directory -Force deps/unicorn | Out-Null
+            gh release download $tag --repo LXrdKnowkill/hexcore-unicorn --pattern "unicorn.dll" --dir deps/unicorn/ 2>$null
+            if (Test-Path "deps/unicorn/unicorn.dll") {
+              Write-Host "✓ unicorn.dll downloaded successfully"
+            } else {
+              Write-Host "⚠ Could not download unicorn.dll — continuing without emulation support"
+            }
+          }
+
       - name: Fetch HexCore Helix Prebuilds (Windows)
         continue-on-error: true
         run: |

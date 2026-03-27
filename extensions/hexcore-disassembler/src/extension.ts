@@ -1450,6 +1450,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				startAddress = parseAddressValue(options.address as string | number | undefined)
 					?? parseAddressValue(options.startAddress as string | number | undefined)
 					?? engine.getBaseAddress();
+				// Auto-backtrack: if address is mid-function, find the real start (FEAT-DISASM-004 / BUG-HELIX-002)
+				if (options.autoBacktrack !== false) {
+					const funcStart = await engine.findFunctionStartForAddress(startAddress);
+					if (funcStart !== undefined && funcStart !== startAddress) {
+						startAddress = funcStart;
+					}
+				}
 				if (typeof options.size === 'number') {
 					size = options.size;
 				} else if (typeof options.count === 'number') {
@@ -2057,9 +2064,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
+			// Pass optimizeIR option to Helix (BUG-HELIX-003)
+			const helixOptions = isHeadless && options.optimizeIR !== undefined
+				? { optimizeIR: options.optimizeIR !== false }
+				: undefined;
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
-				async () => helixWrapper.decompileIr(liftResult.ir, arch)
+				async () => helixWrapper.decompileIr(liftResult.ir, arch, helixOptions)
 			);
 
 			if (!decompileResult.success) {
@@ -2217,6 +2228,21 @@ export function activate(context: vscode.ExtensionContext): void {
 				throw new Error(`Address 0x${params.address.toString(16).toUpperCase()} is outside the binary range.`);
 			}
 
+			// 3b. Auto-backtrack: if address is mid-function, find the real start
+			//     Uses native function boundary detection (FEAT-DISASM-004)
+			let effectiveAddress = params.address;
+			const autoBacktrack = (arg as any)?.autoBacktrack !== false; // enabled by default
+			if (autoBacktrack) {
+				const existingFunc = engine.getFunctionAt(params.address);
+				if (!existingFunc) {
+					// Address not recognized as a function start — try to find one
+					const funcStart = await engine.findFunctionStartForAddress(params.address);
+					if (funcStart !== undefined && funcStart !== params.address) {
+						effectiveAddress = funcStart;
+					}
+				}
+			}
+
 			// 4. Determine max instruction size from architecture
 			const arch = engine.getArchitecture();
 			const maxInstructionSize = (arch === 'arm' || arch === 'arm64')
@@ -2231,9 +2257,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				);
 			}
 
-			// 6. Disassemble main instructions
+			// 6. Disassemble main instructions (use effectiveAddress for backtrack)
 			const estimatedSize = params.count * maxInstructionSize;
-			const rawMainInstructions = await engine.disassembleRange(params.address, estimatedSize);
+			const rawMainInstructions = await engine.disassembleRange(effectiveAddress, estimatedSize);
 			const mainInstructions = rawMainInstructions.slice(0, params.count);
 
 			// 7. Prepare reference maps for comment resolution
@@ -2360,9 +2386,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.searchStringHeadless', async (arg?: Record<string, unknown>) => {
-			const query = typeof arg?.query === 'string' ? arg.query : undefined;
-			if (!query) {
-				throw new Error('searchStringHeadless requires a "query" argument.');
+			const singleQuery = typeof arg?.query === 'string' ? arg.query : undefined;
+			const batchQueries = Array.isArray(arg?.queries)
+				? (arg!.queries as unknown[]).filter((q): q is string => typeof q === 'string')
+				: undefined;
+
+			if (!singleQuery && (!batchQueries || batchQueries.length === 0)) {
+				throw new Error('searchStringHeadless requires a "query" (string) or "queries" (string[]) argument.');
 			}
 
 			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
@@ -2380,10 +2410,66 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 
-			const results = await engine.searchStringReferences(query);
+			// Batch mode: queries[] takes precedence when provided
+			if (batchQueries && batchQueries.length > 0) {
+				const batchResults: Array<{
+					query: string;
+					totalMatches: number;
+					matches: Array<{
+						address: string;
+						string: string;
+						encoding: string;
+						references: string[];
+					}>;
+				}> = [];
+
+				// Deduplicate queries to avoid redundant searches
+				const uniqueQueries = [...new Set(batchQueries)];
+
+				for (const q of uniqueQueries) {
+					const results = await engine.searchStringReferences(q);
+					batchResults.push({
+						query: q,
+						totalMatches: results.length,
+						matches: results.map((sr: any) => ({
+							address: toHexAddress(sr.address),
+							string: sr.string,
+							encoding: sr.encoding,
+							references: sr.references.map((addr: number) => toHexAddress(addr)),
+							query: q
+						}))
+					});
+				}
+
+				const totalMatches = batchResults.reduce((sum, r) => sum + r.totalMatches, 0);
+
+				const exportData = {
+					mode: 'batch' as const,
+					queriesCount: uniqueQueries.length,
+					totalMatches,
+					results: batchResults,
+					generatedAt: new Date().toISOString()
+				};
+
+				if (outputOptions?.path) {
+					fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+					fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+				}
+
+				if (!quietMode) {
+					vscode.window.showInformationMessage(
+						`Batch string search: ${totalMatches} total matches across ${uniqueQueries.length} queries`
+					);
+				}
+
+				return exportData;
+			}
+
+			// Single query mode (backward compatible)
+			const results = await engine.searchStringReferences(singleQuery!);
 
 			const exportData = {
-				query,
+				query: singleQuery,
 				totalMatches: results.length,
 				matches: results.map((sr: any) => ({
 					address: toHexAddress(sr.address),
@@ -2400,7 +2486,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			if (!quietMode) {
-				vscode.window.showInformationMessage(`String search: ${results.length} matches for "${query}"`);
+				vscode.window.showInformationMessage(`String search: ${results.length} matches for "${singleQuery}"`);
 			}
 
 			return exportData;
@@ -2466,6 +2552,263 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			return { outputPath, generatedAt: new Date().toISOString() };
+		})
+	);
+
+	// =========================================================================
+	// FEAT-DISASM-002 — rttiScanHeadless
+	// Scans a PE binary for MSVC RTTI Type Descriptors (.?AV pattern)
+	// =========================================================================
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.rttiScanHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
+
+			// Load file into engine if a path is provided and differs from current
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			// Read the raw file buffer — we need direct byte access for pattern scanning
+			const targetPath = filePath ?? engine.getFilePath();
+			if (!targetPath) {
+				throw new Error('rttiScanHeadless requires a "file" argument or a previously loaded file.');
+			}
+			const fileBuffer = fs.readFileSync(targetPath);
+
+			// Search for .?AV pattern (MSVC RTTI Type Descriptor decorated name)
+			const marker = Buffer.from('.?AV', 'ascii');
+			const classes: Array<{ className: string; offset: number; fullName: string }> = [];
+
+			for (let i = 0; i <= fileBuffer.length - marker.length; i++) {
+				if (fileBuffer[i] === marker[0] &&
+					fileBuffer[i + 1] === marker[1] &&
+					fileBuffer[i + 2] === marker[2] &&
+					fileBuffer[i + 3] === marker[3]) {
+					// Found .?AV — extract the full decorated name until @@ or null byte
+					let end = i + 4;
+					const maxLen = Math.min(i + 512, fileBuffer.length); // cap at 512 chars
+					let foundTerminator = false;
+					while (end < maxLen) {
+						const byte = fileBuffer[end];
+						if (byte === 0) {
+							foundTerminator = true;
+							break;
+						}
+						// Check for @@ terminator (two consecutive @)
+						if (byte === 0x40 && end + 1 < maxLen && fileBuffer[end + 1] === 0x40) {
+							end += 2; // include the @@
+							foundTerminator = true;
+							break;
+						}
+						// Only accept printable ASCII in class names
+						if (byte < 0x20 || byte > 0x7E) {
+							foundTerminator = true;
+							break;
+						}
+						end++;
+					}
+
+					if (!foundTerminator) {
+						continue;
+					}
+
+					const fullName = fileBuffer.subarray(i, end).toString('ascii');
+					// Validate: must be a reasonable RTTI name (at least .?AV + one char)
+					if (fullName.length < 5) {
+						continue;
+					}
+
+					// Undecorate: strip .?AV prefix and @@ suffix
+					let className = fullName.slice(4); // remove ".?AV"
+					if (className.endsWith('@@')) {
+						className = className.slice(0, -2);
+					}
+					// Strip any remaining trailing @ and namespace qualifiers for the short name
+					// e.g., ".?AVFoo@Bar@@" -> className = "Foo@Bar", we keep it as-is
+					// Only strip the final @@ which we already did
+
+					classes.push({
+						className,
+						offset: i,
+						fullName,
+					});
+				}
+			}
+
+			const result = {
+				success: true as const,
+				classes: classes.map(c => ({
+					className: c.className,
+					offset: c.offset,
+					fullName: c.fullName,
+				})),
+				totalClasses: classes.length,
+				generatedAt: new Date().toISOString(),
+			};
+
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(
+					`RTTI Scan: found ${classes.length} class type descriptors`
+				);
+			}
+
+			return result;
+		})
+	);
+
+	// =========================================================================
+	// FEAT-DISASM-003 — searchBytesHeadless (AOB scan)
+	// Searches for byte patterns with wildcards in the loaded binary
+	// =========================================================================
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.searchBytesHeadless', async (arg?: Record<string, unknown>) => {
+			const rawPattern = typeof arg?.pattern === 'string' ? arg.pattern : undefined;
+			if (!rawPattern) {
+				throw new Error('searchBytesHeadless requires a "pattern" argument (e.g. "48 8B ?? ?? 0F 84").');
+			}
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const maxResults = typeof arg?.maxResults === 'number' && Number.isInteger(arg.maxResults) && arg.maxResults > 0
+				? arg.maxResults
+				: 100;
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
+
+			// Load file into engine if a path is provided and differs from current
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			const targetPath = filePath ?? engine.getFilePath();
+			if (!targetPath) {
+				throw new Error('searchBytesHeadless requires a "file" argument or a previously loaded file.');
+			}
+			const fileBuffer = fs.readFileSync(targetPath);
+
+			// Parse the pattern string into bytes and mask
+			// Supports: "48 8B ?? ?? 0F 84" or "488B????0F84" or mixed
+			const normalizedPattern = rawPattern.trim();
+			const patternBytes: Array<{ value: number; wildcard: boolean }> = [];
+
+			if (normalizedPattern.includes(' ')) {
+				// Space-separated format: "48 8B ?? ?? 0F 84"
+				const tokens = normalizedPattern.split(/\s+/);
+				for (const token of tokens) {
+					if (token === '??' || token === '?') {
+						patternBytes.push({ value: 0, wildcard: true });
+					} else if (/^[0-9a-fA-F]{2}$/.test(token)) {
+						patternBytes.push({ value: parseInt(token, 16), wildcard: false });
+					} else {
+						throw new Error(`Invalid pattern token: "${token}". Expected two hex digits or "??".`);
+					}
+				}
+			} else {
+				// Compact format: "488B????0F84"
+				if (normalizedPattern.length % 2 !== 0) {
+					throw new Error('Compact pattern must have an even number of characters.');
+				}
+				for (let i = 0; i < normalizedPattern.length; i += 2) {
+					const pair = normalizedPattern.slice(i, i + 2);
+					if (pair === '??' || pair === '??') {
+						patternBytes.push({ value: 0, wildcard: true });
+					} else if (/^[0-9a-fA-F]{2}$/.test(pair)) {
+						patternBytes.push({ value: parseInt(pair, 16), wildcard: false });
+					} else {
+						throw new Error(`Invalid pattern pair: "${pair}". Expected two hex digits or "??".`);
+					}
+				}
+			}
+
+			if (patternBytes.length === 0) {
+				throw new Error('Pattern must contain at least one byte.');
+			}
+
+			// Build section lookup for offset-to-VA conversion
+			const sections = engine.getSections();
+			const baseAddress = engine.getBaseAddress();
+
+			const offsetToVA = (offset: number): number => {
+				for (const section of sections) {
+					if (offset >= section.rawAddress && offset < section.rawAddress + section.rawSize) {
+						return section.virtualAddress + (offset - section.rawAddress);
+					}
+				}
+				// Fallback: raw offset + base
+				return offset + baseAddress;
+			};
+
+			// Linear scan
+			const matches: Array<{ address: string; offset: number }> = [];
+			const patternLen = patternBytes.length;
+			const scanLimit = fileBuffer.length - patternLen;
+
+			for (let i = 0; i <= scanLimit && matches.length < maxResults; i++) {
+				let matched = true;
+				for (let j = 0; j < patternLen; j++) {
+					const entry = patternBytes[j];
+					if (!entry.wildcard && fileBuffer[i + j] !== entry.value) {
+						matched = false;
+						break;
+					}
+				}
+				if (matched) {
+					const va = offsetToVA(i);
+					matches.push({
+						address: `0x${va.toString(16).toUpperCase()}`,
+						offset: i,
+					});
+				}
+			}
+
+			// Normalize the pattern for display (space-separated)
+			const displayPattern = patternBytes
+				.map(b => b.wildcard ? '??' : b.value.toString(16).toUpperCase().padStart(2, '0'))
+				.join(' ');
+
+			const result = {
+				success: true as const,
+				pattern: displayPattern,
+				matches,
+				totalMatches: matches.length,
+				generatedAt: new Date().toISOString(),
+			};
+
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(
+					`AOB Scan: ${matches.length} match(es) for pattern "${displayPattern}"`
+				);
+			}
+
+			return result;
 		})
 	);
 

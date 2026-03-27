@@ -80,6 +80,16 @@ private:
     Napi::Value DisasmAsync(const Napi::CallbackInfo& info);
 
     /**
+     * Detect function boundaries in a code buffer (asynchronous)
+     * Scans for prologue patterns and call targets to identify functions.
+     * @param info[0] Buffer - code to analyze
+     * @param info[1] Number|BigInt - base address
+     * @param info[2] Number - (optional) max functions, 0 = unlimited (default 5000)
+     * @returns Promise<Array<FunctionBoundary>>
+     */
+    Napi::Value DetectFunctions(const Napi::CallbackInfo& info);
+
+    /**
      * Set option
      * @param info[0] Number - option type (CS_OPT_*)
      * @param info[1] Number - option value

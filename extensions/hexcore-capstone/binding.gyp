@@ -1,7 +1,7 @@
 {
   "targets": [
     {
-      "target_name": "capstone_native",
+      "target_name": "hexcore_capstone",
       "sources": [
         "src/main.cpp",
         "src/capstone_wrapper.cpp"
@@ -21,7 +21,8 @@
           ],
           "msvs_settings": {
             "VCCLCompilerTool": {
-              "ExceptionHandling": 1,
+              "ExceptionHandling": 0,
+              "AdditionalOptions": ["/std:c++17"],
               "AdditionalIncludeDirectories": [
                 "<(module_root_dir)/deps/capstone/include"
               ]
@@ -40,8 +41,9 @@
             "<(module_root_dir)/deps/capstone/build/libcapstone.a"
           ],
           "xcode_settings": {
-            "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+            "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
             "CLANG_CXX_LIBRARY": "libc++",
+            "CLANG_CXX_LANGUAGE_STANDARD": "c++17",
             "MACOSX_DEPLOYMENT_TARGET": "10.15"
           }
         }]

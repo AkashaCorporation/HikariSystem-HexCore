@@ -17,3 +17,10 @@ README.md
 # Prebuilds: force include (overrides .gitignore)
 !prebuilds/
 !prebuilds/**
+
+# Runtime DLLs: force include (Unicorn is dynamically linked)
+!deps/unicorn/unicorn.dll
+!deps/unicorn/libunicorn.so
+!deps/unicorn/libunicorn.so.2
+!deps/unicorn/libunicorn.dylib
+!deps/unicorn/libunicorn.2.dylib

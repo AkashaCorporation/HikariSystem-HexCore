@@ -477,6 +477,32 @@ export interface Version {
  * cs.close();
  * ```
  */
+/**
+ * Function boundary detected by the prologue scanner and call target analysis.
+ */
+export interface FunctionBoundary {
+	/** Start address of the function (BigInt for 64-bit safety) */
+	start: bigint;
+	/** End address (last instruction address) */
+	end: bigint;
+	/** Total size in bytes */
+	size: number;
+	/** Number of instructions (0 if not counted in fast scan) */
+	instructionCount: number;
+	/** How this function was detected */
+	detectionMethod: 'prologue' | 'call_target' | 'symbol' | 'heuristic';
+	/** Confidence score 0.0 - 1.0 */
+	confidence: number;
+	/** Whether the function contains a return instruction */
+	hasReturn: boolean;
+	/** Whether this is a thunk (tiny function with just a jump) */
+	isThunk: boolean;
+	/** Addresses of functions called by this function */
+	callTargets: bigint[];
+	/** Addresses of functions that call this function */
+	calledBy: bigint[];
+}
+
 export class Capstone {
 	/**
 	 * Create a new Capstone disassembler instance
@@ -538,6 +564,30 @@ export class Capstone {
 	 * ```
 	 */
 	disasmAsync(code: Buffer | Uint8Array, address: number, count?: number): Promise<Instruction[]>;
+
+	/**
+	 * Detect function boundaries in a code buffer
+	 *
+	 * Scans the buffer for function prologue patterns (push rbp, stp x29/x30, etc.)
+	 * and collects call targets to identify function boundaries. Runs asynchronously
+	 * in a background thread.
+	 *
+	 * @param code - Buffer containing machine code to analyze
+	 * @param baseAddress - Virtual address of the first byte in the buffer
+	 * @param maxFunctions - Maximum number of functions to detect (default 5000)
+	 * @returns Promise resolving to array of detected function boundaries
+	 *
+	 * @example
+	 * ```typescript
+	 * const cs = new Capstone(ARCH.X86, MODE.MODE_64);
+	 * const functions = await cs.detectFunctions(codeBuffer, 0x140001000n);
+	 * for (const fn of functions) {
+	 *   console.log(`Function at ${fn.start.toString(16)}, ${fn.size} bytes, confidence: ${fn.confidence}`);
+	 * }
+	 * cs.close();
+	 * ```
+	 */
+	detectFunctions(code: Buffer | Uint8Array, baseAddress: number | bigint, maxFunctions?: number): Promise<FunctionBoundary[]>;
 
 	/**
 	 * Set a disassembler option

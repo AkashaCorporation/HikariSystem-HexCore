@@ -142,4 +142,4 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
     return exports;
 }
 
-NODE_API_MODULE(capstone_native, Init)
+NODE_API_MODULE(hexcore_capstone, Init)

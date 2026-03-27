@@ -1,10 +1,9 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
+// Copyright (c) HikariSystem. All rights reserved.
+// Licensed under the MIT License. See LICENSE in the project root.
 
 #include "capstone_wrapper.h"
 #include "disasm_async_worker.h"
+#include "function_detector.h"
 #include <cstring>
 
 // Static constructor reference
@@ -27,6 +26,7 @@ Napi::Object CapstoneWrapper::Init(Napi::Env env, Napi::Object exports) {
 		InstanceMethod("isOpen", &CapstoneWrapper::IsOpen),
 		InstanceMethod("getError", &CapstoneWrapper::GetError),
 		InstanceMethod("strError", &CapstoneWrapper::StrError),
+		InstanceMethod("detectFunctions", &CapstoneWrapper::DetectFunctions),
 	});
 
 	constructor = Napi::Persistent(func);
@@ -108,7 +108,13 @@ Napi::Value CapstoneWrapper::Disasm(const Napi::CallbackInfo& info) {
 		codeSize = codeBuffer.Length();
 	} else if (info[0].IsTypedArray()) {
 		Napi::TypedArray typedArray = info[0].As<Napi::TypedArray>();
-		code = static_cast<const uint8_t*>(typedArray.ArrayBuffer().Data()) + typedArray.ByteOffset();
+		Napi::ArrayBuffer ab = typedArray.ArrayBuffer();
+		if (ab.IsDetached()) {
+			Napi::Error::New(env, "ArrayBuffer is detached")
+				.ThrowAsJavaScriptException();
+			return env.Null();
+		}
+		code = static_cast<const uint8_t*>(ab.Data()) + typedArray.ByteOffset();
 		codeSize = typedArray.ByteLength();
 	} else {
 		Napi::TypeError::New(env, "First argument must be a Buffer or Uint8Array")
@@ -116,13 +122,18 @@ Napi::Value CapstoneWrapper::Disasm(const Napi::CallbackInfo& info) {
 		return env.Null();
 	}
 
-	// Get base address
-	if (!info[1].IsNumber()) {
-		Napi::TypeError::New(env, "Second argument (address) must be a number")
+	// Get base address — accepts BigInt (preferred, no truncation) or Number
+	uint64_t address;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		address = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[1].IsNumber()) {
+		address = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "Second argument (address) must be a Number or BigInt")
 			.ThrowAsJavaScriptException();
 		return env.Null();
 	}
-	uint64_t address = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
 
 	// Get max instructions (optional)
 	size_t count = 0; // 0 means disassemble all
@@ -176,7 +187,13 @@ Napi::Value CapstoneWrapper::DisasmAsync(const Napi::CallbackInfo& info) {
 		codeVec.assign(codeBuffer.Data(), codeBuffer.Data() + codeBuffer.Length());
 	} else if (info[0].IsTypedArray()) {
 		Napi::TypedArray typedArray = info[0].As<Napi::TypedArray>();
-		const uint8_t* data = static_cast<const uint8_t*>(typedArray.ArrayBuffer().Data()) + typedArray.ByteOffset();
+		Napi::ArrayBuffer ab = typedArray.ArrayBuffer();
+		if (ab.IsDetached()) {
+			Napi::Error::New(env, "ArrayBuffer is detached")
+				.ThrowAsJavaScriptException();
+			return env.Null();
+		}
+		const uint8_t* data = static_cast<const uint8_t*>(ab.Data()) + typedArray.ByteOffset();
 		codeVec.assign(data, data + typedArray.ByteLength());
 	} else {
 		Napi::TypeError::New(env, "First argument must be a Buffer or Uint8Array")
@@ -184,13 +201,18 @@ Napi::Value CapstoneWrapper::DisasmAsync(const Napi::CallbackInfo& info) {
 		return env.Null();
 	}
 
-	// Get base address
-	if (!info[1].IsNumber()) {
-		Napi::TypeError::New(env, "Second argument (address) must be a number")
+	// Get base address — accepts BigInt (preferred, no truncation) or Number
+	uint64_t address;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		address = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[1].IsNumber()) {
+		address = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "Second argument (address) must be a Number or BigInt")
 			.ThrowAsJavaScriptException();
 		return env.Null();
 	}
-	uint64_t address = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
 
 	// Get max instructions (optional)
 	size_t count = 0;
@@ -220,7 +242,11 @@ Napi::Object CapstoneWrapper::InstructionToObject(Napi::Env env, cs_insn* insn) 
 	Napi::Object obj = Napi::Object::New(env);
 
 	obj.Set("id", Napi::Number::New(env, insn->id));
-	obj.Set("address", Napi::Number::New(env, static_cast<double>(insn->address)));
+	// Emit address as BigInt to avoid silent truncation for addresses > 2^53.
+	// addressAsNumber is provided for compatibility with consumers that rely on
+	// Number arithmetic (e.g. insn.address + 1), but may lose precision above 2^53.
+	obj.Set("address", Napi::BigInt::New(env, static_cast<uint64_t>(insn->address)));
+	obj.Set("addressAsNumber", Napi::Number::New(env, static_cast<double>(insn->address)));
 	obj.Set("size", Napi::Number::New(env, insn->size));
 	obj.Set("mnemonic", Napi::String::New(env, insn->mnemonic));
 	obj.Set("opStr", Napi::String::New(env, insn->op_str));
@@ -300,6 +326,12 @@ Napi::Object CapstoneWrapper::DetailToObject(Napi::Env env, cs_insn* insn) {
 			break;
 #endif
 		default:
+			// Architecture is known to Capstone (TMS320C64X, M680X, EVM, WASM, BPF, etc.)
+			// but no arch-specific detail converter exists in this wrapper yet.
+			// regsRead/regsWrite/groups are still populated above.
+			obj.Set("archSpecific", env.Null());
+			obj.Set("warning", Napi::String::New(env,
+				"arch-specific detail not yet implemented for this architecture"));
 			break;
 	}
 
@@ -1006,3 +1038,68 @@ Napi::Object CapstoneWrapper::RiscvDetailToObject(Napi::Env env, cs_riscv* riscv
 	return obj;
 }
 #endif
+
+// ============================================================================
+// DetectFunctions — Async function boundary detection
+// ============================================================================
+Napi::Value CapstoneWrapper::DetectFunctions(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (!opened_) {
+		Napi::Error::New(env, "Capstone handle is not open").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (info.Length() < 2) {
+		Napi::TypeError::New(env, "Expected at least 2 arguments: buffer, baseAddress").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Get code buffer
+	std::vector<uint8_t> code;
+	if (info[0].IsBuffer()) {
+		Napi::Buffer<uint8_t> buffer = info[0].As<Napi::Buffer<uint8_t>>();
+		code.assign(buffer.Data(), buffer.Data() + buffer.Length());
+	} else if (info[0].IsTypedArray()) {
+		Napi::TypedArray typedArray = info[0].As<Napi::TypedArray>();
+		Napi::ArrayBuffer ab = typedArray.ArrayBuffer();
+		if (ab.IsDetached()) {
+			Napi::Error::New(env, "ArrayBuffer is detached").ThrowAsJavaScriptException();
+			return env.Undefined();
+		}
+		const uint8_t* data = static_cast<const uint8_t*>(ab.Data()) + typedArray.ByteOffset();
+		code.assign(data, data + typedArray.ByteLength());
+	} else {
+		Napi::TypeError::New(env, "First argument must be a Buffer or TypedArray").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Get base address (BigInt or Number)
+	uint64_t baseAddress;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		baseAddress = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[1].IsNumber()) {
+		baseAddress = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "Base address must be a BigInt or Number").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Get maxFunctions (optional, default 5000)
+	uint32_t maxFunctions = 5000;
+	if (info.Length() > 2 && info[2].IsNumber()) {
+		maxFunctions = info[2].As<Napi::Number>().Uint32Value();
+	}
+
+	// Create deferred promise
+	Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
+
+	// Launch async worker
+	FunctionDetectorWorker* worker = new FunctionDetectorWorker(
+		env, deferred, arch_, mode_, std::move(code), baseAddress, maxFunctions
+	);
+	worker->Queue();
+
+	return deferred.Promise();
+}

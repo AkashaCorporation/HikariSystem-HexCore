@@ -22,7 +22,7 @@
 'use strict';
 
 // Load the native addon
-// prebuildify uses binding.gyp target name (capstone_native)
+// prebuildify uses binding.gyp target name (hexcore_capstone)
 // prebuild-install uses package name (hexcore-capstone)
 // node.napi.node is another common convention
 // Try all for maximum compatibility
@@ -34,9 +34,13 @@ const errors = [];
 const candidates = [
 	{ label: 'prebuild (node.napi)', path: platformDir + 'node.napi.node' },
 	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-capstone.node' },
-	{ label: 'prebuild (underscore)', path: platformDir + 'capstone_native.node' },
-	{ label: 'build/Release', path: './build/Release/capstone_native.node' },
-	{ label: 'build/Debug', path: './build/Debug/capstone_native.node' },
+	{ label: 'prebuild (underscore)', path: platformDir + 'hexcore_capstone.node' },
+	{ label: 'build/Release', path: './build/Release/hexcore_capstone.node' },
+	{ label: 'build/Debug', path: './build/Debug/hexcore_capstone.node' },
+	// Legacy fallback for transition period
+	{ label: 'prebuild (legacy)', path: platformDir + 'capstone_native.node' },
+	{ label: 'build/Release (legacy)', path: './build/Release/capstone_native.node' },
+	{ label: 'build/Debug (legacy)', path: './build/Debug/capstone_native.node' },
 ];
 
 for (const candidate of candidates) {

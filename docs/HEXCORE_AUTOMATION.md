@@ -1,4 +1,4 @@
-# HexCore Automation — v3.7.1
+# HexCore Automation — v3.7.3
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -146,6 +146,57 @@ When `maxEntropy > 7.5` (likely packed), the pipeline skips strings and disassem
 
 ---
 
+## Pipeline Step Referencing — v3.7.3
+
+Steps can reference outputs from previously-completed steps using `$step[N]` tokens in argument values. This eliminates hardcoded paths and makes multi-step pipelines self-describing.
+
+### Syntax
+
+| Token | Description |
+|-------|-------------|
+| `$step[N].output` | Output file path produced by step N (0-based index) |
+| `$step[N].result.fieldName` | A specific field from the JSON result of step N |
+| `$step[prev].output` | Output file path from the immediately preceding step |
+
+**Example — auto-wire liftToIR → decompileIR:**
+
+```json
+{
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x140001000", "count": 150 },
+      "output": { "path": "function.ll" }
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "irPath": "$step[0].output" }
+    }
+  ]
+}
+```
+
+**Example — branch on a result field:**
+
+```json
+{
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "test.exe" } },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "irPath": "$step[0].result.irOutputPath" }
+    }
+  ]
+}
+```
+
+**Rules:**
+- Forward references (referencing a step that has not yet run) are a validation error.
+- Tokens are resolved immediately before the step executes, using the live result of the referenced step.
+- `$step[prev]` is equivalent to `$step[N-1]` where N is the current step index. It is a validation error on step 0.
+
+---
+
 ## Headless Commands (Pipeline-Safe)
 
 These commands accept `file`, `quiet`, and `output` options and can run without any UI interaction.
@@ -181,6 +232,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.rellic.decompileIR` | 120s | ~~Decompile pre-lifted LLVM IR text to pseudo-C via Rellic~~ **(DEPRECATED — use `hexcore.helix.decompileIR`)** | x86, x64 |
 | `hexcore.helix.decompile` | 180s | **Decompile binary to pseudo-C via Helix MLIR pipeline** (lift + full pass pipeline in one step) | x86, x64 |
 | `hexcore.helix.decompileIR` | 180s | **Decompile pre-lifted .ll file to pseudo-C via Helix MLIR pipeline** — use `irPath` to specify the IR file | x86, x64 |
+| `hexcore.disasm.rttiScanHeadless` | 120s | Scan PE binary for MSVC RTTI Type Descriptors, returns class names and offsets **(v3.7.3)** | PE only |
+| `hexcore.disasm.searchBytesHeadless` | 120s | AOB scan with wildcard support — finds byte patterns across the entire binary **(v3.7.3)** | All |
 
 ### Hex Viewer
 
@@ -208,6 +261,7 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.debug.snapshotHeadless` | 60s | Save emulation snapshot (requires active session) | x86, x64, ARM64 |
 | `hexcore.debug.restoreSnapshotHeadless` | 60s | Restore emulation snapshot (requires saved snapshot) | x86, x64, ARM64 |
 | `hexcore.debug.exportTraceHeadless` | 60s | Export API/libc call trace as JSON | x86, x64, ARM64 |
+| `hexcore.debug.searchMemoryHeadless` | 60s | Pattern search across emulated RAM during keepAlive sessions **(v3.7.3)** | x86, x64, ARM64 |
 
 **Wave 2 runtime note**
 
@@ -285,6 +339,13 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.decompile.ir` | `hexcore.helix.decompileIR` |
 | `hexcore.liftir` | `hexcore.disasm.liftToIR` |
 | `hexcore.disasm.disassembleAt` | `hexcore.disasm.disassembleAtHeadless` |
+| `hexcore.debug.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
+| `hexcore.unicorn.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
+| `hexcore.unicorn.searchMemoryHeadless` | `hexcore.debug.searchMemoryHeadless` |
+| `hexcore.disasm.rttiScan` | `hexcore.disasm.rttiScanHeadless` |
+| `hexcore.disasm.scanRtti` | `hexcore.disasm.rttiScanHeadless` |
+| `hexcore.disasm.searchBytes` | `hexcore.disasm.searchBytesHeadless` |
+| `hexcore.disasm.aobScan` | `hexcore.disasm.searchBytesHeadless` |
 
 ---
 
@@ -299,7 +360,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
 - **Rellic Decompiler** **(DEPRECATED — removal in v3.8.0)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook for v3.8 preparation.
-- **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step).
+- **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step). Pass `optimizeIR: false` to skip MLIR optimization passes when debugging pass pipeline issues.
+- **Auto-backtrack** (v3.7.3) — `disassembleAtHeadless` and `helix.decompile` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. Disable with `autoBacktrack: false`.
 
 ---
 
@@ -357,12 +419,102 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 ```
 
 ### `hexcore.disasm.searchStringHeadless`
+
+Single query mode (unchanged):
+
 ```json
 {
   "cmd": "hexcore.disasm.searchStringHeadless",
   "args": { "query": "HTB{" }
 }
 ```
+
+Batch mode **(v3.7.3)** — accepts a `queries` array and searches all terms in one call:
+
+```json
+{
+  "cmd": "hexcore.disasm.searchStringHeadless",
+  "args": { "queries": ["health", "ammo", "recoil"] }
+}
+```
+
+**Batch output:**
+
+```json
+{
+  "mode": "batch",
+  "queriesCount": 3,
+  "totalMatches": 12,
+  "results": [
+    { "query": "health", "totalMatches": 5, "matches": [ ... ] },
+    { "query": "ammo",   "totalMatches": 4, "matches": [ ... ] },
+    { "query": "recoil", "totalMatches": 3, "matches": [ ... ] }
+  ]
+}
+```
+
+Use `query` (string) for single-term lookups and `queries` (array) for batch lookups. Providing both is an error.
+
+### `hexcore.disasm.rttiScanHeadless` **(v3.7.3)**
+
+Scan a PE binary for MSVC RTTI Type Descriptors and recover class names.
+
+```json
+{
+  "cmd": "hexcore.disasm.rttiScanHeadless",
+  "args": { "file": "sample.exe" }
+}
+```
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "classes": [
+    { "className": "CPlayer", "offset": 1234, "fullName": ".?AVCPlayer@@" }
+  ],
+  "totalClasses": 1
+}
+```
+
+**Aliases:** `hexcore.disasm.rttiScan`, `hexcore.disasm.scanRtti`
+
+### `hexcore.disasm.searchBytesHeadless` **(v3.7.3)**
+
+AOB (array-of-bytes) scan across the entire binary with wildcard support.
+
+```json
+{
+  "cmd": "hexcore.disasm.searchBytesHeadless",
+  "args": {
+    "file": "sample.exe",
+    "pattern": "48 8B ?? ?? 0F 84",
+    "maxResults": 100
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | `string` | *(from job)* | Path to binary. Inherited from job-level `file` if omitted. |
+| `pattern` | `string` | *(required)* | Byte pattern — space-separated (`"48 8B ?? 00"`) or compact (`"488B??00"`). `??` is a single-byte wildcard. |
+| `maxResults` | `number` | `100` | Maximum matches to return. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "pattern": "48 8B ?? ?? 0F 84",
+  "matches": [
+    { "address": "0x140001234", "offset": 4660 }
+  ],
+  "totalMatches": 1
+}
+```
+
+**Aliases:** `hexcore.disasm.searchBytes`, `hexcore.disasm.aobScan`
 
 ### `hexcore.disasm.exportASMHeadless`
 ```json
@@ -394,6 +546,7 @@ Disassemble N instructions starting at a given virtual address. Requires prior `
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `20` | Number of instructions to disassemble. |
 | `filterJunk` | `boolean` | `false` | Filter junk instructions from output. Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
+| `autoBacktrack` | `boolean` | `true` | When `true`, auto-detects function boundaries — if the address lands mid-function, backtracks to the real function start. Set to `false` to disable. **(v3.7.3)** |
 | `output` | `{ path? }` | — | JSON output file path. |
 
 ### `hexcore.disasm.liftToIR`
@@ -498,6 +651,8 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `150` | Number of instructions to lift before decompiling. |
+| `optimizeIR` | `boolean` | `true` | When `false`, skips MLIR optimization passes and emits IR as-is. Useful for debugging pass pipeline issues. **(v3.7.3)** |
+| `autoBacktrack` | `boolean` | `true` | Auto-detects function boundaries and backtracks to the real function start if the address is mid-function. Set to `false` to disable. **(v3.7.3)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
 **Returns:**
@@ -835,6 +990,56 @@ Dispose the active emulation session and free Unicorn engine resources. This com
 
 ---
 
+### `hexcore.debug.searchMemoryHeadless` **(v3.7.3)**
+
+Pattern search across emulated RAM. Requires an active emulation session (call `emulateHeadless` or `emulateFullHeadless` with `keepAlive: true` first).
+
+```json
+{
+  "cmd": "hexcore.debug.searchMemoryHeadless",
+  "args": {
+    "pattern": "4D 5A ?? ??",
+    "encoding": "hex",
+    "regions": "all",
+    "maxResults": 100
+  },
+  "output": { "path": "memory-search.json" },
+  "timeoutMs": 60000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `pattern` | `string` | *(required)* | Search pattern — format depends on `encoding`. |
+| `encoding` | `string` | `"hex"` | `"hex"` (space-separated hex bytes, `??` wildcard), `"ascii"`, or `"utf16"`. |
+| `regions` | `string` | `"all"` | Memory regions to search: `"all"`, `"heap"`, `"stack"`, or an explicit range `"0xSTART-0xEND"`. |
+| `maxResults` | `number` | `100` | Maximum matches to return. |
+| `output` | `{ path? }` | — | JSON output file path. |
+| `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "pattern": "4D 5A ?? ??",
+  "encoding": "hex",
+  "regionsSearched": "all",
+  "totalMatches": 2,
+  "matches": [
+    { "address": "0x400000", "region": ".text", "size": 4 },
+    { "address": "0x600000", "region": "heap",  "size": 4 }
+  ]
+}
+```
+
+**Errors:**
+- `No active emulation session.` — no session is active.
+
+**Aliases:** `hexcore.debug.searchMemory`, `hexcore.unicorn.searchMemory`, `hexcore.unicorn.searchMemoryHeadless`
+
+---
+
 ### `hexcore.pipeline.composeReport`
 ```json
 {
@@ -890,7 +1095,7 @@ Relative output paths are resolved from `outDir`.
 - For single-shot emulation, use `emulateFullHeadless` (alias: `hexcore.debug.run`).
 
 ### `No active emulation session.`
-- `writeMemoryHeadless`, `setRegisterHeadless`, and `setStdinHeadless` require an active session.
+- `writeMemoryHeadless`, `setRegisterHeadless`, `setStdinHeadless`, and `searchMemoryHeadless` require an active session.
 - Start a session first with `emulateFullHeadless` (set `keepAlive: true`) or the existing `emulateHeadless`.
 
 ### `timed out after ...`

@@ -1,7 +1,11 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
+// Copyright (c) HikariSystem. All rights reserved.
+// Licensed under the MIT License. See LICENSE in the project root.
+
+// TODO(BUG-CAP-006): This file contains ~600 lines of arch-detail conversion
+// functions (Copy* and *DetailToObject) that are near-duplicates of the ones in
+// capstone_wrapper.cpp. A future refactor should extract the shared conversion
+// logic into a header-only utility (e.g. capstone_detail_convert.h) and have
+// both the sync and async paths include it, eliminating the duplication.
 
 #ifndef DISASM_ASYNC_WORKER_H
 #define DISASM_ASYNC_WORKER_H
@@ -351,15 +355,15 @@ public:
 		cs_err err = cs_open(arch_, mode_, &handle);
 
 		if (err != CS_ERR_OK) {
-			error_ = err;
+			SetError(std::string("Capstone error: ") + cs_strerror(err));
 			return;
 		}
 
 		for (const auto& option : optionState_) {
 			err = cs_option(handle, option.first, option.second);
 			if (err != CS_ERR_OK) {
-				error_ = err;
 				cs_close(&handle);
+				SetError(std::string("Capstone error: ") + cs_strerror(err));
 				return;
 			}
 		}
@@ -377,11 +381,12 @@ public:
 		);
 
 		if (numInsns_ == 0) {
-			error_ = cs_errno(handle);
+			cs_err csErr = cs_errno(handle);
 			// Only treat as error if Capstone reported an actual error
 			// numInsns_ == 0 with CS_ERR_OK means no valid instructions found (not an error)
-			if (error_ != CS_ERR_OK) {
+			if (csErr != CS_ERR_OK) {
 				cs_close(&handle);
+				SetError(std::string("Capstone error: ") + cs_strerror(csErr));
 				return;
 			}
 		}
@@ -801,7 +806,11 @@ private:
 		Napi::Object obj = Napi::Object::New(env);
 
 		obj.Set("id", Napi::Number::New(env, result.id));
-		obj.Set("address", Napi::Number::New(env, static_cast<double>(result.address)));
+		// Emit address as BigInt to avoid silent truncation for addresses > 2^53.
+		// addressAsNumber is provided for compatibility with consumers that rely on
+		// Number arithmetic (e.g. insn.address + 1), but may lose precision above 2^53.
+		obj.Set("address", Napi::BigInt::New(env, static_cast<uint64_t>(result.address)));
+		obj.Set("addressAsNumber", Napi::Number::New(env, static_cast<double>(result.address)));
 		obj.Set("size", Napi::Number::New(env, result.size));
 		obj.Set("mnemonic", Napi::String::New(env, result.mnemonic));
 		obj.Set("opStr", Napi::String::New(env, result.op_str));
@@ -860,8 +869,14 @@ private:
 					detail.Set("m68k", M68kDetailToObject(env, arg));
 				} else if constexpr (std::is_same_v<T, RiscvDetailResult>) {
 					detail.Set("riscv", RiscvDetailToObject(env, arg));
+				} else if constexpr (std::is_same_v<T, std::monostate>) {
+					// Architecture is known to Capstone (TMS320C64X, M680X, EVM, WASM, BPF, etc.)
+					// but no arch-specific detail converter exists in this wrapper yet.
+					// regsRead/regsWrite/groups are still populated above.
+					detail.Set("archSpecific", env.Null());
+					detail.Set("warning", Napi::String::New(env,
+						"arch-specific detail not yet implemented for this architecture"));
 				}
-				// std::monostate - no arch detail
 			}, result.archDetail);
 
 			obj.Set("detail", detail);

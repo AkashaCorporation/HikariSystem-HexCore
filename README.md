@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-03-14):** `v3.7.1` "Dynamic Intelligence + Pipeline Branching" — Permissive memory mapping, faithful glibc/MSVCRT PRNG emulation, junk instruction filtering, VM detection heuristics, PRNG pattern detection, memory dumps, breakpoint auto-snapshots, side-channel analysis, runtime memory disassembly, `onResult` conditional pipeline branching, and Rellic IR optimization passes. See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-03-26):** `v3.7.3` "Deep Analysis + Headless Expansion" — Function boundary detection (native C++ prologue scanner), auto-backtrack for disassembly and decompilation, memory pattern search during live emulation, RTTI class discovery, AOB byte pattern scan, batch string search, PE section-aware string extraction, pipeline step output referencing, 30+ x64 opcode decomposition in the Helix decompiler, and improved confidence scoring. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
@@ -44,21 +44,23 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
 - **IR Lifting** — Machine code → LLVM IR translation via Remill engine
 - **Decompilation** — LLVM IR → pseudo-C via Helix MLIR engine (x86/x64, structured control flow, confidence scoring)
-- **Helix MLIR Decompiler** — C++23/MLIR pipeline with 7 analysis passes (v0.5.0: crash-free on loop-at-entry functions)
+- **Helix MLIR Decompiler** — C++23/MLIR pipeline with 7 analysis passes, 30+ x64 opcode decomposition, improved confidence scoring, crash-free on loop-at-entry functions
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
 - **Hex Viewer** — Virtual scrolling, data inspector, bookmarks, structure templates
 - **Hash Calculator** — MD5, SHA-1, SHA-256, SHA-512 with VirusTotal integration
-- **String Extraction** — ASCII/UTF-16, auto-categorization, XOR deobfuscation, stack strings
+- **String Extraction** — ASCII/UTF-16, auto-categorization, XOR deobfuscation, stack strings, PE section-aware extraction (`.rdata` prioritized), batch queries
 - **Entropy Analysis** — Block-by-block entropy with packer/encryption detection
 - **YARA Scanning** — Rule loading, match highlighting, custom rules
 - **IOC Extraction** — Binary-aware IOC detection (IPs, URLs, domains, pipes, wallets)
 - **Minidump Analysis** — Windows crash dump forensics with thread/module/memory parsing
-- **Automation** — Headless pipeline system with conditional branching (`onResult`) for adaptive workflows
+- **Automation** — Headless pipeline system with conditional branching (`onResult`) and step output referencing (`$step[N].output`) for adaptive workflows
 - **Junk Filtering** — Detect and remove obfuscation junk (callfuscation, nop sleds, identity ops)
 - **VM Detection** — Automatic detection of VM-based obfuscation (dispatchers, handler tables, operand stacks)
 - **PRNG Detection** — Static detection of srand/rand patterns with seed extraction
+- **Function Boundary Detection** — Native C++ prologue scanner for accurate function start/end identification with auto-backtrack
+- **Memory Pattern Search** — AOB byte pattern scan and RTTI class discovery during live emulation (`searchMemoryHeadless`, `searchBytesHeadless`, `rttiScanHeadless`)
 
 ---
 
@@ -89,12 +91,12 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 
 | Package | Version | Description |
 |---------|---------|-------------|
-| **hexcore-capstone** | 1.3.2 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
-| **hexcore-unicorn** | 1.2.1 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory |
-| **hexcore-llvm-mc** | 1.0.0 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
+| **hexcore-capstone** | 1.3.3 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
+| **hexcore-unicorn** | 1.2.2 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory |
+| **hexcore-llvm-mc** | 1.0.1 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
-| **hexcore-remill** | 0.1.2 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
-| **hexcore-helix** | 0.5.0 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (7 analysis passes) |
+| **hexcore-remill** | 0.2.0 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
+| **hexcore-helix** | 0.7.1 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (7 analysis passes, 30+ x64 opcodes, improved confidence scoring) |
 | **hexcore-rellic** | — | *(deprecated — removal in v3.8.0)* Rellic-based decompiler — superseded by Helix MLIR engine |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
@@ -149,7 +151,7 @@ Native multi-architecture disassembler powered by **Capstone Engine v5.0** with 
 - **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
 - **IR Lifting** — Lift machine code to LLVM IR via Remill engine (experimental)
 - **Inline PE/ELF parsing** — Imports, exports, sections without external dependencies
-- **Function detection** — Prolog scanning, call target analysis, up to 1000 functions
+- **Function detection** — Native C++ prologue scanner with auto-backtrack, call target analysis, up to 1000 functions
 - **String cross-references** — Track which instructions reference which strings
 - **Graph View** — IDA-style control flow graph visualization
 - **Patching** — Assemble, patch instructions, NOP sleds (LLVM MC)
@@ -186,6 +188,7 @@ HexCore supports headless batch analysis via `.hexcore_job.json` job files.
 - **Capability audit** — `hexcore.pipeline.listCapabilities` exports headless/interactive capability map
 - **Safety model** — Interactive commands are explicitly blocked in pipeline mode with clear errors
 - **Conditional branching** — `onResult` field enables skip/goto/abort/log based on step output (v3.7.1)
+- **Step output referencing** — `$step[N].output` interpolation passes prior step results as arguments to later steps (v3.7.3)
 - **Output** — JSON/Markdown reports + `hexcore-pipeline.status.json` + `hexcore-pipeline.log`
 
 All analysis extensions support headless execution with `file`, `output`, and `quiet` parameters.
@@ -202,6 +205,15 @@ All analysis extensions support headless execution with `file`, `output`, and `q
 | `hexcore.hexview.dumpHeadless` | hexcore-hexviewer | Programmatic hex dump extraction |
 | `hexcore.hexview.searchHeadless` | hexcore-hexviewer | Pattern search with streaming |
 | `hexcore.pipeline.composeReport` | hexcore-report-composer | Aggregate reports into unified Markdown |
+
+### v3.7.3 Headless Commands
+
+| Command | Extension | Description |
+|---------|-----------|-------------|
+| `hexcore.debug.searchMemoryHeadless` | hexcore-debugger | Search emulator memory for byte/string patterns during live emulation |
+| `hexcore.debug.searchBytesHeadless` | hexcore-debugger | AOB (array of bytes) pattern scan across emulated memory |
+| `hexcore.debug.rttiScanHeadless` | hexcore-debugger | RTTI class discovery — extract C++ class names from emulated PE memory |
+| `hexcore.strings.batchHeadless` | hexcore-strings | Batch string search with a queries array in a single pass |
 
 See [docs/HEXCORE_AUTOMATION.md](docs/HEXCORE_AUTOMATION.md) for full documentation.
 

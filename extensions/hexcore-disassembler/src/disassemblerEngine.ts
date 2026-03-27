@@ -2289,6 +2289,55 @@ export class DisassemblerEngine {
 		return this.functions.get(address);
 	}
 
+	/**
+	 * Find the start of the function containing the given address.
+	 * First checks already-discovered functions, then falls back to
+	 * native prologue scanning if available (FEAT-CAP-010 / FEAT-DISASM-004).
+	 */
+	async findFunctionStartForAddress(address: number): Promise<number | undefined> {
+		// 1. Check if address is already a known function start
+		if (this.functions.has(address)) {
+			return address;
+		}
+
+		// 2. Check if address falls within a known function's range
+		for (const [funcAddr, func] of this.functions) {
+			if (address >= func.address && address < func.endAddress) {
+				return func.address;
+			}
+		}
+
+		// 3. Try native function boundary detection via Capstone
+		if (this.capstone && this.capstoneInitialized && this.fileBuffer) {
+			try {
+				// Scan a region around the target address (up to 64KB before, 4KB after)
+				const scanBefore = 0x10000; // 64KB before
+				const scanAfter = 0x1000;   // 4KB after
+				const scanStart = Math.max(this.baseAddress, address - scanBefore);
+				const scanEnd = Math.min(
+					this.baseAddress + this.fileBuffer.length,
+					address + scanAfter
+				);
+				const offset = this.addressToOffset(scanStart);
+				const endOffset = this.addressToOffset(scanEnd);
+				if (offset >= 0 && endOffset > offset) {
+					const scanBuffer = this.fileBuffer.subarray(offset, endOffset);
+					const functionStart = await this.capstone.findFunctionStart(
+						scanBuffer, address, scanStart
+					);
+					const result = Number(functionStart);
+					if (result !== address && result >= scanStart && result <= address) {
+						return result;
+					}
+				}
+			} catch {
+				// Native detection not available or failed — fall through
+			}
+		}
+
+		return undefined;
+	}
+
 	getArchitecture(): ArchitectureConfig {
 		return this.architecture;
 	}

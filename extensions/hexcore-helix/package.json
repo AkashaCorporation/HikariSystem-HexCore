@@ -1,6 +1,6 @@
 {
   "name": "hexcore-helix",
-  "version": "0.6.0",
+  "version": "0.7.1",
   "description": "HexCore Helix — MLIR-based decompilation engine",
   "main": "./index.js",
   "types": "./index.d.ts",
@@ -21,7 +21,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LXrdKnowkill/hexcore-helix.git"
+    "url": "https://github.com/AkashaCorporation/HexCore-Helix.git"
   },
   "activationEvents": [],
   "engines": {

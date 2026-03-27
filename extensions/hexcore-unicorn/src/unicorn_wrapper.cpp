@@ -1,9 +1,10 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
+// Copyright (c) HikariSystem. All rights reserved.
+// Licensed under the MIT License. See LICENSE in the project root.
 #include "unicorn_wrapper.h"
 #include "emu_async_worker.h"
+#include <unicorn/x86.h>
+#include <unicorn/arm64.h>
+#include <unicorn/arm.h>
 #include <cstring>
 #include <sstream>
 
@@ -216,6 +217,9 @@ Napi::Value UnicornWrapper::EmuStart(const Napi::CallbackInfo& info) {
 		}
 	}
 
+	// Reset auto-map counter at emulation start (BUG-UNI-006)
+	autoMapCount_ = 0;
+
 	uc_err err = uc_emu_start(engine_, begin, until, timeout, count);
 	if (err != UC_ERR_OK) {
 		ThrowUnicornError(env, err, "Emulation failed");
@@ -290,6 +294,9 @@ Napi::Value UnicornWrapper::EmuStartAsync(const Napi::CallbackInfo& info) {
 	// Set emulating state
 	emulating_ = true;
 
+	// Reset auto-map counter at emulation start (BUG-UNI-006)
+	autoMapCount_ = 0;
+
 	Napi::Promise::Deferred deferred = Napi::Promise::Deferred::New(env);
 	EmuAsyncWorker* worker = new EmuAsyncWorker(env, deferred, engine_, begin, until, timeout, count, &emulating_);
 	worker->Queue();
@@ -343,10 +350,16 @@ Napi::Value UnicornWrapper::MemMap(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	size_t size = info[1].As<Napi::Number>().Uint32Value();
+	uint64_t size;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		size = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else {
+		size = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	}
 	uint32_t perms = info[2].As<Napi::Number>().Uint32Value();
 
-	uc_err err = uc_mem_map(engine_, address, size, perms);
+	uc_err err = uc_mem_map(engine_, address, static_cast<size_t>(size), perms);
 	if (err != UC_ERR_OK) {
 		ThrowUnicornError(env, err, "Failed to map memory");
 	}
@@ -433,9 +446,15 @@ Napi::Value UnicornWrapper::MemUnmap(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	size_t size = info[1].As<Napi::Number>().Uint32Value();
+	uint64_t size;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		size = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else {
+		size = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	}
 
-	uc_err err = uc_mem_unmap(engine_, address, size);
+	uc_err err = uc_mem_unmap(engine_, address, static_cast<size_t>(size));
 	if (err != UC_ERR_OK) {
 		ThrowUnicornError(env, err, "Failed to unmap memory");
 	}
@@ -475,10 +494,16 @@ Napi::Value UnicornWrapper::MemProtect(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	size_t size = info[1].As<Napi::Number>().Uint32Value();
+	uint64_t size;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		size = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else {
+		size = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	}
 	uint32_t perms = info[2].As<Napi::Number>().Uint32Value();
 
-	uc_err err = uc_mem_protect(engine_, address, size, perms);
+	uc_err err = uc_mem_protect(engine_, address, static_cast<size_t>(size), perms);
 	if (err != UC_ERR_OK) {
 		ThrowUnicornError(env, err, "Failed to change memory protection");
 	}
@@ -510,7 +535,14 @@ Napi::Value UnicornWrapper::MemRead(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	size_t size = info[1].As<Napi::Number>().Uint32Value();
+	uint64_t sizeVal;
+	if (info[1].IsBigInt()) {
+		bool lossless;
+		sizeVal = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else {
+		sizeVal = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+	}
+	size_t size = static_cast<size_t>(sizeVal);
 
 	Napi::Buffer<uint8_t> buffer = Napi::Buffer<uint8_t>::New(env, size);
 
@@ -600,23 +632,416 @@ Napi::Value UnicornWrapper::MemRegions(const Napi::CallbackInfo& info) {
 
 // ============== Register Operations ==============
 
+// ---- Per-architecture register size lookup (BUG-UNI-002) ----
+
+static size_t GetX86RegisterSize(int regId) {
+	switch (regId) {
+		// 1-byte registers
+		case UC_X86_REG_AL: case UC_X86_REG_AH:
+		case UC_X86_REG_BL: case UC_X86_REG_BH:
+		case UC_X86_REG_CL: case UC_X86_REG_CH:
+		case UC_X86_REG_DL: case UC_X86_REG_DH:
+		case UC_X86_REG_SPL: case UC_X86_REG_BPL:
+		case UC_X86_REG_SIL: case UC_X86_REG_DIL:
+		case UC_X86_REG_R8B: case UC_X86_REG_R9B:
+		case UC_X86_REG_R10B: case UC_X86_REG_R11B:
+		case UC_X86_REG_R12B: case UC_X86_REG_R13B:
+		case UC_X86_REG_R14B: case UC_X86_REG_R15B:
+			return 1;
+
+		// 2-byte registers
+		case UC_X86_REG_AX: case UC_X86_REG_BX:
+		case UC_X86_REG_CX: case UC_X86_REG_DX:
+		case UC_X86_REG_SI: case UC_X86_REG_DI:
+		case UC_X86_REG_BP: case UC_X86_REG_SP:
+		case UC_X86_REG_IP:
+		case UC_X86_REG_R8W: case UC_X86_REG_R9W:
+		case UC_X86_REG_R10W: case UC_X86_REG_R11W:
+		case UC_X86_REG_R12W: case UC_X86_REG_R13W:
+		case UC_X86_REG_R14W: case UC_X86_REG_R15W:
+		case UC_X86_REG_CS: case UC_X86_REG_DS:
+		case UC_X86_REG_ES: case UC_X86_REG_FS:
+		case UC_X86_REG_GS: case UC_X86_REG_SS:
+		case UC_X86_REG_FLAGS:
+		case UC_X86_REG_FPCW: case UC_X86_REG_FPSW:
+		case UC_X86_REG_FPTAG:
+			return 2;
+
+		// 4-byte registers
+		case UC_X86_REG_EAX: case UC_X86_REG_EBX:
+		case UC_X86_REG_ECX: case UC_X86_REG_EDX:
+		case UC_X86_REG_ESI: case UC_X86_REG_EDI:
+		case UC_X86_REG_EBP: case UC_X86_REG_ESP:
+		case UC_X86_REG_EIP:
+		case UC_X86_REG_R8D: case UC_X86_REG_R9D:
+		case UC_X86_REG_R10D: case UC_X86_REG_R11D:
+		case UC_X86_REG_R12D: case UC_X86_REG_R13D:
+		case UC_X86_REG_R14D: case UC_X86_REG_R15D:
+		case UC_X86_REG_EFLAGS:
+		case UC_X86_REG_MXCSR:
+			return 4;
+
+		// 8-byte registers (GPR 64-bit, MMX, segment bases)
+		case UC_X86_REG_RAX: case UC_X86_REG_RBX:
+		case UC_X86_REG_RCX: case UC_X86_REG_RDX:
+		case UC_X86_REG_RSI: case UC_X86_REG_RDI:
+		case UC_X86_REG_RBP: case UC_X86_REG_RSP:
+		case UC_X86_REG_RIP:
+		case UC_X86_REG_R8: case UC_X86_REG_R9:
+		case UC_X86_REG_R10: case UC_X86_REG_R11:
+		case UC_X86_REG_R12: case UC_X86_REG_R13:
+		case UC_X86_REG_R14: case UC_X86_REG_R15:
+		case UC_X86_REG_RFLAGS:
+		case UC_X86_REG_MM0: case UC_X86_REG_MM1:
+		case UC_X86_REG_MM2: case UC_X86_REG_MM3:
+		case UC_X86_REG_MM4: case UC_X86_REG_MM5:
+		case UC_X86_REG_MM6: case UC_X86_REG_MM7:
+		case UC_X86_REG_FS_BASE: case UC_X86_REG_GS_BASE:
+		case UC_X86_REG_K0: case UC_X86_REG_K1:
+		case UC_X86_REG_K2: case UC_X86_REG_K3:
+		case UC_X86_REG_K4: case UC_X86_REG_K5:
+		case UC_X86_REG_K6: case UC_X86_REG_K7:
+			return 8;
+
+		// 10-byte registers (x87 FPU)
+		case UC_X86_REG_FP0: case UC_X86_REG_FP1:
+		case UC_X86_REG_FP2: case UC_X86_REG_FP3:
+		case UC_X86_REG_FP4: case UC_X86_REG_FP5:
+		case UC_X86_REG_FP6: case UC_X86_REG_FP7:
+		case UC_X86_REG_ST0: case UC_X86_REG_ST1:
+		case UC_X86_REG_ST2: case UC_X86_REG_ST3:
+		case UC_X86_REG_ST4: case UC_X86_REG_ST5:
+		case UC_X86_REG_ST6: case UC_X86_REG_ST7:
+			return 10;
+
+		// 16-byte registers (XMM / SSE)
+		case UC_X86_REG_XMM0: case UC_X86_REG_XMM1:
+		case UC_X86_REG_XMM2: case UC_X86_REG_XMM3:
+		case UC_X86_REG_XMM4: case UC_X86_REG_XMM5:
+		case UC_X86_REG_XMM6: case UC_X86_REG_XMM7:
+		case UC_X86_REG_XMM8: case UC_X86_REG_XMM9:
+		case UC_X86_REG_XMM10: case UC_X86_REG_XMM11:
+		case UC_X86_REG_XMM12: case UC_X86_REG_XMM13:
+		case UC_X86_REG_XMM14: case UC_X86_REG_XMM15:
+		case UC_X86_REG_XMM16: case UC_X86_REG_XMM17:
+		case UC_X86_REG_XMM18: case UC_X86_REG_XMM19:
+		case UC_X86_REG_XMM20: case UC_X86_REG_XMM21:
+		case UC_X86_REG_XMM22: case UC_X86_REG_XMM23:
+		case UC_X86_REG_XMM24: case UC_X86_REG_XMM25:
+		case UC_X86_REG_XMM26: case UC_X86_REG_XMM27:
+		case UC_X86_REG_XMM28: case UC_X86_REG_XMM29:
+		case UC_X86_REG_XMM30: case UC_X86_REG_XMM31:
+			return 16;
+
+		// 32-byte registers (YMM / AVX)
+		case UC_X86_REG_YMM0: case UC_X86_REG_YMM1:
+		case UC_X86_REG_YMM2: case UC_X86_REG_YMM3:
+		case UC_X86_REG_YMM4: case UC_X86_REG_YMM5:
+		case UC_X86_REG_YMM6: case UC_X86_REG_YMM7:
+		case UC_X86_REG_YMM8: case UC_X86_REG_YMM9:
+		case UC_X86_REG_YMM10: case UC_X86_REG_YMM11:
+		case UC_X86_REG_YMM12: case UC_X86_REG_YMM13:
+		case UC_X86_REG_YMM14: case UC_X86_REG_YMM15:
+		case UC_X86_REG_YMM16: case UC_X86_REG_YMM17:
+		case UC_X86_REG_YMM18: case UC_X86_REG_YMM19:
+		case UC_X86_REG_YMM20: case UC_X86_REG_YMM21:
+		case UC_X86_REG_YMM22: case UC_X86_REG_YMM23:
+		case UC_X86_REG_YMM24: case UC_X86_REG_YMM25:
+		case UC_X86_REG_YMM26: case UC_X86_REG_YMM27:
+		case UC_X86_REG_YMM28: case UC_X86_REG_YMM29:
+		case UC_X86_REG_YMM30: case UC_X86_REG_YMM31:
+			return 32;
+
+		// 64-byte registers (ZMM / AVX-512)
+		case UC_X86_REG_ZMM0: case UC_X86_REG_ZMM1:
+		case UC_X86_REG_ZMM2: case UC_X86_REG_ZMM3:
+		case UC_X86_REG_ZMM4: case UC_X86_REG_ZMM5:
+		case UC_X86_REG_ZMM6: case UC_X86_REG_ZMM7:
+		case UC_X86_REG_ZMM8: case UC_X86_REG_ZMM9:
+		case UC_X86_REG_ZMM10: case UC_X86_REG_ZMM11:
+		case UC_X86_REG_ZMM12: case UC_X86_REG_ZMM13:
+		case UC_X86_REG_ZMM14: case UC_X86_REG_ZMM15:
+		case UC_X86_REG_ZMM16: case UC_X86_REG_ZMM17:
+		case UC_X86_REG_ZMM18: case UC_X86_REG_ZMM19:
+		case UC_X86_REG_ZMM20: case UC_X86_REG_ZMM21:
+		case UC_X86_REG_ZMM22: case UC_X86_REG_ZMM23:
+		case UC_X86_REG_ZMM24: case UC_X86_REG_ZMM25:
+		case UC_X86_REG_ZMM26: case UC_X86_REG_ZMM27:
+		case UC_X86_REG_ZMM28: case UC_X86_REG_ZMM29:
+		case UC_X86_REG_ZMM30: case UC_X86_REG_ZMM31:
+			return 64;
+
+		// Descriptor table registers (GDTR/IDTR are 10 bytes: 2-byte limit + 8-byte base in 64-bit)
+		case UC_X86_REG_GDTR: case UC_X86_REG_IDTR:
+			return 10;
+		// Segment selector registers (LDTR, TR are 2-byte selectors)
+		case UC_X86_REG_LDTR: case UC_X86_REG_TR:
+			return 2;
+
+		// Control registers (always 64-bit in long mode, 32-bit in protected)
+		case UC_X86_REG_CR0: case UC_X86_REG_CR1:
+		case UC_X86_REG_CR2: case UC_X86_REG_CR3:
+		case UC_X86_REG_CR4: case UC_X86_REG_CR8:
+		case UC_X86_REG_DR0: case UC_X86_REG_DR1:
+		case UC_X86_REG_DR2: case UC_X86_REG_DR3:
+		case UC_X86_REG_DR4: case UC_X86_REG_DR5:
+		case UC_X86_REG_DR6: case UC_X86_REG_DR7:
+			return 8;
+
+		default:
+			return 0; // unknown — caller uses arch/mode fallback
+	}
+}
+
+static size_t GetArm64RegisterSize(int regId) {
+	switch (regId) {
+		// 1-byte NEON sub-registers
+		case UC_ARM64_REG_B0: case UC_ARM64_REG_B1:
+		case UC_ARM64_REG_B2: case UC_ARM64_REG_B3:
+		case UC_ARM64_REG_B4: case UC_ARM64_REG_B5:
+		case UC_ARM64_REG_B6: case UC_ARM64_REG_B7:
+		case UC_ARM64_REG_B8: case UC_ARM64_REG_B9:
+		case UC_ARM64_REG_B10: case UC_ARM64_REG_B11:
+		case UC_ARM64_REG_B12: case UC_ARM64_REG_B13:
+		case UC_ARM64_REG_B14: case UC_ARM64_REG_B15:
+		case UC_ARM64_REG_B16: case UC_ARM64_REG_B17:
+		case UC_ARM64_REG_B18: case UC_ARM64_REG_B19:
+		case UC_ARM64_REG_B20: case UC_ARM64_REG_B21:
+		case UC_ARM64_REG_B22: case UC_ARM64_REG_B23:
+		case UC_ARM64_REG_B24: case UC_ARM64_REG_B25:
+		case UC_ARM64_REG_B26: case UC_ARM64_REG_B27:
+		case UC_ARM64_REG_B28: case UC_ARM64_REG_B29:
+		case UC_ARM64_REG_B30: case UC_ARM64_REG_B31:
+			return 1;
+
+		// 2-byte NEON sub-registers
+		case UC_ARM64_REG_H0: case UC_ARM64_REG_H1:
+		case UC_ARM64_REG_H2: case UC_ARM64_REG_H3:
+		case UC_ARM64_REG_H4: case UC_ARM64_REG_H5:
+		case UC_ARM64_REG_H6: case UC_ARM64_REG_H7:
+		case UC_ARM64_REG_H8: case UC_ARM64_REG_H9:
+		case UC_ARM64_REG_H10: case UC_ARM64_REG_H11:
+		case UC_ARM64_REG_H12: case UC_ARM64_REG_H13:
+		case UC_ARM64_REG_H14: case UC_ARM64_REG_H15:
+		case UC_ARM64_REG_H16: case UC_ARM64_REG_H17:
+		case UC_ARM64_REG_H18: case UC_ARM64_REG_H19:
+		case UC_ARM64_REG_H20: case UC_ARM64_REG_H21:
+		case UC_ARM64_REG_H22: case UC_ARM64_REG_H23:
+		case UC_ARM64_REG_H24: case UC_ARM64_REG_H25:
+		case UC_ARM64_REG_H26: case UC_ARM64_REG_H27:
+		case UC_ARM64_REG_H28: case UC_ARM64_REG_H29:
+		case UC_ARM64_REG_H30: case UC_ARM64_REG_H31:
+			return 2;
+
+		// 4-byte registers (W0-W30, S0-S31, WZR, WSP)
+		case UC_ARM64_REG_W0: case UC_ARM64_REG_W1:
+		case UC_ARM64_REG_W2: case UC_ARM64_REG_W3:
+		case UC_ARM64_REG_W4: case UC_ARM64_REG_W5:
+		case UC_ARM64_REG_W6: case UC_ARM64_REG_W7:
+		case UC_ARM64_REG_W8: case UC_ARM64_REG_W9:
+		case UC_ARM64_REG_W10: case UC_ARM64_REG_W11:
+		case UC_ARM64_REG_W12: case UC_ARM64_REG_W13:
+		case UC_ARM64_REG_W14: case UC_ARM64_REG_W15:
+		case UC_ARM64_REG_W16: case UC_ARM64_REG_W17:
+		case UC_ARM64_REG_W18: case UC_ARM64_REG_W19:
+		case UC_ARM64_REG_W20: case UC_ARM64_REG_W21:
+		case UC_ARM64_REG_W22: case UC_ARM64_REG_W23:
+		case UC_ARM64_REG_W24: case UC_ARM64_REG_W25:
+		case UC_ARM64_REG_W26: case UC_ARM64_REG_W27:
+		case UC_ARM64_REG_W28: case UC_ARM64_REG_W29:
+		case UC_ARM64_REG_W30:
+		case UC_ARM64_REG_WZR: case UC_ARM64_REG_WSP:
+		case UC_ARM64_REG_S0: case UC_ARM64_REG_S1:
+		case UC_ARM64_REG_S2: case UC_ARM64_REG_S3:
+		case UC_ARM64_REG_S4: case UC_ARM64_REG_S5:
+		case UC_ARM64_REG_S6: case UC_ARM64_REG_S7:
+		case UC_ARM64_REG_S8: case UC_ARM64_REG_S9:
+		case UC_ARM64_REG_S10: case UC_ARM64_REG_S11:
+		case UC_ARM64_REG_S12: case UC_ARM64_REG_S13:
+		case UC_ARM64_REG_S14: case UC_ARM64_REG_S15:
+		case UC_ARM64_REG_S16: case UC_ARM64_REG_S17:
+		case UC_ARM64_REG_S18: case UC_ARM64_REG_S19:
+		case UC_ARM64_REG_S20: case UC_ARM64_REG_S21:
+		case UC_ARM64_REG_S22: case UC_ARM64_REG_S23:
+		case UC_ARM64_REG_S24: case UC_ARM64_REG_S25:
+		case UC_ARM64_REG_S26: case UC_ARM64_REG_S27:
+		case UC_ARM64_REG_S28: case UC_ARM64_REG_S29:
+		case UC_ARM64_REG_S30: case UC_ARM64_REG_S31:
+		case UC_ARM64_REG_PSTATE:
+			return 4;
+
+		// 8-byte registers (X0-X28, X29/FP, X30/LR, SP, XZR, PC, D0-D31)
+		case UC_ARM64_REG_X0: case UC_ARM64_REG_X1:
+		case UC_ARM64_REG_X2: case UC_ARM64_REG_X3:
+		case UC_ARM64_REG_X4: case UC_ARM64_REG_X5:
+		case UC_ARM64_REG_X6: case UC_ARM64_REG_X7:
+		case UC_ARM64_REG_X8: case UC_ARM64_REG_X9:
+		case UC_ARM64_REG_X10: case UC_ARM64_REG_X11:
+		case UC_ARM64_REG_X12: case UC_ARM64_REG_X13:
+		case UC_ARM64_REG_X14: case UC_ARM64_REG_X15:
+		case UC_ARM64_REG_X16: case UC_ARM64_REG_X17:
+		case UC_ARM64_REG_X18: case UC_ARM64_REG_X19:
+		case UC_ARM64_REG_X20: case UC_ARM64_REG_X21:
+		case UC_ARM64_REG_X22: case UC_ARM64_REG_X23:
+		case UC_ARM64_REG_X24: case UC_ARM64_REG_X25:
+		case UC_ARM64_REG_X26: case UC_ARM64_REG_X27:
+		case UC_ARM64_REG_X28:
+		case UC_ARM64_REG_X29: case UC_ARM64_REG_X30:
+		case UC_ARM64_REG_SP: case UC_ARM64_REG_XZR:
+		case UC_ARM64_REG_PC:
+		case UC_ARM64_REG_D0: case UC_ARM64_REG_D1:
+		case UC_ARM64_REG_D2: case UC_ARM64_REG_D3:
+		case UC_ARM64_REG_D4: case UC_ARM64_REG_D5:
+		case UC_ARM64_REG_D6: case UC_ARM64_REG_D7:
+		case UC_ARM64_REG_D8: case UC_ARM64_REG_D9:
+		case UC_ARM64_REG_D10: case UC_ARM64_REG_D11:
+		case UC_ARM64_REG_D12: case UC_ARM64_REG_D13:
+		case UC_ARM64_REG_D14: case UC_ARM64_REG_D15:
+		case UC_ARM64_REG_D16: case UC_ARM64_REG_D17:
+		case UC_ARM64_REG_D18: case UC_ARM64_REG_D19:
+		case UC_ARM64_REG_D20: case UC_ARM64_REG_D21:
+		case UC_ARM64_REG_D22: case UC_ARM64_REG_D23:
+		case UC_ARM64_REG_D24: case UC_ARM64_REG_D25:
+		case UC_ARM64_REG_D26: case UC_ARM64_REG_D27:
+		case UC_ARM64_REG_D28: case UC_ARM64_REG_D29:
+		case UC_ARM64_REG_D30: case UC_ARM64_REG_D31:
+		case UC_ARM64_REG_NZCV:
+			return 8;
+
+		// 16-byte registers (Q0-Q31 NEON/SIMD, V0-V31)
+		case UC_ARM64_REG_Q0: case UC_ARM64_REG_Q1:
+		case UC_ARM64_REG_Q2: case UC_ARM64_REG_Q3:
+		case UC_ARM64_REG_Q4: case UC_ARM64_REG_Q5:
+		case UC_ARM64_REG_Q6: case UC_ARM64_REG_Q7:
+		case UC_ARM64_REG_Q8: case UC_ARM64_REG_Q9:
+		case UC_ARM64_REG_Q10: case UC_ARM64_REG_Q11:
+		case UC_ARM64_REG_Q12: case UC_ARM64_REG_Q13:
+		case UC_ARM64_REG_Q14: case UC_ARM64_REG_Q15:
+		case UC_ARM64_REG_Q16: case UC_ARM64_REG_Q17:
+		case UC_ARM64_REG_Q18: case UC_ARM64_REG_Q19:
+		case UC_ARM64_REG_Q20: case UC_ARM64_REG_Q21:
+		case UC_ARM64_REG_Q22: case UC_ARM64_REG_Q23:
+		case UC_ARM64_REG_Q24: case UC_ARM64_REG_Q25:
+		case UC_ARM64_REG_Q26: case UC_ARM64_REG_Q27:
+		case UC_ARM64_REG_Q28: case UC_ARM64_REG_Q29:
+		case UC_ARM64_REG_Q30: case UC_ARM64_REG_Q31:
+		case UC_ARM64_REG_V0: case UC_ARM64_REG_V1:
+		case UC_ARM64_REG_V2: case UC_ARM64_REG_V3:
+		case UC_ARM64_REG_V4: case UC_ARM64_REG_V5:
+		case UC_ARM64_REG_V6: case UC_ARM64_REG_V7:
+		case UC_ARM64_REG_V8: case UC_ARM64_REG_V9:
+		case UC_ARM64_REG_V10: case UC_ARM64_REG_V11:
+		case UC_ARM64_REG_V12: case UC_ARM64_REG_V13:
+		case UC_ARM64_REG_V14: case UC_ARM64_REG_V15:
+		case UC_ARM64_REG_V16: case UC_ARM64_REG_V17:
+		case UC_ARM64_REG_V18: case UC_ARM64_REG_V19:
+		case UC_ARM64_REG_V20: case UC_ARM64_REG_V21:
+		case UC_ARM64_REG_V22: case UC_ARM64_REG_V23:
+		case UC_ARM64_REG_V24: case UC_ARM64_REG_V25:
+		case UC_ARM64_REG_V26: case UC_ARM64_REG_V27:
+		case UC_ARM64_REG_V28: case UC_ARM64_REG_V29:
+		case UC_ARM64_REG_V30: case UC_ARM64_REG_V31:
+			return 16;
+
+		default:
+			return 0; // unknown — caller uses arch/mode fallback
+	}
+}
+
+static size_t GetArmRegisterSize(int regId) {
+	switch (regId) {
+		// 4-byte GPRs and status registers
+		case UC_ARM_REG_R0: case UC_ARM_REG_R1:
+		case UC_ARM_REG_R2: case UC_ARM_REG_R3:
+		case UC_ARM_REG_R4: case UC_ARM_REG_R5:
+		case UC_ARM_REG_R6: case UC_ARM_REG_R7:
+		case UC_ARM_REG_R8: case UC_ARM_REG_R9:
+		case UC_ARM_REG_R10: case UC_ARM_REG_R11:
+		case UC_ARM_REG_R12:
+		case UC_ARM_REG_SP: case UC_ARM_REG_LR:
+		case UC_ARM_REG_PC:
+		case UC_ARM_REG_CPSR: case UC_ARM_REG_SPSR:
+		case UC_ARM_REG_APSR: case UC_ARM_REG_APSR_NZCV:
+		case UC_ARM_REG_FPEXC: case UC_ARM_REG_FPSCR:
+			return 4;
+
+		// 4-byte VFP single-precision
+		case UC_ARM_REG_S0: case UC_ARM_REG_S1:
+		case UC_ARM_REG_S2: case UC_ARM_REG_S3:
+		case UC_ARM_REG_S4: case UC_ARM_REG_S5:
+		case UC_ARM_REG_S6: case UC_ARM_REG_S7:
+		case UC_ARM_REG_S8: case UC_ARM_REG_S9:
+		case UC_ARM_REG_S10: case UC_ARM_REG_S11:
+		case UC_ARM_REG_S12: case UC_ARM_REG_S13:
+		case UC_ARM_REG_S14: case UC_ARM_REG_S15:
+		case UC_ARM_REG_S16: case UC_ARM_REG_S17:
+		case UC_ARM_REG_S18: case UC_ARM_REG_S19:
+		case UC_ARM_REG_S20: case UC_ARM_REG_S21:
+		case UC_ARM_REG_S22: case UC_ARM_REG_S23:
+		case UC_ARM_REG_S24: case UC_ARM_REG_S25:
+		case UC_ARM_REG_S26: case UC_ARM_REG_S27:
+		case UC_ARM_REG_S28: case UC_ARM_REG_S29:
+		case UC_ARM_REG_S30: case UC_ARM_REG_S31:
+			return 4;
+
+		// 8-byte VFP double-precision
+		case UC_ARM_REG_D0: case UC_ARM_REG_D1:
+		case UC_ARM_REG_D2: case UC_ARM_REG_D3:
+		case UC_ARM_REG_D4: case UC_ARM_REG_D5:
+		case UC_ARM_REG_D6: case UC_ARM_REG_D7:
+		case UC_ARM_REG_D8: case UC_ARM_REG_D9:
+		case UC_ARM_REG_D10: case UC_ARM_REG_D11:
+		case UC_ARM_REG_D12: case UC_ARM_REG_D13:
+		case UC_ARM_REG_D14: case UC_ARM_REG_D15:
+		case UC_ARM_REG_D16: case UC_ARM_REG_D17:
+		case UC_ARM_REG_D18: case UC_ARM_REG_D19:
+		case UC_ARM_REG_D20: case UC_ARM_REG_D21:
+		case UC_ARM_REG_D22: case UC_ARM_REG_D23:
+		case UC_ARM_REG_D24: case UC_ARM_REG_D25:
+		case UC_ARM_REG_D26: case UC_ARM_REG_D27:
+		case UC_ARM_REG_D28: case UC_ARM_REG_D29:
+		case UC_ARM_REG_D30: case UC_ARM_REG_D31:
+			return 8;
+
+		// 16-byte NEON quad registers
+		case UC_ARM_REG_Q0: case UC_ARM_REG_Q1:
+		case UC_ARM_REG_Q2: case UC_ARM_REG_Q3:
+		case UC_ARM_REG_Q4: case UC_ARM_REG_Q5:
+		case UC_ARM_REG_Q6: case UC_ARM_REG_Q7:
+		case UC_ARM_REG_Q8: case UC_ARM_REG_Q9:
+		case UC_ARM_REG_Q10: case UC_ARM_REG_Q11:
+		case UC_ARM_REG_Q12: case UC_ARM_REG_Q13:
+		case UC_ARM_REG_Q14: case UC_ARM_REG_Q15:
+			return 16;
+
+		default:
+			return 0; // unknown — caller uses arch/mode fallback
+	}
+}
+
 size_t UnicornWrapper::GetRegisterSize(int regId) {
-	// Default to 64-bit for most cases
-	// This is a simplified version - ideally we'd have a complete mapping
+	// Try per-register lookup first, then fall back to arch/mode default
+	size_t size = 0;
+
 	switch (arch_) {
 		case UC_ARCH_X86:
-			// x86-64 general purpose registers
-			if (mode_ == UC_MODE_64) {
-				return 8; // 64-bit
-			} else if (mode_ == UC_MODE_32) {
-				return 4; // 32-bit
-			} else {
-				return 2; // 16-bit
-			}
+			size = GetX86RegisterSize(regId);
+			if (size > 0) return size;
+			// Fallback for unknown x86 registers
+			if (mode_ == UC_MODE_64) return 8;
+			if (mode_ == UC_MODE_32) return 4;
+			return 2;
+
 		case UC_ARCH_ARM64:
-			return 8; // 64-bit
+			size = GetArm64RegisterSize(regId);
+			if (size > 0) return size;
+			return 8;
+
 		case UC_ARCH_ARM:
-			return 4; // 32-bit
+			size = GetArmRegisterSize(regId);
+			if (size > 0) return size;
+			return 4;
+
 		case UC_ARCH_MIPS:
 			return (mode_ & UC_MODE_64) ? 8 : 4;
 		case UC_ARCH_SPARC:
@@ -650,7 +1075,17 @@ Napi::Value UnicornWrapper::RegRead(const Napi::CallbackInfo& info) {
 	int regId = info[0].As<Napi::Number>().Int32Value();
 	size_t regSize = GetRegisterSize(regId);
 
-	if (regSize == 8) {
+	if (regSize > 8) {
+		// Wide registers (XMM=16, YMM=32, ZMM=64, x87 FP=10, etc.)
+		// Return as Buffer so JS gets the full data
+		uint8_t buf[64] = {0}; // max ZMM size
+		uc_err err = uc_reg_read(engine_, regId, buf);
+		if (err != UC_ERR_OK) {
+			ThrowUnicornError(env, err, "Failed to read register");
+			return env.Undefined();
+		}
+		return Napi::Buffer<uint8_t>::Copy(env, buf, regSize);
+	} else if (regSize == 8) {
 		uint64_t value = 0;
 		uc_err err = uc_reg_read(engine_, regId, &value);
 		if (err != UC_ERR_OK) {
@@ -659,13 +1094,18 @@ Napi::Value UnicornWrapper::RegRead(const Napi::CallbackInfo& info) {
 		}
 		return Napi::BigInt::New(env, value);
 	} else {
-		uint32_t value = 0;
+		// 1, 2, or 4 byte registers
+		uint64_t value = 0;
 		uc_err err = uc_reg_read(engine_, regId, &value);
 		if (err != UC_ERR_OK) {
 			ThrowUnicornError(env, err, "Failed to read register");
 			return env.Undefined();
 		}
-		return Napi::Number::New(env, value);
+		// Mask to actual register width to avoid returning stale upper bits
+		if (regSize == 1) value &= 0xFF;
+		else if (regSize == 2) value &= 0xFFFF;
+		else if (regSize == 4) value &= 0xFFFFFFFF;
+		return Napi::Number::New(env, static_cast<double>(value));
 	}
 }
 
@@ -687,9 +1127,17 @@ Napi::Value UnicornWrapper::RegWrite(const Napi::CallbackInfo& info) {
 	}
 
 	int regId = info[0].As<Napi::Number>().Int32Value();
+	size_t regSize = GetRegisterSize(regId);
 	uc_err err;
 
-	if (info[1].IsBigInt()) {
+	if (info[1].IsBuffer()) {
+		// Buffer input — for wide registers (XMM, YMM, ZMM, x87, NEON Q, etc.)
+		auto buf = info[1].As<Napi::Buffer<uint8_t>>();
+		uint8_t tmp[64] = {0};
+		size_t copyLen = std::min(buf.Length(), std::min(regSize, (size_t)64));
+		std::memcpy(tmp, buf.Data(), copyLen);
+		err = uc_reg_write(engine_, regId, tmp);
+	} else if (info[1].IsBigInt()) {
 		bool lossless;
 		uint64_t value = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
 		err = uc_reg_write(engine_, regId, &value);
@@ -697,7 +1145,7 @@ Napi::Value UnicornWrapper::RegWrite(const Napi::CallbackInfo& info) {
 		uint64_t value = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
 		err = uc_reg_write(engine_, regId, &value);
 	} else {
-		Napi::TypeError::New(env, "value must be a BigInt or Number").ThrowAsJavaScriptException();
+		Napi::TypeError::New(env, "value must be a Buffer, BigInt, or Number").ThrowAsJavaScriptException();
 		return env.Undefined();
 	}
 
@@ -730,7 +1178,15 @@ Napi::Value UnicornWrapper::RegReadBatch(const Napi::CallbackInfo& info) {
 		int regId = regIds.Get(i).As<Napi::Number>().Int32Value();
 		size_t regSize = GetRegisterSize(regId);
 
-		if (regSize == 8) {
+		if (regSize > 8) {
+			uint8_t buf[64] = {0};
+			uc_err err = uc_reg_read(engine_, regId, buf);
+			if (err != UC_ERR_OK) {
+				ThrowUnicornError(env, err, "Failed to read register in batch");
+				return env.Undefined();
+			}
+			result.Set(i, Napi::Buffer<uint8_t>::Copy(env, buf, regSize));
+		} else if (regSize == 8) {
 			uint64_t value = 0;
 			uc_err err = uc_reg_read(engine_, regId, &value);
 			if (err != UC_ERR_OK) {
@@ -739,13 +1195,16 @@ Napi::Value UnicornWrapper::RegReadBatch(const Napi::CallbackInfo& info) {
 			}
 			result.Set(i, Napi::BigInt::New(env, value));
 		} else {
-			uint32_t value = 0;
+			uint64_t value = 0;
 			uc_err err = uc_reg_read(engine_, regId, &value);
 			if (err != UC_ERR_OK) {
 				ThrowUnicornError(env, err, "Failed to read register in batch");
 				return env.Undefined();
 			}
-			result.Set(i, Napi::Number::New(env, value));
+			if (regSize == 1) value &= 0xFF;
+			else if (regSize == 2) value &= 0xFFFF;
+			else if (regSize == 4) value &= 0xFFFFFFFF;
+			result.Set(i, Napi::Number::New(env, static_cast<double>(value)));
 		}
 	}
 
@@ -779,10 +1238,17 @@ Napi::Value UnicornWrapper::RegWriteBatch(const Napi::CallbackInfo& info) {
 
 	for (uint32_t i = 0; i < count; i++) {
 		int regId = regIds.Get(i).As<Napi::Number>().Int32Value();
+		size_t regSize = GetRegisterSize(regId);
 		Napi::Value val = values.Get(i);
 		uc_err err;
 
-		if (val.IsBigInt()) {
+		if (val.IsBuffer()) {
+			auto buf = val.As<Napi::Buffer<uint8_t>>();
+			uint8_t tmp[64] = {0};
+			size_t copyLen = std::min(buf.Length(), std::min(regSize, (size_t)64));
+			std::memcpy(tmp, buf.Data(), copyLen);
+			err = uc_reg_write(engine_, regId, tmp);
+		} else if (val.IsBigInt()) {
 			bool lossless;
 			uint64_t value = val.As<Napi::BigInt>().Uint64Value(&lossless);
 			err = uc_reg_write(engine_, regId, &value);
@@ -790,7 +1256,7 @@ Napi::Value UnicornWrapper::RegWriteBatch(const Napi::CallbackInfo& info) {
 			uint64_t value = static_cast<uint64_t>(val.As<Napi::Number>().Int64Value());
 			err = uc_reg_write(engine_, regId, &value);
 		} else {
-			Napi::TypeError::New(env, "All values must be BigInt or Number").ThrowAsJavaScriptException();
+			Napi::TypeError::New(env, "All values must be Buffer, BigInt, or Number").ThrowAsJavaScriptException();
 			return env.Undefined();
 		}
 
@@ -806,6 +1272,11 @@ Napi::Value UnicornWrapper::RegWriteBatch(const Napi::CallbackInfo& info) {
 // ============== Hook Operations ==============
 
 // Hook callback implementations
+// BUG-UNI-007: NonBlockingCall is intentionally used here for performance —
+// switching to BlockingCall would stall the emulation thread on every instruction.
+// Known limitation: under a saturated Node event loop, callbacks can be delivered
+// out of order or dropped entirely.  JS consumers SHOULD check the sequenceNumber
+// field on each callback to detect gaps (dropped hooks) or reordering.
 void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data) {
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
@@ -813,12 +1284,15 @@ void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data)
 	auto callData = std::make_unique<CodeHookCallData>();
 	callData->address = address;
 	callData->size = size;
+	// Stamp a monotonically increasing sequence number so JS can detect drops/reordering.
+	callData->sequenceNumber = data->wrapper->codeHookSeq_.fetch_add(1, std::memory_order_relaxed);
 
 	auto* raw = callData.release();
 	napi_status status = data->tsfn.NonBlockingCall(raw, [](Napi::Env env, Napi::Function callback, CodeHookCallData* data) {
 		callback.Call({
 			Napi::BigInt::New(env, data->address),
-			Napi::Number::New(env, data->size)
+			Napi::Number::New(env, data->size),
+			Napi::BigInt::New(env, data->sequenceNumber)
 		});
 		delete data;
 	});
@@ -927,6 +1401,11 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	if (address < 0x1000) return false;
 	if (address > 0x00007FFFFFFFFFFF) return false;
 
+	// Enforce auto-map limit to prevent address space exhaustion (BUG-UNI-006)
+	if (data->wrapper && data->wrapper->autoMapCount_ >= UnicornWrapper::MAX_AUTO_MAPS) {
+		return false; // Limit reached, let the fault propagate
+	}
+
 	// Query page size
 	size_t pageSize = 0;
 	uc_query(uc, UC_QUERY_PAGE_SIZE, &pageSize);
@@ -942,6 +1421,11 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	uc_err err = uc_mem_map(uc, alignedAddr, alignedSize, UC_PROT_ALL);
 	if (err != UC_ERR_OK) {
 		return false; // Let emulation crash
+	}
+
+	// Increment auto-map counter (BUG-UNI-006)
+	if (data->wrapper) {
+		data->wrapper->autoMapCount_++;
 	}
 
 	// Notify JS asynchronously for tracking (non-blocking, fire-and-forget)
@@ -1260,6 +1744,14 @@ Napi::Value UnicornWrapper::StateSave(const Napi::CallbackInfo& info) {
 			Napi::Buffer<uint8_t> buffer = Napi::Buffer<uint8_t>::New(env, size);
 			if (uc_mem_read(engine_, regions[i].begin, buffer.Data(), size) == UC_ERR_OK) {
 				region.Set("data", buffer);
+			} else {
+				// uc_mem_read failed (e.g. MMIO or unreadable region).
+				// Still attach the zeroed buffer so StateRestore can at least re-map the
+				// region rather than skipping it silently (BUG-UNI-005).
+				fprintf(stderr, "[hexcore-unicorn] StateSave: uc_mem_read failed for region 0x%llx+0x%llx — attaching zeroed buffer\n",
+					(unsigned long long)regions[i].begin, (unsigned long long)size);
+				region.Set("data", buffer);
+				region.Set("error", Napi::String::New(env, "uc_mem_read failed: region data may be unreadable (MMIO or guard page)"));
 			}
 
 			memArray.Set(i, region);
@@ -1286,11 +1778,22 @@ Napi::Value UnicornWrapper::StateRestore(const Napi::CallbackInfo& info) {
 
 	Napi::Object state = info[0].As<Napi::Object>();
 
+	// Reset auto-map counter (BUG-UNI-006)
+	autoMapCount_ = 0;
+
 	// 1. Restore Memory
-	// Unmap everything first?
-	// Calling mem_unmap for all regions.
-	// Or we can just start fresh.
-	// Let's assume we map over what's needed.
+	// Unmap all existing regions first to avoid stale data and mapping conflicts (BUG-UNI-004)
+	{
+		uc_mem_region *regions = nullptr;
+		uint32_t regionCount = 0;
+		if (uc_mem_regions(engine_, &regions, &regionCount) == UC_ERR_OK) {
+			for (uint32_t i = 0; i < regionCount; i++) {
+				uc_mem_unmap(engine_, regions[i].begin, regions[i].end - regions[i].begin + 1);
+			}
+			uc_free(regions);
+		}
+	}
+
 	if (state.Has("memory")) {
 		Napi::Array memArray = state.Get("memory").As<Napi::Array>();
 		uint32_t count = memArray.Length();
@@ -1300,12 +1803,16 @@ Napi::Value UnicornWrapper::StateRestore(const Napi::CallbackInfo& info) {
 				Napi::Object region = val.As<Napi::Object>();
 				bool lossless;
 				uint64_t address = region.Get("address").As<Napi::BigInt>().Uint64Value(&lossless);
-				size_t size = region.Get("size").As<Napi::Number>().Uint32Value();
+				uint64_t sizeRaw;
+				Napi::Value sizeVal = region.Get("size");
+				if (sizeVal.IsBigInt()) {
+					sizeRaw = sizeVal.As<Napi::BigInt>().Uint64Value(&lossless);
+				} else {
+					sizeRaw = static_cast<uint64_t>(sizeVal.As<Napi::Number>().Int64Value());
+				}
+				size_t size = static_cast<size_t>(sizeRaw);
 				uint32_t perms = region.Get("perms").As<Napi::Number>().Uint32Value();
 
-				// Try map (might fail if already mapped, so we ignore mapping error and just write?)
-				// Better approach: Unmap specific region if overlaps?
-				// Simple approach: Map. If fails, assume mapped. Then Write.
 				uc_mem_map(engine_, address, size, perms);
 
 				if (region.Has("data")) {

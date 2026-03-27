@@ -154,6 +154,17 @@ interface StepOutputPath {
 	format: PipelineOutputFormat;
 }
 
+/**
+ * Recorded result for a completed pipeline step, used for $step[N] interpolation.
+ *
+ * - `outputPath` — the file path written by the step (maps to `$step[N].output`)
+ * - `result`     — the parsed JSON content of that file (maps to `$step[N].result.X`)
+ */
+interface StepRecord {
+	outputPath: string | undefined;
+	result: Record<string, unknown> | undefined;
+}
+
 interface CommandCapability {
 	headless: boolean;
 	defaultTimeoutMs: number;
@@ -181,6 +192,13 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.decompile.ir', 'hexcore.rellic.decompileIR'],
 	['hexcore.liftir', 'hexcore.disasm.liftToIR'],
 	['hexcore.disasm.disassembleAt', 'hexcore.disasm.disassembleAtHeadless'],
+	['hexcore.disasm.rttiScan', 'hexcore.disasm.rttiScanHeadless'],
+	['hexcore.disasm.scanRtti', 'hexcore.disasm.rttiScanHeadless'],
+	['hexcore.disasm.searchBytes', 'hexcore.disasm.searchBytesHeadless'],
+	['hexcore.disasm.aobScan', 'hexcore.disasm.searchBytesHeadless'],
+	['hexcore.debug.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
+	['hexcore.unicorn.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
+	['hexcore.unicorn.searchMemoryHeadless', 'hexcore.debug.searchMemoryHeadless'],
 ]);
 
 /**
@@ -281,6 +299,8 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.rttiScanHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.searchBytesHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.yara.quickScan', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command shows notifications and threat report UI.' }],
 	['hexcore.yara.scanWorkspace', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command depends on workspace UI flow.' }],
 	['hexcore.yara.loadDefender', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command opens folder picker.' }],
@@ -308,6 +328,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.debug.writeMemoryHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.debug.setRegisterHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.debug.setStdinHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.debug.searchMemoryHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.debug.disposeHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.elfanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.elfanalyzer.analyzeActive', { headless: false, defaultTimeoutMs: 60000, validateOutput: false, reason: 'Interactive command analyzes active editor file.' }],
@@ -370,6 +391,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.debug.writeMemoryHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.setRegisterHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.setStdinHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.searchMemoryHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.disposeHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.elfanalyzer.analyze', ['hikarisystem.hexcore-elfanalyzer']],
 	['hexcore.elfanalyzer.analyzeActive', ['hikarisystem.hexcore-elfanalyzer']],
@@ -381,6 +403,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.rellic.decompileIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.liftToIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.disassembleAtHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.rttiScanHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.searchBytesHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
 ]);
@@ -574,6 +598,8 @@ export class AutomationPipelineRunner {
 		let failed = false;
 		let index = 0;
 		let loopCounter = 0;
+		// Accumulates one record per completed step for $step[N] interpolation.
+		const stepRecords: StepRecord[] = [];
 
 		while (index < job.steps.length) {
 			const step = job.steps[index];
@@ -604,6 +630,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -627,6 +654,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -651,6 +679,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -661,7 +690,31 @@ export class AutomationPipelineRunner {
 				continue;
 			}
 
-			const commandOptions = buildCommandOptions(job.file, step, output, job.quiet);
+			let commandOptions: PipelineCommandOptions;
+			try {
+				commandOptions = buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index);
+			} catch (error: unknown) {
+				const errorMessage = `Step arg interpolation failed: ${toErrorMessage(error)}`;
+				const stepStatus = createStepStatus(
+					step,
+					resolvedCommand,
+					startedAt,
+					1,
+					output?.path,
+					'error',
+					errorMessage
+				);
+				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
+				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
+				writeJson(statusPath, status);
+				failed = true;
+				if (!step.continueOnError) {
+					break;
+				}
+				index++;
+				continue;
+			}
 
 			let attemptCount = 0;
 			let executionError: unknown;
@@ -737,16 +790,22 @@ export class AutomationPipelineRunner {
 				break;
 			}
 
-			// Step output capture for onResult evaluation
+			// Step output capture — read once for both onResult evaluation and $step[N] interpolation.
 			let stepOutputData: Record<string, unknown> | undefined;
-			if (completed && step.onResult && output?.path) {
+			if (completed && output?.path) {
 				try {
 					const content = fs.readFileSync(output.path, 'utf8');
-					stepOutputData = JSON.parse(content);
+					const parsed: unknown = JSON.parse(content);
+					if (isRecord(parsed)) {
+						stepOutputData = parsed;
+					}
 				} catch {
-					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for onResult evaluation`);
+					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for step result capture`);
 				}
 			}
+
+			// Record the completed step result so later steps can reference it via $step[N].
+			stepRecords.push({ outputPath: output?.path, result: stepOutputData });
 
 			// Evaluate onResult conditional branching
 			if (completed && step.onResult && stepOutputData) {
@@ -1084,10 +1143,178 @@ function resolveOutputFormat(outputPath: string, format?: PipelineOutputFormat):
 	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
-function buildCommandOptions(filePath: string, step: PipelineStep, output: StepOutputPath | undefined, quietMode: boolean): PipelineCommandOptions {
+/**
+ * Resolves `$step[N]` and `$step[prev]` variable references inside step args.
+ *
+ * Supported token forms:
+ *   - `$step[N].output`          — the output file path written by step N (0-based)
+ *   - `$step[prev].output`       — the output file path of the immediately preceding step
+ *   - `$step[N].result.fieldName` — a top-level field from the parsed JSON output of step N
+ *   - `$step[prev].result.fieldName` — same, for the previous step
+ *
+ * Rules enforced:
+ *   - Forward references (referencing a step >= currentIndex) throw an error.
+ *   - Out-of-range indices throw an error.
+ *   - Only string-typed values are interpolated; non-string values pass through unchanged.
+ *   - Nested objects/arrays in args are traversed recursively.
+ *
+ * @param args         - The raw args record from the pipeline step definition.
+ * @param stepRecords  - Array of records for all steps that have already completed.
+ * @param currentIndex - The 0-based index of the step currently being executed.
+ */
+export function resolveStepReferences(
+	args: Record<string, unknown>,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): Record<string, unknown> {
+	return resolveObject(args, stepRecords, currentIndex) as Record<string, unknown>;
+}
+
+function resolveValue(
+	value: unknown,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): unknown {
+	if (typeof value === 'string') {
+		return interpolateString(value, stepRecords, currentIndex);
+	}
+	if (Array.isArray(value)) {
+		return value.map(item => resolveValue(item, stepRecords, currentIndex));
+	}
+	if (isRecord(value)) {
+		return resolveObject(value, stepRecords, currentIndex);
+	}
+	return value;
+}
+
+function resolveObject(
+	obj: Record<string, unknown>,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): Record<string, unknown> {
+	const result: Record<string, unknown> = {};
+	for (const [key, val] of Object.entries(obj)) {
+		result[key] = resolveValue(val, stepRecords, currentIndex);
+	}
+	return result;
+}
+
+/**
+ * Interpolates all `$step[N]` tokens found inside a single string value.
+ * A token may be the entire string or embedded within a larger string.
+ * When a token is the entire string content, the resolved value is returned
+ * as-is (preserving its original type when accessed via result.X lookup).
+ * When embedded among other text the resolved value is always coerced to string.
+ */
+function interpolateString(
+	raw: string,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): unknown {
+	// Pattern: $step[N].output  or  $step[N].result.fieldName
+	//          $step[prev].output or $step[prev].result.fieldName
+	const TOKEN_RE = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+
+	// Fast-path: nothing to interpolate
+	if (!TOKEN_RE.test(raw)) {
+		return raw;
+	}
+
+	// Reset lastIndex after the test() call consumed it
+	TOKEN_RE.lastIndex = 0;
+
+	// Collect all tokens to determine if the entire string is a single token
+	const tokens: Array<{ full: string; index: string; accessor: string }> = [];
+	let match: RegExpExecArray | null;
+	while ((match = TOKEN_RE.exec(raw)) !== null) {
+		const full = match[0];
+		// accessor is everything after $step[N].
+		const dotPos = full.indexOf('.', full.indexOf(']'));
+		const accessor = full.slice(dotPos + 1); // e.g. "output" or "result.fieldName"
+		tokens.push({ full, index: match[1], accessor });
+	}
+
+	// Resolve each token to a concrete value
+	const resolved = tokens.map(token => ({
+		token,
+		value: resolveToken(token.index, token.accessor, stepRecords, currentIndex)
+	}));
+
+	// If the raw string is exactly one token and nothing else, return the
+	// resolved value directly (preserves non-string types from result fields).
+	if (tokens.length === 1 && raw === tokens[0].full) {
+		return resolved[0].value;
+	}
+
+	// Otherwise perform string substitution left-to-right.
+	const allTokenRe = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+	return raw.replace(allTokenRe, (_match, indexToken) => {
+		const dotPos = _match.indexOf('.', _match.indexOf(']'));
+		const accessor = _match.slice(dotPos + 1);
+		const resolvedVal = resolveToken(indexToken, accessor, stepRecords, currentIndex);
+		return resolvedVal === undefined || resolvedVal === null ? '' : String(resolvedVal);
+	});
+}
+
+function resolveToken(
+	indexToken: string,
+	accessor: string,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): unknown {
+	const stepIndex = indexToken === 'prev' ? currentIndex - 1 : parseInt(indexToken, 10);
+
+	if (isNaN(stepIndex)) {
+		throw new Error(`$step[${indexToken}]: invalid step index`);
+	}
+
+	if (stepIndex < 0) {
+		throw new Error(`$step[${indexToken}]: index resolves to ${stepIndex}, which is out of bounds`);
+	}
+
+	if (stepIndex >= currentIndex) {
+		throw new Error(
+			`$step[${indexToken}]: forward reference detected — step ${stepIndex} has not completed yet ` +
+			`(current step is ${currentIndex})`
+		);
+	}
+
+	if (stepIndex >= stepRecords.length) {
+		throw new Error(
+			`$step[${indexToken}]: index ${stepIndex} is out of range ` +
+			`(only ${stepRecords.length} step(s) have been recorded)`
+		);
+	}
+
+	const record = stepRecords[stepIndex];
+
+	if (accessor === 'output') {
+		return record.outputPath ?? '';
+	}
+
+	// accessor is "result.<fieldName>"
+	const fieldName = accessor.slice('result.'.length);
+	if (!record.result) {
+		throw new Error(
+			`$step[${stepIndex}].result.${fieldName}: step ${stepIndex} produced no parseable output`
+		);
+	}
+	return record.result[fieldName];
+}
+
+function buildCommandOptions(
+	filePath: string,
+	step: PipelineStep,
+	output: StepOutputPath | undefined,
+	quietMode: boolean,
+	stepRecords: StepRecord[],
+	currentIndex: number
+): PipelineCommandOptions {
 	const merged: PipelineCommandOptions = {};
 	if (step.args) {
-		for (const [key, value] of Object.entries(step.args)) {
+		// Resolve $step[N] references before spreading args into the command options.
+		const resolvedArgs = resolveStepReferences(step.args, stepRecords, currentIndex);
+		for (const [key, value] of Object.entries(resolvedArgs)) {
 			// Pipeline controls these fields to guarantee consistent headless behavior.
 			if (key === 'file' || key === 'quiet' || key === 'output') {
 				continue;

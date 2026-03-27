@@ -1,7 +1,5 @@
-/*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
- *--------------------------------------------------------------------------------------------*/
+// Copyright (c) HikariSystem. All rights reserved.
+// Licensed under the MIT License. See LICENSE in the project root.
 #ifndef UNICORN_WRAPPER_H
 #define UNICORN_WRAPPER_H
 
@@ -38,6 +36,11 @@ public:
 	uc_engine* GetEngine() const { return engine_; }
 	bool IsClosed() const { return closed_; }
 
+	// InvalidMemHookCB needs access to autoMapCount_ (BUG-UNI-006)
+	friend bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
+	// CodeHookCB needs access to codeHookSeq_ (BUG-UNI-007)
+	friend void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
+
 private:
 	uc_engine* engine_;
 	uc_arch arch_;
@@ -54,6 +57,15 @@ private:
 	std::unordered_set<uint64_t> breakpoints_;
 	uc_hook breakpointHookHandle_ = 0;
 	bool hasBreakpointHook_ = false;
+
+	// Auto-map limit for InvalidMemHookCB (BUG-UNI-006)
+	static constexpr uint32_t MAX_AUTO_MAPS = 1000;
+	std::atomic<uint32_t> autoMapCount_{0};
+
+	// BUG-UNI-007: global sequence counter for CodeHookCB.
+	// Incremented atomically for every CODE hook invocation so JS can detect
+	// dropped or reordered deliveries caused by NonBlockingCall fire-and-forget.
+	std::atomic<uint64_t> codeHookSeq_{0};
 
 	// Shared Memory References (Keep buffers alive)
 	std::map<uint64_t, Napi::ObjectReference> mappedBuffers_;
@@ -324,6 +336,11 @@ struct HookData {
 struct CodeHookCallData {
 	uint64_t address;
 	uint32_t size;
+	// BUG-UNI-007: sequence number for out-of-order detection by JS consumers.
+	// NonBlockingCall is fire-and-forget; under a busy event loop callbacks can
+	// arrive out of order or be dropped.  JS can compare consecutive seqNums to
+	// detect gaps / reordering.
+	uint64_t sequenceNumber;
 };
 
 struct BlockHookCallData {

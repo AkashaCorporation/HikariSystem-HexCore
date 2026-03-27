@@ -1,6 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Strings Extractor v1.2.0
- *  Extract ASCII and Unicode strings from binary files using streaming
+ *  HexCore Strings Extractor v1.3.0
+ *  Extract ASCII and Unicode strings from binary files
+ *  PE section-aware prioritization (FEAT-STRINGS-001) + streaming fallback
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
@@ -16,7 +17,7 @@ import { wideStringXorScan } from './wideStringXor';
 import { positionalXorScan } from './positionalXor';
 import { rollingXorExtScan } from './rollingXorExt';
 import { layeredXorScan } from './layeredXor';
-import { parsePESections, getSectionForOffset, type PESectionMap } from './peSectionParser';
+import { parsePESections, getSectionForOffset, type PESectionMap, type PESectionInfo } from './peSectionParser';
 import type { MultiByteXorOptions } from './multiByteXor';
 
 type OutputFormat = 'json' | 'md';
@@ -41,6 +42,8 @@ interface ExtractedString {
 	value: string;
 	encoding: 'ASCII' | 'UTF-16LE';
 	category?: string;
+	/** PE section this string was found in (e.g., '.rdata', '.text'). */
+	section?: string;
 }
 
 interface StringsSummary {
@@ -108,11 +111,105 @@ interface CoreExtractionResult {
 }
 
 const CHUNK_SIZE = 64 * 1024;
-const DEFAULT_MIN_LENGTH = 4;
+const DEFAULT_MIN_LENGTH = 6;
 const DEFAULT_MAX_STRINGS = 50000;
 
+// ---------------------------------------------------------------------------
+// PE Section Prioritization — FEAT-STRINGS-001
+// ---------------------------------------------------------------------------
+
+/**
+ * Sections are processed in priority order. Sections not in this list
+ * are placed after the known ones with equal (lowest) priority.
+ * Budget fractions must sum to 1.0.
+ */
+interface SectionBudget {
+	/** Glob-style name match (case-insensitive startsWith). */
+	namePrefix: string;
+	/** Priority — lower number = processed first. */
+	priority: number;
+	/** Fraction of maxStrings allocated to this section. */
+	budgetFraction: number;
+}
+
+const SECTION_BUDGETS: SectionBudget[] = [
+	{ namePrefix: '.rdata',  priority: 1, budgetFraction: 0.60 },
+	{ namePrefix: '.data',   priority: 2, budgetFraction: 0.20 },
+	{ namePrefix: '.rsrc',   priority: 3, budgetFraction: 0.10 },
+	{ namePrefix: '.text',   priority: 4, budgetFraction: 0.10 },
+];
+
+/** Fallback budget fraction for sections not in the priority list. */
+const UNKNOWN_SECTION_PRIORITY = 5;
+
+/**
+ * Given actual PE sections, return them ordered by priority with per-section
+ * result budgets. Sections not in SECTION_BUDGETS share leftover budget equally.
+ */
+function buildSectionPlan(
+	sections: PESectionInfo[],
+	maxStrings: number,
+): Array<{ section: PESectionInfo; budget: number; priority: number }> {
+	const plan: Array<{ section: PESectionInfo; budget: number; priority: number }> = [];
+
+	// Classify each section
+	const known: Array<{ section: PESectionInfo; entry: SectionBudget }> = [];
+	const unknown: PESectionInfo[] = [];
+
+	for (const sec of sections) {
+		const nameLower = sec.name.toLowerCase();
+		const match = SECTION_BUDGETS.find(b => nameLower.startsWith(b.namePrefix));
+		if (match) {
+			known.push({ section: sec, entry: match });
+		} else {
+			unknown.push(sec);
+		}
+	}
+
+	// Assign budgets to known sections
+	let totalKnownFraction = 0;
+	for (const k of known) {
+		totalKnownFraction += k.entry.budgetFraction;
+	}
+
+	// If there are unknown sections, redistribute: known sections get their proportional
+	// share of totalKnownFraction, unknown sections share the rest equally.
+	if (unknown.length > 0 && totalKnownFraction < 1.0) {
+		const unknownFraction = (1.0 - totalKnownFraction) / unknown.length;
+		for (const k of known) {
+			plan.push({
+				section: k.section,
+				budget: Math.max(10, Math.floor(maxStrings * k.entry.budgetFraction)),
+				priority: k.entry.priority,
+			});
+		}
+		for (const sec of unknown) {
+			plan.push({
+				section: sec,
+				budget: Math.max(10, Math.floor(maxStrings * unknownFraction)),
+				priority: UNKNOWN_SECTION_PRIORITY,
+			});
+		}
+	} else {
+		// All sections are known (or unknown list is empty) — use budgets directly
+		// If totalKnownFraction < 1.0 and no unknowns, scale up proportionally
+		const scale = totalKnownFraction > 0 ? 1.0 / totalKnownFraction : 1.0;
+		for (const k of known) {
+			plan.push({
+				section: k.section,
+				budget: Math.max(10, Math.floor(maxStrings * k.entry.budgetFraction * scale)),
+				priority: k.entry.priority,
+			});
+		}
+	}
+
+	// Sort by priority (ascending)
+	plan.sort((a, b) => a.priority - b.priority);
+	return plan;
+}
+
 export function activate(context: vscode.ExtensionContext) {
-	console.log('HexCore Strings Extractor v1.2.0 activated');
+	console.log('HexCore Strings Extractor v1.3.0 activated');
 
 	// Original command — backward compatible
 	context.subscriptions.push(
@@ -336,6 +433,192 @@ function extractStringsCore(
 	const stats = fs.statSync(filePath);
 	const totalSize = stats.size;
 
+	// --- PE pre-scan: attempt to parse section headers ---
+	let peSections: PESectionMap | null = null;
+	const fd = fs.openSync(filePath, 'r');
+	try {
+		const preScanSize = Math.min(PE_PRESCAN_SIZE, totalSize);
+		const preScanBuf = Buffer.alloc(preScanSize);
+		fs.readSync(fd, preScanBuf, 0, preScanSize, 0);
+		peSections = parsePESections(preScanBuf);
+	} catch {
+		// Not a PE or malformed — fall through to linear scan
+	}
+
+	// --- Decide extraction strategy ---
+	if (peSections && peSections.isPE && peSections.sections.length > 0) {
+		const result = extractStringsSectionAware(fd, totalSize, peSections, minLength, maxStrings, onProgress, isCancelled);
+		fs.closeSync(fd);
+		return result;
+	}
+
+	// --- Fallback: linear scan (non-PE files, ELF, raw buffers) ---
+	try {
+		return extractStringsLinear(fd, totalSize, null, minLength, maxStrings, onProgress, isCancelled);
+	} finally {
+		fs.closeSync(fd);
+	}
+}
+
+/**
+ * Extract strings from a single byte range within a file.
+ * Handles chunked I/O, ASCII + Unicode extraction, and section annotation.
+ */
+function extractStringsFromRange(
+	fd: number,
+	rangeStart: number,
+	rangeEnd: number,
+	sectionName: string | undefined,
+	minLength: number,
+	budget: number,
+	onProgress: ((offset: number, totalSize: number, foundStrings: number) => void) | undefined,
+	totalSize: number,
+	globalCount: number,
+	isCancelled: (() => boolean) | undefined,
+): { strings: ExtractedString[]; truncated: boolean; cancelled: boolean } {
+	const strings: ExtractedString[] = [];
+	let asciiCarryover = '';
+	let asciiCarryoverOffset = rangeStart;
+	let unicodeCarryover = Buffer.alloc(0);
+	let unicodeCarryoverOffset = rangeStart;
+	let offset = rangeStart;
+	let truncated = false;
+	let cancelled = false;
+
+	while (offset < rangeEnd) {
+		if (isCancelled?.()) {
+			cancelled = true;
+			break;
+		}
+
+		const bytesToRead = Math.min(CHUNK_SIZE, rangeEnd - offset);
+		const buffer = Buffer.alloc(bytesToRead);
+		fs.readSync(fd, buffer, 0, bytesToRead, offset);
+
+		const asciiResult = extractASCIIFromChunk(buffer, offset, minLength, asciiCarryover, asciiCarryoverOffset);
+		for (const s of asciiResult.strings) {
+			if (sectionName) { s.section = sectionName; }
+			strings.push(s);
+		}
+		asciiCarryover = asciiResult.carryover;
+		asciiCarryoverOffset = asciiResult.carryoverOffset;
+
+		const unicodeResult = extractUnicodeFromChunk(buffer, offset, minLength, unicodeCarryover, unicodeCarryoverOffset);
+		for (const s of unicodeResult.strings) {
+			if (sectionName) { s.section = sectionName; }
+			strings.push(s);
+		}
+		unicodeCarryover = Buffer.from(unicodeResult.carryover);
+		unicodeCarryoverOffset = unicodeResult.carryoverOffset;
+
+		offset += bytesToRead;
+		onProgress?.(offset, totalSize, globalCount + strings.length);
+
+		if (strings.length >= budget) {
+			truncated = true;
+			break;
+		}
+	}
+
+	// Flush ASCII carryover
+	if (asciiCarryover.length >= minLength) {
+		const trimmed = asciiCarryover.trim();
+		if (trimmed.length >= minLength) {
+			const entry: ExtractedString = {
+				offset: asciiCarryoverOffset,
+				value: trimmed,
+				encoding: 'ASCII',
+			};
+			if (sectionName) { entry.section = sectionName; }
+			strings.push(entry);
+		}
+	}
+
+	return { strings, truncated, cancelled };
+}
+
+/**
+ * Section-aware extraction for PE files (FEAT-STRINGS-001).
+ * Processes sections in priority order (.rdata > .data > .rsrc > .text)
+ * with per-section result budgets to prevent .text noise from drowning
+ * out high-value strings in .rdata.
+ */
+function extractStringsSectionAware(
+	fd: number,
+	totalSize: number,
+	peSections: PESectionMap,
+	minLength: number,
+	maxStrings: number,
+	onProgress: ((offset: number, totalSize: number, foundStrings: number) => void) | undefined,
+	isCancelled: (() => boolean) | undefined,
+): CoreExtractionResult {
+	const plan = buildSectionPlan(peSections.sections, maxStrings);
+	const allStrings: ExtractedString[] = [];
+	let truncated = false;
+	let cancelled = false;
+
+	for (const entry of plan) {
+		if (cancelled) { break; }
+		if (allStrings.length >= maxStrings) {
+			truncated = true;
+			break;
+		}
+
+		const sec = entry.section;
+		// Skip zero-size sections
+		if (sec.size <= 0) { continue; }
+
+		const rangeStart = sec.offset;
+		const rangeEnd = Math.min(sec.offset + sec.size, totalSize);
+		if (rangeStart >= totalSize || rangeStart >= rangeEnd) { continue; }
+
+		// Remaining global budget may be less than this section's allocation
+		const remainingGlobal = maxStrings - allStrings.length;
+		const sectionBudget = Math.min(entry.budget, remainingGlobal);
+
+		const result = extractStringsFromRange(
+			fd, rangeStart, rangeEnd, sec.name,
+			minLength, sectionBudget,
+			onProgress, totalSize, allStrings.length,
+			isCancelled,
+		);
+
+		allStrings.push(...result.strings);
+		if (result.cancelled) { cancelled = true; }
+		if (result.truncated) {
+			// Section-level truncation is expected — continue to next section
+		}
+	}
+
+	if (allStrings.length >= maxStrings) {
+		truncated = true;
+	}
+
+	categorizeStrings(allStrings);
+	allStrings.sort((a, b) => a.offset - b.offset);
+	const uniqueStrings = deduplicateStrings(allStrings);
+
+	return {
+		fileSize: totalSize,
+		strings: uniqueStrings,
+		truncated,
+		cancelled,
+	};
+}
+
+/**
+ * Linear (non-section-aware) extraction — used for non-PE files.
+ * This is the original sequential scan logic, preserved for ELF / raw buffers.
+ */
+function extractStringsLinear(
+	fd: number,
+	totalSize: number,
+	_peSections: PESectionMap | null,
+	minLength: number,
+	maxStrings: number,
+	onProgress: ((offset: number, totalSize: number, foundStrings: number) => void) | undefined,
+	isCancelled: (() => boolean) | undefined,
+): CoreExtractionResult {
 	const allStrings: ExtractedString[] = [];
 	let asciiCarryover = '';
 	let asciiCarryoverOffset = 0;
@@ -345,38 +628,33 @@ function extractStringsCore(
 	let truncated = false;
 	let cancelled = false;
 
-	const fd = fs.openSync(filePath, 'r');
-	try {
-		while (offset < totalSize) {
-			if (isCancelled?.()) {
-				cancelled = true;
-				break;
-			}
-
-			const bytesToRead = Math.min(CHUNK_SIZE, totalSize - offset);
-			const buffer = Buffer.alloc(bytesToRead);
-			fs.readSync(fd, buffer, 0, bytesToRead, offset);
-
-			const asciiResult = extractASCIIFromChunk(buffer, offset, minLength, asciiCarryover, asciiCarryoverOffset);
-			allStrings.push(...asciiResult.strings);
-			asciiCarryover = asciiResult.carryover;
-			asciiCarryoverOffset = asciiResult.carryoverOffset;
-
-			const unicodeResult = extractUnicodeFromChunk(buffer, offset, minLength, unicodeCarryover, unicodeCarryoverOffset);
-			allStrings.push(...unicodeResult.strings);
-			unicodeCarryover = Buffer.from(unicodeResult.carryover);
-			unicodeCarryoverOffset = unicodeResult.carryoverOffset;
-
-			offset += bytesToRead;
-			onProgress?.(offset, totalSize, allStrings.length);
-
-			if (allStrings.length > maxStrings) {
-				truncated = true;
-				break;
-			}
+	while (offset < totalSize) {
+		if (isCancelled?.()) {
+			cancelled = true;
+			break;
 		}
-	} finally {
-		fs.closeSync(fd);
+
+		const bytesToRead = Math.min(CHUNK_SIZE, totalSize - offset);
+		const buffer = Buffer.alloc(bytesToRead);
+		fs.readSync(fd, buffer, 0, bytesToRead, offset);
+
+		const asciiResult = extractASCIIFromChunk(buffer, offset, minLength, asciiCarryover, asciiCarryoverOffset);
+		allStrings.push(...asciiResult.strings);
+		asciiCarryover = asciiResult.carryover;
+		asciiCarryoverOffset = asciiResult.carryoverOffset;
+
+		const unicodeResult = extractUnicodeFromChunk(buffer, offset, minLength, unicodeCarryover, unicodeCarryoverOffset);
+		allStrings.push(...unicodeResult.strings);
+		unicodeCarryover = Buffer.from(unicodeResult.carryover);
+		unicodeCarryoverOffset = unicodeResult.carryoverOffset;
+
+		offset += bytesToRead;
+		onProgress?.(offset, totalSize, allStrings.length);
+
+		if (allStrings.length > maxStrings) {
+			truncated = true;
+			break;
+		}
 	}
 
 	if (asciiCarryover.length >= minLength) {
@@ -594,6 +872,7 @@ function generateStringsReport(
 ): string {
 	const asciiCount = strings.filter(stringValue => stringValue.encoding === 'ASCII').length;
 	const unicodeCount = strings.filter(stringValue => stringValue.encoding === 'UTF-16LE').length;
+	const hasSections = strings.some(s => s.section !== undefined && s.section !== '');
 
 	const categorized = new Map<string, ExtractedString[]>();
 	for (const stringValue of strings) {
@@ -602,6 +881,23 @@ function generateStringsReport(
 			categorized.set(category, []);
 		}
 		categorized.get(category)!.push(stringValue);
+	}
+
+	// Build section breakdown if section data is available
+	let sectionBreakdown = '';
+	if (hasSections) {
+		const sectionCounts = new Map<string, number>();
+		for (const s of strings) {
+			const sec = s.section ?? '(unknown)';
+			sectionCounts.set(sec, (sectionCounts.get(sec) ?? 0) + 1);
+		}
+		sectionBreakdown = '\n### Strings by PE Section\n\n| Section | Count |\n|---------|-------|\n';
+		// Sort sections by count descending
+		const sorted = [...sectionCounts.entries()].sort((a, b) => b[1] - a[1]);
+		for (const [sec, count] of sorted) {
+			sectionBreakdown += `| **${sec}** | ${count} |\n`;
+		}
+		sectionBreakdown += '\n';
 	}
 
 	let report = `# HexCore Strings Extractor Report
@@ -614,7 +910,7 @@ function generateStringsReport(
 | **File Path** | ${filePath} |
 | **File Size** | ${formatBytes(fileSize)} |
 | **Min Length** | ${minLength} characters |
-| **Processing** | Streaming (memory efficient) |
+| **Processing** | ${hasSections ? 'Section-aware (PE prioritized)' : 'Streaming (memory efficient)'} |
 | **Truncated** | ${truncated ? 'Yes (max strings limit reached)' : 'No'} |
 
 ---
@@ -626,7 +922,7 @@ function generateStringsReport(
 | **ASCII Strings** | ${asciiCount} |
 | **Unicode Strings** | ${unicodeCount} |
 | **Total** | ${strings.length} |
-
+${sectionBreakdown}
 ---
 
 ## Interesting Strings by Category
@@ -639,14 +935,26 @@ function generateStringsReport(
 		const items = categorized.get(category);
 		if (items && items.length > 0) {
 			report += `### ${category} (${items.length})\n\n`;
-			report += '| Offset | Encoding | Value |\n';
-			report += '|--------|----------|-------|\n';
+			if (hasSections) {
+				report += '| Offset | Encoding | Section | Value |\n';
+				report += '|--------|----------|---------|-------|\n';
+			} else {
+				report += '| Offset | Encoding | Value |\n';
+				report += '|--------|----------|-------|\n';
+			}
 			for (const item of items.slice(0, 50)) {
 				const escapedValue = item.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 80);
-				report += `| 0x${item.offset.toString(16).toUpperCase().padStart(8, '0')} | ${item.encoding} | \`${escapedValue}\` |\n`;
+				const offsetHex = `0x${item.offset.toString(16).toUpperCase().padStart(8, '0')}`;
+				if (hasSections) {
+					report += `| ${offsetHex} | ${item.encoding} | ${item.section ?? '—'} | \`${escapedValue}\` |\n`;
+				} else {
+					report += `| ${offsetHex} | ${item.encoding} | \`${escapedValue}\` |\n`;
+				}
 			}
 			if (items.length > 50) {
-				report += `| ... | ... | *${items.length - 50} more* |\n`;
+				report += hasSections
+					? `| ... | ... | ... | *${items.length - 50} more* |\n`
+					: `| ... | ... | *${items.length - 50} more* |\n`;
 			}
 			report += '\n';
 		}
@@ -655,18 +963,28 @@ function generateStringsReport(
 	const generalStrings = categorized.get('General') || [];
 	if (generalStrings.length > 0) {
 		report += `### General Strings (showing first 100 of ${generalStrings.length})\n\n`;
-		report += '| Offset | Encoding | Value |\n';
-		report += '|--------|----------|-------|\n';
+		if (hasSections) {
+			report += '| Offset | Encoding | Section | Value |\n';
+			report += '|--------|----------|---------|-------|\n';
+		} else {
+			report += '| Offset | Encoding | Value |\n';
+			report += '|--------|----------|-------|\n';
+		}
 		for (const item of generalStrings.slice(0, 100)) {
 			const escapedValue = item.value.replace(/\|/g, '\\|').replace(/\n/g, ' ').substring(0, 80);
 			const truncatedValue = item.value.length > 80 ? '...' : '';
-			report += `| 0x${item.offset.toString(16).toUpperCase().padStart(8, '0')} | ${item.encoding} | \`${escapedValue}${truncatedValue}\` |\n`;
+			const offsetHex = `0x${item.offset.toString(16).toUpperCase().padStart(8, '0')}`;
+			if (hasSections) {
+				report += `| ${offsetHex} | ${item.encoding} | ${item.section ?? '—'} | \`${escapedValue}${truncatedValue}\` |\n`;
+			} else {
+				report += `| ${offsetHex} | ${item.encoding} | \`${escapedValue}${truncatedValue}\` |\n`;
+			}
 		}
 		report += '\n';
 	}
 
 	report += `---
-*Generated by HexCore Strings Extractor v1.2.0 (Streaming)*
+*Generated by HexCore Strings Extractor v1.3.0 (${hasSections ? 'Section-Aware' : 'Streaming'})*
 `;
 
 	return report;

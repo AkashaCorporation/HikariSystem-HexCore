@@ -173,7 +173,7 @@ export class HelixWrapper {
 	 * because Remill IR already encodes the architecture in the IR text,
 	 * and the Helix engine uses x86_64 backend for both x86 variants.
 	 */
-	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64'): Promise<HelixResult> {
+	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64', options?: { optimizeIR?: boolean }): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
 		}
@@ -185,11 +185,35 @@ export class HelixWrapper {
 			return this.errorResult(`Architecture '${arch}' is not supported by Helix.`);
 		}
 
-		if (irText.length > ASYNC_THRESHOLD) {
-			return this.decompileIrAsync(irText, mapping.helixArch);
+		// Apply optimizeIR flag if the native module supports it (BUG-HELIX-003)
+		const skipOpt = options?.optimizeIR === false;
+		if (skipOpt) {
+			try {
+				const engine = this.getOrCreateEngine(mapping.helixArch);
+				if (engine && typeof (engine as any).setSkipOptimization === 'function') {
+					(engine as any).setSkipOptimization(true);
+				}
+			} catch { /* Native module doesn't support this yet — silently proceed */ }
 		}
 
-		return this.decompileIrSync(irText, mapping.helixArch);
+		let result: HelixResult;
+		if (irText.length > ASYNC_THRESHOLD) {
+			result = await this.decompileIrAsync(irText, mapping.helixArch);
+		} else {
+			result = this.decompileIrSync(irText, mapping.helixArch);
+		}
+
+		// Reset optimization flag for next call
+		if (skipOpt) {
+			try {
+				const engine = this.getOrCreateEngine(mapping.helixArch);
+				if (engine && typeof (engine as any).setSkipOptimization === 'function') {
+					(engine as any).setSkipOptimization(false);
+				}
+			} catch { /* ignore */ }
+		}
+
+		return result;
 	}
 
 	/**

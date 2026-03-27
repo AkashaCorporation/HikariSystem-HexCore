@@ -1072,6 +1072,169 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// Search Memory Headless — pattern search across emulated RAM (Issue #18)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.searchMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+
+			const state = engine.getEmulationState();
+			if (!state) {
+				throw new Error('No active emulation session. Call emulateHeadless first.');
+			}
+
+			// Parse pattern — supports hex string ("48 8B ?? 00"), ASCII, or UTF-16
+			const patternStr = typeof arg?.pattern === 'string' ? arg.pattern : undefined;
+			const encoding = typeof arg?.encoding === 'string' ? arg.encoding : 'hex'; // 'hex' | 'ascii' | 'utf16'
+			const regionsFilter = typeof arg?.regions === 'string' ? arg.regions : 'all'; // 'all' | 'heap' | 'stack' | or "0x1000-0x2000"
+			const maxResults = typeof arg?.maxResults === 'number' ? arg.maxResults : 100;
+
+			if (!patternStr) {
+				throw new Error('searchMemoryHeadless requires a "pattern" argument.');
+			}
+
+			// Build search bytes and wildcard mask from pattern
+			let searchBytes: number[];
+			let wildcardMask: boolean[];
+
+			if (encoding === 'ascii') {
+				const buf = Buffer.from(patternStr, 'ascii');
+				searchBytes = Array.from(buf);
+				wildcardMask = searchBytes.map(() => false);
+			} else if (encoding === 'utf16') {
+				const buf = Buffer.from(patternStr, 'utf16le');
+				searchBytes = Array.from(buf);
+				wildcardMask = searchBytes.map(() => false);
+			} else {
+				// Hex pattern with ?? wildcards: "48 8B ?? 00" or "488B??00"
+				const tokens: string[] = [];
+				const normalized = patternStr.trim();
+				if (normalized.includes(' ')) {
+					tokens.push(...normalized.split(/\s+/));
+				} else {
+					for (let i = 0; i < normalized.length; i += 2) {
+						tokens.push(normalized.substring(i, i + 2));
+					}
+				}
+				searchBytes = [];
+				wildcardMask = [];
+				for (const token of tokens) {
+					if (token === '??' || token === '?') {
+						searchBytes.push(0);
+						wildcardMask.push(true);
+					} else {
+						const byte = parseInt(token, 16);
+						if (isNaN(byte)) {
+							throw new Error(`Invalid hex byte in pattern: "${token}"`);
+						}
+						searchBytes.push(byte);
+						wildcardMask.push(false);
+					}
+				}
+			}
+
+			if (searchBytes.length === 0) {
+				throw new Error('Pattern is empty after parsing.');
+			}
+
+			// Get memory regions to search
+			const allRegions = await engine.getMemoryRegions();
+			let regionsToSearch = allRegions;
+
+			if (regionsFilter === 'heap') {
+				regionsToSearch = allRegions.filter(r => r.name?.toLowerCase().includes('heap'));
+			} else if (regionsFilter === 'stack') {
+				regionsToSearch = allRegions.filter(r => r.name?.toLowerCase().includes('stack'));
+			} else if (regionsFilter !== 'all') {
+				// Try to parse as "0xSTART-0xEND"
+				const rangeMatch = regionsFilter.match(/^(0x[0-9a-fA-F]+)\s*-\s*(0x[0-9a-fA-F]+)$/);
+				if (rangeMatch) {
+					const rangeStart = BigInt(rangeMatch[1]);
+					const rangeEnd = BigInt(rangeMatch[2]);
+					regionsToSearch = allRegions.filter(r => {
+						const rEnd = BigInt(r.address) + BigInt(r.size);
+						return BigInt(r.address) < rangeEnd && rEnd > rangeStart;
+					});
+				}
+			}
+
+			// Search each region
+			const matches: Array<{ address: string; region: string; size: number }> = [];
+			const patternLen = searchBytes.length;
+
+			for (const region of regionsToSearch) {
+				if (matches.length >= maxResults) break;
+
+				const regionAddr = BigInt(region.address);
+				const regionSize = region.size;
+
+				// Read region in chunks (max 4MB at a time to avoid memory issues)
+				const chunkSize = Math.min(regionSize, 4 * 1024 * 1024);
+				let offset = 0;
+
+				while (offset < regionSize && matches.length < maxResults) {
+					const readSize = Math.min(chunkSize, regionSize - offset);
+					let data: Buffer;
+					try {
+						data = await engine.emulationReadMemory(regionAddr + BigInt(offset), readSize);
+					} catch {
+						// Skip unreadable regions (MMIO, guard pages)
+						break;
+					}
+
+					// Linear scan with wildcard support
+					for (let i = 0; i <= data.length - patternLen; i++) {
+						let found = true;
+						for (let j = 0; j < patternLen; j++) {
+							if (!wildcardMask[j] && data[i + j] !== searchBytes[j]) {
+								found = false;
+								break;
+							}
+						}
+						if (found) {
+							const matchAddr = regionAddr + BigInt(offset + i);
+							matches.push({
+								address: '0x' + matchAddr.toString(16),
+								region: region.name || `region@0x${regionAddr.toString(16)}`,
+								size: patternLen
+							});
+							if (matches.length >= maxResults) break;
+							// Skip past this match to avoid overlapping results
+							i += patternLen - 1;
+						}
+					}
+
+					offset += readSize;
+					// If we read less than chunkSize, we're done with this region
+					if (readSize < chunkSize) break;
+				}
+			}
+
+			const exportData = {
+				success: true,
+				pattern: patternStr,
+				encoding,
+				regionsSearched: regionsToSearch.length,
+				totalMatches: matches.length,
+				matches,
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				vscode.window.showInformationMessage(
+					`Found ${matches.length} match(es) for pattern "${patternStr}" across ${regionsToSearch.length} memory region(s).`
+				);
+			}
+
+			return exportData;
+		})
+	);
+
 	console.log('HexCore Debugger extension activated');
 }
 

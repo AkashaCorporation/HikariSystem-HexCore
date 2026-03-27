@@ -120,6 +120,23 @@ jobs:
           tar -czf $asset prebuilds
           "asset=$asset" >> $env:GITHUB_OUTPUT
 
+      - name: Pack Unicorn Runtime DLLs
+        id: pack-runtime
+        if: ${{ matrix.engine.name == 'hexcore-unicorn' }}
+        working-directory: engine
+        run: |
+          $version = "${{ steps.engine-version.outputs.version }}"
+          $name = "hexcore-unicorn"
+          $runtimeAsset = "$name-v$version-runtime-win32-x64.tar.gz"
+          $dllPath = "deps/unicorn/unicorn.dll"
+          if (Test-Path $dllPath) {
+            tar -czf $runtimeAsset $dllPath
+            "asset=$runtimeAsset" >> $env:GITHUB_OUTPUT
+            Write-Host "Packed Unicorn runtime DLL: $runtimeAsset"
+          } else {
+            Write-Host "WARNING: unicorn.dll not found at $dllPath — runtime asset skipped"
+          }
+
       - name: Pack Remill Semantics
         id: pack-semantics
         if: ${{ matrix.engine.name == 'hexcore-remill' }}
@@ -168,6 +185,26 @@ jobs:
           }
           gh release upload $tag $asset --clobber
 
+      - name: Upload Unicorn Runtime DLLs to Release
+        if: ${{ matrix.engine.name == 'hexcore-unicorn' && env.HEXCORE_RELEASE_TOKEN != '' && steps.pack-runtime.outputs.asset }}
+        env:
+          GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
+          GH_REPO: ${{ matrix.engine.repo }}
+          ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
+        run: |
+          $tag = "v$env:ENGINE_VERSION"
+          $asset = "engine/${{ steps.pack-runtime.outputs.asset }}"
+          if (Test-Path $asset) {
+            gh release upload $tag $asset --clobber
+            Write-Host "Uploaded Unicorn runtime DLL asset"
+          }
+          # Also upload the raw DLL for fallback download
+          $dll = "engine/deps/unicorn/unicorn.dll"
+          if (Test-Path $dll) {
+            gh release upload $tag $dll --clobber
+            Write-Host "Uploaded unicorn.dll as standalone asset"
+          }
+
       - name: Upload Semantics to Release
         if: ${{ matrix.engine.name == 'hexcore-remill' && env.HEXCORE_RELEASE_TOKEN != '' }}
         env:
@@ -197,7 +234,7 @@ jobs:
       - name: Checkout Helix Repository
         uses: actions/checkout@v6
         with:
-          repository: LXrdKnowkill/hexcore-helix
+          repository: AkashaCorporation/HexCore-Helix
           path: engine
 
       - name: Setup Node.js
@@ -226,7 +263,7 @@ jobs:
         run: |
           $tag = "v0.2.0"
           $asset = "helix-llvm-mlir-deps-win32-x64.zip"
-          $url = "https://github.com/LXrdKnowkill/hexcore-helix/releases/download/$tag/$asset"
+          $url = "https://github.com/AkashaCorporation/HexCore-Helix/releases/download/$tag/$asset"
           Write-Host "Downloading Helix LLVM/MLIR deps from $url ..."
 
           $maxRetries = 3
@@ -328,7 +365,7 @@ jobs:
         if: ${{ env.HEXCORE_RELEASE_TOKEN != '' }}
         env:
           GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
-          GH_REPO: LXrdKnowkill/hexcore-helix
+          GH_REPO: AkashaCorporation/HexCore-Helix
           ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
         run: |
           $tag = "v$env:ENGINE_VERSION"

@@ -5,6 +5,77 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.3] - 2026-03-26 - "Field-Tested Fortification"
+
+> **29-Item Engineering Overhaul** — Consolidated all findings from the ROTTR.exe reverse engineering session (PE64, ~1.4GB), code reviews of hexcore-capstone and hexcore-unicorn, POWER.md compliance audit, and community feedback (Issue #18). This release resolves the only known P0 crash, hardens every native engine, introduces function boundary detection, and adds four new headless commands for the automation pipeline.
+
+### Critical Fixes
+
+- **[P0] Helix Liveness.cpp Assertion Crash (BUG-HELIX-001)** — Fixed `StructureControlFlow::detectEscapingValues` to also scan **block arguments** (MLIR phi values), not just operation results. Block arguments defined inside a loop body with uses outside the region were silently missed, causing a fatal `"Use leaves the current parent region"` assertion during the HelixLow→HelixHigh pass pipeline. Affects functions with deep loops, backward branches to entry blocks, and heavy SIMD code paths.
+- **Unicorn DLL Missing in Packaged Build (BUG-UNI-008)** — The `.exe` build was missing `unicorn.dll` because `prebuild-install` only fetches the `.node` file, the DLL is gitignored, and the install script silently skipped the copy. Fixed across 4 points: (1) `hexcore-native-install.js` now downloads the DLL from GitHub Release if absent, (2) `.vscodeignore` force-includes runtime DLLs, (3) prebuild workflow uploads DLL as release asset, (4) installer workflow has a verification step with fallback download.
+
+### Native Engine Fixes — hexcore-capstone
+
+- **Async Worker Error Swallowing (BUG-CAP-001)** — `DisasmAsyncWorker::Execute()` now calls `SetError()` instead of silently storing errors in a member variable. Promises correctly reject with descriptive messages.
+- **Detached ArrayBuffer Guard (BUG-CAP-004)** — Added `IsDetached()` check before dereferencing TypedArray buffers in `Disasm()` and `DisasmAsync()` paths.
+- **C++17 Cross-Platform (BUG-CAP-005)** — Added `CLANG_CXX_LANGUAGE_STANDARD: c++17` for Mac and `/std:c++17` for Windows in `binding.gyp`.
+- **target_name POWER.md Compliance (BUG-CAP-007)** — Renamed `capstone_native` → `hexcore_capstone` in binding.gyp, main.cpp, and index.js. Legacy name kept as fallback for transition.
+- **Exception Contradiction (BUG-CAP-008)** — Aligned Mac/Windows exception settings with `NAPI_DISABLE_CPP_EXCEPTIONS`.
+- **Unhandled Architecture Detail (BUG-CAP-003)** — `DetailToObject()` now returns `archSpecific: null` with a warning string for architectures without detail parsing (TMS320C64X, M680X, EVM, WASM, BPF).
+- **BigInt Addresses (FEAT-CAP-009)** — Instruction `address` field now emits BigInt for 64-bit safety. Backward-compatible `addressAsNumber` field added. Base address accepts both BigInt and Number.
+- **Sync/Async Duplication (BUG-CAP-006)** — Documented as TODO for future refactor.
+
+### Native Engine Fixes — hexcore-unicorn
+
+- **GetRegisterSize Lookup Table (BUG-UNI-002)** — Full per-register size lookup for x86/x64 (200+ registers including GPR 8/16/32/64-bit, XMM 128-bit, YMM 256-bit, ZMM 512-bit, FP, MMX, segment, control/debug), ARM64 (B/H/S/D/Q/X/W registers), and ARM32. `RegRead` now returns correctly-sized buffers; `RegWrite` accepts Buffer for wide registers.
+- **MemMap 32-bit Truncation (BUG-UNI-003)** — All `Uint32Value()` calls for memory sizes replaced with BigInt-aware parsing. Enables mapping regions > 4GB.
+- **StateRestore Memory Cleanup (BUG-UNI-004)** — `StateRestore()` now calls `uc_mem_unmap()` on all existing regions before remapping from snapshot. Eliminates stale region persistence and UC_ERR_MAP regressions.
+- **StateSave Data Loss (BUG-UNI-005)** — When `uc_mem_read` fails, the buffer is still stored (zeroed) and an `error` field is added to the region object for consumer diagnostics.
+- **Auto-Map Limit (BUG-UNI-006)** — `InvalidMemHookCB` now enforces `MAX_AUTO_MAPS = 1000` with an atomic counter. Prevents address space exhaustion from malicious binaries. Counter resets on `EmuStart`, `EmuStartAsync`, and `StateRestore`.
+- **CodeHook Sequence Numbers (BUG-UNI-007)** — `CodeHookCB` now stamps an atomic `sequenceNumber` on each callback, enabling JS consumers to detect out-of-order delivery from `NonBlockingCall`.
+
+### Compliance
+
+- **Copyright Headers (BUG-CAP-002 + BUG-UNI-001)** — Replaced `Copyright (c) Microsoft Corporation` with `Copyright (c) HikariSystem` in 7 source files across Capstone and Unicorn (both monorepo and standalone repos).
+
+### Added — Function Boundary Detection (Fase 2)
+
+- **Native Prologue Scanner (FEAT-CAP-010)** — New `detectFunctions()` async method on the Capstone wrapper. C++ worker scans entire code buffers for prologue patterns (x86/x64: `push rbp`, `endbr64`, `sub rsp`; ARM64: `stp x29,x30`; ARM32: `push {regs,lr}`; MIPS: `addiu sp`) and collects call targets. Returns `FunctionBoundary[]` with start/end, confidence score, detection method, and thunk flag.
+- **Auto-Backtrack (FEAT-DISASM-004)** — `disassembleAtHeadless` and `helix.decompile` (via `liftToIR`) now auto-detect function boundaries. When an address lands mid-function, the system scans backward to find the real function start. Disable with `"autoBacktrack": false`.
+- **Decompiler Stub Elimination (BUG-HELIX-002)** — Consequence of auto-backtrack: Helix no longer decompiles partial stubs when given mid-function addresses.
+
+### Added — Helix Decompiler Quality (Fase 3)
+
+- **optimizeIR Flag (BUG-HELIX-003)** — Full pipeline implementation from C++ Engine → C API → Rust FFI → NAPI-RS → TS wrapper. `helix.decompile` headless now accepts `"optimizeIR": false` to skip Tier 2.5 optimization passes (magic division recovery, devirtualization).
+- **Confidence Score Penalties (FEAT-HELIX-004)** — `PseudoCEmitter::analyzeFunction` now penalizes: stub functions with < 5 statements (-40 points), short functions < 10 statements (-15), and undecomposed native opcode calls (-3 each, max -30). Scores reflect actual output quality.
+- **x64 Opcode Decomposition (FEAT-HELIX-005)** — 30+ native x64 opcodes now emit C expressions instead of raw opcode function calls: SSE conversions (`CVTPS2PD` → `(double)`), memory moves (`MOVSD_MEM` → `*(double*)addr`), min/max (`MINSS` → `fminf()`), sign extension (`CWDE` → `(int32_t)(int16_t)`), SSE arithmetic (`MULSS` → `*`), and more.
+
+### Added — Pipeline & Analysis (Fase 4)
+
+- **Batch String Search (FEAT-DISASM-001)** — `searchStringHeadless` now accepts `{ queries: ["health", "ammo", ...] }` for batch mode. Reduces 25-step jobs to a single step. Results include per-query `query` field.
+- **PE Section Filter (FEAT-STRINGS-001)** — String extraction prioritizes sections: `.rdata` (60%) > `.data` (20%) > `.rsrc` (10%) > `.text` (10%). Eliminates 99% noise from `.text` section. Results annotated with `section` field.
+- **minLength Default (FEAT-STRINGS-002)** — Default minimum string length increased from 4 to 6 characters.
+- **Pipeline Step Referencing (FEAT-PIPE-001)** — Job steps can reference previous outputs: `"$step[0].output"`, `"$step[prev].result.fieldName"`. Supports recursive object traversal and clear error messages for forward references.
+
+### Added — New Headless Commands (Fase 5 + Issue #18)
+
+- **RTTI Scan (FEAT-DISASM-002)** — `hexcore.disasm.rttiScanHeadless`: scans PE binaries for `.?AV` RTTI type descriptors, extracts class names with decorated/undecorated forms. Aliases: `rttiScan`, `scanRtti`.
+- **AOB Scan (FEAT-DISASM-003)** — `hexcore.disasm.searchBytesHeadless`: byte pattern search with `??` wildcard support in virtual address space. Supports space-separated and compact hex formats. Aliases: `searchBytes`, `aobScan`.
+- **Memory Pattern Search ([#18](https://github.com/AkashaCorporation/HikariSystem-HexCore/issues/18))** — `hexcore.debug.searchMemoryHeadless`: pattern search across emulated RAM during keepAlive sessions. Supports hex (with wildcards), ASCII, and UTF-16 patterns. Region filtering: `all`, `heap`, `stack`, or explicit ranges. Aliases: `searchMemory`, `unicorn.searchMemory`. *Requested by [@YasminePayload](https://github.com/YasminePayload).*
+
+### Engine Versions
+
+| Engine | Version | Changes |
+|--------|---------|---------|
+| hexcore-capstone | 1.3.4 | +detectFunctions, BigInt, SetError, target_name, C++17 |
+| hexcore-unicorn | 1.2.3 | +RegisterSize lookup, MemMap BigInt, StateRestore, autoMap limit |
+| hexcore-helix | 0.7.1 | +optimizeIR flag, confidence scoring, opcode decomposition, Liveness fix |
+| hexcore-remill | 0.2.0 | (unchanged) |
+| hexcore-llvm-mc | 1.0.1 | (unchanged) |
+| hexcore-better-sqlite3 | 2.0.0 | (unchanged) |
+
+---
+
 ## [3.7.2] - 2026-03-22 - "Headless Hardening + Runtime Convergence"
 
 > **Stabilization & Architecture Release** — Focused convergence release ahead of the `3.8.0` Helix-first transition. `v3.7.2` hardens the automation-first HexCore stack across three fronts: (1) wrapper fidelity for Capstone and LLVM MC, (2) worker/runtime stability for Unicorn-backed debugger flows, and (3) first-round Remill/Helix precision fixes so LLVM IR and decompiler output stop lying in high-impact control-flow cases.

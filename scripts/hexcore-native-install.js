@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  Copyright (c) HikariSystem. All rights reserved.
+ *  Licensed under the MIT License. See LICENSE in the project root.
  *--------------------------------------------------------------------------------------------*/
 
 'use strict';
@@ -226,22 +226,93 @@ function copyIfExists(src, destDir) {
 function copyUnicornRuntimeDeps(binaryDir) {
 	const depsDir = path.join(cwd, 'deps', 'unicorn');
 	if (!fs.existsSync(depsDir)) {
-		return;
+		fs.mkdirSync(depsDir, { recursive: true });
 	}
 
+	const dllFiles = getDllFilesForPlatform();
+	let anyMissing = false;
+
+	for (const dllFile of dllFiles) {
+		const src = path.join(depsDir, dllFile);
+		if (!fs.existsSync(src)) {
+			anyMissing = true;
+			break;
+		}
+	}
+
+	// If DLLs are missing locally, try to download from GitHub Release
+	if (anyMissing) {
+		console.log('[hexcore-native-install] Unicorn runtime DLL(s) not found locally, attempting download...');
+		downloadUnicornDlls(depsDir, dllFiles);
+	}
+
+	// Copy DLLs to the binary directory (next to the .node file)
+	for (const dllFile of dllFiles) {
+		copyIfExists(path.join(depsDir, dllFile), binaryDir);
+	}
+
+	// Verify at least the primary DLL exists somewhere
+	const primaryDll = dllFiles[0];
+	const inDeps = fs.existsSync(path.join(depsDir, primaryDll));
+	const inBinary = fs.existsSync(path.join(binaryDir, primaryDll));
+	if (!inDeps && !inBinary) {
+		console.warn(`[hexcore-native-install] WARNING: Unicorn runtime DLL '${primaryDll}' not found!`);
+		console.warn('[hexcore-native-install] The Unicorn emulation engine will fail to load at runtime.');
+		console.warn('[hexcore-native-install] Ensure deps/unicorn/ contains the required DLL or check the GitHub Release assets.');
+	} else {
+		console.log(`[hexcore-native-install] Unicorn DLL verified: deps=${inDeps}, binary=${inBinary}`);
+	}
+}
+
+function getDllFilesForPlatform() {
 	if (process.platform === 'win32') {
-		copyIfExists(path.join(depsDir, 'unicorn.dll'), binaryDir);
-		return;
+		return ['unicorn.dll'];
 	}
-
 	if (process.platform === 'linux') {
-		copyIfExists(path.join(depsDir, 'libunicorn.so'), binaryDir);
-		copyIfExists(path.join(depsDir, 'libunicorn.so.2'), binaryDir);
+		return ['libunicorn.so', 'libunicorn.so.2'];
+	}
+	if (process.platform === 'darwin') {
+		return ['libunicorn.dylib', 'libunicorn.2.dylib'];
+	}
+	return [];
+}
+
+function downloadUnicornDlls(depsDir, dllFiles) {
+	const version = pkg.version;
+	const repoUrl = (pkg.repository && (typeof pkg.repository === 'string' ? pkg.repository : pkg.repository.url)) || '';
+	const repoMatch = repoUrl.match(/github\.com[/:]([^/]+\/[^/.]+)/);
+	if (!repoMatch) {
+		console.warn('[hexcore-native-install] Cannot resolve GitHub repo for DLL download');
 		return;
 	}
+	const repo = repoMatch[1];
+	const tag = `v${version}`;
 
-	if (process.platform === 'darwin') {
-		copyIfExists(path.join(depsDir, 'libunicorn.dylib'), binaryDir);
-		copyIfExists(path.join(depsDir, 'libunicorn.2.dylib'), binaryDir);
+	// Try downloading a runtime-deps asset (e.g., hexcore-unicorn-v1.2.1-runtime-win32-x64.tar.gz)
+	const runtimeAsset = `${moduleName}-v${version}-runtime-${process.platform}-${process.arch}.tar.gz`;
+	const ghResult = run('gh', ['release', 'download', tag, '--repo', repo, '--pattern', runtimeAsset, '--dir', cwd]);
+	const runtimePath = path.join(cwd, runtimeAsset);
+
+	if (ghResult.ok && fs.existsSync(runtimePath)) {
+		const tarResult = run('tar', ['-xzf', runtimePath, '-C', cwd]);
+		if (tarResult.ok) {
+			try { fs.unlinkSync(runtimePath); } catch (e) { /* ignore */ }
+			console.log(`[hexcore-native-install] Downloaded runtime deps from release: ${runtimeAsset}`);
+			return;
+		}
+	}
+	// Clean up failed download
+	try { if (fs.existsSync(runtimePath)) { fs.unlinkSync(runtimePath); } } catch (e) { /* ignore */ }
+
+	// Fallback: try downloading individual DLL files from release assets
+	for (const dllFile of dllFiles) {
+		const dllDest = path.join(depsDir, dllFile);
+		if (fs.existsSync(dllDest)) {
+			continue;
+		}
+		const result = run('gh', ['release', 'download', tag, '--repo', repo, '--pattern', dllFile, '--dir', depsDir]);
+		if (result.ok && fs.existsSync(dllDest)) {
+			console.log(`[hexcore-native-install] Downloaded ${dllFile} from release`);
+		}
 	}
 }

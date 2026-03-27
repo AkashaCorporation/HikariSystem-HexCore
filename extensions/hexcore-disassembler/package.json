@@ -237,6 +237,16 @@
 				"category": "HexCore Automation"
 			},
 			{
+				"command": "hexcore.disasm.rttiScanHeadless",
+				"title": "RTTI Scan (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.searchBytesHeadless",
+				"title": "Search Bytes / AOB Scan (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.disasm.liftToIR",
 				"title": "[Experimental] Lift to LLVM IR",
 				"category": "HexCore Disassembler",

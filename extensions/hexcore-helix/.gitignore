@@ -1,0 +1,8 @@
+# Build artifacts
+build/
+node_modules/
+*.log
+
+# NAPI-RS binaries — downloaded by hexcore-native-install.js
+# NEVER commit .node files — they're fetched from GitHub Release
+*.node
