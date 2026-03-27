@@ -261,10 +261,11 @@ jobs:
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
         working-directory: engine/engine
         run: |
-          $tag = "v0.2.0"
+          $version = node -p "require('../package.json').version"
+          $tag = "v$version"
           $asset = "helix-llvm-mlir-deps-win32-x64.zip"
           $url = "https://github.com/AkashaCorporation/HexCore-Helix/releases/download/$tag/$asset"
-          Write-Host "Downloading Helix LLVM/MLIR deps from $url ..."
+          Write-Host "Downloading Helix LLVM/MLIR deps from $url (tag: $tag) ..."
 
           $maxRetries = 3
           $retryCount = 0
