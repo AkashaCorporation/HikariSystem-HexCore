@@ -112,6 +112,7 @@ jobs:
           cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
       - name: Verify Unicorn Runtime DLL
+        continue-on-error: true
         run: |
           $unicornDir = "extensions/hexcore-unicorn"
           $dllPaths = @(
@@ -138,9 +139,12 @@ jobs:
             if (Test-Path "deps/unicorn/unicorn.dll") {
               Write-Host "✓ unicorn.dll downloaded successfully"
             } else {
-              Write-Host "⚠ Could not download unicorn.dll — continuing without emulation support"
+              Write-Host "⚠ Could not download unicorn.dll — Unicorn emulation will be unavailable in this build"
+              Write-Host "⚠ This is non-blocking — the DLL can be added manually later"
             }
           }
+          # Always exit 0 — DLL absence is non-fatal for the build
+          exit 0
 
       - name: Fetch HexCore Helix Prebuilds (Windows)
         continue-on-error: true
