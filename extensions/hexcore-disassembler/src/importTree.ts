@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
 import { DisassemblerEngine, ImportLibrary, ImportFunction } from './disassemblerEngine';
+import { lookupApi, formatApiSignature, CATEGORY_LABELS } from './peApiDatabase';
 
 type ImportTreeElement = ImportLibraryItem | ImportFunctionItem;
 
@@ -30,20 +31,53 @@ export class ImportFunctionItem extends vscode.TreeItem {
 		super(func.name, collapsibleState);
 
 		const addrHex = func.address.toString(16).toUpperCase();
-		const ordinalStr = func.ordinal !== undefined ? ` (Ordinal: ${func.ordinal})` : '';
-		const hintStr = func.hint !== undefined ? ` [Hint: ${func.hint}]` : '';
+		const ordinalStr = func.ordinal !== undefined ? `Ordinal: ${func.ordinal}` : '';
+		const hintStr = func.hint !== undefined ? `Hint: ${func.hint}` : '';
 
-		this.tooltip = [
+		// v3.7.5: Resolve API signature from database
+		const apiSig = lookupApi(func.name);
+
+		const tooltipLines = [
 			`Function: ${func.name}`,
 			`Library: ${libraryName}`,
 			`IAT Address: 0x${addrHex}`,
-			ordinalStr,
-			hintStr
-		].filter(s => s.length > 0).join('\n');
+		];
+		if (ordinalStr) { tooltipLines.push(ordinalStr); }
+		if (hintStr) { tooltipLines.push(hintStr); }
 
-		this.description = `0x${addrHex}`;
+		if (apiSig) {
+			tooltipLines.push('');
+			tooltipLines.push(formatApiSignature(apiSig));
+			tooltipLines.push('');
+			tooltipLines.push(`Category: ${CATEGORY_LABELS[apiSig.category] || apiSig.category}`);
+			if (apiSig.tags.length > 0) {
+				tooltipLines.push(`Tags: ${apiSig.tags.join(', ')}`);
+			}
+		}
+
+		this.tooltip = tooltipLines.join('\n');
+
+		// v3.7.5: Show category in description alongside address
+		if (apiSig) {
+			this.description = `0x${addrHex}  [${apiSig.category}]`;
+		} else {
+			this.description = `0x${addrHex}`;
+		}
+
 		this.contextValue = 'importFunction';
-		this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.blue'));
+
+		// v3.7.5: Color-code icons by security relevance
+		if (apiSig && (apiSig.category === 'injection' || apiSig.tags.includes('shellcode'))) {
+			this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.red'));
+		} else if (apiSig && (apiSig.category === 'network' || apiSig.category === 'crypto')) {
+			this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.orange'));
+		} else if (apiSig && (apiSig.category === 'hook' || apiSig.tags.includes('keylogger'))) {
+			this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.red'));
+		} else if (apiSig && (apiSig.tags.includes('anti_debug') || apiSig.tags.includes('evasion'))) {
+			this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.yellow'));
+		} else {
+			this.iconPath = new vscode.ThemeIcon('symbol-function', new vscode.ThemeColor('charts.blue'));
+		}
 
 		this.command = {
 			command: 'hexcore.disasm.goToAddress',

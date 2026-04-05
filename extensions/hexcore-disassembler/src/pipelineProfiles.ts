@@ -81,7 +81,7 @@ export function getBuiltInPipelinePresets(): PipelinePreset[] {
 					{ cmd: 'hexcore.entropy.analyze', args: { blockSize: 4096 } },
 					{ cmd: 'hexcore.strings.extract', args: { minLength: 4, maxStrings: 200000 } },
 					{ cmd: 'hexcore.ioc.extract' },
-					{ cmd: 'hexcore.peanalyzer.analyze', continueOnError: true },
+					{ cmd: 'hexcore.disasm.analyzePEHeadless', continueOnError: true },
 					{ cmd: 'hexcore.disasm.analyzeAll', args: { includeInstructions: true }, timeoutMs: 240000 },
 					{ cmd: 'hexcore.yara.scan', continueOnError: true }
 				]

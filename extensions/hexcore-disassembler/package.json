@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.3.0",
+	"version": "1.4.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -111,6 +111,40 @@
 				"command": "hexcore.disasm.searchString",
 				"title": "Search String References",
 				"category": "HexCore Disassembler"
+			},
+			{
+				"command": "hexcore.disasm.renameVariable",
+				"title": "Rename Variable",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-variable)"
+			},
+			{
+				"command": "hexcore.disasm.retypeVariable",
+				"title": "Retype Variable",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-type-parameter)"
+			},
+			{
+				"command": "hexcore.disasm.retypeFunction",
+				"title": "Retype Function Return Type",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-method)"
+			},
+			{
+				"command": "hexcore.disasm.setBookmark",
+				"title": "Set Bookmark",
+				"category": "HexCore Disassembler",
+				"icon": "$(bookmark)"
+			},
+			{
+				"command": "hexcore.disasm.getSessionDbPath",
+				"title": "Get Session Database Path",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.extractStrings",
+				"title": "Extract Strings (Section-Filtered)",
+				"category": "HexCore Automation"
 			},
 			{
 				"command": "hexcore.disasm.exportASM",
@@ -441,7 +475,8 @@
 		"watch": "tsc -watch -p ./"
 	},
 	"dependencies": {
-		"hexcore-common": "file:../hexcore-common"
+		"hexcore-common": "file:../hexcore-common",
+		"hexcore-better-sqlite3": "file:../hexcore-better-sqlite3"
 	},
 	"devDependencies": {
 		"@types/mocha": "^10.0.0",

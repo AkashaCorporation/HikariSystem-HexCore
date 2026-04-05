@@ -5,6 +5,283 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.7.4-nightly] - 2026-04-04 - "Remill Refinement + mali_kbase Siege"
+
+> **Remill IR Quality + Pipeline Reliability + Session Persistence + Analysis Hardening + ELF ET_REL Full Resolution + SysV Calling Convention** — LLVM IR quality improvements, autoBacktrack hardening, persistent session database, section-filtered strings, ftrace/CET preamble detection, ELF ET_REL external symbol resolution, and HQL session integration. Battle-tested against `mali_kbase.ko` (45MB, 7313 functions, Arm Mali GPU driver) — external kernel calls (`mutex_lock`, `dma_sync_sg_for_device`, `_dev_warn`, etc.) now appear in decompiled output with correct SysV calling convention.
+
+### Remill Wrapper — External Symbol Resolution (Phase 5.6) — NEW
+
+- **`setExternalSymbols(map)` NAPI Method** — New method accepts a `{ address: symbolName }` map from the TypeScript layer before lifting. The C++ Phase 5.6 injects `declare ptr @mutex_lock(...)` etc. directly into the LLVM Module, ensuring external dependencies survive optimization passes and DCE.
+- **Phase 5.6: Resolve External CALLI Targets** — After all optimization passes, walks the LLVM Module and: (1) matches `callTargets` from Phase 3 against the external symbol map, (2) scans all CALLI `CallInst` for constant i64 targets matching fake addresses, (3) declares ALL external symbols in the module as a safety net. Fixes the 2/7 functions where Phase 4.5 `calliTargets` pointer staleness caused zero declares.
+- **Target OS from Binary Format** — `liftToIR` now detects the binary format (ELF → `linux`, PE → `windows`) and passes the correct OS to Remill instead of using `process.platform`. Fixes `target triple = "x86_64-unknown-windows-msvc-coff"` for ELF files lifted on Windows hosts. The Remill lifter is recreated when the target OS changes.
+
+### Helix Decompiler — SysV Calling Convention — NEW
+
+- **`RecoverCallingConventionPass` ABI Auto-Detection** — The pass now reads `llvm.target_triple` from the MLIR module attribute. Triples containing `linux`, `elf`, `gnu`, `freebsd`, `openbsd`, or `darwin` select SysV ABI (RDI, RSI, RDX, RCX, R8, R9). Falls back to Win64 (RCX, RDX, R8, R9) for Windows triples or when no triple is present. Previously hardcoded to Win64.
+- **Header reflects ABI** — Decompiled output shows `/* sysv */` for Linux binaries, `/* win64 */` for Windows PE. Parameter numbering matches the correct ABI: `param_1` = RDI for SysV, `param_1` = RCX for Win64.
+
+### Helix Decompiler — P0 CallOp Pipeline Survival — NEW
+
+- **CallOp Dialect Conversion Fix** — `applyPartialConversion` in `HelixLowToMid` and `HelixMidToHigh` was skipping all operations inside `low::FuncOp` regions because `FuncOp` was marked as `addLegalOp`. The MLIR conversion framework treats legal ops as "done" and never recurses into their bodies. Added manual post-conversion walks in both passes that collect surviving `low::CallOp` / `mid::CallOp` and convert them in-place. Previously: zero calls survived the pipeline for `.ko` files. Now: all calls propagate through Low → Mid → High.
+- **Target Triple Preservation** — `mlir::translateLLVMIRToModule` does NOT carry over the LLVM `target triple` as an MLIR attribute. The pipeline now captures the triple from `llvm::Module::getTargetTriple()` before `std::move` and sets it as `llvm.target_triple` on the MLIR `ModuleOp`. This enables downstream passes (RecoverCallingConvention, collectCallArgs) to detect the correct ABI.
+- **P0 Debug Instrumentation** — `CallOpCountInstrumentation` (PassInstrumentation) added to `Pipeline.cpp`. Traces `low.call`, `mid.call`, `high.call` counts BEFORE and AFTER every pass in the pipeline. Output goes to stderr as `[P0-TRACE]` lines. Also logs per-phase CallOp counts in `EliminateDeadCode` and per-pattern conversion in `HelixLowToMid`.
+
+### Helix Decompiler — External Symbol Resolution via AddressOf — NEW
+
+- **`llvm.mlir.addressof` Symbol Extraction** — For ET_REL (.ko) files, the fresh Remill lifter emits external calls as `ptrtoint(@symbol_name)`, which becomes `llvm.ptrtoint(llvm.mlir.addressof @symbol)` in MLIR. The `convertSemantic::CALL` handler now looks through `PtrToIntOp → AddressOfOp` to extract the symbol name directly. Previously: all external calls appeared as `__indirect_call(...)`. Now: `_dev_warn(...)`, `dma_sync_sg_for_device(...)`, `mutex_lock(...)` appear with their real kernel API names.
+- **`resolveCallTargets` Phase 3** — Added a fallback phase in `SignatureDb.cpp` that walks remaining nameless `CallOp`s and resolves them via `AddressOfOp` when address-based lookup fails. This catches calls where the `__hxreloc__` addresses don't match (rebased vs real addresses) but the LLVM IR still references the symbol by name.
+
+### Disassembler — FIX-011 Hardening
+
+- **Signed Addend Parsing** — `r_addend` in ELF RELA entries is now read as signed int64 via `BigInt.asIntN(64, ...)`. Previously, `Number(readU64(...))` converted `-4` (0xFFFFFFFFFFFFFFFC) to `1.844e+19`, causing displacement overflow and zero relocations patched. Fixes all 97-section `.ko` files.
+- **Resolved Target Map** — The `symbolMap` now stores both the fake base address (0x7FFF0000+) AND the resolved target address (`fakeAddr + addend + 4`) that the Remill lifter actually computes. Ensures IR text replacement matches regardless of addend variations.
+- **Hybrid Post-Processing** — Two-strategy approach: Strategy A does regex replacement of `@sub_<fakeHex>` patterns in IR text. Strategy B uses `liftResult.callTargets[]` (populated by Remill Phase 3) to match fake addresses against the symbol map, adding declares even when no text patterns match.
+- **Kernel Infrastructure Filter** — 17 kernel trampoline symbols (`__fentry__`, `__x86_return_thunk`, `__cfi_check`, `__x86_indirect_thunk_{rax..r15}`) are excluded from relocation patching to avoid polluting the IR with NOPs.
+
+### Disassembler — Pipeline Capability Map
+
+- **6 New Pipeline Commands** — `hexcore.disasm.extractStrings`, `hexcore.disasm.getSessionDbPath`, `hexcore.disasm.renameFunction`, `hexcore.disasm.renameVariable`, `hexcore.disasm.retypeFunction`, `hexcore.disasm.retypeVariable`, `hexcore.disasm.setBookmark` added to `COMMAND_CAPABILITIES` and `COMMAND_OWNERS`. Session mutation commands use `validateOutput: false`.
+- **`getSessionDbPath` Headless Support** — Now accepts `output.path` and writes `{ "dbPath": "...", "error": "..." }` to file. Reports diagnostic error when session store is unavailable.
+
+### hexcore-better-sqlite3 — Prebuild Loader Fix
+
+- **Multi-Name Prebuild Resolution** — `index.js` now tries `hexcore-better-sqlite3.node` (prebuildify hyphen), `hexcore_better_sqlite3.node` (underscore), and `node.napi.node` (generic) before falling back to build paths. Fixes session store initialization failure where the prebuild file existed but the loader looked for the wrong filename.
+
+### hexcore-better-sqlite3 — Session Store Loader Fix
+
+- **`loadNativeModule` Pattern** — `sessionStore.ts` now uses `loadNativeModule` with candidate paths (same pattern as capstone/remill/helix wrappers) instead of bare `require('hexcore-better-sqlite3')`. Fixes module resolution in the VS Code extension host where `node_modules` symlinks don't exist.
+
+### Helix Worker Thread — Flag Propagation Fix
+
+- **`useCastLayer` + `skipOptimization` in Worker** — `decompileIrAsync` (used for IR > 64KB) now forwards engine flags to the worker thread. Previously, the worker created a fresh `HelixEngine` without applying `setUseCastLayer(true)` or `setSkipOptimization(true)`, causing PE files to work (small IR → sync path) but ELF to fail (large IR → async path, flags lost).
+
+### HQL Extension
+
+- **`engines` field** — Added `"engines": { "vscode": "^1.97.0" }` to `package.json` (fixes extension host load error).
+- **FlatBuffer adapter fixes** — `readStr()` handles `Uint8Array` return from newer `flatbuffers` versions. Schema vtable offset constants preserved for future use.
+
+### Remill Wrapper — IR Quality
+
+- **Selective SSE Semantic Inlining** — SSE/FP semantic functions (MINSS, MAXSS, MULSS, ADDSS, SUBSS, DIVSS, SQRTSS, COMISS, CVTPS2PD, XORPS, and 30+ more) are now **always inlined** regardless of the `inlineSemantics` flag. After inlining, LLVM optimization passes reduce them to native IR: `MINSS` → `fcmp olt` + `select`, `MULSS` → `fmul`, `SQRTSS` → `@llvm.sqrt.f32`. Non-SSE semantics stay as named calls for Helix pattern-matching.
+- **LLVM Intrinsic Lowering (Phase 5.4)** — `@llvm.ctpop` → `@__popcnt{N}`, `@llvm.ctlz` → `@__clz{N}`, `@llvm.cttz` → `@__ctz{N}`, `@llvm.bswap` → `@__bswap{N}`. Replaces opaque LLVM intrinsics with named external calls that the Helix decompiler can emit as readable library calls. Skips non-integer (vector) intrinsics.
+- **State Register Naming (Phase 5.3)** — GEPs on the State pointer (arg 0) are annotated with register names (`&RAX`, `&XMM0`). Loads from State are named after their register (`RAX`, `XMM0`). Implicit parameter detection: registers loaded before any store in the entry block are reported in `result.implicitParams[]`.
+- **Third Optimization Round (Phase 5.5)** — Added `InstCombine` → `SimplifyCFG` → `ADCE` after the existing two rounds. Catches dead branches and constant conditions left over from semantic inlining and intrinsic lowering.
+- **`inlineSemantics` Option** — New `LiftOptions.inlineSemantics` field (default: `false`). When `true`, ALL semantic helper functions are inlined (aggressive mode). When `false`, only SSE/FP semantics are inlined (selective mode). Exposed in the N-API `liftBytes` options and async worker.
+
+### Disassembler — autoBacktrack Fixes
+
+- **autoBacktrack for `functionAddress` Branch** — The `liftToIR` command had autoBacktrack only in the `options.file` code path. The `functionAddress` path (used by pipeline jobs) skipped backtracking entirely. Now both branches call `findFunctionStartForAddress` when `autoBacktrack` is enabled.
+- **`forceProbe` Parameter** — `findFunctionStartForAddress(address, forceProbe)` accepts a new `forceProbe` flag. When `true`, skips function table lookups (steps 1+2) and goes directly to Capstone fallback + byte scanner. Prevents false "already a function start" from `analyzeAll` misdetections.
+- **Improved Byte-Level Boundary Scanner** — Scan range increased from 16KB to 64KB. Now detects three boundary types: INT3 padding (`CC CC`), NOP padding (`90 90`), and `ret` + prologue (`C3` followed by optional padding then a prologue byte). Prologue recognition covers REX prefixes (`48`, `4C`, `40`, `41`, `44`, `45`), push variants (`50`–`57`), and other x64 function entry patterns.
+- **Backtrack Metadata** — `liftToIR` results now include `backtracked: boolean` and `originalAddress: number` when the start address was adjusted by autoBacktrack.
+
+### Helix Decompiler — C AST Layer (Phase 4)
+
+- **C AST Architecture** — New standalone C AST layer replaces monolithic PseudoCEmitter (5,200 LOC) with a clean 3-stage pipeline: `CAstBuilder` (3,125 LOC) → `CAstOptimizer` (2,400+ LOC) → `CAstPrinter` (486 LOC). Mutable tree semantics (not MLIR SSA) enabling proper tree-rewriting optimizations. Namespace `helix::cast`, 9 headers, 5 source files, ~6,000 LOC total.
+- **`--use-cast-layer` Feature Flag** — New CLI flag enables the C AST pipeline. Without the flag, PseudoCEmitter (default) is used. Wired through: `helix_tool.cpp` → C API (`helix_engine_set_use_cast_layer`) → `Engine` → `Pipeline::emitPseudoC()`.
+- **Node Hierarchy** — 31 AST node types: 12 expressions (`CIntLitExpr`, `CVarRefExpr`, `CBinaryExpr`, `CUnaryExpr`, `CCastExpr`, `CCallExpr`, `CTernaryExpr`, `CSubscriptExpr`, `CFieldAccessExpr`, `CFloatLitExpr`, `CStringLitExpr`, `CAddrLitExpr`), 15 statements, 4 declarations. LLVM-style RTTI via `NodeKind` enum + `classof()`. CRTP visitor template (`CAstVisitor<Derived>`).
+- **CAstBuilder — 4-Tier Op Coverage** — Handles all HelixHigh ops (29), HelixMid ops (11), HelixLow ops (26 expression + 15 statement), LLVM dialect ops (47 including FP: `fadd`, `fsub`, `fmul`, `fdiv`, `fcmp`, `fpext`, `sitofp`, vector: `extractelement`, `shufflevector`, `insertelement`), and arith dialect ops (19). Fallback: unrecognized ops → diagnostic comment.
+- **CAstBuilder — Remill Intrinsic Resolution** — `__remill_read_memory_f32(state, addr)` → `*(float*)addr`, `__remill_write_memory_*` → pass-through state, `__remill_flag_computation_*` / `__remill_undefined_*` → `0` (infrastructure). LLVM calls as statements now emit with correct arguments (fixes `__popcnt8()` missing args).
+- **CAstBuilder — Win64 ABI** — Parameter inference (RCX→param_1, RDX→param_2, R8→param_3, R9→param_4, XMM0-3→float params), `param_1→this` heuristic (struct base ≥3 uses), stack offset mapping, copy propagation with 5-hop transitive resolution and cycle detection.
+- **14-Pass AST Optimizer** — Tree-rewriting passes in fixed order:
+  1. `removePrologueEpilogue` — Strip `rbp=rsp`, `rsp=rsp±N`, callee-saved register saves
+  2. `eliminateInfrastructure` — Remove `_promoted_*`, `_spill_*`, `__*flag*`, RSP bookkeeping
+  3. `eliminateNullPtrStores` — Remove `*(type)(void*)0 = ...` (unresolved State GEPs)
+  4. `eliminateDeadStores` — Backward liveness analysis with call/deref/field safety guards
+  5. `propagateCopies` — Single-use synthetic temporary inlining with `cloneExpr()` deep-copy
+  6. `canonicalizeXorPatterns` — `x ^ -1` → `!x` (boolean) / `~x` (bitwise), Remill flag idioms
+  7. `recoverStructFieldAccess` — `*(ptr + N)` → `ptr->field_0xN`
+  8. `simplifyExpressions` — 12+ algebraic rules: `*&x→x`, `!!x→x`, `x+0→x`, `x*-1→-x`, `!(==)→!=`, shift-combine, constant folding
+  9. `synthesizeCompoundAssign` — Structural equality matching for `*x = *x + 1 → (*x)++`, `ptr->f = ptr->f OP y → ptr->f OP= y`
+  10. `eliminateConstantBranches` — `if(0){A}else{B}` → B, `if(1){A}else{B}` → A
+  11. `removeEmptyIfStatements` — Dead NaN guards from MINSS/MAXSS lowering
+  12. `cleanupFloatZeros` — `(int64_t)(void*)0` → `0.0f` in float context, `block_argN` → `0.0f`
+  13. `collapseMinMaxPatterns` — `if(a < b){x=a}` → `x = min(a, b)`, `if(a > b){x=a}` → `x = max(a, b)`
+  14. `removeDeadCodeAfterReturn` — Strip unreachable statements after return/break/continue/goto
+- **CAstPrinter** — Visitor-based C code emitter with C operator precedence (13 levels), smart parenthesization, hex literals for |value| > 256, 4-space indentation, struct declaration support.
+
+### Helix Decompiler — State Struct GEP Resolution
+
+- **XMM Register Recognition** — `RemillToHelixLow` RegisterTracker Strategy 3 extended to recognize State struct paths: `gep %state, 0, 0, 1, N` → XMM registers (XMM0-XMM15, 128-bit), `gep %state, 0, 0, 2, N` → ArithFlags (CF, PF, AF, ZF, SF, DF, OF, 8-bit). Existing GPR path (`gep %state, 0, 0, 6, N`) unchanged.
+- **Chained GEP Resolution** — Second scan pass resolves multi-level GEP chains: `gep __VEC_BASE, N` → XMM{N}, `gep __FLAGS_BASE, N` → flag name. Sub-GEPs within known XMM registers inherit the register name.
+- **Float Type Propagation** — XMM/YMM variable declarations typed as `float` instead of `int64_t`. RegReadOp/RegWriteOp for XMM registers produce/consume `float` type. Eliminates `int64_t xmm0` → `float xmm0`.
+- **FP Flag Warning Suppression** — Flag synthesis warnings for floating-point condition codes (`b`, `nb`, `be`, `nbe`, `p`, `np`) silenced. These failures are expected from SSE UCOMISS/COMISS lowering.
+- **Liveness Resilience for ELF ET_REL (FIX-013)** — `Liveness.cpp` no longer asserts on escaped SSA uses from unresolved ELF relocations. When a use leaves its parent region (common in `.ko` kernel modules where calls point to relocation stubs at address 0), the use is marked as external and the decompiler continues with reduced confidence instead of crashing. Affected functions emit `// Issues: Unresolved relocations detected (ELF ET_REL)` in the output header.
+
+### Disassembler — ELF Relocation Processing & autoBacktrack
+
+- **ELF `.rela.text` Processing (FIX-011)** — For ELF ET_REL files (kernel modules `.ko`, relocatable objects `.o`), the disassembler now parses `.rela.text` / `.rel.text` relocation entries and resolves external symbol names via `.symtab` + `.strtab`. Supported relocation types: `R_X86_64_PLT32`, `R_X86_64_PC32`, `R_X86_64_GOTPCREL`. The `liftToIR` command pre-patches the byte buffer with fake addresses for each external symbol, lifts normally, then post-processes the IR to replace fake addresses with named declarations (`declare ptr @mutex_lock(...)`). Eliminates `call sub_0` for all external calls in kernel modules. Tested target: `mali_kbase.ko` (7313 functions, Arm Mali GPU driver).
+- **autoBacktrack `forceProbe` Mode** — `findFunctionStartForAddress(addr, forceProbe=true)` skips function table lookups and goes directly to Capstone + byte-level prologue scanning. The `liftToIR` command uses `forceProbe` by default when `autoBacktrack` is enabled, preventing false "already a function start" results from `analyzeAll` misdetections.
+- **Improved Boundary Scanner** — Scan range increased from 16KB to 64KB. Now detects three boundary types: INT3 padding (`CC CC`), NOP padding (`90 90`), and `ret` + prologue (`C3` followed by optional padding then a prologue byte). Covers REX prefixes, push variants, and other x64 function entry patterns.
+- **autoBacktrack for `functionAddress` Branch** — The `liftToIR` pipeline path that uses `functionAddress` now correctly applies autoBacktrack. Previously only the `file` + `address` code path had backtracking.
+- **Backtrack Metadata** — `liftToIR` results include `backtracked: boolean` and `originalAddress: number` when the start address was adjusted.
+
+### Session Persistence (FIX-008 + FIX-009) — NEW
+
+- **`.hexcore_session.db`** — New SQLite-backed persistent session store (via `hexcore-better-sqlite3`, WAL mode). Auto-created next to the binary on first load. Keyed by SHA-256 of the binary — reopening the same binary restores all session data instantly.
+- **7-Table Schema** — `session_meta` (binary hash, version), `functions` (renames, return types, calling conventions), `variables` (per-function renames/retypes), `fields` (struct field names/types), `comments`, `bookmarks`, `analyze_cache` (persists `analyzeAll` function table across sessions).
+- **Analyze Cache** — `analyzeAll()` saves discovered functions to the session DB. Next run restores from cache before scanning, making re-analysis near-instant for previously analyzed binaries.
+- **Legacy Migration** — On first load, imports existing `.hexcore-annotations.json` comments into the session DB automatically.
+- **New Commands** — `hexcore.disasm.renameVariable`, `hexcore.disasm.retypeVariable`, `hexcore.disasm.retypeFunction`, `hexcore.disasm.setBookmark`, `hexcore.disasm.getSessionDbPath`. All support both interactive (UI input box) and headless (pipeline JSON args) modes.
+
+### HQL Session Integration — NEW
+
+- **`SessionDbReader`** — New read-only SQLite accessor in `hexcore-hql/src/adapter/sessionDb.ts`. Opens the disassembler's session DB in WAL read-only mode for concurrent access.
+- **`hydrateHAST(buffer, session?)`** — HAST FlatBuffer hydrator now accepts an optional `SessionDbReader`. When provided, analyst-defined function names, return types, and variable renames/retypes are applied to the `CFunctionDecl` nodes before the HQL matcher runs.
+
+### Disassembler — autoBacktrack Hardening (FIX-001)
+
+- **Function Table Containment (Always Active)** — `findFunctionStartForAddress` now checks if the target address falls within a known function's range even when `forceProbe=true`. Previously, `forceProbe` skipped the function table entirely.
+- **Capstone Backward Disassembly** — New step 4 in the backtrack pipeline: tries disassembling from `addr-1` through `addr-16`, checking which instruction sequence lands exactly on the target address. Requires ≥3 consecutive valid instructions. Works for dense code (D lang, optimized) without CC/90 padding.
+- **Extended Prologue Recognition** — Byte scanner now recognizes: `mov [rsp+8], rcx` (fastcall save), `mov [rsp+10h], rdx` (2nd arg save), `endbr64` (F3 0F 1E FA).
+
+### Disassembler — Section-Filtered String Extraction (FIX-003)
+
+- **`findStrings(sections?, minLength?)`** — String extraction now accepts optional PE section names (e.g. `[".rdata", ".data"]`) and minimum length. When specified, only those byte ranges are scanned. Eliminates 99% noise from `.text` on large binaries.
+- **New `hexcore.disasm.extractStrings` Command** — Headless pipeline command: `{ "args": { "sections": [".rdata"], "minLength": 5, "maxStrings": 10000 } }`.
+
+### Disassembler — ftrace Preamble Skip (FIX-015)
+
+- **NOP Sled Detection** — `scanForFunctionPrologs` recognizes multi-byte NOP sequences (0F 1F, 66 0F 1F) as ftrace `__pfx_` preambles. When a sled ≥8 bytes is found followed by `endbr64` or `push rbp`, the function is registered at the real prologue.
+- **CET-Enabled Binary Support** — `endbr64` + `push rbp`/`sub rsp` recognized as valid function prologue. Covers `-fcf-protection=full`.
+
+### Disassembler — ELF ET_REL Detection (FIX-014)
+
+- **ET_REL Warning** — Loading an ELF relocatable (e_type=1, `.ko`, `.o`) emits a warning. `FileInfo.isRelocatable` flag + `elfWarning` in headless results.
+
+### Disassembler — Instruction Alignment Verification (IMP-001)
+
+- **`verifyInstructionAlignment(targetAddress)`** — Disassembles backwards from a known good region to verify the target is on an instruction boundary. Returns `{ aligned: false, suggestedAddress }` when mid-instruction. Integrated into `disassembleAtHeadless`.
+
+### Disassembler — XRef Performance
+
+- **XRef Storage: O(N) → O(1) Lookup** — Cross-references changed from `XRef[]` + `.filter()` to `Map<number, XRef[]>` + `.get()`. `findCrossReferences(address)` is now O(1).
+
+### Disassembler — Deep PE Analysis with Windows API Signatures (P1) — NEW
+
+- **Windows API Signature Database (`peApiDatabase.ts`)** — 180+ Windows API type signatures covering kernel32, ntdll, advapi32, ws2_32, wininet, winhttp, user32, shell32, crypt32, bcrypt, ole32, urlmon, gdi32. Each entry includes: full C prototype (return type, parameter names and types), **API category** (file_io, memory, process, thread, injection, network, crypto, registry, hook, etc.), and **security tags** (shellcode, keylogger, ransomware, c2, anti_debug, persistence, dropper, exfiltration, etc.). Automatic A/W/Ex suffix stripping for O(1) lookup.
+- **Enhanced PE Data Directory Parsing** — New parsing for 5 additional PE data directories:
+  - **TLS Directory** — Parses TLS callback array (common anti-debug technique). Reports callback count and addresses. Emits warning when callbacks are detected.
+  - **Debug Directory** — Parses CodeView (RSDS) entries to extract PDB path and GUID. Supports multiple debug entries per binary.
+  - **Delay Import Directory** — Walks delay-load DLL descriptors, resolves function names from INT table. Full name/hint/address resolution.
+  - **CLR Runtime Header** — Detects .NET assemblies, extracts runtime version, metadata size, entry point token, native/32-bit flags.
+  - **Resource/Security/Reloc/LoadConfig** — Size reporting for remaining data directories.
+- **`hexcore.disasm.analyzePEHeadless` Command** — Comprehensive headless PE analysis returning: typed imports with full C prototypes, category-based security summary, security indicators (hasInjectionAPIs, hasAntiDebug, hasKeylogger, hasDynamicLoading, hasPersistence, isDotNet, hasTLSCallbacks, isSigned), data directories (TLS, Debug, Delay Import, CLR), sections, and exports. Pipeline-compatible with `$step[N]` referencing.
+- **Import Category Summary** — Groups all imported APIs by functional category with aggregated security tags. Provides instant behavioral profiling: "this binary uses 12 injection APIs, 8 network APIs, and 5 crypto APIs".
+- **Import Tree — API Signature Tooltips** — Hovering any import function in the sidebar now shows the full C prototype, API category, and security tags. Icons are color-coded: **red** = injection/keylogger/shellcode, **orange** = network/crypto, **yellow** = anti-debug/evasion, **blue** = normal.
+- **Pipeline Integration** — `hexcore.disasm.analyzePEHeadless` registered in COMMAND_CAPABILITIES and COMMAND_OWNERS for automation pipeline use.
+
+### Base64 Decoder — Confidence Scoring Engine (P2) — NEW
+
+- **Shannon Entropy Analysis** — Calculates per-string entropy in bits/byte. Real base64 data has entropy ~5.5-6.0; false positives (API names, alphabet strings) have lower entropy (~3.0-4.0). Entropy is reported in results and used as a scoring factor.
+- **8-Factor Confidence Scoring** — Each Base64 candidate receives a 0-100 confidence score based on:
+  1. **String length** — Longer strings score higher (+15 for ≥100 chars, -10 for <24)
+  2. **Shannon entropy** — High entropy = more likely real (+15 for ≥5.5 bits/byte)
+  3. **Padding validation** — Correct `=` padding present (+8)
+  4. **Character distribution** — Chi-squared uniformity analysis across Base64 alphabet
+  5. **Decoded content quality** — Printable ASCII ratio (+12 for >90%)
+  6. **Decoded patterns** — JSON/XML/URL/path detection in decoded output (+5)
+  7. **Null byte penalty** — High null ratio penalized (-8 for >30%)
+  8. **Context filter** — Windows API names, alphabet sequences, code identifiers (-25)
+- **Context-Aware False Positive Filters** — Eliminates common false positives:
+  - CamelCase Windows API names (`CreateFileA`, `VirtualAllocEx`, `InitializeCriticalSectionEx`)
+  - NT native API patterns (`NtQueryInformationProcess`, `RtlDecompressBuffer`)
+  - Pure alphabet sequences (`abcdefghijklmnopqrstuvwxyz`)
+  - C++ namespaces, snake_case identifiers, dotted names
+  - URLs, pure hex strings, GUIDs
+  - Low character diversity (repeated patterns like `AAAAAAAA`)
+  - All-alphabetic strings with no digits or `+/` characters
+- **Confidence Categories** — `high_confidence` (≥75), `medium_confidence` (≥50), `possible` (≥30). Matches below 30 are filtered out entirely.
+- **Enhanced Headless API** — New `minConfidence` parameter (default 30) and `category` filter. Returns breakdown by category, average confidence score, and per-match scoring reasons.
+- **Report Overhaul** — Interactive report now shows matches grouped by confidence category with entropy, confidence score, and expandable scoring breakdown per match.
+
+### Disassembler — Deep ELF Section Analyzer (P4) — NEW
+
+- **ELF Program Headers** — All program headers parsed with type names (PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_GNU_STACK, PT_GNU_RELRO, PT_TLS, etc.), permissions, virtual/physical addresses, file/memory sizes, and alignment. PT_INTERP extracts the interpreter path (e.g., `/lib64/ld-linux-x86-64.so.2`).
+- **Full Symbol Table** — ALL symbols from `.symtab` and `.dynsym` with complete metadata: name, value, size, **binding** (LOCAL/GLOBAL/WEAK), **type** (NOTYPE/OBJECT/FUNC/SECTION/FILE/TLS/GNU_IFUNC), **visibility** (DEFAULT/HIDDEN/PROTECTED/INTERNAL), section name, and import/export classification. Up to 16,384 symbols per table.
+- **Relocations (Human-Readable)** — ALL relocation entries from every `.rela.*`/`.rel.*` section with type names (R_X86_64_PC32, R_X86_64_PLT32, R_X86_64_GOTPCREL, R_AARCH64_CALL26, etc.), resolved symbol names, addends, and source section. Supports x86_64 (12 types), AArch64 (6 types) relocation naming. Up to 65,536 entries per section.
+- **Dynamic Entries** — ALL entries from `.dynamic` section with tag names (DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH, DT_INIT, DT_FINI, DT_GNU_HASH, DT_FLAGS_1, etc.). String values resolved for DT_NEEDED (library names), DT_SONAME, DT_RPATH, DT_RUNPATH.
+- **Kernel Module Info (.ko)** — For ET_REL files, parses `.modinfo` section extracting: module name, version, description, author, license, srcversion, vermagic, depends (comma-separated dependencies), intree flag, retpoline flag, and parameter descriptions.
+- **`hexcore.disasm.analyzeELFHeadless` Command** — Comprehensive headless ELF analysis returning: file info, sections, program headers, symbol statistics (total/functions/objects/imports/exports/local/global/weak), full symbol table, relocations grouped by section, dynamic entries, needed libraries, module info (for .ko), interpreter path, and SONAME. Pipeline-compatible.
+- **Symbol Statistics** — Automatic categorization: counts functions, objects, imports, exports, local/global/weak bindings. Instant profile of binary composition.
+
+### Helix Decompiler — Variable Rename Propagation in Body (P3) — NEW
+
+- **C AST Variable Rename Walk (VSCode Side)** — Session DB variable renames (`renameVariable`) are now passed to the Helix engine via `setVariableRename(oldName, newName)` BEFORE decompilation. The engine walks all `CVarRefExpr` nodes in the C AST and substitutes names surgically, eliminating the fragile string-based replacement. This prevents false matches on substrings, struct field names, and comments.
+- **`collectSessionVariableRenames()` Helper** — Reads all variable renames from the session DB for the target function (with ±16 byte address tolerance for patchable entries). Returns `{oldName, newName}[]` pairs passed to `HelixWrapper.decompileIr()`.
+- **HelixWrapper P3 Integration** — New `setVariableRename(old, new)`, `clearVariableRenames()` on `HelixEngineInstance`. `supportsVariableRenames()` feature detection. Renames forwarded to worker thread via `workerData` for async decompilation. Renames cleared after each decompile call.
+- **Graceful Fallback** — When the native module doesn't support `setVariableRename` (older `.node` build), `applySessionRenames` falls back to the existing string-based regex replacement. Zero behavior change for users who haven't rebuilt Helix.
+- **Belt-and-Suspenders Fix** — String-based regex rename in `applySessionRenames` now ALWAYS runs regardless of engine support. If the C++ AST walk already renamed the variable, the regex finds nothing and is a no-op. If the AST walk missed it (C AST layer off, name mismatch), the regex catches it. Prevents rename regression.
+- **Requires Helix C++ Side**: `Engine.h/cpp` (rename map + setter), `CApi.cpp` (C API export `helix_engine_set_variable_rename`), `ffi.rs` (NAPI-RS FFI), `CAstOptimizer.cpp` (new rename walk pass after optimizer, before printer).
+
+### Disassembler — Backtrack Validation with Capstone Linear Sweep (FIX-022c)
+
+- **Linear Sweep Validation** — After `findFunctionStartForAddress` returns a backtrack candidate, `validateBacktrackCandidate()` decodes instructions linearly from the candidate to the original address using Capstone. If the sweep encounters a `RET`, `INT3` padding (CC CC), unconditional `JMP` to outside the range, or a decode failure before reaching the original address, the candidate belongs to a **different function** and the backtrack is rejected. Replaces the fixed distance limit (256/4096 bytes) with a semantically correct validation.
+- **Impact**: Fixes the UpdatePosition-full regression on ROTTR (108-byte backtrack crossed a `ret` boundary into an adjacent function). All 7 previously regressed functions are now either restored or improved. Zero regressions across PE64 (ROTTR) and ET_REL (mali_kbase.ko) test binaries.
+- **Cost**: ~30-50 Capstone decode calls per backtrack validation (submillisecond). Only runs when autoBacktrack is enabled and the candidate differs from the original address.
+
+### Disassembler — autoBacktrack Regression Fix for PE (FIX-022)
+
+- **forceProbe Conditional on File Type** — `findFunctionStartForAddress` was called with `forceProbe=true` in both `liftToIR` code paths, which skips the function table and always does byte-level prologue scanning. For PE64 binaries (ROTTR), this caused the scanner to backtrack too far (108-1755 bytes) into **adjacent functions**, collapsing 19-23 basic blocks down to 1. Now uses `forceProbe=false` for PE files (consults function table first), and `forceProbe=true` only for ET_REL (.ko) where the function table may have misdetected entries. Fixes NpcDamage (50→7→restored), UpdatePosition (42→10→restored), BoneTransform (22→10→restored) regressions on ROTTR.
+
+### Remill Wrapper — Kernel Module Lifting Improvements (FIX-019/020/021)
+
+- **Return Thunk Recognition (FIX-019)** — Phase 1 (pre-decode) and Phase 3 (CFG wiring) now recognize `__x86_return_thunk`, `__x86_indirect_thunk_*`, and `__x86_return_thunk_safe` as function returns instead of jumps. In Spectre-mitigated kernels, `ret` is replaced by `jmp __x86_return_thunk` (retpoline). Without this fix, the lifter treats the thunk jump as an unconditional branch to an external target, leaving the block without a proper return terminator and causing the scanner to continue past the function boundary. Now emits `ret` in the LLVM IR for these blocks, preventing code bleed into adjacent functions. Affects all kernel modules compiled with `-mretpoline`.
+- **Branch Target Resolution via Relocation Map (FIX-020)** — Phase 1 leader discovery now consults the `externalSymbols_` map when evaluating jump targets. In ET_REL files, branch targets that resolve to known kernel symbols (e.g., `__x86_return_thunk`) are handled at the symbol level rather than the address level, preventing false leader insertion for external trampolines.
+- **Internal Call Target Tracking (FIX-021)** — `callTargets` in `LiftResult` now includes BOTH external AND internal call targets (previously only external). The TypeScript `liftToIR` command separates them: internal targets (within `.text` range, not in symbolMap) are reported as `internalCallTargets[]` in the result for downstream recursive lifting. Example: `kbase_jit_allocate` calling `find_reasonable_region` (internal helper at 0x142a0) — now visible in the result for future multi-function lifting.
+- **Requires Remill .node rebuild** — FIX-019 and FIX-020 are C++ changes in `remill_wrapper.cpp`. The TypeScript FIX-021 is active immediately. Full effect requires rebuilding the hexcore-remill native module.
+
+### Disassembler — ET_REL Section Disambiguation (FIX-018)
+
+- **Code Section Priority in addressToOffset** — For ET_REL (relocatable) ELF files, multiple sections have `virtualAddress=0` (e.g., `__bug_table`, `.text`, `.rodata`, `.data`, `.debug_info` — all start at VA 0). The `addressToOffset()` function used a first-match strategy, so `__bug_table` (which comes before `.text` in the section list) would intercept addresses meant for `.text`. This caused `getBytes(0x3A20)` to return bug table data instead of function code, producing garbage semantics (ADD/OR byte ops on AL/CL registers). Now uses two-pass matching: Pass 1 prioritizes `isCode || isExecutable` sections, Pass 2 falls back to any matching section for data addresses.
+- **Impact**: ALL 7 mali_kbase functions were affected. `kbase_jit_allocate` returned 67 garbage semantics; with the fix, it should return 400+ real instructions with branches, calls, and control flow.
+
+### Disassembler — CET/ftrace Preamble Skip (FIX-017)
+
+- **endbr64 + __fentry__ Skip** — Linux kernel modules compiled with `-fcf-protection` and `-pg` start every function with `endbr64` (F3 0F 1E FA) + `call __fentry__` (E8 00 00 00 00) — a 9-byte preamble that Remill's amd64 semantics module cannot decode. Without skipping, the lifter falls into byte-by-byte decoding, producing ADD/OR byte operations instead of real instructions. The `liftToIR` command now detects and skips this preamble, advancing `startAddress` by 9 bytes to the real `push rbp; mov rbp, rsp` prologue.
+- **Supported Patterns**: `endbr64` (F3 0F 1E FA), `endbr32` (F3 0F 1E FB), `call +0` ftrace NOP (E8 00 00 00 00), multi-byte NOP sled (66 0F 1F ...).
+- **Impact**: `kbase_jit_allocate` goes from 67 garbage semantics (ADD/OR byte ops) to real x86-64 instructions with branches, calls, and control flow.
+
+### Disassembler — Buffer Size Fallback Fix (FIX-016)
+
+- **Smart Function Sizing** — `liftToIR` fallback buffer size changed from **256 bytes** to intelligent sizing. Priority chain: (1) explicit `options.size`, (2) `options.count * 15` clamped to symbol table size, (3) `getRecommendedLiftSize()` from ELF/PE symbol table, (4) 4096-byte fallback. Fixes functions like `kbase_jit_allocate` (2121 bytes) being truncated to 74 semantics — now lifts the full function with 400+ semantics, 20+ basic blocks, and 40+ external calls.
+- **`getSymbolSizeAt(address)`** — New engine method that resolves function size from: (1) function table (`analyzeAll`), (2) ELF `.symtab`/`.dynsym` `st_size` field (from P4 enhanced parsing), (3) gap to next function in sorted address list. Returns 0 if unknown.
+- **`getRecommendedLiftSize(address, fallback)`** — Returns `symbolSize + 16` (padding for alignment/epilogue) if symbol size is known, otherwise the fallback value.
+- **Count+Symbol Max** — When `count` is provided, `size = max(count*15, symbolTableSize)`. Ensures the buffer is at least as large as the real function even when count underestimates. Example: `count=300` gives `4500` bytes, but if the symbol table says the function is `5000` bytes, `5000` is used.
+- **All 4 code paths fixed** — Both `liftToIR` (Remill) and `rellic.decompile` (Rellic) commands, both `address` and `functionAddress` branches.
+
+### Disassembler — Duplicate Declare Fix (FIX-011b)
+
+- **Deduplicate External Symbol Declarations** — The `liftToIR` FIX-011 post-processor emitted `declare ptr @vunmap(...)` both inline (Strategy A text replacement) and in the external symbols block (Strategy B annotation), causing `error: invalid redefinition of function` in the LLVM parser. Now scans the IR for existing `declare` statements before injecting the annotation block, filtering out already-declared symbols. Affected: `mali_kbase.ko` with `count >= 1000` (symbols `vunmap`, `kbase_is_page_migration_enabled`, `_raw_spin_unlock`, `_raw_spin_lock`, etc.).
+- **Empty Block Guard** — When all external symbols are already declared inline, the annotation block (`; --- External symbols ---`) is not injected at all, keeping the IR clean.
+
+### Pipeline & Integration Fixes
+
+- **Full Static Pipeline Upgraded** — Default `full-static` pipeline profile now uses `hexcore.disasm.analyzePEHeadless` (v3.7.5 deep analysis with typed imports, API signatures, security indicators) instead of legacy `hexcore.peanalyzer.analyze`. Import table is always present in pipeline output.
+- **PE Analyzer Fallback** — When the standalone `hexcore-peanalyzer` extension returns empty imports (RVA resolution failure for some binaries), it now falls back to `hexcore.disasm.analyzePEHeadless` to fill the import table via the disassembler engine's IAT/ILT walker.
+- **Documentation Updated** — `HEXCORE_AUTOMATION.md` and `HEXCORE_JOB_TEMPLATES.md` updated with new command names, descriptions, and aliases (`hexcore.pe.deep`, `hexcore.elf.deep`).
+
+### Engine Versions
+
+| Engine | Version | Changes |
+|--------|---------|---------|
+| hexcore-remill | 0.2.0 | +SSE selective inlining, intrinsic lowering, register naming, 3rd opt round |
+| hexcore-capstone | 1.3.4 | (unchanged) |
+| hexcore-unicorn | 1.2.3 | (unchanged) |
+| hexcore-helix | 0.8.0-nightly | +C AST layer, 14-pass optimizer, State GEP resolution, XMM float typing |
+| hexcore-llvm-mc | 1.0.1 | (unchanged) |
+| hexcore-better-sqlite3 | 2.0.0 | (unchanged) |
+| hexcore-disassembler | 1.4.0 | +PE API sigs, ELF deep analysis, analyzePE/ELFHeadless, P3 rename wiring |
+| hexcore-base64 | 2.0.0 | +Confidence scoring engine, context filters, entropy analysis |
+
+### Known Issues
+
+- **Residual `(int64_t)(void*)0` in Non-Float Context** — Some State GEPs that don't resolve to named registers still appear as null pointer dereferences. The `eliminateNullPtrStores` pass removes most of these, but values used as expression operands (not assignment targets) may survive. Full fix requires deeper State struct analysis in RemillToHelixLow.
+- **`block_argN` Variables** — MLIR block arguments from `select`/phi nodes appear as unresolved `block_arg0` in some control flow paths. The `cleanupFloatZeros` pass replaces these with `0.0f` in float context, but non-float contexts still show the raw name.
+- **Type Propagation Incomplete** — All non-XMM variables still typed as `int64_t`. Struct pointer types (`Entity*`), field types (`float` for health values), and return types require deeper type inference passes planned for v1.0.
+
+---
+
 ## [3.7.3] - 2026-03-26 - "Field-Tested Fortification"
 
 > **29-Item Engineering Overhaul** — Consolidated all findings from the ROTTR.exe reverse engineering session (PE64, ~1.4GB), code reviews of hexcore-capstone and hexcore-unicorn, POWER.md compliance audit, and community feedback (Issue #18). This release resolves the only known P0 crash, hardens every native engine, introduces function boundary detection, and adds four new headless commands for the automation pipeline.

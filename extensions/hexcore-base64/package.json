@@ -2,7 +2,7 @@
 	"name": "hexcore-base64",
 	"displayName": "HexCore Base64 Decoder",
 	"description": "Detect and decode Base64 encoded strings in binary files",
-	"version": "1.0.0",
+	"version": "2.0.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

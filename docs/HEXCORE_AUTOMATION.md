@@ -1,4 +1,4 @@
-# HexCore Automation — v3.7.3
+# HexCore Automation — v3.7.4
 
 HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
 
@@ -30,7 +30,8 @@ HexCore supports running analysis pipelines from a workspace job file named `.he
     { "cmd": "hexcore.entropy.analyze" },
     { "cmd": "hexcore.strings.extract", "args": { "minLength": 5 } },
     { "cmd": "hexcore.strings.extractAdvanced" },
-    { "cmd": "hexcore.peanalyzer.analyze" },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "continueOnError": true },
+    { "cmd": "hexcore.disasm.analyzeELFHeadless", "continueOnError": true },
     { "cmd": "hexcore.disasm.analyzeAll" },
     { "cmd": "hexcore.yara.scan" },
     { "cmd": "hexcore.ioc.extract" }
@@ -210,9 +211,11 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.entropy.analyze` | 90s | Shannon entropy analysis, packing detection | All |
 | `hexcore.strings.extract` | 120s | ASCII/Unicode string extraction with categorization | All |
 | `hexcore.strings.extractAdvanced` | 180s | XOR deobfuscation (1-byte + multi-byte keys, rolling, increment) + stack string detection | All |
-| `hexcore.peanalyzer.analyze` | 120s | PE header, imports, exports, sections, anomalies | PE only |
-| `hexcore.elfanalyzer.analyze` | 120s | ELF header, sections, segments, symbols, security mitigations (RELRO, NX, PIE, Canary) | ELF only |
-| `hexcore.base64.decodeHeadless` | 90s | Detect and decode Base64 strings in binary files | All |
+| `hexcore.peanalyzer.analyze` | 120s | PE header, sections, entropy, packer detection, security mitigations (legacy) | PE only |
+| `hexcore.disasm.analyzePEHeadless` | 120s | **Deep PE analysis**: typed imports (180+ API signatures), exports, sections, TLS/Debug/CLR/DelayImport, security indicators, category summary | PE only |
+| `hexcore.elfanalyzer.analyze` | 120s | ELF header, sections, segments, symbols, security mitigations (RELRO, NX, PIE, Canary) (legacy) | ELF only |
+| `hexcore.disasm.analyzeELFHeadless` | 120s | **Deep ELF analysis**: program headers, full symtab/dynsym, all relocations, dynamic entries, .ko modinfo, symbol stats | ELF only |
+| `hexcore.base64.decodeHeadless` | 90s | Detect and decode Base64 strings with **confidence scoring** (entropy, context filters, categories) | All |
 | `hexcore.yara.scan` | 180s | YARA rule scanning with threat scoring | All |
 | `hexcore.yara.updateRules` | 60s | Reload YARA rule files | N/A |
 | `hexcore.ioc.extract` | 120s | IOC extraction (IPs, URLs, hashes, emails, domains) | All |
@@ -234,6 +237,13 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.helix.decompileIR` | 180s | **Decompile pre-lifted .ll file to pseudo-C via Helix MLIR pipeline** — use `irPath` to specify the IR file | x86, x64 |
 | `hexcore.disasm.rttiScanHeadless` | 120s | Scan PE binary for MSVC RTTI Type Descriptors, returns class names and offsets **(v3.7.3)** | PE only |
 | `hexcore.disasm.searchBytesHeadless` | 120s | AOB scan with wildcard support — finds byte patterns across the entire binary **(v3.7.3)** | All |
+| `hexcore.disasm.extractStrings` | 180s | Section-filtered string extraction with PE/ELF section selection **(v3.7.4)** | All |
+| `hexcore.disasm.renameFunction` | 10s | Rename a function in the session DB — propagates to all call sites **(v3.7.4)** | All |
+| `hexcore.disasm.renameVariable` | 10s | Rename a variable within a function scope in the session DB **(v3.7.4)** | All |
+| `hexcore.disasm.retypeVariable` | 10s | Change variable type in the session DB — propagates to Helix output **(v3.7.4)** | All |
+| `hexcore.disasm.retypeFunction` | 10s | Change function return type in the session DB **(v3.7.4)** | All |
+| `hexcore.disasm.setBookmark` | 10s | Set a named bookmark at an address in the session DB **(v3.7.4)** | All |
+| `hexcore.disasm.getSessionDbPath` | 10s | Returns the path to the `.hexcore_session.db` for the current binary **(v3.7.4)** | All |
 
 ### Hex Viewer
 
@@ -329,7 +339,9 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.hash.file` | `hexcore.hashcalc.calculate` |
 | `hexcore.hash.calculate` | `hexcore.hashcalc.calculate` |
 | `hexcore.pe.analyze` | `hexcore.peanalyzer.analyze` |
+| `hexcore.pe.deep` | `hexcore.disasm.analyzePEHeadless` |
 | `hexcore.elf.analyze` | `hexcore.elfanalyzer.analyze` |
+| `hexcore.elf.deep` | `hexcore.disasm.analyzeELFHeadless` |
 | `hexcore.hex.dump` | `hexcore.hexview.dumpHeadless` |
 | `hexcore.hex.search` | `hexcore.hexview.searchHeadless` |
 | `hexcore.disasm.open` | `hexcore.disasm.openFile` |
@@ -346,6 +358,94 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.disasm.scanRtti` | `hexcore.disasm.rttiScanHeadless` |
 | `hexcore.disasm.searchBytes` | `hexcore.disasm.searchBytesHeadless` |
 | `hexcore.disasm.aobScan` | `hexcore.disasm.searchBytesHeadless` |
+| `hexcore.disasm.rename` | `hexcore.disasm.renameFunction` |
+| `hexcore.disasm.retype` | `hexcore.disasm.retypeVariable` |
+| `hexcore.disasm.bookmark` | `hexcore.disasm.setBookmark` |
+| `hexcore.disasm.sessionPath` | `hexcore.disasm.getSessionDbPath` |
+
+---
+
+## Session Persistence — v3.7.4
+
+### Overview
+
+HexCore now persists analyst annotations (renames, retypes, comments, bookmarks) across sessions via `.hexcore_session.db` (SQLite, WAL mode). The session is keyed by SHA-256 of the binary — reopening the same binary restores all data.
+
+### Session Commands
+
+| Command | Args | Description |
+|---------|------|-------------|
+| `renameFunction` | `{ "address": "0x...", "name": "ValidateFlag" }` | Rename function — propagates to all call sites |
+| `renameVariable` | `{ "funcAddress": "0x...", "originalName": "param_1", "newName": "healthPtr" }` | Rename variable within function scope |
+| `retypeVariable` | `{ "funcAddress": "0x...", "variableName": "healthPtr", "newType": "HealthComponent*" }` | Change variable type — feeds back into Helix |
+| `retypeFunction` | `{ "address": "0x...", "returnType": "int32_t" }` | Change function return type |
+| `setBookmark` | `{ "address": "0x...", "label": "damage calc entry" }` | Named bookmark at address |
+| `getSessionDbPath` | (none) | Returns `.hexcore_session.db` path |
+
+### Helix Integration
+
+When `helix.decompile` runs, it consults the session DB and applies renames/retypes as a post-processing overlay. The `sessionOverlay` arg can also be passed explicitly:
+
+```json
+{
+  "cmd": "hexcore.helix.decompile",
+  "args": {
+    "address": "0x14003EDD0",
+    "sessionOverlay": {
+      "functions": { "0x14003EDD0": { "name": "ValidateFlag" } },
+      "variables": {
+        "0x14003EDD0.param_1": { "name": "result", "type": "int32_t" }
+      }
+    }
+  }
+}
+```
+
+### HQL Integration
+
+The HQL matcher reads the session DB via `SessionDbReader` to apply analyst-defined names/types to the HAST before running pattern queries.
+
+### Schema
+
+```sql
+CREATE TABLE session_meta (binary_hash TEXT PRIMARY KEY, version INTEGER, created_at TEXT);
+CREATE TABLE functions (address TEXT PRIMARY KEY, name TEXT, return_type TEXT);
+CREATE TABLE variables (func_address TEXT, original_name TEXT, new_name TEXT, new_type TEXT);
+CREATE TABLE fields (struct_type TEXT, offset INTEGER, name TEXT, type TEXT);
+CREATE TABLE comments (address TEXT PRIMARY KEY, comment TEXT);
+CREATE TABLE bookmarks (address TEXT PRIMARY KEY, label TEXT);
+CREATE TABLE analyze_cache (address TEXT PRIMARY KEY, name TEXT, size INTEGER, instruction_count INTEGER);
+```
+
+---
+
+## ELF Relocatable Support — v3.7.4
+
+### ELF ET_REL Processing
+
+For ELF relocatable files (`.ko` kernel modules, `.o` object files), the disassembler processes `.rela.text` relocation entries before lifting. External symbols (kernel APIs) are resolved to named declarations in the IR.
+
+- **Supported relocations**: `R_X86_64_PLT32`, `R_X86_64_PC32`, `R_X86_64_GOTPCREL`
+- **Symbol resolution**: via `.symtab` + `.strtab`
+- **Effect**: `call sub_0` → `call mutex_lock` in Helix output
+
+### ftrace Preamble Detection
+
+Kernel binaries compiled with `-fpatchable-function-entry=16,16` have NOP padding before each function. HexCore detects this pattern and skips to the real prologue:
+
+```
+(90 | 0F 1F XX){8,32}  ← NOP sled (ftrace __pfx_)
+F3 0F 1E FA             ← endbr64 (CET)
+E8 XX XX XX XX          ← call __fentry__ (tracing)
+55                      ← push rbp (REAL FUNCTION START)
+```
+
+### ET_REL Warning
+
+When loading an ELF with `e_type == ET_REL`, a warning is emitted in pipeline output:
+```
+[WARN] Target is a relocatable ELF (ET_REL). External calls are unresolved relocations.
+```
 
 ---
 
@@ -361,7 +461,10 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
 - **Rellic Decompiler** **(DEPRECATED — removal in v3.8.0)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook for v3.8 preparation.
 - **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step). Pass `optimizeIR: false` to skip MLIR optimization passes when debugging pass pipeline issues.
-- **Auto-backtrack** (v3.7.3) — `disassembleAtHeadless` and `helix.decompile` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. Disable with `autoBacktrack: false`.
+- **Auto-backtrack** (v3.7.3+) — `disassembleAtHeadless`, `helix.decompile`, and `liftToIR` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. v3.7.4 adds `forceProbe` mode, Capstone backward disassembly, ftrace preamble skip, and `endbr64` recognition. Disable with `autoBacktrack: false`.
+- **Section-filtered strings** (v3.7.4) — `hexcore.disasm.extractStrings` accepts `sections: [".rdata", ".data"]` to scan only specific PE/ELF sections. Eliminates noise from `.text`.
+- **Session persistence** (v3.7.4) — `.hexcore_session.db` stores function renames, variable retypes, comments, bookmarks, and `analyzeAll` cache across sessions. Keyed by binary SHA-256.
+- **ELF ET_REL support** (v3.7.4) — Relocatable ELF files (`.ko`, `.o`) have `.rela.text` processed before lifting. External symbols resolved to named declarations. ftrace preambles auto-skipped.
 
 ---
 

@@ -143,6 +143,31 @@ async function analyze(
 			async () => runAnalysis()
 		);
 
+	// v3.7.5: If standalone import parsing returned empty, try the disassembler
+	// engine's analyzePEHeadless as a fallback (it has robust IAT/ILT walking).
+	if (analysis.isPE && analysis.imports.length === 0) {
+		try {
+			const deepResult: any = await vscode.commands.executeCommand(
+				'hexcore.disasm.analyzePEHeadless',
+				{ file: uri.fsPath, quiet: true }
+			);
+			if (deepResult?.imports?.libraries) {
+				for (const lib of deepResult.imports.libraries) {
+					analysis.imports.push({
+						dllName: lib.dll,
+						functions: (lib.functions || []).map((f: any) => ({
+							name: f.name,
+							ordinal: f.ordinal,
+							address: typeof f.address === 'string' ? parseInt(f.address, 16) : (f.address || 0)
+						}))
+					});
+				}
+			}
+		} catch {
+			// Disassembler not available or file not loadable — continue with empty imports
+		}
+	}
+
 	if (options.output) {
 		writeOutput(analysis, options.output);
 	}

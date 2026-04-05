@@ -7,6 +7,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
+import { SessionStore } from './sessionStore';
+import { lookupApi, formatApiSignature, formatApiSignatureCompact, ApiSignature, ApiCategory, CATEGORY_LABELS } from './peApiDatabase';
 
 // Types
 export interface Instruction {
@@ -84,6 +86,156 @@ export interface ExportFunction {
 	forwarderName?: string;
 }
 
+// v3.7.5: Enhanced ELF analysis data
+export interface ELFProgramHeader {
+	type: number;
+	typeName: string;
+	flags: number;
+	permissions: string;
+	offset: number;
+	vaddr: number;
+	paddr: number;
+	filesz: number;
+	memsz: number;
+	align: number;
+	/** For PT_INTERP: the interpreter path */
+	interpreter?: string;
+}
+
+export interface ELFSymbolEntry {
+	name: string;
+	value: number;
+	size: number;
+	binding: string;     // LOCAL, GLOBAL, WEAK
+	type: string;        // NOTYPE, OBJECT, FUNC, SECTION, FILE, TLS, GNU_IFUNC
+	visibility: string;  // DEFAULT, HIDDEN, PROTECTED, INTERNAL
+	sectionIndex: number;
+	sectionName: string;
+	isImport: boolean;
+	isExport: boolean;
+}
+
+export interface ELFRelocationEntry {
+	offset: number;
+	type: number;
+	typeName: string;
+	symbolName: string;
+	addend: number;
+	sectionName: string; // which section this relocation belongs to
+}
+
+export interface ELFDynamicEntry {
+	tag: number;
+	tagName: string;
+	value: number;
+	/** For DT_NEEDED, DT_SONAME, DT_RPATH: the string value */
+	stringValue?: string;
+}
+
+export interface ELFModuleInfo {
+	name?: string;
+	version?: string;
+	description?: string;
+	author?: string;
+	license?: string;
+	srcversion?: string;
+	depends?: string[];
+	vermagic?: string;
+	intree?: boolean;
+	retpoline?: boolean;
+	parmDescriptions?: Array<{ name: string; description: string }>;
+}
+
+export interface ELFAnalysis {
+	programHeaders: ELFProgramHeader[];
+	symbols: ELFSymbolEntry[];
+	relocations: ELFRelocationEntry[];
+	dynamicEntries: ELFDynamicEntry[];
+	moduleInfo?: ELFModuleInfo;
+	/** Needed shared libraries (from DT_NEEDED) */
+	neededLibraries: string[];
+	/** SONAME if present */
+	soname?: string;
+	/** Interpreter path (from PT_INTERP) */
+	interpreter?: string;
+	/** ELF type: ET_REL, ET_EXEC, ET_DYN, ET_CORE */
+	elfType: string;
+	elfTypeValue: number;
+}
+
+// v3.7.5: Enhanced PE data directories
+export interface TLSDirectory {
+	startAddressOfRawData: number;
+	endAddressOfRawData: number;
+	addressOfIndex: number;
+	addressOfCallBacks: number;
+	callbackAddresses: number[];
+	characteristics: number;
+}
+
+export interface DebugDirectoryEntry {
+	type: number;
+	typeName: string;
+	timestamp: Date;
+	majorVersion: number;
+	minorVersion: number;
+	size: number;
+	addressOfRawData: number;
+	pointerToRawData: number;
+	pdbPath?: string;
+	pdbGuid?: string;
+}
+
+export interface DelayImportLibrary {
+	name: string;
+	handle: number;
+	delayIAT: number;
+	delayINT: number;
+	functions: ImportFunction[];
+}
+
+export interface CLRHeader {
+	majorRuntimeVersion: number;
+	minorRuntimeVersion: number;
+	metadataRVA: number;
+	metadataSize: number;
+	flags: number;
+	entryPointToken: number;
+	isNative: boolean;
+	is32BitRequired: boolean;
+}
+
+export interface PEDataDirectories {
+	tls?: TLSDirectory;
+	debug?: DebugDirectoryEntry[];
+	delayImport?: DelayImportLibrary[];
+	clr?: CLRHeader;
+	resourceRVA?: number;
+	resourceSize?: number;
+	securitySize?: number;
+	relocSize?: number;
+	loadConfigSize?: number;
+}
+
+// v3.7.5: Typed import with resolved API signature
+export interface TypedImportFunction extends ImportFunction {
+	signature?: ApiSignature;
+}
+
+export interface TypedImportLibrary {
+	name: string;
+	functions: TypedImportFunction[];
+}
+
+// v3.7.5: Import category summary for security analysis
+export interface ImportCategorySummary {
+	category: ApiCategory;
+	label: string;
+	count: number;
+	functions: string[];
+	tags: string[];
+}
+
 // File header info
 export interface FileInfo {
 	format: 'PE' | 'PE64' | 'ELF32' | 'ELF64' | 'MachO' | 'Raw';
@@ -94,6 +246,8 @@ export interface FileInfo {
 	timestamp?: Date;
 	subsystem?: string;
 	characteristics?: string[];
+	/** v3.7.4: True when target is an ELF ET_REL (relocatable / .ko kernel module) */
+	isRelocatable?: boolean;
 }
 
 export interface DisassemblyOptions {
@@ -111,13 +265,21 @@ export class DisassemblerEngine {
 	private functions: Map<number, Function> = new Map();
 	private strings: Map<number, StringReference> = new Map();
 	private comments: Map<number, string> = new Map();
-	private xrefs: XRef[] = [];
+	private xrefs: Map<number, XRef[]> = new Map();
 
 	// File analysis data
 	private fileInfo?: FileInfo;
 	private sections: Section[] = [];
 	private imports: ImportLibrary[] = [];
 	private exports: ExportFunction[] = [];
+	/** v3.7.5: Enhanced PE data directories (TLS, Debug, Delay Import, CLR) */
+	private peDataDirectories: PEDataDirectories = {};
+	/** v3.7.5: Enhanced ELF analysis data (program headers, symbols, relocations, dynamic, modinfo) */
+	private elfAnalysis?: ELFAnalysis;
+
+	/** v3.7.4 FIX-011: .rela.text relocations for ET_REL files (kernel modules, .o files).
+	 *  Maps file offset (in .text) → {symbolName, relocType, addend} */
+	private textRelocations: Map<number, { name: string; type: number; addend: number }> = new Map();
 
 	// Capstone Engine
 	private capstone: CapstoneWrapper;
@@ -139,10 +301,23 @@ export class DisassemblerEngine {
 	// v3.7.1: VM detection results from last analyzeAll() with detectVM: true
 	private _vmDetectionResults?: Map<number, { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number }>;
 
+	// v3.7.4: Persistent session store (renames, retypes, comments, bookmarks, analyze cache)
+	private sessionStore?: SessionStore;
+
 	constructor() {
 		this.capstone = new CapstoneWrapper();
 		this.llvmMc = new LlvmMcWrapper();
 		this.loadConfig();
+	}
+
+	/** v3.7.4: Add XRef to the indexed map (O(1) lookup by target address). */
+	private addXRef(xref: XRef): void {
+		const list = this.xrefs.get(xref.to);
+		if (list) {
+			list.push(xref);
+		} else {
+			this.xrefs.set(xref.to, [xref]);
+		}
 	}
 
 	private loadConfig(): void {
@@ -249,9 +424,23 @@ export class DisassemblerEngine {
 			this.functions.clear();
 			this.instructions.clear();
 			this.comments.clear();
-			this.xrefs = [];
+			this.xrefs.clear();
 			this.strings.clear();
 			this._textScanCache = undefined;
+
+			// v3.7.4: Initialize persistent session store
+			try {
+				this.sessionStore?.dispose();
+				this.sessionStore = new SessionStore(filePath);
+				// Import legacy annotations if they exist
+				const annotationsPath = path.join(path.dirname(filePath), '.hexcore-annotations.json');
+				this.sessionStore.importAnnotations(annotationsPath);
+			} catch (err: unknown) {
+				// SQLite unavailable or file locked — continue without persistence
+				const msg = err instanceof Error ? err.message : String(err);
+				console.warn(`[HexCore] SessionStore init failed: ${msg}`);
+				this.sessionStore = undefined;
+			}
 
 			// Initialize architecture first (needed for base address detection in PE)
 			this.architecture = this.detectArchitecture();
@@ -312,6 +501,23 @@ export class DisassemblerEngine {
 
 		const countBefore = this.functions.size;
 
+		// v3.7.4: Restore function table from session cache (skip re-analysis)
+		if (this.sessionStore && this.functions.size === 0) {
+			const cached = this.sessionStore.getCachedFunctions();
+			if (cached.length > 0) {
+				for (const entry of cached) {
+					const addr = parseInt(entry.address, 16);
+					if (!this.functions.has(addr)) {
+						try {
+							await this.analyzeFunction(addr, entry.name);
+						} catch {
+							// If analysis fails, skip this cached entry
+						}
+					}
+				}
+			}
+		}
+
 		// Scan for function prologs in code sections
 		await this.scanForFunctionPrologs();
 
@@ -351,6 +557,23 @@ export class DisassemblerEngine {
 					const vmResult = this.detectVM(func.address);
 					this._vmDetectionResults.set(func.address, vmResult);
 				}
+			}
+		}
+
+		// v3.7.4: Persist discovered functions to session cache
+		if (this.sessionStore) {
+			try {
+				this.sessionStore.clearCache();
+				for (const func of this.functions.values()) {
+					this.sessionStore.cacheFunction(
+						`0x${func.address.toString(16)}`,
+						func.name,
+						func.size,
+						func.endAddress
+					);
+				}
+			} catch {
+				// Non-critical — continue without cache persistence
 			}
 		}
 
@@ -780,42 +1003,68 @@ export class DisassemblerEngine {
 	// String Analysis
 	// ============================================================================
 
-	async findStrings(): Promise<void> {
+	/**
+	 * Extract strings from the binary.
+	 * @param sectionNames - Optional list of PE section names to limit scanning (e.g. [".rdata", ".data"]).
+	 *                       When omitted, scans the entire file buffer.
+	 * @param minLength - Minimum string length (default: 4).
+	 */
+	async findStrings(sectionNames?: string[], minLength: number = 4): Promise<void> {
 		if (!this.fileBuffer) {
 			return;
 		}
 
-		// ASCII strings (min 4 chars)
-		const asciiPattern = /[\x20-\x7E]{4,}/g;
-		const text = this.fileBuffer.toString('binary');
-		let match;
+		// v3.7.4: Compute scan ranges from section names
+		let scanRanges: Array<{ start: number; end: number }>;
+		if (sectionNames && sectionNames.length > 0) {
+			scanRanges = [];
+			for (const secName of sectionNames) {
+				const sec = this.sections.find(s => s.name === secName || s.name === secName.replace(/^\./, ''));
+				if (sec) {
+					scanRanges.push({ start: sec.rawAddress, end: sec.rawAddress + sec.rawSize });
+				}
+			}
+			if (scanRanges.length === 0) { return; } // no matching sections
+		} else {
+			scanRanges = [{ start: 0, end: this.fileBuffer.length }];
+		}
 
-		while ((match = asciiPattern.exec(text)) !== null) {
-			if (match[0].length <= 16384) {
-				const offset = match.index;
-				const str = match[0];
-				const addr = this.offsetToAddress(offset);
-				this.strings.set(addr, { address: addr, string: str, encoding: 'ascii', references: [] });
+		// ASCII strings
+		const asciiPattern = new RegExp(`[\\x20-\\x7E]{${minLength},}`, 'g');
+
+		for (const range of scanRanges) {
+			const text = this.fileBuffer.subarray(range.start, range.end).toString('binary');
+			let match;
+			while ((match = asciiPattern.exec(text)) !== null) {
+				if (match[0].length <= 16384) {
+					const offset = range.start + match.index;
+					const str = match[0];
+					const addr = this.offsetToAddress(offset);
+					this.strings.set(addr, { address: addr, string: str, encoding: 'ascii', references: [] });
+				}
 			}
 		}
 
 		// Unicode strings (UTF-16 LE)
-		for (let i = 0; i < this.fileBuffer.length - 8; i += 2) {
-			let len = 0;
-			while (i + len * 2 < this.fileBuffer.length - 1) {
-				const char = this.fileBuffer.readUInt16LE(i + len * 2);
-				if (char === 0 || char > 0x7E) {
-					break;
+		for (const range of scanRanges) {
+			const rangeStart = range.start % 2 === 0 ? range.start : range.start + 1; // align to 2
+			for (let i = rangeStart; i < range.end - 8; i += 2) {
+				let len = 0;
+				while (i + len * 2 < range.end - 1) {
+					const char = this.fileBuffer.readUInt16LE(i + len * 2);
+					if (char === 0 || char > 0x7E) {
+						break;
+					}
+					len++;
 				}
-				len++;
-			}
-			if (len >= 4 && len <= 512) {
-				const str = this.fileBuffer.toString('utf16le', i, i + len * 2);
-				const addr = this.offsetToAddress(i);
-				if (!this.strings.has(addr)) {
-					this.strings.set(addr, { address: addr, string: str, encoding: 'unicode', references: [] });
+				if (len >= minLength && len <= 512) {
+					const str = this.fileBuffer.toString('utf16le', i, i + len * 2);
+					const addr = this.offsetToAddress(i);
+					if (!this.strings.has(addr)) {
+						this.strings.set(addr, { address: addr, string: str, encoding: 'unicode', references: [] });
+					}
+					i += len * 2;
 				}
-				i += len * 2;
 			}
 		}
 	}
@@ -838,14 +1087,14 @@ export class DisassemblerEngine {
 					if (!strRef.references.includes(inst.address)) {
 						strRef.references.push(inst.address);
 					}
-					this.xrefs.push({ from: inst.address, to: targetAddr, type: 'string' });
+					this.addXRef({ from: inst.address, to: targetAddr, type: 'string' });
 				}
 			}
 			addrRegex.lastIndex = 0;
 
 			// Data xrefs: any address reference to non-string data
 			if (inst.targetAddress && !inst.isCall && !inst.isJump) {
-				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'data' });
+				this.addXRef({ from: inst.address, to: inst.targetAddress, type: 'data' });
 			}
 		}
 
@@ -866,7 +1115,7 @@ export class DisassemblerEngine {
 						if (!strRef.references.includes(instrAddr)) {
 							strRef.references.push(instrAddr);
 						}
-						this.xrefs.push({ from: instrAddr, to: strAddr, type: 'string' });
+						this.addXRef({ from: instrAddr, to: strAddr, type: 'string' });
 					}
 				}
 			}
@@ -1135,6 +1384,79 @@ export class DisassemblerEngine {
 			const exportDirSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 4);
 			if (exportDirRVA > 0 && exportDirSize > 0) {
 				this.parsePEExports(exportDirRVA, exportDirSize);
+			}
+		}
+
+		// v3.7.5: Parse additional data directories
+		this.peDataDirectories = {};
+
+		// DataDirectory[2]: Resource Directory (size only)
+		if (numberOfRvaAndSizes > 2) {
+			const rva = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 16);
+			const size = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 20);
+			if (rva > 0 && size > 0) {
+				this.peDataDirectories.resourceRVA = rva;
+				this.peDataDirectories.resourceSize = size;
+			}
+		}
+
+		// DataDirectory[4]: Certificate/Security (size only)
+		if (numberOfRvaAndSizes > 4) {
+			const size = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 36);
+			if (size > 0) {
+				this.peDataDirectories.securitySize = size;
+			}
+		}
+
+		// DataDirectory[5]: Base Relocation (size only)
+		if (numberOfRvaAndSizes > 5) {
+			const size = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 44);
+			if (size > 0) {
+				this.peDataDirectories.relocSize = size;
+			}
+		}
+
+		// DataDirectory[6]: Debug Directory
+		if (numberOfRvaAndSizes > 6) {
+			const debugRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 48);
+			const debugSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 52);
+			if (debugRVA > 0 && debugSize > 0) {
+				this.parsePEDebugDirectory(debugRVA, debugSize);
+			}
+		}
+
+		// DataDirectory[9]: TLS Directory
+		if (numberOfRvaAndSizes > 9) {
+			const tlsRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 72);
+			const tlsSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 76);
+			if (tlsRVA > 0 && tlsSize > 0) {
+				this.parsePETLSDirectory(tlsRVA, is64);
+			}
+		}
+
+		// DataDirectory[10]: Load Config (size only)
+		if (numberOfRvaAndSizes > 10) {
+			const size = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 84);
+			if (size > 0) {
+				this.peDataDirectories.loadConfigSize = size;
+			}
+		}
+
+		// DataDirectory[13]: Delay Import Directory
+		if (numberOfRvaAndSizes > 13) {
+			const delayRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 104);
+			const delaySize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 108);
+			if (delayRVA > 0 && delaySize > 0) {
+				this.parsePEDelayImportDirectory(delayRVA, is64);
+			}
+		}
+
+		// DataDirectory[14]: CLR Runtime Header
+		if (numberOfRvaAndSizes > 14) {
+			const clrRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 112);
+			const clrSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 116);
+			if (clrRVA > 0 && clrSize > 0) {
+				this.parsePECLRHeader(clrRVA);
 			}
 		}
 	}
@@ -1407,6 +1729,396 @@ export class DisassemblerEngine {
 	}
 
 	// ============================================================================
+	// v3.7.5: Enhanced PE Data Directory Parsing
+	// ============================================================================
+
+	private parsePEDebugDirectory(debugRVA: number, debugSize: number): void {
+		if (!this.fileBuffer) { return; }
+		const debugOffset = this.rvaToFileOffset(debugRVA);
+		if (debugOffset < 0 || debugOffset >= this.fileBuffer.length) { return; }
+
+		const DEBUG_TYPE_NAMES: Record<number, string> = {
+			0: 'Unknown', 1: 'COFF', 2: 'CodeView', 3: 'FPO', 4: 'Misc',
+			5: 'Exception', 6: 'Fixup', 7: 'OMAP_TO_SRC', 8: 'OMAP_FROM_SRC',
+			9: 'Borland', 10: 'Reserved', 11: 'CLSID', 12: 'VC_FEATURE',
+			13: 'POGO', 14: 'ILTCG', 16: 'Repro', 17: 'Embedded'
+		};
+
+		const entries: DebugDirectoryEntry[] = [];
+		const entrySize = 28; // sizeof(IMAGE_DEBUG_DIRECTORY)
+		const numEntries = Math.min(Math.floor(debugSize / entrySize), 16);
+
+		for (let i = 0; i < numEntries; i++) {
+			const off = debugOffset + i * entrySize;
+			if (off + entrySize > this.fileBuffer.length) { break; }
+
+			const type = this.fileBuffer.readUInt32LE(off + 12);
+			const sizeOfData = this.fileBuffer.readUInt32LE(off + 16);
+			const addressOfRawData = this.fileBuffer.readUInt32LE(off + 20);
+			const pointerToRawData = this.fileBuffer.readUInt32LE(off + 24);
+			const timestamp = this.fileBuffer.readUInt32LE(off + 4);
+			const majorVersion = this.fileBuffer.readUInt16LE(off + 8);
+			const minorVersion = this.fileBuffer.readUInt16LE(off + 10);
+
+			const entry: DebugDirectoryEntry = {
+				type,
+				typeName: DEBUG_TYPE_NAMES[type] || `Type_${type}`,
+				timestamp: timestamp > 0 ? new Date(timestamp * 1000) : new Date(0),
+				majorVersion,
+				minorVersion,
+				size: sizeOfData,
+				addressOfRawData,
+				pointerToRawData
+			};
+
+			// Parse CodeView (type 2) for PDB path
+			if (type === 2 && pointerToRawData > 0 && pointerToRawData + 24 < this.fileBuffer.length) {
+				const cvSig = this.fileBuffer.readUInt32LE(pointerToRawData);
+				if (cvSig === 0x53445352) { // 'RSDS'
+					// GUID: 16 bytes at offset 4
+					const guidBytes = this.fileBuffer.subarray(pointerToRawData + 4, pointerToRawData + 20);
+					const p1 = guidBytes.readUInt32LE(0).toString(16).padStart(8, '0');
+					const p2 = guidBytes.readUInt16LE(4).toString(16).padStart(4, '0');
+					const p3 = guidBytes.readUInt16LE(6).toString(16).padStart(4, '0');
+					const p4 = Array.from(guidBytes.subarray(8, 10)).map(b => b.toString(16).padStart(2, '0')).join('');
+					const p5 = Array.from(guidBytes.subarray(10, 16)).map(b => b.toString(16).padStart(2, '0')).join('');
+					entry.pdbGuid = `${p1}-${p2}-${p3}-${p4}-${p5}`.toUpperCase();
+
+					// PDB path: null-terminated string after GUID + age (4 bytes)
+					const pathStart = pointerToRawData + 24;
+					const pathEnd = Math.min(pathStart + 260, pointerToRawData + sizeOfData, this.fileBuffer.length);
+					let pdbPath = '';
+					for (let j = pathStart; j < pathEnd && this.fileBuffer[j] !== 0; j++) {
+						pdbPath += String.fromCharCode(this.fileBuffer[j]);
+					}
+					if (pdbPath.length > 0) {
+						entry.pdbPath = pdbPath;
+					}
+				}
+			}
+
+			entries.push(entry);
+		}
+
+		if (entries.length > 0) {
+			this.peDataDirectories.debug = entries;
+		}
+	}
+
+	private parsePETLSDirectory(tlsRVA: number, is64: boolean): void {
+		if (!this.fileBuffer) { return; }
+		const tlsOffset = this.rvaToFileOffset(tlsRVA);
+		if (tlsOffset < 0) { return; }
+
+		const minSize = is64 ? 40 : 24;
+		if (tlsOffset + minSize > this.fileBuffer.length) { return; }
+
+		let startAddr: number, endAddr: number, indexAddr: number, callbackAddr: number, characteristics: number;
+
+		if (is64) {
+			startAddr = Number(this.fileBuffer.readBigUInt64LE(tlsOffset));
+			endAddr = Number(this.fileBuffer.readBigUInt64LE(tlsOffset + 8));
+			indexAddr = Number(this.fileBuffer.readBigUInt64LE(tlsOffset + 16));
+			callbackAddr = Number(this.fileBuffer.readBigUInt64LE(tlsOffset + 24));
+			characteristics = this.fileBuffer.readUInt32LE(tlsOffset + 36);
+		} else {
+			startAddr = this.fileBuffer.readUInt32LE(tlsOffset);
+			endAddr = this.fileBuffer.readUInt32LE(tlsOffset + 4);
+			indexAddr = this.fileBuffer.readUInt32LE(tlsOffset + 8);
+			callbackAddr = this.fileBuffer.readUInt32LE(tlsOffset + 12);
+			characteristics = this.fileBuffer.readUInt32LE(tlsOffset + 20);
+		}
+
+		// Walk TLS callback array (VA pointers, null-terminated)
+		const callbackAddresses: number[] = [];
+		if (callbackAddr > 0) {
+			// Convert VA to file offset
+			const cbRVA = callbackAddr - this.baseAddress;
+			const cbFileOff = this.rvaToFileOffset(cbRVA);
+			if (cbFileOff >= 0) {
+				const ptrSize = is64 ? 8 : 4;
+				for (let i = 0; i < 32; i++) {
+					const off = cbFileOff + i * ptrSize;
+					if (off + ptrSize > this.fileBuffer.length) { break; }
+
+					let addr: number;
+					if (is64) {
+						addr = Number(this.fileBuffer.readBigUInt64LE(off));
+					} else {
+						addr = this.fileBuffer.readUInt32LE(off);
+					}
+
+					if (addr === 0) { break; }
+					callbackAddresses.push(addr);
+				}
+			}
+		}
+
+		this.peDataDirectories.tls = {
+			startAddressOfRawData: startAddr,
+			endAddressOfRawData: endAddr,
+			addressOfIndex: indexAddr,
+			addressOfCallBacks: callbackAddr,
+			callbackAddresses,
+			characteristics
+		};
+	}
+
+	private parsePEDelayImportDirectory(delayRVA: number, is64: boolean): void {
+		if (!this.fileBuffer) { return; }
+		const delayOffset = this.rvaToFileOffset(delayRVA);
+		if (delayOffset < 0 || delayOffset >= this.fileBuffer.length) { return; }
+
+		const libraries: DelayImportLibrary[] = [];
+		const entrySize = 32; // sizeof(ImgDelayDescr)
+
+		for (let i = 0; i < 128; i++) {
+			const off = delayOffset + i * entrySize;
+			if (off + entrySize > this.fileBuffer.length) { break; }
+
+			const attributes = this.fileBuffer.readUInt32LE(off);
+			const nameRVA = this.fileBuffer.readUInt32LE(off + 4);
+			const handleRVA = this.fileBuffer.readUInt32LE(off + 8);
+			const iatRVA = this.fileBuffer.readUInt32LE(off + 12);
+			const intRVA = this.fileBuffer.readUInt32LE(off + 16);
+
+			if (nameRVA === 0 && iatRVA === 0) { break; }
+
+			// Read DLL name
+			const nameOffset = this.rvaToFileOffset(nameRVA);
+			let dllName = '';
+			if (nameOffset >= 0 && nameOffset < this.fileBuffer.length) {
+				for (let j = nameOffset; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+					dllName += String.fromCharCode(this.fileBuffer[j]);
+					if (dllName.length > 256) { break; }
+				}
+			}
+
+			if (dllName.length === 0) { continue; }
+
+			// Walk INT (Import Name Table) to get function names
+			const functions: ImportFunction[] = [];
+			if (intRVA > 0) {
+				const intOffset = this.rvaToFileOffset(intRVA);
+				const ptrSize = is64 ? 8 : 4;
+				let iatEntry = iatRVA;
+
+				for (let j = 0; j < 4096; j++) {
+					const entryOff = intOffset + j * ptrSize;
+					if (entryOff < 0 || entryOff + ptrSize > this.fileBuffer.length) { break; }
+
+					let entry: number;
+					if (is64) {
+						const val = this.fileBuffer.readBigUInt64LE(entryOff);
+						if (val === 0n) { break; }
+						entry = Number(val & 0x7FFFFFFFFFFFFFFFn);
+					} else {
+						entry = this.fileBuffer.readUInt32LE(entryOff);
+						if (entry === 0) { break; }
+						entry = entry & 0x7FFFFFFF;
+					}
+
+					const hintOff = this.rvaToFileOffset(entry);
+					if (hintOff >= 0 && hintOff + 2 < this.fileBuffer.length) {
+						const hint = this.fileBuffer.readUInt16LE(hintOff);
+						let funcName = '';
+						for (let k = hintOff + 2; k < this.fileBuffer.length && this.fileBuffer[k] !== 0; k++) {
+							funcName += String.fromCharCode(this.fileBuffer[k]);
+							if (funcName.length > 256) { break; }
+						}
+						functions.push({
+							name: funcName || `DelayOrdinal_${j}`,
+							hint,
+							address: iatEntry + this.baseAddress
+						});
+					}
+
+					iatEntry += ptrSize;
+				}
+			}
+
+			libraries.push({
+				name: dllName,
+				handle: handleRVA + this.baseAddress,
+				delayIAT: iatRVA + this.baseAddress,
+				delayINT: intRVA + this.baseAddress,
+				functions
+			});
+		}
+
+		if (libraries.length > 0) {
+			this.peDataDirectories.delayImport = libraries;
+		}
+	}
+
+	private parsePECLRHeader(clrRVA: number): void {
+		if (!this.fileBuffer) { return; }
+		const clrOffset = this.rvaToFileOffset(clrRVA);
+		if (clrOffset < 0 || clrOffset + 72 > this.fileBuffer.length) { return; }
+
+		const headerSize = this.fileBuffer.readUInt32LE(clrOffset);
+		if (headerSize < 72) { return; }
+
+		const majorVersion = this.fileBuffer.readUInt16LE(clrOffset + 4);
+		const minorVersion = this.fileBuffer.readUInt16LE(clrOffset + 6);
+		const metadataRVA = this.fileBuffer.readUInt32LE(clrOffset + 8);
+		const metadataSize = this.fileBuffer.readUInt32LE(clrOffset + 12);
+		const flags = this.fileBuffer.readUInt32LE(clrOffset + 16);
+		const entryPointToken = this.fileBuffer.readUInt32LE(clrOffset + 20);
+
+		this.peDataDirectories.clr = {
+			majorRuntimeVersion: majorVersion,
+			minorRuntimeVersion: minorVersion,
+			metadataRVA,
+			metadataSize,
+			flags,
+			entryPointToken,
+			isNative: (flags & 0x01) !== 0,        // COMIMAGE_FLAGS_ILONLY inverted
+			is32BitRequired: (flags & 0x02) !== 0   // COMIMAGE_FLAGS_32BITREQUIRED
+		};
+	}
+
+	// ============================================================================
+	// v3.7.5: Typed Import Resolution (Windows API Signature Database)
+	// ============================================================================
+
+	/**
+	 * Resolve imports against the Windows API signature database.
+	 * Returns enriched import data with type signatures and categories.
+	 */
+	getTypedImports(): TypedImportLibrary[] {
+		return this.imports.map(lib => ({
+			name: lib.name,
+			functions: lib.functions.map(func => ({
+				...func,
+				signature: lookupApi(func.name)
+			}))
+		}));
+	}
+
+	/**
+	 * Build a summary of imported API categories for security analysis.
+	 * Groups imports by category and lists security-relevant tags.
+	 */
+	getImportCategorySummary(): ImportCategorySummary[] {
+		const categoryMap = new Map<ApiCategory, { functions: string[]; tags: Set<string> }>();
+
+		for (const lib of this.imports) {
+			for (const func of lib.functions) {
+				const sig = lookupApi(func.name);
+				if (!sig) { continue; }
+
+				let entry = categoryMap.get(sig.category);
+				if (!entry) {
+					entry = { functions: [], tags: new Set() };
+					categoryMap.set(sig.category, entry);
+				}
+				entry.functions.push(func.name);
+				for (const tag of sig.tags) {
+					entry.tags.add(tag);
+				}
+			}
+		}
+
+		const result: ImportCategorySummary[] = [];
+		for (const [category, data] of categoryMap) {
+			result.push({
+				category,
+				label: CATEGORY_LABELS[category] || category,
+				count: data.functions.length,
+				functions: data.functions,
+				tags: Array.from(data.tags).sort()
+			});
+		}
+
+		// Sort: highest-count categories first
+		result.sort((a, b) => b.count - a.count);
+		return result;
+	}
+
+	/**
+	 * Get the parsed PE data directories.
+	 */
+	getPEDataDirectories(): PEDataDirectories {
+		return this.peDataDirectories;
+	}
+
+	/**
+	 * v3.7.5 P4: Get the enhanced ELF analysis data.
+	 */
+	getELFAnalysis(): ELFAnalysis | undefined {
+		return this.elfAnalysis;
+	}
+
+	/**
+	 * v3.7.5: Get the size of a function/symbol at the given address.
+	 * Checks: (1) function table from analyzeAll, (2) ELF symbol table st_size,
+	 * (3) PE export table. Returns 0 if unknown.
+	 */
+	getSymbolSizeAt(address: number): number {
+		// 1. Function table (from analyzeAll)
+		const func = this.functions.get(address);
+		if (func && func.size > 0) {
+			return func.size;
+		}
+
+		// 2. ELF symbol table: search for FUNC symbol at this address
+		if (this.elfAnalysis) {
+			for (const sym of this.elfAnalysis.symbols) {
+				if (sym.type === 'FUNC' && sym.value === address && sym.size > 0) {
+					return sym.size;
+				}
+			}
+			// Also try with PIE adjustment
+			if (this.fileInfo?.characteristics?.includes('PIE')) {
+				const rawAddr = address - this.baseAddress;
+				for (const sym of this.elfAnalysis.symbols) {
+					if (sym.type === 'FUNC' && sym.value === rawAddr && sym.size > 0) {
+						return sym.size;
+					}
+				}
+			}
+		}
+
+		// 3. Scan nearby function table entries to find the gap
+		if (this.functions.size > 0) {
+			const sortedAddrs = [...this.functions.keys()].sort((a, b) => a - b);
+			const idx = sortedAddrs.indexOf(address);
+			if (idx >= 0 && idx + 1 < sortedAddrs.length) {
+				return sortedAddrs[idx + 1] - address;
+			}
+			// Binary search for the next function after this address
+			let lo = 0, hi = sortedAddrs.length - 1;
+			while (lo <= hi) {
+				const mid = (lo + hi) >> 1;
+				if (sortedAddrs[mid] <= address) { lo = mid + 1; }
+				else { hi = mid - 1; }
+			}
+			if (lo < sortedAddrs.length) {
+				const gap = sortedAddrs[lo] - address;
+				if (gap > 0 && gap <= 65536) {
+					return gap;
+				}
+			}
+		}
+
+		return 0;
+	}
+
+	/**
+	 * v3.7.5: Get the buffer size needed to fully lift a function.
+	 * Returns the actual function/symbol size if known, otherwise a conservative fallback.
+	 */
+	getRecommendedLiftSize(address: number, fallback: number = 4096): number {
+		const symbolSize = this.getSymbolSizeAt(address);
+		if (symbolSize > 0) {
+			// Add 16 bytes padding for alignment/epilogue
+			return symbolSize + 16;
+		}
+		return fallback;
+	}
+
+	// ============================================================================
 	// ELF Structure Parsing
 	// ============================================================================
 
@@ -1440,6 +2152,15 @@ export class DisassemblerEngine {
 		// Detect ELF type: ET_EXEC=2 (fixed base), ET_DYN=3 (PIE or shared object)
 		const eType = readU16(16);
 		const isPIE = eType === 3; // ET_DYN - Position Independent Executable
+
+		// v3.7.4: FIX-014 — Warn on ET_REL (relocatable object / kernel module)
+		if (eType === 1) {
+			console.warn(
+				'[HexCore] [WARN] Target is a relocatable ELF (ET_REL / .ko kernel module). ' +
+				'External calls are unresolved relocations — decompilation will be limited. ' +
+				'Tip: Link against a dummy kernel image or process relocations first.'
+			);
+		}
 
 		// Detect base address from first LOAD segment
 		let baseAddr = 0x400000;
@@ -1480,7 +2201,8 @@ export class DisassemblerEngine {
 			entryPoint: adjustedEntryPoint,
 			baseAddress: this.baseAddress,
 			imageSize: this.fileBuffer.length,
-			characteristics: isPIE ? ['ELF', 'PIE'] : ['ELF']
+			characteristics: isPIE ? ['ELF', 'PIE'] : eType === 1 ? ['ELF', 'ET_REL'] : ['ELF'],
+			isRelocatable: eType === 1
 		};
 
 		// Parse section headers - collect raw info for symbol parsing
@@ -1492,6 +2214,7 @@ export class DisassemblerEngine {
 			offset: number;
 			size: number;
 			link: number;
+			info: number;   // sh_info: for SHT_RELA, index of section relocations apply to
 			entsize: number;
 		}
 		const elfSections: ElfSection[] = [];
@@ -1516,6 +2239,7 @@ export class DisassemblerEngine {
 				const offset = is64Bit ? Number(readU64(secOff + 24)) : readU32(secOff + 16);
 				const size = is64Bit ? Number(readU64(secOff + 32)) : readU32(secOff + 20);
 				const link = readU32(is64Bit ? secOff + 40 : secOff + 24);
+				const info = readU32(is64Bit ? secOff + 44 : secOff + 28);
 				const entsize = is64Bit ? Number(readU64(secOff + 56)) : readU32(secOff + 36);
 
 				// Read section name
@@ -1532,7 +2256,7 @@ export class DisassemblerEngine {
 				// For PIE: adjust section addresses by adding base
 				const adjustedAddr = (isPIE && addr > 0 && addr < this.baseAddress) ? addr + this.baseAddress : addr;
 
-				elfSections.push({ name, type, flags, addr: adjustedAddr, offset, size, link, entsize });
+				elfSections.push({ name, type, flags, addr: adjustedAddr, offset, size, link, info, entsize });
 
 				const isWritable = (flags & 0x1) !== 0;
 				const isAlloc = (flags & 0x2) !== 0;
@@ -1755,6 +2479,482 @@ export class DisassemblerEngine {
 				}
 			}
 		}
+
+		// v3.7.4 FIX-011: Parse .rela.text relocations for ET_REL (relocatable objects)
+		// Maps each call/jump site in .text to its external symbol name so the
+		// lifter can generate `declare @mutex_lock(...)` instead of `call sub_0`.
+		//
+		// v3.7.4-fix: Process ALL .rela sections targeting .text (not just the first),
+		// handle -ffunction-sections (.rela.text.funcname), use sh_info for matching,
+		// expand relocation types for x86_64 (GOTPCRELX) and AArch64 (CALL26).
+		if (eType === 1 /* ET_REL */) {
+			console.log(`[HexCore] FIX-011: ET_REL detected. elfSections.length=${elfSections.length}, shnum=${shnum}`);
+
+			// Collect ALL text-like sections (handles -ffunction-sections: .text.funcname)
+			const textSections = elfSections.filter(s =>
+				s.name === '.text' || s.name.startsWith('.text.'));
+			const textSecIndices = new Set(textSections.map(s => elfSections.indexOf(s)));
+
+			// Find the symtab + its strtab (SHT_SYMTAB = 2)
+			const symtabSec = elfSections.find(s => s.type === 2);
+			const strtabSec = symtabSec ? elfSections[symtabSec.link] : undefined;
+
+			console.log(`[HexCore] FIX-011: text sections=${textSections.length} (${textSections.map(s => s.name).join(', ')}), ` +
+				`symtab=${symtabSec ? `found(link=${symtabSec.link})` : 'NOT FOUND'}, ` +
+				`strtab=${strtabSec ? `found(off=${strtabSec.offset},size=${strtabSec.size})` : 'NOT FOUND'}`);
+
+			if (textSections.length > 0 && symtabSec && strtabSec) {
+				// Collect ALL .rela/.rel sections that target text sections.
+				// Match by sh_info (points to the section being relocated) OR by name.
+				const relaSections = elfSections.filter(s =>
+					(s.type === 4 /* SHT_RELA */ || s.type === 9 /* SHT_REL */) &&
+					(textSecIndices.has(s.info) ||
+					 s.name === '.rela.text' || s.name === '.rel.text' ||
+					 s.name.startsWith('.rela.text.') || s.name.startsWith('.rel.text.')));
+
+				console.log(`[HexCore] FIX-011: Found ${relaSections.length} text relocation sections: ` +
+					relaSections.map(s => `"${s.name}"(type=${s.type},size=${s.size},info=${s.info})`).join(', '));
+
+				// All rela/rel sections for debugging
+				const allRelaSecs = elfSections.filter(s => s.type === 4 || s.type === 9);
+				console.log(`[HexCore] FIX-011: Total relocation sections in file: ${allRelaSecs.length}: ` +
+					allRelaSecs.map(s => `"${s.name}"(info=${s.info})`).join(', '));
+
+				// Architecture-aware relocation type filter
+				// x86_64: PC32=2, PLT32=4, GOTPCREL=9, 32S=11, GOTPCRELX=41, REX_GOTPCRELX=42
+				// AArch64: ADR_PREL_PG_HI21=275, ADD_ABS_LO12_NC=277, JUMP26=282, CALL26=283, LDST64=286
+				// ARM32: THM_CALL=10, CALL=28, JUMP24=29, THM_JUMP24=30
+				const isX86 = this.architecture === 'x86' || this.architecture === 'x64';
+				const isARM64 = this.architecture === 'arm64';
+				const isARM32 = this.architecture === 'arm';
+				const callRelTypes: Set<number> = new Set();
+				if (isX86) {
+					[2, 4, 9, 11, 41, 42].forEach(t => callRelTypes.add(t));
+				} else if (isARM64) {
+					[275, 277, 282, 283, 286].forEach(t => callRelTypes.add(t));
+				} else if (isARM32) {
+					[10, 28, 29, 30].forEach(t => callRelTypes.add(t));
+				} else {
+					// Fallback: accept common x86_64 + AArch64 call types
+					[2, 4, 9, 41, 42, 282, 283].forEach(t => callRelTypes.add(t));
+				}
+
+				const symEntSize = is64Bit ? 24 : 16;
+				let totalParsed = 0;
+
+				for (const relaSec of relaSections) {
+					const isRela = relaSec.type === 4; // SHT_RELA has addend field
+					const relEntSize = isRela ? (is64Bit ? 24 : 12) : (is64Bit ? 16 : 8);
+					const numRel = relEntSize > 0 ? Math.floor(relaSec.size / relEntSize) : 0;
+
+					// Determine base offset of the target section relative to main .text
+					// so rOffset values from per-function sections are globally consistent.
+					const targetSec = elfSections[relaSec.info];
+					const mainText = textSections.find(s => s.name === '.text');
+					const sectionBase = (targetSec && mainText)
+						? (targetSec.offset - mainText.offset)
+						: 0;
+
+					for (let i = 0; i < numRel && i < 262144; i++) {
+						const relOff = relaSec.offset + i * relEntSize;
+						if (relOff + relEntSize > this.fileBuffer.length) { break; }
+
+						const rOffset = is64Bit ? Number(readU64(relOff)) : readU32(relOff);
+						const rInfo = is64Bit ? Number(readU64(relOff + 8)) : readU32(relOff + 4);
+						// r_addend is SIGNED — must read as signed int64, not unsigned
+						const rAddendRaw = isRela
+							? (is64Bit ? readU64(relOff + 16) : BigInt(readU32(relOff + 8)))
+							: 0n;
+						const rAddend = typeof rAddendRaw === 'bigint'
+							? Number(BigInt.asIntN(64, rAddendRaw))
+							: Number(rAddendRaw);
+
+						const symIdx = is64Bit ? Math.trunc(rInfo / 0x100000000) : (rInfo >> 8);
+						const relType = is64Bit ? (rInfo & 0xFFFFFFFF) : (rInfo & 0xFF);
+
+						if (!callRelTypes.has(relType)) {
+							continue;
+						}
+
+						// Read symbol name from .symtab
+						const symOff = symtabSec.offset + symIdx * symEntSize;
+						if (symOff + symEntSize > this.fileBuffer.length) { continue; }
+						const stName = readU32(symOff);
+
+						let symName = '';
+						const symNameOff = strtabSec.offset + stName;
+						if (symNameOff < this.fileBuffer.length) {
+							for (let j = symNameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+								symName += String.fromCharCode(this.fileBuffer[j]);
+								if (symName.length > 256) { break; }
+							}
+						}
+						if (symName.length === 0) { continue; }
+
+						// rOffset is relative to target section; adjust to overall .text start
+						this.textRelocations.set(sectionBase + rOffset, {
+							name: symName,
+							type: relType,
+							addend: rAddend
+						});
+					}
+					totalParsed += numRel;
+				}
+				console.log(`[HexCore] FIX-011: Parsed ${totalParsed} reloc entries across ${relaSections.length} sections, ` +
+					`${this.textRelocations.size} call/jump relocations stored. ` +
+					`First 10: ${[...this.textRelocations.entries()].slice(0, 10).map(([off, r]) => `0x${off.toString(16)}→${r.name}(type=${r.type})`).join(', ')}`);
+
+				if (this.textRelocations.size === 0 && totalParsed > 0) {
+					console.warn(`[HexCore] FIX-011: ${totalParsed} relocation entries found but NONE matched call/jump types ` +
+						`(arch=${this.architecture}, accepted types=[${[...callRelTypes].join(',')}]). ` +
+						`Check if architecture detection is correct.`);
+				}
+			} else {
+				console.warn(`[HexCore] FIX-011: ET_REL missing required sections — textSections=${textSections.length}, symtabSec=${!!symtabSec}, strtabSec=${!!strtabSec}`);
+			}
+		}
+
+		// =====================================================================
+		// v3.7.5 P4: Enhanced ELF Analysis — build comprehensive ELF data
+		// =====================================================================
+
+		const ELF_TYPE_NAMES: Record<number, string> = {
+			0: 'ET_NONE', 1: 'ET_REL', 2: 'ET_EXEC', 3: 'ET_DYN', 4: 'ET_CORE'
+		};
+
+		const PT_NAMES: Record<number, string> = {
+			0: 'PT_NULL', 1: 'PT_LOAD', 2: 'PT_DYNAMIC', 3: 'PT_INTERP',
+			4: 'PT_NOTE', 5: 'PT_SHLIB', 6: 'PT_PHDR', 7: 'PT_TLS',
+			0x6474E550: 'PT_GNU_EH_FRAME', 0x6474E551: 'PT_GNU_STACK',
+			0x6474E552: 'PT_GNU_RELRO', 0x6474E553: 'PT_GNU_PROPERTY'
+		};
+
+		const STB_NAMES = ['LOCAL', 'GLOBAL', 'WEAK'];
+		const STT_NAMES = ['NOTYPE', 'OBJECT', 'FUNC', 'SECTION', 'FILE', 'COMMON', 'TLS'];
+		const STV_NAMES = ['DEFAULT', 'INTERNAL', 'HIDDEN', 'PROTECTED'];
+
+		// Relocation type name maps
+		const RELT_X86_64: Record<number, string> = {
+			0: 'R_X86_64_NONE', 1: 'R_X86_64_64', 2: 'R_X86_64_PC32',
+			4: 'R_X86_64_PLT32', 5: 'R_X86_64_COPY', 6: 'R_X86_64_GLOB_DAT',
+			7: 'R_X86_64_JUMP_SLOT', 8: 'R_X86_64_RELATIVE', 9: 'R_X86_64_GOTPCREL',
+			10: 'R_X86_64_32', 11: 'R_X86_64_32S', 41: 'R_X86_64_GOTPCRELX',
+			42: 'R_X86_64_REX_GOTPCRELX'
+		};
+		const RELT_AARCH64: Record<number, string> = {
+			275: 'R_AARCH64_ADR_PREL_PG_HI21', 277: 'R_AARCH64_ADD_ABS_LO12_NC',
+			282: 'R_AARCH64_JUMP26', 283: 'R_AARCH64_CALL26',
+			257: 'R_AARCH64_ABS64', 258: 'R_AARCH64_ABS32'
+		};
+		const relocTypeNames = (this.architecture === 'arm64') ? RELT_AARCH64 : RELT_X86_64;
+
+		const DT_NAMES: Record<number, string> = {
+			0: 'DT_NULL', 1: 'DT_NEEDED', 2: 'DT_PLTRELSZ', 3: 'DT_PLTGOT',
+			4: 'DT_HASH', 5: 'DT_STRTAB', 6: 'DT_SYMTAB', 7: 'DT_RELA',
+			8: 'DT_RELASZ', 9: 'DT_RELAENT', 10: 'DT_STRSZ', 11: 'DT_SYMENT',
+			12: 'DT_INIT', 13: 'DT_FINI', 14: 'DT_SONAME', 15: 'DT_RPATH',
+			20: 'DT_PLTREL', 21: 'DT_DEBUG', 23: 'DT_JMPREL',
+			24: 'DT_BIND_NOW', 25: 'DT_INIT_ARRAY', 26: 'DT_FINI_ARRAY',
+			27: 'DT_INIT_ARRAYSZ', 28: 'DT_FINI_ARRAYSZ', 29: 'DT_RUNPATH',
+			30: 'DT_FLAGS', 0x6FFFFFFB: 'DT_FLAGS_1', 0x6FFFFFF0: 'DT_VERSYM',
+			0x6FFFFFFD: 'DT_VERDEF', 0x6FFFFFFE: 'DT_VERNEED',
+			0x6FFFFFF9: 'DT_RELACOUNT', 0x6FFFFFFA: 'DT_RELCOUNT',
+			0x6FFFFFF5: 'DT_GNU_PRELINKED', 0x6FFFFFF3: 'DT_GNU_CONFLICT',
+			0x6FFFFEF5: 'DT_GNU_HASH'
+		};
+
+		// -- 1. Program Headers --
+		const programHeaders: ELFProgramHeader[] = [];
+		let interpPath: string | undefined;
+		if (phoff > 0 && phnum > 0) {
+			for (let i = 0; i < phnum; i++) {
+				const phOff = phoff + i * phentsize;
+				if (phOff + phentsize > this.fileBuffer.length) { break; }
+
+				const pType = readU32(phOff);
+				const pFlags = is64Bit ? readU32(phOff + 4) : readU32(phOff + 24);
+				const pOffset = is64Bit ? Number(readU64(phOff + 8)) : readU32(phOff + 4);
+				const pVaddr = is64Bit ? Number(readU64(phOff + 16)) : readU32(phOff + 8);
+				const pPaddr = is64Bit ? Number(readU64(phOff + 24)) : readU32(phOff + 12);
+				const pFilesz = is64Bit ? Number(readU64(phOff + 32)) : readU32(phOff + 16);
+				const pMemsz = is64Bit ? Number(readU64(phOff + 40)) : readU32(phOff + 20);
+				const pAlign = is64Bit ? Number(readU64(phOff + 48)) : readU32(phOff + 28);
+
+				let perms = '';
+				perms += (pFlags & 4) ? 'r' : '-';
+				perms += (pFlags & 2) ? 'w' : '-';
+				perms += (pFlags & 1) ? 'x' : '-';
+
+				const ph: ELFProgramHeader = {
+					type: pType,
+					typeName: PT_NAMES[pType] || `PT_0x${pType.toString(16)}`,
+					flags: pFlags,
+					permissions: perms,
+					offset: pOffset,
+					vaddr: pVaddr,
+					paddr: pPaddr,
+					filesz: pFilesz,
+					memsz: pMemsz,
+					align: pAlign
+				};
+
+				// PT_INTERP: read interpreter path
+				if (pType === 3 && pOffset > 0 && pOffset + pFilesz <= this.fileBuffer.length) {
+					let interp = '';
+					for (let j = pOffset; j < pOffset + pFilesz && this.fileBuffer[j] !== 0; j++) {
+						interp += String.fromCharCode(this.fileBuffer[j]);
+					}
+					if (interp.length > 0) {
+						ph.interpreter = interp;
+						interpPath = interp;
+					}
+				}
+
+				programHeaders.push(ph);
+			}
+		}
+
+		// -- 2. Full Symbol Table --
+		const allSymbols: ELFSymbolEntry[] = [];
+		for (const sec of elfSections) {
+			if (sec.type !== 2 && sec.type !== 11) { continue; }
+			if (sec.entsize === 0 || sec.size === 0) { continue; }
+			const strTabSec = elfSections[sec.link];
+			if (!strTabSec) { continue; }
+
+			const symCount = Math.min(Math.floor(sec.size / sec.entsize), 16384);
+			for (let i = 0; i < symCount; i++) {
+				const symOff = sec.offset + i * sec.entsize;
+				if (symOff + sec.entsize > this.fileBuffer.length) { break; }
+
+				let stName: number, stInfo: number, stOther: number, stShndx: number, stValue: number, stSize: number;
+				if (is64Bit) {
+					stName = readU32(symOff);
+					stInfo = this.fileBuffer[symOff + 4];
+					stOther = this.fileBuffer[symOff + 5];
+					stShndx = readU16(symOff + 6);
+					stValue = Number(readU64(symOff + 8));
+					stSize = Number(readU64(symOff + 16));
+				} else {
+					stName = readU32(symOff);
+					stValue = readU32(symOff + 4);
+					stSize = readU32(symOff + 8);
+					stInfo = this.fileBuffer[symOff + 12];
+					stOther = this.fileBuffer[symOff + 13];
+					stShndx = readU16(symOff + 14);
+				}
+
+				let symName = '';
+				const nameOff = strTabSec.offset + stName;
+				if (nameOff < this.fileBuffer.length) {
+					for (let j = nameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+						symName += String.fromCharCode(this.fileBuffer[j]);
+						if (symName.length > 256) { break; }
+					}
+				}
+				if (symName.length === 0 && i === 0) { continue; } // skip null symbol
+
+				const stBind = stInfo >> 4;
+				const stType = stInfo & 0xF;
+				const stVis = stOther & 0x3;
+
+				const secName = (stShndx > 0 && stShndx < elfSections.length)
+					? elfSections[stShndx].name
+					: stShndx === 0 ? 'UND' : stShndx === 0xFFF1 ? 'ABS' : stShndx === 0xFFF2 ? 'COM' : `sec_${stShndx}`;
+
+				allSymbols.push({
+					name: symName || `sym_${i}`,
+					value: stValue,
+					size: stSize,
+					binding: STB_NAMES[stBind] || `BIND_${stBind}`,
+					type: STT_NAMES[stType] || (stType === 10 ? 'GNU_IFUNC' : `TYPE_${stType}`),
+					visibility: STV_NAMES[stVis] || `VIS_${stVis}`,
+					sectionIndex: stShndx,
+					sectionName: secName,
+					isImport: stShndx === 0 && (stBind === 1 || stBind === 2),
+					isExport: stShndx !== 0 && (stBind === 1 || stBind === 2) && stType === 2
+				});
+			}
+		}
+
+		// -- 3. All Relocations (human-readable) --
+		const allRelocations: ELFRelocationEntry[] = [];
+		for (const sec of elfSections) {
+			if (sec.type !== 4 && sec.type !== 9) { continue; } // SHT_RELA=4, SHT_REL=9
+			if (sec.entsize === 0 || sec.size === 0) { continue; }
+
+			const isRela = sec.type === 4;
+			const relEntSize = isRela ? (is64Bit ? 24 : 12) : (is64Bit ? 16 : 8);
+			const numRel = Math.min(Math.floor(sec.size / relEntSize), 65536);
+
+			// Find associated symtab + strtab
+			const relSymtab = elfSections[sec.link];
+			const relStrtab = relSymtab ? elfSections[relSymtab.link] : undefined;
+
+			for (let i = 0; i < numRel; i++) {
+				const relOff = sec.offset + i * relEntSize;
+				if (relOff + relEntSize > this.fileBuffer.length) { break; }
+
+				const rOffset = is64Bit ? Number(readU64(relOff)) : readU32(relOff);
+				const rInfo = is64Bit ? Number(readU64(relOff + 8)) : readU32(relOff + 4);
+				const rAddend = isRela ? (is64Bit ? Number(BigInt.asIntN(64, readU64(relOff + 16))) : readU32(relOff + 8)) : 0;
+
+				const symIdx = is64Bit ? Math.trunc(rInfo / 0x100000000) : (rInfo >> 8);
+				const relType = is64Bit ? (rInfo & 0xFFFFFFFF) : (rInfo & 0xFF);
+
+				// Resolve symbol name
+				let symName = '';
+				if (relSymtab && relStrtab) {
+					const symEntSz = is64Bit ? 24 : 16;
+					const sOff = relSymtab.offset + symIdx * symEntSz;
+					if (sOff + symEntSz <= this.fileBuffer.length) {
+						const sName = readU32(sOff);
+						const sNameOff = relStrtab.offset + sName;
+						if (sNameOff < this.fileBuffer.length) {
+							for (let j = sNameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+								symName += String.fromCharCode(this.fileBuffer[j]);
+								if (symName.length > 256) { break; }
+							}
+						}
+					}
+				}
+
+				allRelocations.push({
+					offset: rOffset,
+					type: relType,
+					typeName: relocTypeNames[relType] || `REL_${relType}`,
+					symbolName: symName || `sym_${symIdx}`,
+					addend: rAddend,
+					sectionName: sec.name
+				});
+			}
+		}
+
+		// -- 4. Dynamic Entries --
+		const dynamicEntries: ELFDynamicEntry[] = [];
+		const neededLibs: string[] = [];
+		let soname: string | undefined;
+		for (const sec of elfSections) {
+			if (sec.type !== 6) { continue; } // SHT_DYNAMIC
+			const dynStrSec = elfSections[sec.link];
+			const entrySize = is64Bit ? 16 : 8;
+			const numEntries = Math.floor(sec.size / entrySize);
+
+			for (let i = 0; i < numEntries; i++) {
+				const entOff = sec.offset + i * entrySize;
+				if (entOff + entrySize > this.fileBuffer.length) { break; }
+
+				const dTag = is64Bit ? Number(readU64(entOff)) : readU32(entOff);
+				const dVal = is64Bit ? Number(readU64(entOff + 8)) : readU32(entOff + 4);
+
+				if (dTag === 0) { break; } // DT_NULL
+
+				const entry: ELFDynamicEntry = {
+					tag: dTag,
+					tagName: DT_NAMES[dTag] || `DT_0x${dTag.toString(16)}`,
+					value: dVal
+				};
+
+				// Resolve string values for DT_NEEDED, DT_SONAME, DT_RPATH, DT_RUNPATH
+				if (dynStrSec && (dTag === 1 || dTag === 14 || dTag === 15 || dTag === 29)) {
+					let str = '';
+					const sOff = dynStrSec.offset + dVal;
+					if (sOff < this.fileBuffer.length) {
+						for (let j = sOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+							str += String.fromCharCode(this.fileBuffer[j]);
+							if (str.length > 256) { break; }
+						}
+					}
+					entry.stringValue = str;
+
+					if (dTag === 1 && str) { neededLibs.push(str); }
+					if (dTag === 14 && str) { soname = str; }
+				}
+
+				dynamicEntries.push(entry);
+			}
+		}
+
+		// -- 5. .modinfo parsing for kernel modules (.ko) --
+		let moduleInfo: ELFModuleInfo | undefined;
+		if (eType === 1) {
+			const modinfoSec = elfSections.find(s => s.name === '.modinfo');
+			if (modinfoSec && modinfoSec.size > 0 && modinfoSec.offset + modinfoSec.size <= this.fileBuffer.length) {
+				moduleInfo = {};
+				const parmDescs: Array<{ name: string; description: string }> = [];
+
+				// .modinfo is a sequence of null-terminated "key=value" strings
+				let pos = modinfoSec.offset;
+				const end = modinfoSec.offset + modinfoSec.size;
+				while (pos < end) {
+					// Skip null bytes between entries
+					while (pos < end && this.fileBuffer[pos] === 0) { pos++; }
+					if (pos >= end) { break; }
+
+					let entry = '';
+					while (pos < end && this.fileBuffer[pos] !== 0) {
+						entry += String.fromCharCode(this.fileBuffer[pos]);
+						pos++;
+						if (entry.length > 1024) { break; }
+					}
+
+					const eq = entry.indexOf('=');
+					if (eq <= 0) { continue; }
+					const key = entry.substring(0, eq);
+					const val = entry.substring(eq + 1);
+
+					switch (key) {
+						case 'name': moduleInfo.name = val; break;
+						case 'version': moduleInfo.version = val; break;
+						case 'description': moduleInfo.description = val; break;
+						case 'author': moduleInfo.author = val; break;
+						case 'license': moduleInfo.license = val; break;
+						case 'srcversion': moduleInfo.srcversion = val; break;
+						case 'vermagic': moduleInfo.vermagic = val; break;
+						case 'intree':
+							moduleInfo.intree = val === 'Y';
+							break;
+						case 'retpoline':
+							moduleInfo.retpoline = val === 'Y';
+							break;
+						case 'depends':
+							moduleInfo.depends = val.length > 0 ? val.split(',').filter(s => s.length > 0) : [];
+							break;
+						case 'parmtype': break; // skip, we use parm
+						case 'parm': {
+							const colonIdx = val.indexOf(':');
+							if (colonIdx > 0) {
+								parmDescs.push({ name: val.substring(0, colonIdx), description: val.substring(colonIdx + 1) });
+							}
+							break;
+						}
+					}
+				}
+
+				if (parmDescs.length > 0) {
+					moduleInfo.parmDescriptions = parmDescs;
+				}
+
+				// If empty, discard
+				if (!moduleInfo.name && !moduleInfo.license && !moduleInfo.vermagic) {
+					moduleInfo = undefined;
+				}
+			}
+		}
+
+		// -- Store the complete analysis --
+		this.elfAnalysis = {
+			programHeaders,
+			symbols: allSymbols,
+			relocations: allRelocations,
+			dynamicEntries,
+			moduleInfo,
+			neededLibraries: neededLibs,
+			soname,
+			interpreter: interpPath,
+			elfType: ELF_TYPE_NAMES[eType] || `ET_${eType}`,
+			elfTypeValue: eType
+		};
 	}
 
 	private parseRawFile(): void {
@@ -1951,7 +3151,7 @@ export class DisassemblerEngine {
 		for (const inst of funcInstructions) {
 			if (inst.isCall && inst.targetAddress && this.functions.size < this.maxFunctions) {
 				func.callees.push(inst.targetAddress);
-				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'call' });
+				this.addXRef({ from: inst.address, to: inst.targetAddress, type: 'call' });
 
 				// Track caller in target function
 				const target = this.functions.get(inst.targetAddress);
@@ -1968,7 +3168,7 @@ export class DisassemblerEngine {
 
 			// Record jump xrefs and follow unconditional jump targets as new functions
 			if (inst.isJump && inst.targetAddress) {
-				this.xrefs.push({ from: inst.address, to: inst.targetAddress, type: 'jump' });
+				this.addXRef({ from: inst.address, to: inst.targetAddress, type: 'jump' });
 
 				// Follow unconditional jumps whose targets are outside this function
 				// (trampolines, tail calls, thunks) — treat target as a new function
@@ -2101,8 +3301,80 @@ export class DisassemblerEngine {
 				}
 			} else {
 				// x86/x64: Variable-length instructions
+
+				// v3.7.4: Helper to measure multi-byte NOP size (FIX-015 ftrace preamble)
+				const nopSize = (buf: Buffer, pos: number, end: number): number => {
+					if (pos >= end) { return 0; }
+					if (buf[pos] === 0x90) { return 1; } // single-byte NOP
+					if (buf[pos] === 0x0F && pos + 1 < end && buf[pos + 1] === 0x1F) {
+						// Multi-byte NOP: 0F 1F /0 (3-9 bytes depending on ModRM + displacement)
+						if (pos + 2 < end && buf[pos + 2] === 0x00) { return 3; } // 0F 1F 00
+						if (pos + 3 < end && buf[pos + 2] === 0x40 && buf[pos + 3] === 0x00) { return 4; } // 0F 1F 40 00
+						if (pos + 4 < end && buf[pos + 2] === 0x44 && buf[pos + 3] === 0x00 && buf[pos + 4] === 0x00) { return 5; } // 0F 1F 44 00 00
+						return 3; // default 3-byte NOP
+					}
+					if (buf[pos] === 0x66 && pos + 1 < end && buf[pos + 1] === 0x0F && pos + 2 < end && buf[pos + 2] === 0x1F) {
+						// 66 0F 1F ... (4-9 byte NOP with operand size prefix)
+						if (pos + 3 < end && buf[pos + 3] === 0x44) { return 5; } // 66 0F 1F 44 00
+						if (pos + 3 < end && buf[pos + 3] === 0x84) { return 8; } // 66 0F 1F 84 00 00 00 00
+						return 4;
+					}
+					return 0; // not a NOP
+				};
+
 				for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off++) {
 					const byte = this.fileBuffer[off];
+
+					// v3.7.4: Detect ftrace __pfx_ NOP sled → skip to endbr64/real prologue (FIX-015)
+					// Pattern: (NOP){8,32} [endbr64] [call __fentry__] push rbp
+					if (byte === 0x0F && off + 1 < secEnd && this.fileBuffer[off + 1] === 0x1F) {
+						// Potential multi-byte NOP sled start — measure total length
+						let nopEnd = off;
+						let nopBytes = 0;
+						while (nopEnd < secEnd) {
+							const ns = nopSize(this.fileBuffer, nopEnd, secEnd);
+							if (ns === 0) { break; }
+							nopEnd += ns;
+							nopBytes += ns;
+						}
+						if (nopBytes >= 8 && nopEnd + 4 <= secEnd) {
+							// Check for endbr64 (F3 0F 1E FA) at end of NOP sled
+							if (this.fileBuffer[nopEnd] === 0xF3 && this.fileBuffer[nopEnd + 1] === 0x0F &&
+								this.fileBuffer[nopEnd + 2] === 0x1E && this.fileBuffer[nopEnd + 3] === 0xFA) {
+								// Register function at endbr64, not at __pfx_ NOP sled
+								const addr = this.sectionOffsetToAddress(nopEnd, section);
+								if (addr > 0 && !this.functions.has(addr)) {
+									await this.analyzeFunction(addr);
+								}
+								off = nopEnd + 3; // skip past endbr64
+								continue;
+							}
+							// No endbr64 — check for push rbp directly after sled
+							if (this.fileBuffer[nopEnd] === 0x55) {
+								const addr = this.sectionOffsetToAddress(nopEnd, section);
+								if (addr > 0 && !this.functions.has(addr)) {
+									await this.analyzeFunction(addr);
+								}
+								off = nopEnd;
+								continue;
+							}
+						}
+					}
+
+					// v3.7.4: endbr64 (F3 0F 1E FA) as function start — CET-enabled binaries
+					if (byte === 0xF3 && off + 3 < secEnd &&
+						this.fileBuffer[off + 1] === 0x0F &&
+						this.fileBuffer[off + 2] === 0x1E &&
+						this.fileBuffer[off + 3] === 0xFA) {
+						// endbr64 followed by push rbp or sub rsp
+						if (off + 4 < secEnd && (this.fileBuffer[off + 4] === 0x55 || this.fileBuffer[off + 4] === 0x48)) {
+							const addr = this.sectionOffsetToAddress(off, section);
+							if (addr > 0 && !this.functions.has(addr)) {
+								await this.analyzeFunction(addr);
+							}
+							continue;
+						}
+					}
 
 					// x64: push rbp (0x55) followed by mov rbp, rsp (0x48 0x89 0xE5)
 					if (byte === 0x55 && off + 3 < secEnd) {
@@ -2165,6 +3437,12 @@ export class DisassemblerEngine {
 		return this.exports;
 	}
 
+	/** v3.7.4 FIX-011: Get .rela.text relocations for ET_REL files.
+	 *  Returns Map<textOffset, {name, type, addend}> */
+	getTextRelocations(): Map<number, { name: string; type: number; addend: number }> {
+		return this.textRelocations;
+	}
+
 	getFileName(): string {
 		return this.currentFile ? path.basename(this.currentFile) : 'Unknown';
 	}
@@ -2174,7 +3452,7 @@ export class DisassemblerEngine {
 	}
 
 	async findCrossReferences(address: number): Promise<XRef[]> {
-		return this.xrefs.filter(x => x.to === address);
+		return this.xrefs.get(address) ?? [];
 	}
 
 	async searchStringReferences(query: string): Promise<StringReference[]> {
@@ -2204,7 +3482,7 @@ export class DisassemblerEngine {
 						if (!strRef.references.includes(instrAddr)) {
 							strRef.references.push(instrAddr);
 						}
-						this.xrefs.push({ from: instrAddr, to: strAddr, type: 'string' });
+						this.addXRef({ from: instrAddr, to: strAddr, type: 'string' });
 					}
 				}
 			}
@@ -2258,10 +3536,52 @@ export class DisassemblerEngine {
 		if (func) {
 			func.name = name;
 		}
+		// v3.7.4: Persist to session store
+		this.sessionStore?.renameFunction(`0x${address.toString(16)}`, name);
 	}
 
 	getFunctionName(address: number): string | undefined {
+		// v3.7.4: Check session store first for user-defined names
+		const sessionName = this.sessionStore?.getFunction(`0x${address.toString(16)}`)?.name;
+		if (sessionName) {
+			return sessionName;
+		}
 		return this.functions.get(address)?.name;
+	}
+
+	// v3.7.4: Session-backed rename/retype for variables, fields, comments, bookmarks
+
+	renameVariable(funcAddress: number, originalName: string, newName: string): void {
+		this.sessionStore?.renameVariable(`0x${funcAddress.toString(16)}`, originalName, newName);
+	}
+
+	retypeVariable(funcAddress: number, originalName: string, newType: string): void {
+		this.sessionStore?.retypeVariable(`0x${funcAddress.toString(16)}`, originalName, newType);
+	}
+
+	retypeFunction(address: number, returnType: string): void {
+		this.sessionStore?.retypeFunction(`0x${address.toString(16)}`, returnType);
+	}
+
+	setSessionComment(address: number, comment: string): void {
+		this.comments.set(address, comment);
+		this.sessionStore?.setComment(`0x${address.toString(16)}`, comment);
+	}
+
+	setBookmark(address: number, label: string): void {
+		this.sessionStore?.setBookmark(`0x${address.toString(16)}`, label);
+	}
+
+	removeBookmark(address: number): void {
+		this.sessionStore?.removeBookmark(`0x${address.toString(16)}`);
+	}
+
+	getAllBookmarks(): Array<{ address: string; label: string; updated_at: string }> {
+		return this.sessionStore?.getAllBookmarks() ?? [];
+	}
+
+	getSessionStore(): SessionStore | undefined {
+		return this.sessionStore;
 	}
 
 	getFunctions(): Function[] {
@@ -2294,15 +3614,15 @@ export class DisassemblerEngine {
 	 * First checks already-discovered functions, then falls back to
 	 * native prologue scanning if available (FEAT-CAP-010 / FEAT-DISASM-004).
 	 */
-	async findFunctionStartForAddress(address: number): Promise<number | undefined> {
-		// 1. Check if address is already a known function start
-		if (this.functions.has(address)) {
+	async findFunctionStartForAddress(address: number, forceProbe = false): Promise<number | undefined> {
+		// 1. Check if address is already a known function start (skip when forceProbe)
+		if (!forceProbe && this.functions.has(address)) {
 			return address;
 		}
 
-		// 2. Check if address falls within a known function's range
-		for (const [funcAddr, func] of this.functions) {
-			if (address >= func.address && address < func.endAddress) {
+		// 2. Check if address falls within a known function's range (ALWAYS, even forceProbe)
+		for (const [, func] of this.functions) {
+			if (address > func.address && address < func.endAddress) {
 				return func.address;
 			}
 		}
@@ -2335,7 +3655,174 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// 4. v3.7.4: Capstone backward disassembly — try disassembling from addr-N
+		//    to find which instruction sequence lands exactly on target address.
+		//    This works for dense code (D lang, optimized) without CC/90 padding.
+		if (this.capstone && this.capstoneInitialized && this.fileBuffer) {
+			for (let delta = 1; delta <= 16; delta++) {
+				const tryAddr = address - delta;
+				const tryOffset = this.addressToOffset(tryAddr);
+				if (tryOffset < 0) { continue; }
+				const windowEnd = Math.min(tryOffset + delta + 64, this.fileBuffer.length);
+				const window = this.fileBuffer.subarray(tryOffset, windowEnd);
+				try {
+					const insns = await this.capstone.disassemble(window, tryAddr, 32);
+					if (insns.length < 3) { continue; } // need >= 3 valid instructions
+
+					// Check if any instruction boundary lands on target
+					let validChain = 0;
+					for (const insn of insns) {
+						validChain++;
+						const endAddr = insn.address + insn.size;
+						if (endAddr === address && validChain >= 3) {
+							// Found valid instruction chain ending at target.
+							// Now scan backwards from tryAddr for a prologue to find the real function start.
+							const scanBack = Math.min(tryAddr - this.baseAddress, 0x2000);
+							const probeStart = tryAddr - scanBack;
+							const probeOffset = this.addressToOffset(probeStart);
+							if (probeOffset >= 0) {
+								// Look for nearest ret+prologue or padding+prologue before tryAddr
+								for (let scan = this.addressToOffset(tryAddr) - 1; scan >= probeOffset; scan--) {
+									const sb = this.fileBuffer![scan];
+									if (sb === 0xC3 || sb === 0xCC) {
+										let funcOff = scan + 1;
+										while (funcOff < this.addressToOffset(tryAddr) && (this.fileBuffer![funcOff] === 0xCC || this.fileBuffer![funcOff] === 0x90)) {
+											funcOff++;
+										}
+										const fb = this.fileBuffer![funcOff];
+										if (fb === 0x55 || fb === 0x53 || fb === 0x48 || fb === 0x4C ||
+											fb === 0x56 || fb === 0x57 || fb === 0x40 || fb === 0x41 ||
+											fb === 0xF3) { // F3 = endbr64 prefix
+											return this.offsetToAddress(funcOff);
+										}
+										break;
+									}
+								}
+							}
+							// If no prologue found, the tryAddr itself might be close to function start
+							return tryAddr;
+						}
+						if (endAddr > address) { break; } // overshot
+					}
+				} catch {
+					// Disassembly failed at this offset — try next
+				}
+			}
+		}
+
+		// 5. Byte-level boundary scanner: look for function boundaries
+		//    scanning backwards from the target address.
+		//    Detects: INT3 padding (CC), NOP padding (90), ret+prologue (C3+XX)
+		if (this.fileBuffer) {
+			const maxScan = 0x10000; // 64KB back
+			const targetOffset = this.addressToOffset(address);
+
+			const isPrologue = (b: number) =>
+				b === 0x48 || b === 0x4C || // REX.W / REX.WR
+				b === 0x40 || b === 0x41 || // REX / REX.B
+				b === 0x55 || b === 0x53 || // push rbp / push rbx
+				b === 0x56 || b === 0x57 || // push rsi / push rdi
+				b === 0x44 || b === 0x45 || // REX.R / REX.RB
+				b === 0x50 || b === 0x51 || // push rax / push rcx
+				b === 0x52;                 // push rdx
+
+			// v3.7.4: Extended multi-byte prologue recognition
+			const isExtendedPrologue = (off: number): boolean => {
+				if (off + 5 > this.fileBuffer!.length) { return false; }
+				const buf = this.fileBuffer!;
+				// mov [rsp+8], rcx (fastcall save): 48 89 4C 24 08
+				if (buf[off] === 0x48 && buf[off + 1] === 0x89 && buf[off + 2] === 0x4C &&
+					buf[off + 3] === 0x24 && buf[off + 4] === 0x08) { return true; }
+				// endbr64: F3 0F 1E FA
+				if (off + 4 <= this.fileBuffer!.length &&
+					buf[off] === 0xF3 && buf[off + 1] === 0x0F && buf[off + 2] === 0x1E &&
+					buf[off + 3] === 0xFA) { return true; }
+				// mov [rsp+10h], rdx (fastcall save 2nd arg): 48 89 54 24 10
+				if (buf[off] === 0x48 && buf[off + 1] === 0x89 && buf[off + 2] === 0x54 &&
+					buf[off + 3] === 0x24 && buf[off + 4] === 0x10) { return true; }
+				return false;
+			};
+
+			const isPadding = (b: number) => b === 0xCC || b === 0x90;
+
+			if (targetOffset >= 2) {
+				const scanEnd = Math.max(0, targetOffset - maxScan);
+				for (let off = targetOffset - 1; off > scanEnd; off--) {
+					const b = this.fileBuffer[off];
+
+					// Pattern 1: 2+ padding bytes (CC or 90)
+					if (isPadding(b) && off > 0 && isPadding(this.fileBuffer[off - 1])) {
+						let funcOff = off + 1;
+						while (funcOff < targetOffset && isPadding(this.fileBuffer[funcOff])) {
+							funcOff++;
+						}
+						if (funcOff >= targetOffset) { break; } // target is IN padding
+						if (isPrologue(this.fileBuffer[funcOff]) || isExtendedPrologue(funcOff)) {
+							const funcAddr = this.offsetToAddress(funcOff);
+							if (funcAddr < address) { return funcAddr; }
+						}
+						break; // only check nearest padding boundary
+					}
+
+					// Pattern 2: ret (C3) followed by prologue or padding+prologue
+					if (b === 0xC3 && off + 1 < targetOffset) {
+						let funcOff = off + 1;
+						// Skip optional padding after ret
+						while (funcOff < targetOffset && isPadding(this.fileBuffer[funcOff])) {
+							funcOff++;
+						}
+						if (funcOff >= targetOffset) { continue; }
+						if (isPrologue(this.fileBuffer[funcOff]) || isExtendedPrologue(funcOff)) {
+							const funcAddr = this.offsetToAddress(funcOff);
+							if (funcAddr < address) { return funcAddr; }
+						}
+					}
+				}
+			}
+		}
+
 		return undefined;
+	}
+
+	/**
+	 * v3.7.4: IMP-001 — Verify that an address falls on an instruction boundary.
+	 * Disassembles backwards from a known good region and checks if any instruction
+	 * boundary matches the target address exactly.
+	 * @returns aligned=true if on boundary, or suggestedAddress pointing to the nearest valid boundary.
+	 */
+	async verifyInstructionAlignment(targetAddress: number, lookbackBytes: number = 64): Promise<{
+		aligned: boolean;
+		suggestedAddress?: number;
+	}> {
+		if (!this.capstone || !this.capstoneInitialized || !this.fileBuffer) {
+			return { aligned: true }; // can't verify, assume OK
+		}
+
+		const startAddr = Math.max(this.baseAddress, targetAddress - lookbackBytes);
+		const offset = this.addressToOffset(startAddr);
+		const endOffset = this.addressToOffset(targetAddress + 16);
+		if (offset < 0 || endOffset < 0 || endOffset <= offset) {
+			return { aligned: true };
+		}
+
+		try {
+			const buf = this.fileBuffer.subarray(offset, endOffset);
+			const insns = await this.capstone.disassemble(buf, startAddr, 1000);
+
+			for (const insn of insns) {
+				if (insn.address === targetAddress) {
+					return { aligned: true };
+				}
+				if (insn.address > targetAddress) {
+					// Previous instruction spans over target — mid-instruction
+					return { aligned: false, suggestedAddress: insn.address };
+				}
+			}
+		} catch {
+			// Disassembly failed — assume aligned
+		}
+
+		return { aligned: true };
 	}
 
 	getArchitecture(): ArchitectureConfig {
@@ -2372,6 +3859,11 @@ export class DisassemblerEngine {
 	 * Extract raw bytes from the loaded file at the given virtual address.
 	 * Returns undefined if no file is loaded or the address is out of bounds.
 	 */
+	/** v3.7.5 FIX-022c: Expose Capstone for backtrack validation in liftToIR */
+	getCapstone(): CapstoneWrapper | undefined {
+		return this.capstoneInitialized ? this.capstone : undefined;
+	}
+
 	getBytes(address: number, size: number): Buffer | undefined {
 		if (!this.fileBuffer) {
 			return undefined;
@@ -2392,7 +3884,20 @@ export class DisassemblerEngine {
 		}
 
 		// For ELF, use section mapping
+		// v3.7.5 FIX-018: For ET_REL files, multiple sections have virtualAddress=0
+		// (e.g. __bug_table, .text, .rodata all start at VA 0). The first match wins,
+		// but __bug_table often comes before .text in the section list. Prioritize
+		// executable (.text) sections to avoid reading from data/debug sections.
 		if (this.isELFFile()) {
+			// Pass 1: prefer code/executable sections
+			for (const section of this.sections) {
+				if (address >= section.virtualAddress &&
+					address < section.virtualAddress + section.virtualSize &&
+					(section.isCode || section.isExecutable)) {
+					return section.rawAddress + (address - section.virtualAddress);
+				}
+			}
+			// Pass 2: any matching section (fallback for data addresses)
 			for (const section of this.sections) {
 				if (address >= section.virtualAddress &&
 					address < section.virtualAddress + section.virtualSize) {

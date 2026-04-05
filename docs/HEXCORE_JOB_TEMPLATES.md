@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.7.1
+# HexCore Job Templates — v3.7.4
 
 Safe default `.hexcore_job.json` templates for users and AI agents.
 
@@ -270,11 +270,11 @@ Full malware triage with PE/ELF analysis, Base64 detection, YARA threat detectio
     { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
     { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" }, "timeoutMs": 90000 },
     { "cmd": "hexcore.entropy.analyze", "timeoutMs": 90000 },
-    { "cmd": "hexcore.peanalyzer.analyze", "timeoutMs": 120000, "continueOnError": true },
-    { "cmd": "hexcore.elfanalyzer.analyze", "timeoutMs": 120000, "continueOnError": true },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "timeoutMs": 120000, "continueOnError": true },
+    { "cmd": "hexcore.disasm.analyzeELFHeadless", "timeoutMs": 120000, "continueOnError": true },
     { "cmd": "hexcore.strings.extract", "args": { "minLength": 4, "maxStrings": 100000 }, "timeoutMs": 180000 },
     { "cmd": "hexcore.strings.extractAdvanced", "timeoutMs": 180000 },
-    { "cmd": "hexcore.base64.decodeHeadless", "timeoutMs": 90000 },
+    { "cmd": "hexcore.base64.decodeHeadless", "args": { "minConfidence": 50 }, "timeoutMs": 90000 },
     { "cmd": "hexcore.hexview.dumpHeadless", "args": { "offset": 0, "size": 512 }, "output": { "path": "header-dump.json" }, "timeoutMs": 60000 },
     { "cmd": "hexcore.hexview.searchHeadless", "args": { "pattern": "4D5A" }, "output": { "path": "mz-search.json" }, "timeoutMs": 120000 },
     { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
@@ -284,7 +284,7 @@ Full malware triage with PE/ELF analysis, Base64 detection, YARA threat detectio
 }
 ```
 
-**Note:** Both `peanalyzer.analyze` and `elfanalyzer.analyze` are included with `continueOnError: true` — the wrong format will fail gracefully and the pipeline continues.
+**Note:** Both `analyzePEHeadless` and `analyzeELFHeadless` are included with `continueOnError: true` — the wrong format will fail gracefully and the pipeline continues. These v3.7.5 commands replace the legacy `peanalyzer.analyze` / `elfanalyzer.analyze` with typed imports (180+ Windows API signatures), full symbol tables, relocations, and security indicators.
 
 ---
 
@@ -817,3 +817,177 @@ Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler usi
 - This eliminates hardcoded paths and makes the template portable across machines and `outDir` values.
 - `size` (bytes) is used instead of `count` (instructions) when the region boundary is known; both are accepted by `liftToIR`.
 - `continueOnError: true` on the decompile step ensures `hexcore-pipeline.status.json` is written even if Helix returns a partial result.
+
+---
+
+## v3.7.4 Templates
+
+New templates covering section-filtered strings, session-aware decompilation, ELF kernel module analysis, and rename/retype workflows.
+
+---
+
+## Template: Section-Filtered String Extraction (v3.7.4)
+
+Extract strings only from `.rdata` and `.data` sections — eliminates 99% noise from `.text` on large binaries.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\filtered-strings",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.extractStrings",
+      "args": { "sections": [".rdata", ".data"], "minLength": 5, "maxStrings": 50000 },
+      "output": { "path": "strings-rdata.json" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `sections` accepts PE section names (`.rdata`, `.data`, `.rsrc`) or ELF section names (`.rodata`, `.data`).
+- Without `sections`, defaults to priority scan: `.rdata` (60%) > `.data` (20%) > `.rsrc` (10%) > `.text` (10%).
+- `minLength` default is now 6 (was 4 in v3.7.3).
+
+---
+
+## Template: Session-Aware Decompilation (v3.7.4)
+
+Decompile a function with analyst-defined renames and retypes applied to the output.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\session-decompile",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 2500, "forceReload": true },
+      "timeoutMs": 300000,
+      "expectOutput": false
+    },
+    {
+      "cmd": "hexcore.disasm.renameFunction",
+      "args": { "address": "0x14003EDD0", "name": "ValidateFlag" },
+      "timeoutMs": 10000
+    },
+    {
+      "cmd": "hexcore.disasm.retypeVariable",
+      "args": { "funcAddress": "0x14003EDD0", "variableName": "param_1", "newType": "int32_t" },
+      "timeoutMs": 10000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "0x14003EDD0", "count": 500, "autoBacktrack": true },
+      "output": { "path": "ValidateFlag.helix.c" },
+      "timeoutMs": 300000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `renameFunction` and `retypeVariable` persist to `.hexcore_session.db` — surviving across sessions.
+- `helix.decompile` automatically reads the session DB and applies renames/retypes to the output.
+- Renames propagate to all call sites in subsequent decompilations.
+
+---
+
+## Template: ELF Kernel Module Analysis (v3.7.4)
+
+Analyze Linux kernel modules (`.ko`) with ELF relocation processing and ftrace preamble handling.
+
+```json
+{
+  "file": "C:\\path\\to\\driver.ko",
+  "outDir": "C:\\path\\to\\hexcore-reports\\kernel-module",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    { "cmd": "hexcore.elfanalyzer.analyze", "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 5000, "maxFunctionSize": 65536, "forceReload": true },
+      "timeoutMs": 600000
+    },
+    {
+      "cmd": "hexcore.disasm.rttiScanHeadless",
+      "output": { "path": "rtti-scan.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.disasm.extractStrings",
+      "args": { "sections": [".rodata"], "minLength": 5, "maxStrings": 50000 },
+      "output": { "path": "strings-rodata.json" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": { "queries": ["ioctl", "copy_from_user", "copy_to_user", "mutex_lock", "kmalloc", "kfree", "printk"] },
+      "output": { "path": "kernel-api-xrefs.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "entry", "count": 500, "autoBacktrack": true },
+      "output": { "path": "entry-decompiled.helix.c" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "KERNEL_MODULE_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `.ko` files are ELF ET_REL (relocatable). HexCore processes `.rela.text` relocations automatically — external kernel API calls appear with real names in Helix output.
+- ftrace preambles (`-fpatchable-function-entry=16,16`) are auto-skipped in `analyzeAll`.
+- `extractStrings` with `sections: [".rodata"]` targets the read-only data section (ELF equivalent of PE `.rdata`).
+- Batch `queries` in `searchStringHeadless` finds all kernel API cross-references in one pass.
+- A `[WARN] Target is a relocatable ELF (ET_REL)` will appear in pipeline log.
+
+---
+
+## Template: Rename/Retype Workflow (v3.7.4)
+
+Batch rename and retype functions and variables via pipeline, then decompile with annotations applied.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\annotated",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 2500, "forceReload": true },
+      "timeoutMs": 300000,
+      "expectOutput": false
+    },
+    { "cmd": "hexcore.disasm.renameFunction", "args": { "address": "0x140229680", "name": "HealthComponent_RPC" }, "timeoutMs": 10000 },
+    { "cmd": "hexcore.disasm.renameFunction", "args": { "address": "0x1409BF3E0", "name": "SetHealth" }, "timeoutMs": 10000 },
+    { "cmd": "hexcore.disasm.renameFunction", "args": { "address": "0x140859DE8", "name": "PlayerAwareness_UpdatePosition" }, "timeoutMs": 10000 },
+    { "cmd": "hexcore.disasm.retypeVariable", "args": { "funcAddress": "0x140859DE8", "variableName": "r14", "newType": "GlobalWorldContext*" }, "timeoutMs": 10000 },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "0x140859DE8", "count": 500, "autoBacktrack": true },
+      "output": { "path": "UpdatePosition-annotated.helix.c" },
+      "timeoutMs": 300000
+    }
+  ]
+}
+```
+
+**Notes:**
+- All renames/retypes persist in `.hexcore_session.db` — no need to re-apply next session.
+- `helix.decompile` output reflects annotations: `sub_140859DE8` → `PlayerAwareness_UpdatePosition`, `int64_t r14` → `GlobalWorldContext* r14`.
+- Session DB is auto-created next to the binary on first annotation command.

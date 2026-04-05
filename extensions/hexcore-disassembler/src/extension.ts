@@ -11,7 +11,8 @@ import { StringRefProvider } from './stringRefTree';
 import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
-import { DisassemblerEngine, ImportLibrary, Instruction } from './disassemblerEngine';
+import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis } from './disassemblerEngine';
+import { formatApiSignatureCompact, CATEGORY_LABELS } from './peApiDatabase';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
 import {
@@ -1060,6 +1061,130 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
+	// v3.7.4: Rename variable (interactive)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.renameVariable', async (arg?: any) => {
+			// Headless mode: { funcAddress|funcAddr: string|number, originalName: string, newName: string }
+			if (arg && typeof arg === 'object' && ('funcAddress' in arg || 'funcAddr' in arg) && 'originalName' in arg && 'newName' in arg) {
+				const rawAddr = arg.funcAddress ?? arg.funcAddr;
+				const funcAddr = typeof rawAddr === 'string' ? parseInt(rawAddr, 16) : rawAddr;
+				engine.renameVariable(funcAddr, arg.originalName, arg.newName);
+				return { success: true };
+			}
+			// Interactive mode
+			const addr = disasmEditorProvider.getCurrentFunctionAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No function selected');
+				return;
+			}
+			const originalName = await vscode.window.showInputBox({ prompt: 'Original variable name (e.g. param_1)' });
+			if (!originalName) { return; }
+			const newName = await vscode.window.showInputBox({ prompt: `Rename "${originalName}" to:`, value: originalName });
+			if (newName && newName !== originalName) {
+				engine.renameVariable(addr, originalName, newName);
+				disasmEditorProvider.refresh();
+				vscode.window.showInformationMessage(`Renamed "${originalName}" → "${newName}"`);
+			}
+		})
+	);
+
+	// v3.7.4: Retype variable (interactive)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.retypeVariable', async (arg?: any) => {
+			if (arg && typeof arg === 'object' && ('funcAddress' in arg || 'funcAddr' in arg) && 'originalName' in arg && 'newType' in arg) {
+				const rawAddr = arg.funcAddress ?? arg.funcAddr;
+				const funcAddr = typeof rawAddr === 'string' ? parseInt(rawAddr, 16) : rawAddr;
+				engine.retypeVariable(funcAddr, arg.originalName, arg.newType);
+				return { success: true };
+			}
+			const addr = disasmEditorProvider.getCurrentFunctionAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No function selected');
+				return;
+			}
+			const originalName = await vscode.window.showInputBox({ prompt: 'Variable name to retype' });
+			if (!originalName) { return; }
+			const newType = await vscode.window.showInputBox({ prompt: `New type for "${originalName}":`, value: 'int64_t' });
+			if (newType) {
+				engine.retypeVariable(addr, originalName, newType);
+				disasmEditorProvider.refresh();
+				vscode.window.showInformationMessage(`Retyped "${originalName}" → ${newType}`);
+			}
+		})
+	);
+
+	// v3.7.4: Retype function return type
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.retypeFunction', async (arg?: any) => {
+			if (arg && typeof arg === 'object' && 'address' in arg && 'returnType' in arg) {
+				const addr = typeof arg.address === 'string' ? parseInt(arg.address, 16) : arg.address;
+				engine.retypeFunction(addr, arg.returnType);
+				return { success: true };
+			}
+			const addr = arg?.address || disasmEditorProvider.getCurrentFunctionAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No function selected');
+				return;
+			}
+			const returnType = await vscode.window.showInputBox({ prompt: 'Function return type:', value: 'int' });
+			if (returnType) {
+				engine.retypeFunction(addr, returnType);
+				disasmEditorProvider.refresh();
+				vscode.window.showInformationMessage(`Return type → ${returnType}`);
+			}
+		})
+	);
+
+	// v3.7.4: Set/remove bookmark
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.setBookmark', async (arg?: any) => {
+			if (arg && typeof arg === 'object' && 'address' in arg && 'label' in arg) {
+				const addr = typeof arg.address === 'string' ? parseInt(arg.address, 16) : arg.address;
+				engine.setBookmark(addr, arg.label);
+				return { success: true };
+			}
+			const addr = disasmEditorProvider.getCurrentAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('No address selected');
+				return;
+			}
+			const label = await vscode.window.showInputBox({ prompt: 'Bookmark label:', value: `0x${addr.toString(16).toUpperCase()}` });
+			if (label) {
+				engine.setBookmark(addr, label);
+				vscode.window.showInformationMessage(`Bookmark set: ${label}`);
+			}
+		})
+	);
+
+	// v3.7.4: Get session DB path (for HQL integration + pipeline headless)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.getSessionDbPath', (arg?: unknown) => {
+			const store = engine.getSessionStore();
+			const dbPath = store?.getDbPath() ?? null;
+			const error = !store
+				? (!engine.isFileLoaded()
+					? 'No binary file loaded — session store not initialized'
+					: 'Session store unavailable (hexcore-better-sqlite3 may not be installed)')
+				: undefined;
+
+			const result: Record<string, unknown> = { dbPath };
+			if (error) {
+				result.error = error;
+			}
+
+			// Headless pipeline support: write result to output file
+			const options = (arg !== null && arg !== undefined && typeof arg === 'object') ? arg as Record<string, unknown> : {};
+			if (options.output) {
+				const outputPath = typeof options.output === 'string'
+					? options.output
+					: (options.output as { path: string }).path;
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf-8');
+			}
+
+			return result;
+		})
+	);
+
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.showCFG', async () => {
 			const addr = disasmEditorProvider.getCurrentFunctionAddress();
@@ -1431,6 +1556,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			let startAddress: number;
 			let size: number;
 			let functionName: string | undefined;
+			let didBacktrack = false;
+			let backtrackOriginalAddress: number | undefined;
 
 			// Resolve bytes: from headless options, selected function, or user input
 			if (isHeadless && options.file) {
@@ -1451,27 +1578,79 @@ export function activate(context: vscode.ExtensionContext): void {
 					?? parseAddressValue(options.startAddress as string | number | undefined)
 					?? engine.getBaseAddress();
 				// Auto-backtrack: if address is mid-function, find the real start (FEAT-DISASM-004 / BUG-HELIX-002)
+				backtrackOriginalAddress = startAddress;
 				if (options.autoBacktrack !== false) {
-					const funcStart = await engine.findFunctionStartForAddress(startAddress);
+					// v3.7.5 FIX-022: For PE files, try function table FIRST (forceProbe=false).
+					// Only fall back to byte-level probe for ET_REL (.ko) where the function
+					// table may have incorrect entries. forceProbe=true was causing regressions
+					// on PE64 (ROTTR) by backtracking into adjacent functions' prologues.
+					const isRelocatable = engine.getFileInfo()?.isRelocatable === true;
+					const funcStart = await engine.findFunctionStartForAddress(startAddress, isRelocatable);
 					if (funcStart !== undefined && funcStart !== startAddress) {
-						startAddress = funcStart;
+						// FIX-022c: Validate backtrack with Capstone linear sweep.
+						// Decode instructions from candidate to original address. If we hit
+						// a RET, INT3 padding, or decode failure before reaching the original,
+						// the candidate is a DIFFERENT function — discard the backtrack.
+						const dist = startAddress - funcStart;
+						if (dist > 0 && dist <= 4096) {
+							const valid = await validateBacktrackCandidate(engine, funcStart, startAddress);
+							if (valid) {
+								startAddress = funcStart;
+								didBacktrack = true;
+							} else {
+								console.log(`[HexCore] liftToIR FIX-022c: Backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} REJECTED (linear sweep found function boundary in ${dist}-byte gap)`);
+							}
+						} else if (dist > 4096) {
+							console.log(`[HexCore] liftToIR FIX-022c: Discarding backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} (${dist} bytes > 4096 limit)`);
+						}
 					}
 				}
 				if (typeof options.size === 'number') {
 					size = options.size;
 				} else if (typeof options.count === 'number') {
-					size = options.count * 15; // conservative upper bound for x64 instruction length
+					// v3.7.5 FIX: Use the larger of count*15 and the actual symbol size.
+					const countEstimate = options.count * 15;
+					const symbolSize = engine.getRecommendedLiftSize(startAddress, 0);
+					size = symbolSize > 0 ? Math.max(countEstimate, symbolSize) : countEstimate;
 				} else {
 					size = engine.getBufferSize();
 				}
 			} else if (isHeadless && options.functionAddress !== undefined) {
 				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
+				// Auto-backtrack: find real function start if address is mid-function
+				backtrackOriginalAddress = startAddress;
+				if (options.autoBacktrack !== false) {
+					// v3.7.5 FIX-022: forceProbe only for ET_REL (see address path above)
+					const isRelocatable2 = engine.getFileInfo()?.isRelocatable === true;
+					const funcStart = await engine.findFunctionStartForAddress(startAddress, isRelocatable2);
+					if (funcStart !== undefined && funcStart !== startAddress) {
+						const dist2 = startAddress - funcStart;
+						if (dist2 > 0 && dist2 <= 4096) {
+							const valid2 = await validateBacktrackCandidate(engine, funcStart, startAddress);
+							if (valid2) {
+								startAddress = funcStart;
+								didBacktrack = true;
+							} else {
+								console.log(`[HexCore] liftToIR FIX-022c: Backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} REJECTED (linear sweep found boundary in ${dist2}-byte gap)`);
+							}
+						} else if (dist2 > 4096) {
+							console.log(`[HexCore] liftToIR FIX-022c: Discarding backtrack (${dist2} bytes > 4096 limit)`);
+						}
+					}
+				}
 				const func = engine.getFunctionAt(startAddress);
 				if (func) {
 					size = func.endAddress - func.address;
 					functionName = func.name;
 				} else {
-					size = typeof options.size === 'number' ? options.size : 256;
+					// v3.7.5 FIX: Smart sizing — symbol table → count → 4096 (was 256)
+					if (typeof options.size === 'number') {
+						size = options.size;
+					} else if (typeof options.count === 'number') {
+						size = options.count * 15;
+					} else {
+						size = engine.getRecommendedLiftSize(startAddress, 4096);
+					}
 				}
 			} else {
 				// Interactive: ask user for address and size
@@ -1513,7 +1692,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			const bytes = engine.getBytes(startAddress, size);
+			let bytes = engine.getBytes(startAddress, size); // let: FIX-011 may reassign with patched buffer
 			if (!bytes || bytes.length === 0) {
 				const loadedFile = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
 				const base = engine.getBaseAddress();
@@ -1525,8 +1704,142 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
 			}
+
+			// v3.7.5 FIX-017: Skip CET endbr64 + ftrace __fentry__ preamble.
+			// Remill's amd64 semantics may not support endbr64 (F3 0F 1E FA),
+			// causing it to decode every byte as a 1-byte instruction (ADD/OR/XOR).
+			// Also skip `call __fentry__` (E8 00 00 00 00) which is a NOP sled
+			// patched by ftrace at runtime. Both appear at the start of Linux
+			// kernel module functions compiled with -fcf-protection and -pg.
+			{
+				const firstBytes = Array.from(bytes.subarray(0, Math.min(16, bytes.length))).map(b => b.toString(16).padStart(2, '0')).join(' ');
+				console.log(`[HexCore] liftToIR FIX-017 probe: addr=0x${startAddress.toString(16)} first16=[${firstBytes}] len=${bytes.length}`);
+				let skip = 0;
+				// endbr64: F3 0F 1E FA (4 bytes)
+				if (bytes.length >= skip + 4 &&
+					bytes[skip] === 0xF3 && bytes[skip + 1] === 0x0F &&
+					bytes[skip + 2] === 0x1E && bytes[skip + 3] === 0xFA) {
+					skip += 4;
+				}
+				// endbr32: F3 0F 1E FB (4 bytes)
+				else if (bytes.length >= skip + 4 &&
+					bytes[skip] === 0xF3 && bytes[skip + 1] === 0x0F &&
+					bytes[skip + 2] === 0x1E && bytes[skip + 3] === 0xFB) {
+					skip += 4;
+				}
+				// call __fentry__ / call +0 (ftrace NOP): E8 00 00 00 00 (5 bytes)
+				if (bytes.length >= skip + 5 &&
+					bytes[skip] === 0xE8 &&
+					bytes[skip + 1] === 0x00 && bytes[skip + 2] === 0x00 &&
+					bytes[skip + 3] === 0x00 && bytes[skip + 4] === 0x00) {
+					skip += 5;
+				}
+				// Multi-byte NOP sled (66 0F 1F 84 00 00 00 00 00 = 9-byte NOP)
+				if (bytes.length >= skip + 2 && bytes[skip] === 0x66 && bytes[skip + 1] === 0x0F) {
+					// Skip the NOP (variable length: 2-9 bytes)
+					const nopLens = [2, 3, 4, 5, 6, 7, 8, 9];
+					for (const len of nopLens) {
+						if (bytes.length >= skip + len && bytes[skip] === 0x66 && bytes[skip + 1] === 0x0F && bytes[skip + 2] === 0x1F) {
+							skip += len;
+							break;
+						}
+					}
+				}
+
+				if (skip > 0) {
+					console.log(`[HexCore] liftToIR FIX-017: Skipping ${skip}-byte CET/ftrace preamble at 0x${startAddress.toString(16)} (endbr64+__fentry__)`);
+					bytes = bytes.subarray(skip);
+					startAddress += skip;
+				}
+			}
+
 			// Update size to actual bytes extracted (may be truncated at file boundary)
 			size = bytes.length;
+
+			// FIX-011: For ET_REL (relocatable ELF), pre-patch call displacements
+			// so the Remill lifter sees real call targets instead of `call +5` (NOP).
+			// Without patching, unresolved relocations have displacement=0, which
+			// makes calls disappear from the IR (fall-through optimization).
+			// Strategy: patch bytes → Remill emits `call @sub_<fakeAddr>` →
+			// post-process IR to replace `@sub_<fakeAddr>` with `@mutex_lock` etc.
+			let symbolMap: Map<number, string> | undefined; // fakeAddr → symbolName
+			const fileInfo = engine.getFileInfo();
+			const textRelocs = engine.getTextRelocations();
+
+			console.log(`[HexCore] liftToIR FIX-011: isRelocatable=${fileInfo?.isRelocatable}, textRelocs.size=${textRelocs.size}`);
+			if (fileInfo?.isRelocatable && textRelocs.size > 0) {
+				const patchedBytes = Buffer.from(bytes);
+				symbolMap = new Map();
+				let fakeAddr = 0x7FFF0000; // fake address space for external symbols
+				const symbolAddrs = new Map<string, number>(); // dedup: name → fakeAddr
+
+				const textSection = engine.getSections().find(s => s.name === '.text');
+				const textSectionVA = textSection?.virtualAddress ?? 0;
+				const liftOffsetInText = startAddress - textSectionVA;
+				let patchCount = 0;
+
+				// Kernel infrastructure — NOPs at runtime, skip patching
+				const infraSymbols = new Set([
+					'__fentry__', '__x86_return_thunk', '__cfi_check',
+					'__x86_indirect_thunk_rax', '__x86_indirect_thunk_rbx',
+					'__x86_indirect_thunk_rcx', '__x86_indirect_thunk_rdx',
+					'__x86_indirect_thunk_rsi', '__x86_indirect_thunk_rdi',
+					'__x86_indirect_thunk_rbp', '__x86_indirect_thunk_r8',
+					'__x86_indirect_thunk_r9', '__x86_indirect_thunk_r10',
+					'__x86_indirect_thunk_r11', '__x86_indirect_thunk_r12',
+					'__x86_indirect_thunk_r13', '__x86_indirect_thunk_r14',
+					'__x86_indirect_thunk_r15',
+				]);
+
+				for (const [textOffset, reloc] of textRelocs) {
+					// Only patch relocations within our lift range
+					const patchOffset = textOffset - liftOffsetInText;
+					if (patchOffset < 0 || patchOffset + 4 > patchedBytes.length) {
+						continue;
+					}
+					if (infraSymbols.has(reloc.name)) {
+						continue;
+					}
+					// R_X86_64_PLT32(4) and PC32(2) are direct call/jump relocations
+					if (reloc.type !== 2 && reloc.type !== 4) {
+						continue;
+					}
+
+					// Allocate or reuse fake address for this symbol
+					let targetAddr = symbolAddrs.get(reloc.name);
+					if (targetAddr === undefined) {
+						targetAddr = fakeAddr;
+						fakeAddr += 0x10; // 16-byte spacing
+						symbolAddrs.set(reloc.name, targetAddr);
+					}
+
+					// Patch the 32-bit displacement: S + A - P
+					// P = virtual address of the relocation site
+					const relocVA = textSectionVA + textOffset;
+					const displacement = (targetAddr + reloc.addend - relocVA) | 0;
+					patchedBytes.writeInt32LE(displacement, patchOffset);
+
+					// Record the RESOLVED target that Remill will actually see:
+					// target = PC_after_call + displacement = (relocVA + 4) + displacement
+					// This accounts for the addend (typically -4 for R_X86_64_PLT32)
+					const resolvedTarget = ((relocVA + 4) + displacement) >>> 0;
+					if (!symbolMap.has(resolvedTarget)) {
+						symbolMap.set(resolvedTarget, reloc.name);
+					}
+					patchCount++;
+				}
+
+				console.log(`[HexCore] liftToIR FIX-011: Patched ${patchCount} call displacements, ` +
+					`${symbolMap.size} unique external symbols (fakeAddr range 0x7FFF0000–0x${(fakeAddr - 0x10).toString(16)})`);
+
+				// Use patched buffer for lifting
+				bytes = patchedBytes;
+			}
+
+			// FIX-011: Pass external symbol map to Remill C++ Phase 5.6
+			if (symbolMap && symbolMap.size > 0) {
+				remillWrapper.setExternalSymbols(symbolMap);
+			}
 
 			// Perform lifting with progress indicator
 			const liftResult = await vscode.window.withProgress(
@@ -1536,9 +1849,19 @@ export function activate(context: vscode.ExtensionContext): void {
 					cancellable: false,
 				},
 				async () => {
-					return remillWrapper.liftBytes(bytes, startAddress, arch);
+					// Detect target OS from binary format — ELF → linux, PE → windows
+					const fmt = fileInfo?.format ?? '';
+					const targetOs = fmt.startsWith('ELF') ? 'linux'
+						: (fmt === 'PE' || fmt === 'PE64') ? 'windows'
+						: undefined; // let detectOs() decide
+					return remillWrapper.liftBytes(bytes, startAddress, arch, targetOs);
 				}
 			);
+
+			// Clear after lift
+			if (symbolMap && symbolMap.size > 0) {
+				remillWrapper.clearExternalSymbols();
+			}
 
 			if (!liftResult.success) {
 				const errorMsg = `Lift failed: ${liftResult.error}`;
@@ -1547,6 +1870,116 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
+			}
+
+			// FIX-011 post-processing: Inject external symbol declarations into IR.
+			//
+			// The Remill Phase 4.5 (calliTargets) is supposed to replace CALLI
+			// arguments with concrete target addresses, but the LLVM CallInst
+			// pointers can become stale after block construction. Instead, we use
+			// TWO complementary strategies:
+			//
+			// Strategy A: Use liftResult.callTargets (populated by Phase 3 in C++)
+			//   to map fakeAddr → symbolName, then replace any `i64 <decimal>` or
+			//   `@sub_<hex>` patterns that match.
+			//
+			// Strategy B: Inject `@__hxreloc__` declarations so the Helix engine's
+			//   resolveCallTargets() can map call instruction addresses → symbols.
+			//   This works even when Strategy A finds no text matches.
+			let processedIR = liftResult.ir;
+			if (symbolMap && symbolMap.size > 0) {
+				let replaceCount = 0;
+				const declares = new Set<string>();
+
+				// Strategy A: Direct IR text replacement
+				const sortedEntries = [...symbolMap.entries()].sort((a, b) => b[0] - a[0]);
+				for (const [addr, name] of sortedEntries) {
+					const fakeHex = addr.toString(16);
+					const before = processedIR;
+
+					// Replace @sub_<hex> and @lifted_<hex> patterns
+					processedIR = processedIR
+						.replace(new RegExp(`@sub_${fakeHex}\\b`, 'gi'), `@${name}`)
+						.replace(new RegExp(`@lifted_${fakeHex}\\b`, 'gi'), `@${name}`);
+
+					// Replace i64 <decimal> in CALLI arguments
+					const decPattern = `i64 ${addr}`;
+					if (processedIR.includes(decPattern)) {
+						processedIR = processedIR.split(decPattern).join(`i64 ptrtoint (ptr @${name} to i64)`);
+					}
+
+					if (processedIR !== before) {
+						replaceCount++;
+						declares.add(name);
+					}
+				}
+
+				// Strategy B: Inject @__hxreloc__ declarations for Helix resolveCallTargets()
+				// Also builds the full symbol set from callTargets array (more reliable than text matching)
+				const callTargets: number[] = liftResult.callTargets ?? [];
+				console.log(`[HexCore] liftToIR FIX-011 Strategy B: callTargets=[${callTargets.slice(0, 10).map(t => '0x' + t.toString(16)).join(', ')}${callTargets.length > 10 ? '...' : ''}] (${callTargets.length} total), symbolMap keys=[${[...symbolMap.keys()].slice(0, 10).map(k => '0x' + k.toString(16)).join(', ')}${symbolMap.size > 10 ? '...' : ''}] (${symbolMap.size} total)`);
+				let matchedTargets = 0;
+				for (const target of callTargets) {
+					const name = symbolMap.get(target);
+					if (name) {
+						declares.add(name);
+						matchedTargets++;
+					}
+				}
+				console.log(`[HexCore] liftToIR FIX-011 Strategy B: ${matchedTargets}/${callTargets.length} callTargets matched symbolMap`);
+
+				// Clean up orphaned fake-address references
+				processedIR = processedIR.replace(/^(define|declare) [^\n]*@sub_7ff[0-9a-f]+[^\n]*\n/gmi, '');
+				processedIR = processedIR.replace(/^(define|declare) [^\n]*@lifted_7ff[0-9a-f]+[^\n]*\n/gmi, '');
+
+				// Build annotation block with declares + hxreloc metadata
+				if (declares.size > 0) {
+					// v3.7.5 FIX: Deduplicate — skip symbols already declared inline
+					// by the Remill lifter (C++ side emits declare during lift).
+					const alreadyDeclared = new Set<string>();
+					for (const match of processedIR.matchAll(/^declare\s+\S+\s+@(\w+)\s*\(/gm)) {
+						alreadyDeclared.add(match[1]);
+					}
+					const newDeclares = [...declares].filter(n => !alreadyDeclared.has(n));
+					const declareLines = newDeclares.map(n => `declare ptr @${n}(...)`);
+
+					// Machine-readable relocation declarations for Helix
+					const relocDeclares: string[] = [];
+					const relocEntries = [...symbolMap.entries()]
+						.filter(([, name]) => declares.has(name))
+						.sort((a, b) => a[0] - b[0]);
+					for (const [addr, name] of relocEntries) {
+						const hexAddr = addr.toString(16).padStart(16, '0');
+						relocDeclares.push(`declare void @__hxreloc__${hexAddr}__${name}()`);
+					}
+
+					// Only build block if there are new declares or reloc metadata to inject
+					const blockParts: string[] = [];
+					if (declareLines.length > 0) { blockParts.push(declareLines.join('\n')); }
+					if (relocDeclares.length > 0) { blockParts.push(relocDeclares.join('\n')); }
+
+					const declareBlock = blockParts.length > 0
+						? '\n; --- External symbols (resolved from .rela.text, ' + declares.size + ' symbols) ---\n' + blockParts.join('\n') + '\n'
+						: '';
+
+					if (declareBlock.length > 0) {
+						const lastDeclareIdx = processedIR.lastIndexOf('\ndeclare ');
+						if (lastDeclareIdx >= 0) {
+							const lineEnd = processedIR.indexOf('\n', lastDeclareIdx + 1);
+							processedIR = processedIR.slice(0, lineEnd) + '\n' + declareBlock + processedIR.slice(lineEnd);
+						} else {
+							const firstDefine = processedIR.indexOf('\ndefine ');
+							if (firstDefine >= 0) {
+								processedIR = processedIR.slice(0, firstDefine) + '\n' + declareBlock + processedIR.slice(firstDefine);
+							} else {
+								processedIR = declareBlock + processedIR;
+							}
+						}
+					}
+
+					console.log(`[HexCore] liftToIR FIX-011: ${replaceCount} text replacements, ` +
+						`${declares.size} external declares (${newDeclares.length} new, ${alreadyDeclared.size} deduped), ${callTargets.length} callTargets from Remill`);
+				}
 			}
 
 			const fileName = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
@@ -1558,7 +1991,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				functionName,
 			});
 
-			const fullIR = header + liftResult.ir;
+			const fullIR = header + processedIR;
+
+			// v3.7.5 FIX-021: Separate internal vs external call targets.
+			// Internal targets are within the .ko/.text range — can be lifted recursively.
+			// External targets are resolved via symbolMap (already handled above).
+			const allCallTargets: number[] = liftResult.callTargets ?? [];
+			const textSection = engine.getSections().find(s => s.name === '.text');
+			const textStart = textSection?.virtualAddress ?? 0;
+			const textEnd = textStart + (textSection?.virtualSize ?? 0);
+			const internalCallTargets = allCallTargets.filter(t =>
+				t >= textStart && t < textEnd && !(symbolMap?.has(t))
+			);
+			const externalCallTargets = allCallTargets.filter(t =>
+				symbolMap?.has(t)
+			);
+
+			if (internalCallTargets.length > 0) {
+				console.log(`[HexCore] liftToIR FIX-021: ${internalCallTargets.length} internal call targets: [${internalCallTargets.slice(0, 10).map(t => '0x' + t.toString(16)).join(', ')}${internalCallTargets.length > 10 ? '...' : ''}]`);
+			}
 
 			// Headless: write to file if output specified
 			if (isHeadless && options.output) {
@@ -1573,6 +2024,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					bytesConsumed: liftResult.bytesConsumed,
 					architecture: mapping.remillArch,
 					functionName,
+					backtracked: didBacktrack,
+					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
+					internalCallTargets,
 				};
 			}
 
@@ -1584,6 +2038,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					bytesConsumed: liftResult.bytesConsumed,
 					architecture: mapping.remillArch,
 					functionName,
+					backtracked: didBacktrack,
+					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
+					internalCallTargets,
 				};
 			}
 
@@ -1612,6 +2069,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				bytesConsumed: liftResult.bytesConsumed,
 				architecture: mapping.remillArch,
 				functionName,
+				backtracked: didBacktrack,
+				...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 			};
 		})
 	);
@@ -1680,7 +2139,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (typeof options.size === 'number') {
 					size = options.size;
 				} else if (typeof options.count === 'number') {
-					size = options.count * 15; // conservative upper bound for x64 instruction length
+					// v3.7.5 FIX: Use the larger of count*15 and the actual symbol size.
+					const countEstimate = options.count * 15;
+					const symbolSize = engine.getRecommendedLiftSize(startAddress, 0);
+					size = symbolSize > 0 ? Math.max(countEstimate, symbolSize) : countEstimate;
 				} else {
 					size = engine.getBufferSize();
 				}
@@ -1691,7 +2153,14 @@ export function activate(context: vscode.ExtensionContext): void {
 					size = func.endAddress - func.address;
 					functionName = func.name;
 				} else {
-					size = typeof options.size === 'number' ? options.size : 256;
+					// v3.7.5 FIX: Smart sizing — symbol table → count → 4096 (was 256)
+					if (typeof options.size === 'number') {
+						size = options.size;
+					} else if (typeof options.count === 'number') {
+						size = options.count * 15;
+					} else {
+						size = engine.getRecommendedLiftSize(startAddress, 4096);
+					}
 				}
 			} else {
 				const addrInput = await vscode.window.showInputBox({
@@ -1742,9 +2211,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			// Step 1: Lift to IR
+			const fmtForOs = engine.getFileInfo()?.format ?? '';
+			const targetOsForLift = fmtForOs.startsWith('ELF') ? 'linux'
+				: (fmtForOs === 'PE' || fmtForOs === 'PE64') ? 'windows'
+				: undefined;
 			const liftResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Lifting to LLVM IR...', cancellable: false },
-				async () => remillWrapper.liftBytes(bytes, startAddress, arch)
+				async () => remillWrapper.liftBytes(bytes, startAddress, arch, targetOsForLift)
 			);
 
 			if (!liftResult.success) {
@@ -1911,6 +2384,209 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	// -----------------------------------------------------------------------
+	// Helper: Apply Session DB renames/retypes to decompiled pseudo-C
+	// -----------------------------------------------------------------------
+	/**
+	 * v3.7.5 P3: Collect variable renames from the session DB for a given function.
+	 * Returns an array of {oldName, newName} pairs to pass to the Helix engine.
+	 * The engine will walk the C AST and apply renames surgically on CVarRefExpr nodes.
+	 */
+	function collectSessionVariableRenames(
+		options: Record<string, unknown>,
+		eng: DisassemblerEngine
+	): Array<{ oldName: string; newName: string }> {
+		if (!eng.isFileLoaded()) { return []; }
+		const store = eng.getSessionStore();
+		if (!store) { return []; }
+
+		// Determine function address from options
+		const funcAddress = typeof options.functionAddress === 'number' ? options.functionAddress
+			: typeof options.address === 'number' ? options.address
+			: typeof options.startAddress === 'number' ? options.startAddress
+			: undefined;
+		if (!funcAddress) { return []; }
+
+		// Try the address and nearby offsets (same logic as applySessionRenames)
+		const hexAddr = `0x${funcAddress.toString(16)}`;
+		let variables = store.getVariables(hexAddr);
+
+		// Try nearby addresses (±16 bytes for patchable entry)
+		if ((!variables || variables.length === 0)) {
+			for (let delta = 1; delta <= 16; delta++) {
+				variables = store.getVariables(`0x${(funcAddress + delta).toString(16)}`);
+				if (variables && variables.length > 0) { break; }
+				variables = store.getVariables(`0x${(funcAddress - delta).toString(16)}`);
+				if (variables && variables.length > 0) { break; }
+			}
+		}
+
+		if (!variables || variables.length === 0) { return []; }
+
+		const result: Array<{ oldName: string; newName: string }> = [];
+		for (const v of variables) {
+			if (v.new_name && v.new_name !== v.original_name) {
+				result.push({ oldName: v.original_name, newName: v.new_name });
+			}
+		}
+		return result;
+	}
+
+	function applySessionRenames(source: string, funcAddress: number | undefined, originalAddress?: number): string {
+		if (!engine.isFileLoaded()) return source;
+		if (!funcAddress && !originalAddress) return source;
+
+		const store = engine.getSessionStore();
+		if (!store) return source;
+
+		let result = source;
+
+		// Try both the lift address and the original (pre-backtrack) address,
+		// since renames may be registered against either.
+		const candidates: string[] = [];
+		if (funcAddress) candidates.push(`0x${funcAddress.toString(16)}`);
+		if (originalAddress && originalAddress !== funcAddress)
+			candidates.push(`0x${originalAddress.toString(16)}`);
+
+		// Find first address that has a Session DB entry
+		let hexAddr = candidates[0] ?? '';
+		let funcEntry = store.getFunction(hexAddr);
+		if (!funcEntry && candidates[1]) {
+			hexAddr = candidates[1];
+			funcEntry = store.getFunction(hexAddr);
+		}
+
+		// Also try the function table for nearby addresses (±16 bytes for patchable entry)
+		if (!funcEntry && funcAddress) {
+			for (let delta = 1; delta <= 16; delta++) {
+				const tryAddr = `0x${(funcAddress + delta).toString(16)}`;
+				funcEntry = store.getFunction(tryAddr);
+				if (funcEntry) { hexAddr = tryAddr; break; }
+				const tryAddr2 = `0x${(funcAddress - delta).toString(16)}`;
+				funcEntry = store.getFunction(tryAddr2);
+				if (funcEntry) { hexAddr = tryAddr2; break; }
+			}
+		}
+		if (funcEntry?.name) {
+			// Replace sub_<hex> with the user-defined name (word boundary)
+			// Try both lift address and original address patterns
+			for (const addr of [funcAddress, originalAddress].filter(Boolean) as number[]) {
+				const subName = `sub_${addr.toString(16)}`;
+				const regex = new RegExp(`\\b${escapeRegex(subName)}\\b`, 'g');
+				result = result.replace(regex, funcEntry.name);
+			}
+		}
+
+		// 2. Apply variable renames and retypes
+		// v3.7.5 P3: Variable renames are ALSO passed to the Helix C AST walker
+		// (via addVariableRename) for surgical node-level replacement. The string-based
+		// regex here runs as a safety net — if the engine already renamed the variable,
+		// the regex won't find the old name and is a no-op. If the engine didn't rename
+		// (C AST layer off, name mismatch, older .node), the regex catches it.
+		const variables = store.getVariables(hexAddr) ?? [];
+		for (const v of variables) {
+			if (v.new_name && v.new_name !== v.original_name) {
+				const regex = new RegExp(`\\b${escapeRegex(v.original_name)}\\b`, 'g');
+				result = result.replace(regex, v.new_name);
+			}
+			if (v.new_type) {
+				// Replace type declarations: int32_t param_1 → MyType param_1
+				// Look for "old_type var_name" pattern and replace the type part
+				const varName = v.new_name || v.original_name;
+				// Common C type patterns that appear before variable names
+				const typePattern = new RegExp(
+					`(\\b(?:u?int(?:8|16|32|64)_t|void|char|short|int|long|float|double|bool|unsigned|struct\\s+\\w+)\\s*\\*?)\\s+(${escapeRegex(varName)}\\b)`,
+					'g'
+				);
+				result = result.replace(typePattern, `${v.new_type} $2`);
+			}
+		}
+
+		// 3. Apply function return type rename
+		if (funcEntry?.return_type) {
+			const funcName = funcEntry.name || `sub_${(funcAddress ?? 0).toString(16)}`;
+			// Replace return type in function signature: "int32_t funcName(" → "RetType funcName("
+			const sigRegex = new RegExp(
+				`(\\b(?:u?int(?:8|16|32|64)_t|void|char|short|int|long|float|double|bool|unsigned|struct\\s+\\w+)\\s*\\*?)\\s+(${escapeRegex(funcName)}\\s*\\()`,
+				'g'
+			);
+			result = result.replace(sigRegex, `${funcEntry.return_type} $2`);
+		}
+
+		return result;
+	}
+
+	/**
+	 * v3.7.5 FIX-022c: Validate a backtrack candidate by Capstone linear sweep.
+	 *
+	 * Decodes instructions from `candidate` to `original`. If we encounter a RET,
+	 * INT3 padding (CC CC), unconditional JMP to outside the range, or a decode
+	 * failure before reaching `original`, the candidate is a different function
+	 * and the backtrack is invalid.
+	 *
+	 * Cost: ~30-50 Capstone decode calls (submillisecond).
+	 */
+	async function validateBacktrackCandidate(
+		eng: DisassemblerEngine,
+		candidate: number,
+		original: number
+	): Promise<boolean> {
+		const dist = original - candidate;
+		if (dist <= 0 || dist > 4096) { return false; }
+
+		const bytes = eng.getBytes(candidate, dist + 64); // extra margin
+		if (!bytes || bytes.length < dist) { return false; }
+
+		try {
+			const capstone = eng.getCapstone();
+			if (!capstone) { return true; } // can't validate, assume ok
+
+			const insns = await capstone.disassemble(bytes, candidate, 512);
+			if (!insns || insns.length === 0) { return false; }
+
+			for (const insn of insns) {
+				const insnEnd = insn.address + insn.size;
+
+				// Reached or passed the original address — valid backtrack
+				if (insnEnd >= original) { return true; }
+
+				// RET instruction — function ended before reaching original
+				if (insn.mnemonic === 'ret' || insn.mnemonic === 'retf' ||
+					insn.mnemonic === 'retfq') {
+					return false;
+				}
+
+				// INT3 (0xCC) — padding between functions
+				if (insn.mnemonic === 'int3') {
+					// Check if next byte is also INT3 (CC CC = inter-function padding)
+					const nextOff = insnEnd - candidate;
+					if (nextOff < bytes.length && bytes[nextOff] === 0xCC) {
+						return false;
+					}
+				}
+
+				// Unconditional JMP to outside the [candidate, original] range
+				if (insn.mnemonic === 'jmp') {
+					// If it's a short/near jump, check target
+					const target = insn.targetAddress;
+					if (target !== undefined && (target < candidate || target > original + 64)) {
+						return false;
+					}
+				}
+			}
+
+			// Ran out of instructions without reaching original — suspicious
+			return false;
+		} catch {
+			// Capstone error — can't validate, be conservative and reject
+			return false;
+		}
+	}
+
+	function escapeRegex(s: string): string {
+		return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	}
+
+	// -----------------------------------------------------------------------
 	// Helix — Decompile IR to pseudo-C (direct IR input)
 	// -----------------------------------------------------------------------
 	context.subscriptions.push(
@@ -1971,9 +2647,26 @@ export function activate(context: vscode.ExtensionContext): void {
 				irText = activeEditor.document.getText();
 			}
 
+			// Pass optimizeIR + useCastLayer options to Helix (v3.7.4)
+			const helixIROptions: { optimizeIR?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> } | undefined =
+				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
+					? {
+						...(options.optimizeIR !== undefined ? { optimizeIR: options.optimizeIR !== false } : {}),
+						...(options.useCastLayer !== undefined ? { useCastLayer: options.useCastLayer === true } : {}),
+					}
+					: undefined;
+
+			// v3.7.5 P3: Collect session variable renames for this function and pass
+			// them to the Helix engine so the C AST walker can apply them surgically.
+			const sessionRenames = collectSessionVariableRenames(options, engine);
+			if (sessionRenames.length > 0) {
+				const opts = helixIROptions ?? {};
+				opts.variableRenames = sessionRenames;
+			}
+
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
-				async () => helixWrapper.decompileIr(irText, arch)
+				async () => helixWrapper.decompileIr(irText, arch, helixIROptions ?? (sessionRenames.length > 0 ? { variableRenames: sessionRenames } : undefined))
 			);
 
 			if (!decompileResult.success) {
@@ -1986,7 +2679,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			const fullCode = decompileResult.source;
+			// Apply Session DB renames/retypes (funcAddress from options if available)
+			const decompileAddr = typeof options.functionAddress === 'number' ? options.functionAddress
+				: typeof options.address === 'number' ? options.address
+				: undefined;
+			const fullCode = applySessionRenames(decompileResult.source, decompileAddr);
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
@@ -2064,13 +2761,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			// Pass optimizeIR option to Helix (BUG-HELIX-003)
-			const helixOptions = isHeadless && options.optimizeIR !== undefined
-				? { optimizeIR: options.optimizeIR !== false }
-				: undefined;
+			// Pass optimizeIR + useCastLayer options to Helix
+			const helixOptions: { optimizeIR?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> } | undefined =
+				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
+					? {
+						...(options.optimizeIR !== undefined ? { optimizeIR: options.optimizeIR !== false } : {}),
+						...(options.useCastLayer !== undefined ? { useCastLayer: options.useCastLayer === true } : {}),
+					}
+					: undefined;
+
+			// v3.7.5 P3: Collect session variable renames and pass to Helix engine
+			const sessionRenames2 = collectSessionVariableRenames(options, engine);
+			if (sessionRenames2.length > 0) {
+				const opts = helixOptions ?? {};
+				opts.variableRenames = sessionRenames2;
+			}
+
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
-				async () => helixWrapper.decompileIr(liftResult.ir, arch, helixOptions)
+				async () => helixWrapper.decompileIr(liftResult.ir, arch, helixOptions ?? (sessionRenames2.length > 0 ? { variableRenames: sessionRenames2 } : undefined))
 			);
 
 			if (!decompileResult.success) {
@@ -2083,7 +2792,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			const fullCode = decompileResult.source;
+			// Apply Session DB renames/retypes to the decompiled output
+			// liftResult.address = post-backtrack (e.g. 0x3A10)
+			// options.address / options.startAddress = original user address (e.g. 0x3A20)
+			const funcAddr = typeof liftResult.address === 'number' ? liftResult.address : undefined;
+			const origAddr = typeof options.address === 'number' ? options.address
+				: typeof options.startAddress === 'number' ? options.startAddress
+				: typeof options.functionAddress === 'number' ? options.functionAddress
+				: undefined;
+			const fullCode = applySessionRenames(decompileResult.source, funcAddr, origAddr);
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
@@ -2228,7 +2945,13 @@ export function activate(context: vscode.ExtensionContext): void {
 				throw new Error(`Address 0x${params.address.toString(16).toUpperCase()} is outside the binary range.`);
 			}
 
-			// 3b. Auto-backtrack: if address is mid-function, find the real start
+			// 3b. v3.7.4: IMP-001 — Verify instruction alignment
+			const alignmentCheck = await engine.verifyInstructionAlignment(params.address);
+			const alignmentWarning = alignmentCheck.aligned ? undefined
+				: `Address 0x${params.address.toString(16).toUpperCase()} is mid-instruction. ` +
+				  `Nearest boundary: 0x${alignmentCheck.suggestedAddress!.toString(16).toUpperCase()}`;
+
+			// 3c. Auto-backtrack: if address is mid-function, find the real start
 			//     Uses native function boundary detection (FEAT-DISASM-004)
 			let effectiveAddress = params.address;
 			const autoBacktrack = (arg as any)?.autoBacktrack !== false; // enabled by default
@@ -2367,6 +3090,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				result.prngDetection = prngDetection;
 			}
 
+			// v3.7.4: Include alignment warning if address was mid-instruction
+			if (alignmentWarning) {
+				(result as any).alignmentWarning = alignmentWarning;
+				(result as any).suggestedAddress = `0x${alignmentCheck.suggestedAddress!.toString(16).toUpperCase()}`;
+			}
+
+			// v3.7.4: Include ELF ET_REL warning if applicable
+			const fileInfo = engine.getFileInfo();
+			if (fileInfo?.isRelocatable) {
+				(result as any).elfWarning = 'Target is ET_REL (relocatable). External calls are unresolved relocations.';
+			}
+
 			// 10. Write to file if output.path specified
 			if (params.output?.path) {
 				fs.mkdirSync(path.dirname(params.output.path), { recursive: true });
@@ -2490,6 +3225,58 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			return exportData;
+		})
+	);
+
+	// v3.7.4: Extract strings filtered by PE section (FIX-003)
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.extractStrings', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const sections = Array.isArray(arg?.sections) ? arg.sections as string[] : undefined;
+			const minLength = typeof arg?.minLength === 'number' ? arg.minLength : 4;
+			const maxStrings = typeof arg?.maxStrings === 'number' ? arg.maxStrings : 10000;
+			const quietMode = arg?.quiet === true;
+			const rawOutput = arg?.output;
+			const outputPath = typeof (rawOutput as any)?.path === 'string' ? (rawOutput as any).path : undefined;
+
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+				}
+			}
+
+			// Clear existing strings and re-extract with section filter
+			await engine.findStrings(sections, minLength);
+
+			const allStrings = engine.getStrings();
+			const limited = allStrings.slice(0, maxStrings);
+
+			const result = {
+				totalFound: allStrings.length,
+				returned: limited.length,
+				sections: sections ?? ['(all)'],
+				minLength,
+				strings: limited.map(s => ({
+					address: `0x${s.address.toString(16)}`,
+					string: s.string,
+					encoding: s.encoding,
+					references: s.references.map(r => `0x${r.toString(16)}`)
+				})),
+				generatedAt: new Date().toISOString()
+			};
+
+			if (outputPath) {
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, '\t'), 'utf-8');
+				if (!quietMode) {
+					vscode.window.showInformationMessage(`Extracted ${result.returned} strings → ${outputPath}`);
+				}
+			}
+
+			return result;
 		})
 	);
 
@@ -2805,6 +3592,379 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!quietMode) {
 				vscode.window.showInformationMessage(
 					`AOB Scan: ${matches.length} match(es) for pattern "${displayPattern}"`
+				);
+			}
+
+			return result;
+		})
+	);
+
+	// =========================================================================
+	// FEAT-PE-001 — analyzePEHeadless (Deep PE Analysis with Typed Imports)
+	// v3.7.5: Comprehensive PE analysis with Windows API signatures,
+	// category-based security summary, TLS/Debug/CLR parsing
+	// =========================================================================
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.analyzePEHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
+
+			// Load file into engine if a path is provided
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			const fileInfo = engine.getFileInfo();
+			if (!fileInfo || (fileInfo.format !== 'PE' && fileInfo.format !== 'PE64')) {
+				throw new Error('analyzePEHeadless requires a PE/PE64 binary.');
+			}
+
+			const sections = engine.getSections();
+			const typedImports = engine.getTypedImports();
+			const exports = engine.getExports();
+			const categorySummary = engine.getImportCategorySummary();
+			const dataDirectories = engine.getPEDataDirectories();
+
+			// Count resolved vs unresolved imports
+			let totalImported = 0;
+			let totalResolved = 0;
+			for (const lib of typedImports) {
+				for (const func of lib.functions) {
+					totalImported++;
+					if (func.signature) { totalResolved++; }
+				}
+			}
+
+			// Build typed imports output
+			const importsOutput = typedImports.map(lib => ({
+				dll: lib.name,
+				functionCount: lib.functions.length,
+				functions: lib.functions.map(func => {
+					const base: Record<string, unknown> = {
+						name: func.name,
+						address: `0x${func.address.toString(16).toUpperCase()}`,
+					};
+					if (func.ordinal !== undefined) { base.ordinal = func.ordinal; }
+					if (func.hint !== undefined) { base.hint = func.hint; }
+					if (func.signature) {
+						base.prototype = formatApiSignatureCompact(func.signature);
+						base.returnType = func.signature.returnType;
+						base.paramCount = func.signature.parameters.length;
+						base.category = func.signature.category;
+						base.tags = func.signature.tags;
+					}
+					return base;
+				})
+			}));
+
+			// Build exports output
+			const exportsOutput = exports.map(exp => {
+				const base: Record<string, unknown> = {
+					name: exp.name,
+					ordinal: exp.ordinal,
+					address: `0x${exp.address.toString(16).toUpperCase()}`,
+				};
+				if (exp.isForwarder) {
+					base.isForwarder = true;
+					base.forwarderName = exp.forwarderName;
+				}
+				return base;
+			});
+
+			// Build security tags summary
+			const allTags = new Set<string>();
+			for (const cat of categorySummary) {
+				for (const tag of cat.tags) {
+					allTags.add(tag);
+				}
+			}
+
+			// Build data directories output
+			const dataDirectoriesOutput: Record<string, unknown> = {};
+
+			if (dataDirectories.tls) {
+				const tls = dataDirectories.tls;
+				dataDirectoriesOutput.tls = {
+					startAddress: `0x${tls.startAddressOfRawData.toString(16).toUpperCase()}`,
+					endAddress: `0x${tls.endAddressOfRawData.toString(16).toUpperCase()}`,
+					indexAddress: `0x${tls.addressOfIndex.toString(16).toUpperCase()}`,
+					callbacksAddress: `0x${tls.addressOfCallBacks.toString(16).toUpperCase()}`,
+					callbackCount: tls.callbackAddresses.length,
+					callbacks: tls.callbackAddresses.map(a => `0x${a.toString(16).toUpperCase()}`),
+					warning: tls.callbackAddresses.length > 0 ? 'TLS callbacks detected — common anti-debug technique' : undefined
+				};
+			}
+
+			if (dataDirectories.debug && dataDirectories.debug.length > 0) {
+				dataDirectoriesOutput.debug = dataDirectories.debug.map(d => {
+					const entry: Record<string, unknown> = {
+						type: d.typeName,
+						timestamp: d.timestamp.toISOString(),
+						size: d.size
+					};
+					if (d.pdbPath) { entry.pdbPath = d.pdbPath; }
+					if (d.pdbGuid) { entry.pdbGuid = d.pdbGuid; }
+					return entry;
+				});
+			}
+
+			if (dataDirectories.delayImport && dataDirectories.delayImport.length > 0) {
+				dataDirectoriesOutput.delayImport = dataDirectories.delayImport.map(lib => ({
+					dll: lib.name,
+					functionCount: lib.functions.length,
+					functions: lib.functions.map(f => f.name)
+				}));
+			}
+
+			if (dataDirectories.clr) {
+				const clr = dataDirectories.clr;
+				dataDirectoriesOutput.clr = {
+					runtimeVersion: `${clr.majorRuntimeVersion}.${clr.minorRuntimeVersion}`,
+					metadataSize: clr.metadataSize,
+					entryPointToken: `0x${clr.entryPointToken.toString(16).toUpperCase()}`,
+					isNative: clr.isNative,
+					is32BitRequired: clr.is32BitRequired,
+					warning: '.NET assembly detected'
+				};
+			}
+
+			if (dataDirectories.resourceSize) {
+				dataDirectoriesOutput.resourceSize = dataDirectories.resourceSize;
+			}
+			if (dataDirectories.securitySize) {
+				dataDirectoriesOutput.securitySize = dataDirectories.securitySize;
+				dataDirectoriesOutput.isSigned = true;
+			}
+			if (dataDirectories.relocSize) {
+				dataDirectoriesOutput.relocSize = dataDirectories.relocSize;
+			}
+
+			const result = {
+				fileInfo: {
+					format: fileInfo.format,
+					architecture: fileInfo.architecture,
+					entryPoint: `0x${fileInfo.entryPoint.toString(16).toUpperCase()}`,
+					baseAddress: `0x${fileInfo.baseAddress.toString(16).toUpperCase()}`,
+					imageSize: fileInfo.imageSize,
+					timestamp: fileInfo.timestamp?.toISOString(),
+					subsystem: fileInfo.subsystem,
+					isRelocatable: fileInfo.isRelocatable,
+				},
+				sections: sections.map(s => ({
+					name: s.name,
+					virtualAddress: `0x${s.virtualAddress.toString(16).toUpperCase()}`,
+					virtualSize: s.virtualSize,
+					rawSize: s.rawSize,
+					permissions: s.permissions,
+					isCode: s.isCode,
+					isData: s.isData,
+				})),
+				imports: {
+					totalLibraries: typedImports.length,
+					totalFunctions: totalImported,
+					resolvedSignatures: totalResolved,
+					unresolvedCount: totalImported - totalResolved,
+					libraries: importsOutput,
+				},
+				exports: {
+					totalFunctions: exports.length,
+					functions: exportsOutput,
+				},
+				categorySummary: categorySummary.map(cat => ({
+					category: cat.category,
+					label: cat.label,
+					count: cat.count,
+					tags: cat.tags,
+					functions: cat.functions,
+				})),
+				securityIndicators: {
+					tags: Array.from(allTags).sort(),
+					hasNetworkAPIs: categorySummary.some(c => c.category === 'network'),
+					hasCryptoAPIs: categorySummary.some(c => c.category === 'crypto'),
+					hasInjectionAPIs: categorySummary.some(c => c.category === 'injection'),
+					hasAntiDebug: allTags.has('anti_debug'),
+					hasKeylogger: allTags.has('keylogger'),
+					hasProcessEnum: allTags.has('enumeration'),
+					hasDynamicLoading: allTags.has('dynamic_loading'),
+					hasPersistence: allTags.has('persistence'),
+					isSigned: !!dataDirectories.securitySize,
+					isDotNet: !!dataDirectories.clr,
+					hasTLSCallbacks: (dataDirectories.tls?.callbackAddresses.length ?? 0) > 0,
+				},
+				dataDirectories: dataDirectoriesOutput,
+				generatedAt: new Date().toISOString(),
+			};
+
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				const resolvedPct = totalImported > 0 ? Math.round(totalResolved / totalImported * 100) : 0;
+				vscode.window.showInformationMessage(
+					`PE Analysis: ${typedImports.length} DLLs, ${totalImported} imports (${resolvedPct}% typed), ${exports.length} exports`
+				);
+			}
+
+			return result;
+		})
+	);
+
+	// =========================================================================
+	// FEAT-ELF-001 — analyzeELFHeadless (Deep ELF Analysis)
+	// v3.7.5 P4: Comprehensive ELF analysis with symbols, relocations,
+	// program headers, dynamic entries, and .ko module info
+	// =========================================================================
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.analyzeELFHeadless', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
+
+			if (filePath) {
+				const currentFile = engine.getFilePath();
+				if (currentFile !== filePath) {
+					const loaded = await engine.loadFile(filePath);
+					if (!loaded) {
+						throw new Error(`Failed to load file: ${filePath}`);
+					}
+					await engine.analyzeAll();
+				}
+			}
+
+			const fileInfo = engine.getFileInfo();
+			if (!fileInfo || (fileInfo.format !== 'ELF32' && fileInfo.format !== 'ELF64')) {
+				throw new Error('analyzeELFHeadless requires an ELF binary.');
+			}
+
+			const elfData = engine.getELFAnalysis();
+			if (!elfData) {
+				throw new Error('ELF analysis data not available.');
+			}
+
+			const sections = engine.getSections();
+			const imports = engine.getImports();
+			const exports = engine.getExports();
+
+			// Build structured output
+			const symbolStats = {
+				total: elfData.symbols.length,
+				functions: elfData.symbols.filter(s => s.type === 'FUNC').length,
+				objects: elfData.symbols.filter(s => s.type === 'OBJECT').length,
+				imports: elfData.symbols.filter(s => s.isImport).length,
+				exports: elfData.symbols.filter(s => s.isExport).length,
+				local: elfData.symbols.filter(s => s.binding === 'LOCAL').length,
+				global: elfData.symbols.filter(s => s.binding === 'GLOBAL').length,
+				weak: elfData.symbols.filter(s => s.binding === 'WEAK').length,
+			};
+
+			const result = {
+				fileInfo: {
+					format: fileInfo.format,
+					architecture: fileInfo.architecture,
+					entryPoint: `0x${fileInfo.entryPoint.toString(16).toUpperCase()}`,
+					baseAddress: `0x${fileInfo.baseAddress.toString(16).toUpperCase()}`,
+					imageSize: fileInfo.imageSize,
+					elfType: elfData.elfType,
+					isRelocatable: fileInfo.isRelocatable,
+					interpreter: elfData.interpreter,
+					soname: elfData.soname,
+				},
+				sections: sections.map(s => ({
+					name: s.name,
+					virtualAddress: `0x${s.virtualAddress.toString(16).toUpperCase()}`,
+					virtualSize: s.virtualSize,
+					rawSize: s.rawSize,
+					permissions: s.permissions,
+					isCode: s.isCode,
+					isData: s.isData,
+				})),
+				programHeaders: elfData.programHeaders.map(ph => ({
+					type: ph.typeName,
+					permissions: ph.permissions,
+					offset: `0x${ph.offset.toString(16)}`,
+					vaddr: `0x${ph.vaddr.toString(16).toUpperCase()}`,
+					filesz: ph.filesz,
+					memsz: ph.memsz,
+					align: ph.align,
+					...(ph.interpreter ? { interpreter: ph.interpreter } : {}),
+				})),
+				symbolStats,
+				symbols: elfData.symbols.map(s => ({
+					name: s.name,
+					value: `0x${s.value.toString(16).toUpperCase()}`,
+					size: s.size,
+					binding: s.binding,
+					type: s.type,
+					visibility: s.visibility,
+					section: s.sectionName,
+					isImport: s.isImport,
+					isExport: s.isExport,
+				})),
+				relocations: {
+					total: elfData.relocations.length,
+					bySectionCount: (() => {
+						const map = new Map<string, number>();
+						for (const r of elfData.relocations) {
+							map.set(r.sectionName, (map.get(r.sectionName) || 0) + 1);
+						}
+						return Object.fromEntries(map);
+					})(),
+					entries: elfData.relocations.slice(0, 5000).map(r => ({
+						offset: `0x${r.offset.toString(16).toUpperCase()}`,
+						type: r.typeName,
+						symbol: r.symbolName,
+						addend: r.addend,
+						section: r.sectionName,
+					})),
+					truncated: elfData.relocations.length > 5000,
+				},
+				dynamicEntries: elfData.dynamicEntries.map(d => ({
+					tag: d.tagName,
+					value: `0x${d.value.toString(16).toUpperCase()}`,
+					...(d.stringValue ? { string: d.stringValue } : {}),
+				})),
+				neededLibraries: elfData.neededLibraries,
+				...(elfData.moduleInfo ? {
+					moduleInfo: {
+						name: elfData.moduleInfo.name,
+						version: elfData.moduleInfo.version,
+						description: elfData.moduleInfo.description,
+						author: elfData.moduleInfo.author,
+						license: elfData.moduleInfo.license,
+						vermagic: elfData.moduleInfo.vermagic,
+						srcversion: elfData.moduleInfo.srcversion,
+						depends: elfData.moduleInfo.depends,
+						intree: elfData.moduleInfo.intree,
+						retpoline: elfData.moduleInfo.retpoline,
+						parameters: elfData.moduleInfo.parmDescriptions,
+					}
+				} : {}),
+				generatedAt: new Date().toISOString(),
+			};
+
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+			}
+
+			if (!quietMode) {
+				const modLabel = elfData.moduleInfo?.name ? ` (module: ${elfData.moduleInfo.name})` : '';
+				vscode.window.showInformationMessage(
+					`ELF Analysis: ${elfData.elfType}, ${symbolStats.total} symbols, ${elfData.relocations.length} relocs, ${elfData.neededLibraries.length} libs${modLabel}`
 				);
 			}
 
