@@ -40,6 +40,11 @@ interface HelixEngineInstance {
 	decompile(data: Buffer, baseAddress: bigint, entryAddress: bigint): HelixDecompileResult;
 	dispose(): void;
 	readonly isDisposed: boolean;
+	/** v3.7.5 P3: Set variable rename in the C AST pipeline (old → new).
+	 *  Applied during CAstOptimizer walk, before CAstPrinter serialization. */
+	addVariableRename?(oldName: string, newName: string): void;
+	/** v3.7.5 P3: Clear all variable renames from the engine. */
+	clearVariableRenames?(): void;
 }
 
 interface HelixModule {
@@ -137,6 +142,20 @@ export class HelixWrapper {
 	}
 
 	/**
+	 * v3.7.5 P3: Check if the native module supports addVariableRename.
+	 * Returns true when the C++ side has the rename map + AST walk pass.
+	 */
+	supportsVariableRenames(): boolean {
+		if (!this.available) { return false; }
+		try {
+			const engine = this.ensureEngine();
+			return !!engine && typeof engine.addVariableRename === 'function';
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * Verifica se uma arquitetura Capstone é suportada pelo Helix.
 	 */
 	isArchSupported(arch: ArchitectureConfig): boolean {
@@ -173,7 +192,7 @@ export class HelixWrapper {
 	 * because Remill IR already encodes the architecture in the IR text,
 	 * and the Helix engine uses x86_64 backend for both x86 variants.
 	 */
-	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64', options?: { optimizeIR?: boolean }): Promise<HelixResult> {
+	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64', options?: { optimizeIR?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> }): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
 		}
@@ -189,26 +208,83 @@ export class HelixWrapper {
 		const skipOpt = options?.optimizeIR === false;
 		if (skipOpt) {
 			try {
-				const engine = this.getOrCreateEngine(mapping.helixArch);
+				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine && typeof (engine as any).setSkipOptimization === 'function') {
 					(engine as any).setSkipOptimization(true);
 				}
 			} catch { /* Native module doesn't support this yet — silently proceed */ }
 		}
 
+		// Apply useCastLayer flag — enables C AST pipeline (v3.7.4)
+		// Must be set BEFORE decompileIr() as it's an engine config, not a decompile param
+		const castLayer = options?.useCastLayer === true;
+		if (castLayer) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof (engine as any).setUseCastLayer === 'function') {
+					(engine as any).setUseCastLayer(true);
+				}
+			} catch { /* Native module doesn't support this yet — silently proceed */ }
+		}
+
+		// v3.7.5 P3: Apply variable renames to the engine before decompilation.
+		// The C AST optimizer will walk CVarRefExpr nodes and substitute names.
+		const renames = options?.variableRenames;
+		if (renames && renames.length > 0) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine) {
+					if (typeof engine.clearVariableRenames === 'function') {
+						engine.clearVariableRenames();
+					}
+					if (typeof engine.addVariableRename === 'function') {
+						for (const { oldName, newName } of renames) {
+							engine.addVariableRename(oldName, newName);
+						}
+					}
+				}
+			} catch { /* Native module doesn't support renames yet — fallback to string replace */ }
+		}
+
 		let result: HelixResult;
 		if (irText.length > ASYNC_THRESHOLD) {
-			result = await this.decompileIrAsync(irText, mapping.helixArch);
+			// v3.7.4: Pass engine flags to worker — worker creates its own engine
+			// so flags set on the main-thread engine don't propagate automatically
+			result = await this.decompileIrAsync(irText, mapping.helixArch, {
+				skipOptimization: skipOpt,
+				useCastLayer: castLayer,
+				variableRenames: renames,
+			});
 		} else {
 			result = this.decompileIrSync(irText, mapping.helixArch);
 		}
 
-		// Reset optimization flag for next call
+		// Reset optimization flag for next call (sync path only — worker disposes its own engine)
 		if (skipOpt) {
 			try {
-				const engine = this.getOrCreateEngine(mapping.helixArch);
+				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine && typeof (engine as any).setSkipOptimization === 'function') {
 					(engine as any).setSkipOptimization(false);
+				}
+			} catch { /* ignore */ }
+		}
+
+		// Reset castLayer flag for next call (sync path only)
+		if (castLayer) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof (engine as any).setUseCastLayer === 'function') {
+					(engine as any).setUseCastLayer(false);
+				}
+			} catch { /* ignore */ }
+		}
+
+		// v3.7.5 P3: Clear variable renames after decompilation (sync path only)
+		if (renames && renames.length > 0) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof engine.clearVariableRenames === 'function') {
+					engine.clearVariableRenames();
 				}
 			} catch { /* ignore */ }
 		}
@@ -295,7 +371,11 @@ export class HelixWrapper {
 	 * Offload decompileIr para worker thread (o .node não tem async nativo).
 	 * Evita bloquear a UI do VS Code em funções grandes.
 	 */
-	private decompileIrAsync(irText: string, arch: HelixArchValue): Promise<HelixResult> {
+	private decompileIrAsync(
+		irText: string,
+		arch: HelixArchValue,
+		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> },
+	): Promise<HelixResult> {
 		return new Promise<HelixResult>((resolve) => {
 			const workerCode = `
 				const { parentPort, workerData } = require('worker_threads');
@@ -312,6 +392,27 @@ export class HelixWrapper {
 				} else {
 					try {
 						const engine = new binding.HelixEngine(workerData.arch);
+
+						// v3.7.4: Apply engine flags forwarded from the main thread
+						if (workerData.skipOptimization && typeof engine.setSkipOptimization === 'function') {
+							engine.setSkipOptimization(true);
+						}
+						if (workerData.useCastLayer && typeof engine.setUseCastLayer === 'function') {
+							engine.setUseCastLayer(true);
+						}
+
+						// v3.7.5 P3: Apply variable renames before decompilation
+						if (workerData.variableRenames && workerData.variableRenames.length > 0) {
+							if (typeof engine.clearVariableRenames === 'function') {
+								engine.clearVariableRenames();
+							}
+							if (typeof engine.addVariableRename === 'function') {
+								for (const r of workerData.variableRenames) {
+									engine.addVariableRename(r.oldName, r.newName);
+								}
+							}
+						}
+
 						const result = engine.decompileIr(workerData.irText);
 						engine.dispose();
 						parentPort.postMessage({ result });
@@ -323,7 +424,14 @@ export class HelixWrapper {
 
 			const worker = new Worker(workerCode, {
 				eval: true,
-				workerData: { irText, arch, modulePaths: this.modulePaths },
+				workerData: {
+					irText,
+					arch,
+					modulePaths: this.modulePaths,
+					skipOptimization: flags?.skipOptimization ?? false,
+					useCastLayer: flags?.useCastLayer ?? false,
+					variableRenames: flags?.variableRenames ?? [],
+				},
 			});
 
 			worker.on('message', (msg: { result?: HelixDecompileResult; error?: string }) => {
