@@ -214,6 +214,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Belt-and-Suspenders Fix** — String-based regex rename in `applySessionRenames` now ALWAYS runs regardless of engine support. If the C++ AST walk already renamed the variable, the regex finds nothing and is a no-op. If the AST walk missed it (C AST layer off, name mismatch), the regex catches it. Prevents rename regression.
 - **Requires Helix C++ Side**: `Engine.h/cpp` (rename map + setter), `CApi.cpp` (C API export `helix_engine_set_variable_rename`), `ffi.rs` (NAPI-RS FFI), `CAstOptimizer.cpp` (new rename walk pass after optimizer, before printer).
 
+### Remill Wrapper — Native endbr64/ftrace Handling in DoLift (FIX-023)
+
+- **Synthetic NOP for endbr64/endbr32** — When `DecodeInstruction()` fails on CET instructions (F3 0F 1E FA / F3 0F 1E FB), the Phase 1 scanner now creates a synthetic `DecodedInst` with `category = kCategoryNoOp` and `size = 4` instead of stopping the scan. Phase 3 recognizes these synthetic NOPs and skips `LiftIntoBlock()` for them. The lifter now continues through `endbr64` preambles natively without the TypeScript FIX-017 skip (which is kept as a safety net for older .node builds).
+- **Synthetic NOP for `call __fentry__`** — Same treatment for `E8 00 00 00 00` (ftrace NOP sled with unresolved displacement). Creates a synthetic 5-byte `kCategoryNoOp`. Eliminates the need for TypeScript-side byte skipping in kernel modules.
+- **Impact**: The Remill scanner now correctly decodes through the full `endbr64 + call __fentry__ + push rbp + mov rbp, rsp` preamble without stopping. Combined with FIX-018 (section disambiguation), all 7 mali_kbase.ko functions lift with correct code bytes from the first instruction.
+- **Requires Remill .node rebuild** (`npx node-gyp rebuild`).
+
 ### Disassembler — Backtrack Validation with Capstone Linear Sweep (FIX-022c)
 
 - **Linear Sweep Validation** — After `findFunctionStartForAddress` returns a backtrack candidate, `validateBacktrackCandidate()` decodes instructions linearly from the candidate to the original address using Capstone. If the sweep encounters a `RET`, `INT3` padding (CC CC), unconditional `JMP` to outside the range, or a decode failure before reaching the original address, the candidate belongs to a **different function** and the backtrack is rejected. Replaces the fixed distance limit (256/4096 bytes) with a semantically correct validation.

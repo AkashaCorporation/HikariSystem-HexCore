@@ -498,6 +498,47 @@ LiftResult RemillLifter::DoLift(
 				reinterpret_cast<const char*>(bytes + scanOffset), length - scanOffset);
 
 			if (!arch_->DecodeInstruction(scanPC, instrBytes, scanInst, scanContext)) {
+				// FIX-023: Intercept endbr64/endbr32 — Remill has no semantic for these
+				// CET instructions, but they are architectural NOPs. Create a synthetic
+				// DecodedInst so the scan continues past them instead of stopping.
+				if (scanOffset + 4 <= length) {
+					const uint8_t* p = bytes + scanOffset;
+					bool isEndbr64 = (p[0] == 0xF3 && p[1] == 0x0F && p[2] == 0x1E && p[3] == 0xFA);
+					bool isEndbr32 = (p[0] == 0xF3 && p[1] == 0x0F && p[2] == 0x1E && p[3] == 0xFB);
+					if (isEndbr64 || isEndbr32) {
+						DecodedInst di;
+						di.pc = scanPC;
+						di.size = 4;
+						di.inst.category = remill::Instruction::kCategoryNoOp;
+						di.inst.bytes = std::string(reinterpret_cast<const char*>(p), 4);
+						di.inst.branch_taken_pc = 0;
+						di.inst.branch_not_taken_pc = 0;
+						decoded.push_back(di);
+						scanOffset += 4;
+						scanPC += 4;
+						continue;
+					}
+				}
+				// FIX-023: Also handle `call __fentry__` (E8 00 00 00 00) — ftrace NOP
+				// sled in kernel modules. The displacement is 0 (unresolved relocation),
+				// making it a call to PC+5 which is just a fallthrough NOP.
+				if (scanOffset + 5 <= length) {
+					const uint8_t* p = bytes + scanOffset;
+					if (p[0] == 0xE8 && p[1] == 0x00 && p[2] == 0x00 &&
+						p[3] == 0x00 && p[4] == 0x00) {
+						DecodedInst di;
+						di.pc = scanPC;
+						di.size = 5;
+						di.inst.category = remill::Instruction::kCategoryNoOp;
+						di.inst.bytes = std::string(reinterpret_cast<const char*>(p), 5);
+						di.inst.branch_taken_pc = 0;
+						di.inst.branch_not_taken_pc = 0;
+						decoded.push_back(di);
+						scanOffset += 5;
+						scanPC += 5;
+						continue;
+					}
+				}
 				break;
 			}
 
@@ -660,6 +701,19 @@ LiftResult RemillLifter::DoLift(
 				currentBlock = it->second;
 			} else {
 				currentBlock = &func->getEntryBlock();
+			}
+		}
+
+		// FIX-023: Skip synthetic NOPs (endbr64, call __fentry__) — they have
+		// no Remill semantic and LiftIntoBlock would fail on them. They were
+		// already added to `decoded` as kCategoryNoOp in Phase 1.
+		if (di.inst.category == remill::Instruction::kCategoryNoOp &&
+			di.size >= 4 && di.size <= 5) {
+			const uint8_t firstByte = static_cast<uint8_t>(di.inst.bytes[0]);
+			if (firstByte == 0xF3 || firstByte == 0xE8) {
+				// Synthetic NOP — skip lifting, just count the bytes
+				totalOffset += di.size;
+				continue;
 			}
 		}
 
