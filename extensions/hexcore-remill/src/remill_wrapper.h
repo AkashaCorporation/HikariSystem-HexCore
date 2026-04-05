@@ -12,6 +12,7 @@
 #include <napi.h>
 #include <string>
 #include <vector>
+#include <map>
 #include <memory>
 #include <cstdint>
 
@@ -35,6 +36,7 @@ struct LiftOptions {
 	size_t maxBytes        = 32768;   // Max bytes to decode (32KB)
 	bool   splitAtCalls    = true;    // Record external CALL targets
 	bool   optimizeIR      = true;    // Run LLVM passes (mem2reg, instcombine, simplifycfg, dce)
+	bool   inlineSemantics = false;   // Preserve named semantic calls by default for downstream decompilers
 };
 
 /**
@@ -52,6 +54,9 @@ struct LiftResult {
 	uint64_t nextAddress = 0;          // Where to continue lifting (valid if truncated)
 	std::vector<uint64_t> callTargets; // Discovered external CALL targets
 	std::string truncationReason;      // "max_instructions" | "max_blocks" | "max_bytes"
+
+	// Register analysis metadata
+	std::vector<std::string> implicitParams; // Registers read before written (function params)
 };
 
 /**
@@ -82,10 +87,16 @@ private:
 	static Napi::Value GetSupportedArchs(const Napi::CallbackInfo& info);
 	Napi::Value Close(const Napi::CallbackInfo& info);
 	Napi::Value IsOpen(const Napi::CallbackInfo& info);
+	Napi::Value SetExternalSymbols(const Napi::CallbackInfo& info);
+	Napi::Value ClearExternalSymbols(const Napi::CallbackInfo& info);
 
 	// --- State ---
 	std::string archName_;
 	bool closed_ = false;
+
+	// FIX-011: External symbol map (fakeAddr → symbol name) for ET_REL relocations.
+	// Set from JS before liftBytes(); used after lifting to resolve CALLI targets.
+	std::map<uint64_t, std::string> externalSymbols_;
 
 	std::unique_ptr<llvm::LLVMContext> context_;
 	std::unique_ptr<llvm::Module> semanticsModule_;
@@ -102,7 +113,8 @@ public:
 		Napi::Env env,
 		RemillLifter* lifter,
 		std::vector<uint8_t> bytes,
-		uint64_t address);
+		uint64_t address,
+		LiftOptions options);
 
 	void Execute() override;
 	void OnOK() override;
@@ -114,6 +126,7 @@ private:
 	RemillLifter* lifter_;
 	std::vector<uint8_t> bytes_;
 	uint64_t address_;
+	LiftOptions options_;
 	LiftResult result_;
 	Napi::Promise::Deferred deferred_;
 };

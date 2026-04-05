@@ -47,6 +47,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/GlobalAlias.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/Intrinsics.h>
 
 // LLVM New Pass Manager + optimization passes
 #include <llvm/Passes/PassBuilder.h>
@@ -59,6 +60,7 @@
 #include <llvm/Transforms/Scalar/DeadStoreElimination.h>
 #include <llvm/Transforms/Scalar/EarlyCSE.h>
 #include <llvm/Transforms/Scalar/SROA.h>
+#include <llvm/Transforms/Utils/Cloning.h>
 #include <llvm/Analysis/CGSCCPassManager.h>
 #include <llvm/Analysis/LoopAnalysisManager.h>
 
@@ -93,6 +95,30 @@ static llvm::AllocaInst* FindNamedAlloca(llvm::Function* func, llvm::StringRef n
 	}
 
 	return nullptr;
+}
+
+static LiftOptions ParseLiftOptions(const Napi::Value& value) {
+	LiftOptions options;
+
+	if (!value.IsObject()) {
+		return options;
+	}
+
+	auto opts = value.As<Napi::Object>();
+	if (opts.Has("maxInstructions") && opts.Get("maxInstructions").IsNumber())
+		options.maxInstructions = opts.Get("maxInstructions").As<Napi::Number>().Uint32Value();
+	if (opts.Has("maxBasicBlocks") && opts.Get("maxBasicBlocks").IsNumber())
+		options.maxBasicBlocks = opts.Get("maxBasicBlocks").As<Napi::Number>().Uint32Value();
+	if (opts.Has("maxBytes") && opts.Get("maxBytes").IsNumber())
+		options.maxBytes = opts.Get("maxBytes").As<Napi::Number>().Uint32Value();
+	if (opts.Has("splitAtCalls") && opts.Get("splitAtCalls").IsBoolean())
+		options.splitAtCalls = opts.Get("splitAtCalls").As<Napi::Boolean>().Value();
+	if (opts.Has("optimizeIR") && opts.Get("optimizeIR").IsBoolean())
+		options.optimizeIR = opts.Get("optimizeIR").As<Napi::Boolean>().Value();
+	if (opts.Has("inlineSemantics") && opts.Get("inlineSemantics").IsBoolean())
+		options.inlineSemantics = opts.Get("inlineSemantics").As<Napi::Boolean>().Value();
+
+	return options;
 }
 
 // Helper: resolve the semantics directory at runtime.
@@ -174,6 +200,8 @@ Napi::Object RemillLifter::Init(Napi::Env env, Napi::Object exports) {
 		InstanceMethod("getArch", &RemillLifter::GetArch),
 		InstanceMethod("close", &RemillLifter::Close),
 		InstanceMethod("isOpen", &RemillLifter::IsOpen),
+		InstanceMethod("setExternalSymbols", &RemillLifter::SetExternalSymbols),
+		InstanceMethod("clearExternalSymbols", &RemillLifter::ClearExternalSymbols),
 		StaticMethod("getSupportedArchs", &RemillLifter::GetSupportedArchs),
 	});
 
@@ -296,20 +324,7 @@ Napi::Value RemillLifter::LiftBytes(const Napi::CallbackInfo& info) {
 	}
 
 	// Parse optional lift options (3rd argument)
-	LiftOptions options;
-	if (info.Length() > 2 && info[2].IsObject()) {
-		auto opts = info[2].As<Napi::Object>();
-		if (opts.Has("maxInstructions") && opts.Get("maxInstructions").IsNumber())
-			options.maxInstructions = opts.Get("maxInstructions").As<Napi::Number>().Uint32Value();
-		if (opts.Has("maxBasicBlocks") && opts.Get("maxBasicBlocks").IsNumber())
-			options.maxBasicBlocks = opts.Get("maxBasicBlocks").As<Napi::Number>().Uint32Value();
-		if (opts.Has("maxBytes") && opts.Get("maxBytes").IsNumber())
-			options.maxBytes = opts.Get("maxBytes").As<Napi::Number>().Uint32Value();
-		if (opts.Has("splitAtCalls") && opts.Get("splitAtCalls").IsBoolean())
-			options.splitAtCalls = opts.Get("splitAtCalls").As<Napi::Boolean>().Value();
-		if (opts.Has("optimizeIR") && opts.Get("optimizeIR").IsBoolean())
-			options.optimizeIR = opts.Get("optimizeIR").As<Napi::Boolean>().Value();
-	}
+	LiftOptions options = info.Length() > 2 ? ParseLiftOptions(info[2]) : LiftOptions{};
 
 	try {
 		LiftResult result = DoLift(bytes, length, address, options);
@@ -367,7 +382,9 @@ Napi::Value RemillLifter::LiftBytesAsync(const Napi::CallbackInfo& info) {
 		address = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
 	}
 
-	auto* worker = new LiftBytesWorker(env, this, std::move(bytesCopy), address);
+	LiftOptions options = info.Length() > 2 ? ParseLiftOptions(info[2]) : LiftOptions{};
+
+	auto* worker = new LiftBytesWorker(env, this, std::move(bytesCopy), address, options);
 	auto promise = worker->GetDeferred().Promise();
 	worker->Queue();
 	return promise;
@@ -496,14 +513,26 @@ LiftResult RemillLifter::DoLift(
 			// Check if this instruction is a branch or call
 			// Remill categorizes instructions — check for jumps
 			switch (scanInst.category) {
-			case remill::Instruction::kCategoryDirectJump:
-				// Unconditional jump: target_pc is a leader
-				if (!scanInst.branch_taken_pc) {
-					// Fallback: check operands for the target
-				} else {
+			case remill::Instruction::kCategoryDirectJump: {
+				// FIX-019: Check if jump target is a kernel return thunk
+				// (retpoline: `jmp __x86_return_thunk` replaces `ret` in Spectre-mitigated kernels)
+				if (scanInst.branch_taken_pc) {
+					auto thunkIt = externalSymbols_.find(scanInst.branch_taken_pc);
+					if (thunkIt != externalSymbols_.end()) {
+						const auto& symName = thunkIt->second;
+						if (symName == "__x86_return_thunk" ||
+							symName.find("__x86_indirect_thunk_") == 0 ||
+							symName == "__x86_return_thunk_safe") {
+							// Treat as function return — don't add fallthrough as leader
+							// The block will get a ret terminator in Phase 4
+							break;
+						}
+					}
+					// Normal unconditional jump: target is a leader
 					leaders.insert(scanInst.branch_taken_pc);
 				}
 				break;
+			}
 
 			case remill::Instruction::kCategoryConditionalBranch:
 				// Conditional branch: both target and fall-through are leaders
@@ -523,11 +552,15 @@ LiftResult RemillLifter::DoLift(
 				if (scanOffset + scanInst.bytes.size() < length) {
 					leaders.insert(nextPC);
 				}
-				// Record external call targets for boundary metadata
+				// Record call targets for boundary metadata
 				if (options.splitAtCalls && scanInst.branch_taken_pc) {
 					bool isExternal = scanInst.branch_taken_pc < address ||
 					                  scanInst.branch_taken_pc >= endAddr;
 					if (isExternal) {
+						result.callTargets.push_back(scanInst.branch_taken_pc);
+					} else {
+						// FIX-021: Also record INTERNAL call targets so the TypeScript
+						// layer can lift them recursively for multi-function modules.
 						result.callTargets.push_back(scanInst.branch_taken_pc);
 					}
 				}
@@ -669,7 +702,22 @@ LiftResult RemillLifter::DoLift(
 
 		switch (di.inst.category) {
 		case remill::Instruction::kCategoryDirectJump: {
-			// Unconditional jump: br label %target_bb
+			// FIX-019: If jump target is a return thunk, emit ret instead of br
+			if (di.inst.branch_taken_pc) {
+				auto thunkIt = externalSymbols_.find(di.inst.branch_taken_pc);
+				if (thunkIt != externalSymbols_.end()) {
+					const auto& symName = thunkIt->second;
+					if (symName == "__x86_return_thunk" ||
+						symName.find("__x86_indirect_thunk_") == 0 ||
+						symName == "__x86_return_thunk_safe") {
+						// Return thunk — emit ret, not br
+						llvm::IRBuilder<> builder(currentBlock);
+						builder.CreateRet(func->getArg(2));
+						break;
+					}
+				}
+			}
+			// Normal unconditional jump: br label %target_bb
 			if (di.inst.branch_taken_pc && bbMap.count(di.inst.branch_taken_pc)) {
 				llvm::IRBuilder<> builder(currentBlock);
 				builder.CreateBr(bbMap[di.inst.branch_taken_pc]);
@@ -1032,7 +1080,82 @@ LiftResult RemillLifter::DoLift(
 			F->eraseFromParent();
 		}
 
-		// 6. Strip bodies from callee functions (keep as declarations)
+		// 6. Semantic inlining (selective + optional full).
+		//
+		// SSE/FP semantics are ALWAYS inlined so that downstream decompilers
+		// see native LLVM ops (fmul, fadd, fcmp+select) instead of opaque
+		// calls like MINSS(), MULSS().  Helix v0.8.0 recognizes fcmp+select
+		// patterns and emits correct if-structure — operand resolution is
+		// a Helix-side fix (State GEP → XMM float value tracking).
+		// Non-SSE semantics stay as named calls (Helix pattern-matches them).
+		{
+			auto isSseSemantic = [](llvm::Function* F) -> bool {
+				if (!F) return false;
+				llvm::StringRef name = F->getName();
+				if (!name.contains("_GLOBAL__N_1")) return false;
+				// Scalar single/double
+				if (name.contains("ADDSS") || name.contains("SUBSS") ||
+				    name.contains("MULSS") || name.contains("DIVSS") ||
+				    name.contains("MINSS") || name.contains("MAXSS") ||
+				    name.contains("SQRTSS")) return true;
+				if (name.contains("ADDSD") || name.contains("SUBSD") ||
+				    name.contains("MULSD") || name.contains("DIVSD") ||
+				    name.contains("MINSD") || name.contains("MAXSD") ||
+				    name.contains("SQRTSD")) return true;
+				// Packed
+				if (name.contains("ADDPS") || name.contains("SUBPS") ||
+				    name.contains("MULPS") || name.contains("DIVPS")) return true;
+				if (name.contains("ADDPD") || name.contains("SUBPD") ||
+				    name.contains("MULPD") || name.contains("DIVPD")) return true;
+				// Comparisons
+				if (name.contains("COMISS") || name.contains("UCOMISS") ||
+				    name.contains("COMISD") || name.contains("UCOMISD")) return true;
+				// Conversions
+				if (name.contains("CVTSS") || name.contains("CVTSD") ||
+				    name.contains("CVTPS") || name.contains("CVTPD") ||
+				    name.contains("CVTSI") || name.contains("CVTTSS") ||
+				    name.contains("CVTTSD")) return true;
+				// Bitwise (XOR for negation/zeroing)
+				if (name.contains("XORPS") || name.contains("XORPD") ||
+				    name.contains("ANDPS") || name.contains("ANDPD") ||
+				    name.contains("ORPS")  || name.contains("ORPD") ||
+				    name.contains("ANDNPS")|| name.contains("ANDNPD")) return true;
+				return false;
+			};
+
+			bool inlined = true;
+			unsigned rounds = 0;
+			while (inlined && rounds++ < 8) {
+				inlined = false;
+				llvm::SmallVector<llvm::CallInst*, 32> callsToInline;
+
+				for (auto &BB : *func) {
+					for (auto &I : BB) {
+						if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+							auto *callee = CI->getCalledFunction();
+							if (callee && !callee->isDeclaration() &&
+							    !callee->isIntrinsic() && callee != func) {
+								if (options.inlineSemantics || isSseSemantic(callee)) {
+									callsToInline.push_back(CI);
+								}
+							}
+						}
+					}
+				}
+
+				for (auto *CI : callsToInline) {
+					llvm::InlineFunctionInfo IFI;
+					auto result = llvm::InlineFunction(*CI, IFI);
+					if (result.isSuccess()) {
+						inlined = true;
+					}
+				}
+			}
+		}
+
+		// 7. Strip bodies from helper functions but keep their declarations.
+		// This preserves readable named semantic callsites in compatibility mode
+		// while still keeping the final module compact.
 		for (auto &F : *liftModule) {
 			if (&F != func && !F.isDeclaration()) {
 				F.deleteBody();
@@ -1050,6 +1173,115 @@ LiftResult RemillLifter::DoLift(
 		}
 		for (auto *NMD : namedMDToRemove) {
 			NMD->eraseFromParent();
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 5.3: State Register Naming + Implicit Parameter Detection
+	// ═══════════════════════════════════════════════════════════════════════
+	// Name GEPs and loads from State pointer (arg 0) with register names.
+	// Detect implicit parameters (registers read before written in entry).
+	// NOTE: GEPs are NOT replaced with allocas — the *(int64_t)(void*)0
+	// rendering is fixed on the Helix decompiler side.
+	{
+		llvm::Value* statePtr = func->getArg(0);
+		const auto& DL = liftModule->getDataLayout();
+
+		std::set<std::string> regsWrittenInEntry;
+		std::set<std::string> implicitParamSet;
+
+		for (auto& BB : *func) {
+			bool isEntry = (&BB == &func->getEntryBlock());
+			for (auto& I : BB) {
+				auto* GEP = llvm::dyn_cast<llvm::GetElementPtrInst>(&I);
+				if (!GEP || GEP->getPointerOperand() != statePtr)
+					continue;
+
+				llvm::APInt offset(64, 0);
+				if (!GEP->accumulateConstantOffset(DL, offset))
+					continue;
+
+				uint64_t byteOff = offset.getZExtValue();
+				if (byteOff >= 8192) continue;  // sanity: State < 4KB
+
+				auto* reg = arch_->RegisterAtStateOffset(byteOff);
+				if (!reg) continue;
+
+				// Name the GEP and its load/store users
+				if (!GEP->hasName())
+					GEP->setName("&" + reg->name);
+
+				for (auto* U : GEP->users()) {
+					if (auto* LI = llvm::dyn_cast<llvm::LoadInst>(U)) {
+						if (!LI->hasName()) LI->setName(reg->name);
+						if (isEntry && !regsWrittenInEntry.count(reg->name))
+							implicitParamSet.insert(reg->name);
+					}
+					if (auto* SI = llvm::dyn_cast<llvm::StoreInst>(U)) {
+						if (SI->getPointerOperand() == GEP && isEntry)
+							regsWrittenInEntry.insert(reg->name);
+					}
+				}
+			}
+		}
+
+		for (auto& name : implicitParamSet)
+			result.implicitParams.push_back(name);
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 5.4: Lower LLVM Intrinsics to Named Functions
+	// ═══════════════════════════════════════════════════════════════════════
+	// Intrinsics like llvm.ctpop, llvm.ctlz, llvm.cttz, llvm.bswap are
+	// not recognized by the Helix decompiler. Replace with named calls.
+	{
+		llvm::SmallVector<llvm::CallInst*, 16> intrinsicCalls;
+
+		for (auto& BB : *func) {
+			for (auto& I : BB) {
+				auto* CI = llvm::dyn_cast<llvm::CallInst>(&I);
+				if (!CI) continue;
+				auto* callee = CI->getCalledFunction();
+				if (!callee || !callee->isIntrinsic()) continue;
+
+				switch (callee->getIntrinsicID()) {
+				case llvm::Intrinsic::ctpop:
+				case llvm::Intrinsic::ctlz:
+				case llvm::Intrinsic::cttz:
+				case llvm::Intrinsic::bswap:
+					intrinsicCalls.push_back(CI);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+
+		for (auto* CI : intrinsicCalls) {
+			auto* callee = CI->getCalledFunction();
+			auto intrID = callee->getIntrinsicID();
+			auto* retTy = CI->getType();
+			if (!retTy->isIntegerTy()) continue;  // skip vector intrinsics
+			unsigned bits = retTy->getIntegerBitWidth();
+
+			const char* baseName = nullptr;
+			switch (intrID) {
+			case llvm::Intrinsic::ctpop: baseName = "__popcnt"; break;
+			case llvm::Intrinsic::ctlz:  baseName = "__clz"; break;
+			case llvm::Intrinsic::cttz:  baseName = "__ctz"; break;
+			case llvm::Intrinsic::bswap: baseName = "__bswap"; break;
+			default: continue;
+			}
+
+			std::string funcName = std::string(baseName) + std::to_string(bits);
+			auto* fnTy = llvm::FunctionType::get(retTy, {retTy}, false);
+			auto fnCallee = liftModule->getOrInsertFunction(funcName, fnTy);
+
+			llvm::IRBuilder<> builder(CI);
+			auto* newCall = builder.CreateCall(fnCallee, {CI->getArgOperand(0)});
+			newCall->setName(funcName);
+			CI->replaceAllUsesWith(newCall);
+			CI->eraseFromParent();
 		}
 	}
 
@@ -1100,6 +1332,11 @@ LiftResult RemillLifter::DoLift(
 		FPM.addPass(llvm::InstCombinePass());
 		FPM.addPass(llvm::SimplifyCFGPass());
 
+		// Third round: catch remaining dead branches + constant conditions
+		FPM.addPass(llvm::InstCombinePass());
+		FPM.addPass(llvm::SimplifyCFGPass());
+		FPM.addPass(llvm::ADCEPass());
+
 		// Run on all functions in the module (primarily the lifted function)
 		llvm::ModulePassManager MPM;
 		MPM.addPass(llvm::createModuleToFunctionPassAdaptor(std::move(FPM)));
@@ -1129,6 +1366,97 @@ LiftResult RemillLifter::DoLift(
 		}
 	}
 
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 5.6: Resolve external CALLI targets using externalSymbols_ map
+	// ═══════════════════════════════════════════════════════════════════════
+	// For ET_REL (kernel modules), the TypeScript layer patches call
+	// displacements to point to fake addresses (0x7FFF0000+). The Remill
+	// lifter decodes these as real calls and records them in callTargets.
+	// However, Phase 4.5 (calliTargets) often fails to inject the concrete
+	// target into the CALLI arg because the CallInst pointer becomes stale.
+	//
+	// This phase walks ALL instructions looking for CALLI calls where
+	// arg[2] (the target) is an i64 constant matching our fake address map.
+	// When found, it creates a declared external function and replaces the
+	// CALLI with a direct call to it.
+	//
+	// Even if the i64 constant was NOT injected by Phase 4.5, we also scan
+	// callTargets (populated by Phase 3) and inject external function
+	// declarations into the module so the downstream decompiler knows about
+	// the external dependencies.
+
+	if (!externalSymbols_.empty()) {
+		auto& ctx = liftModule->getContext();
+		auto* voidTy = llvm::Type::getVoidTy(ctx);
+		auto* i8PtrTy = llvm::PointerType::get(ctx, 0);
+
+		// Create a generic external function type: ptr(...)
+		auto* externFnTy = llvm::FunctionType::get(i8PtrTy, /* isVarArg= */ true);
+
+		// Cache declared external functions
+		std::map<std::string, llvm::Function*> declaredFns;
+		auto getOrCreateExtern = [&](const std::string& name) -> llvm::Function* {
+			auto it = declaredFns.find(name);
+			if (it != declaredFns.end()) return it->second;
+			auto* fn = llvm::Function::Create(
+				externFnTy, llvm::GlobalValue::ExternalLinkage, name, liftModule.get());
+			declaredFns[name] = fn;
+			return fn;
+		};
+
+		size_t resolvedCount = 0;
+
+		// Strategy 1: Scan callTargets from Phase 3 and inject declares
+		for (uint64_t ct : result.callTargets) {
+			auto it = externalSymbols_.find(ct);
+			if (it != externalSymbols_.end()) {
+				getOrCreateExtern(it->second);
+				resolvedCount++;
+			}
+		}
+
+		// Strategy 2: Walk all CallInsts and try to replace CALLI calls
+		// where the target arg is a constant matching externalSymbols_.
+		for (auto& F : *liftModule) {
+			for (auto& BB : F) {
+				std::vector<llvm::CallInst*> toReplace;
+				for (auto& I : BB) {
+					auto* CI = llvm::dyn_cast<llvm::CallInst>(&I);
+					if (!CI) continue;
+
+					auto* calledFn = CI->getCalledFunction();
+					if (!calledFn || !calledFn->getName().contains("CALLI")) continue;
+
+					// CALLI signature: (Memory, State, target_i64, NEXT_PC, ...)
+					// arg[2] is the call target address
+					if (CI->arg_size() <= 2) continue;
+					auto* targetArg = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(2));
+					if (!targetArg) continue;
+
+					uint64_t targetAddr = targetArg->getZExtValue();
+					auto symIt = externalSymbols_.find(targetAddr);
+					if (symIt == externalSymbols_.end()) continue;
+
+					// Found a CALLI with a resolved external target!
+					// We can't easily replace the CALLI call with a different
+					// function signature in-place (Remill's CALLI passes State/Memory).
+					// Instead, inject a comment-style call right after: the downstream
+					// IR text replacement in TypeScript will pick it up.
+					// For now, just ensure the declare exists.
+					getOrCreateExtern(symIt->second);
+					resolvedCount++;
+				}
+			}
+		}
+
+		// Strategy 3: Regardless of CALLI matching, declare ALL external
+		// symbols so the IR has `declare ptr @mutex_lock(...)` etc.
+		// The Helix decompiler uses these + @__hxreloc__ to resolve calls.
+		for (auto& [addr, name] : externalSymbols_) {
+			getOrCreateExtern(name);
+		}
+	}
+
 	// Print the stripped module
 	std::string irStr;
 	llvm::raw_string_ostream os(irStr);
@@ -1138,6 +1466,38 @@ LiftResult RemillLifter::DoLift(
 	result.ir = irStr;
 	result.success = true;
 	return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-011: setExternalSymbols / clearExternalSymbols
+// ═══════════════════════════════════════════════════════════════════════
+// Called from JS before liftBytes() to provide a map of
+// fakeAddr → symbolName for ET_REL relocations. After lifting,
+// DoLift Phase 5.6 uses this map to resolve CALLI targets.
+
+Napi::Value RemillLifter::SetExternalSymbols(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+	if (info.Length() < 1 || !info[0].IsObject()) {
+		Napi::TypeError::New(env, "setExternalSymbols expects an object { address: name, ... }")
+			.ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	externalSymbols_.clear();
+	Napi::Object map = info[0].As<Napi::Object>();
+	Napi::Array keys = map.GetPropertyNames();
+	for (uint32_t i = 0; i < keys.Length(); i++) {
+		std::string key = keys.Get(i).As<Napi::String>().Utf8Value();
+		std::string name = map.Get(key).As<Napi::String>().Utf8Value();
+		uint64_t addr = std::stoull(key);
+		externalSymbols_[addr] = name;
+	}
+	return Napi::Number::New(env, static_cast<double>(externalSymbols_.size()));
+}
+
+Napi::Value RemillLifter::ClearExternalSymbols(const Napi::CallbackInfo& info) {
+	externalSymbols_.clear();
+	return info.Env().Undefined();
 }
 
 Napi::Object RemillLifter::LiftResultToJS(
@@ -1168,6 +1528,14 @@ Napi::Object RemillLifter::LiftResultToJS(
 	}
 	obj.Set("callTargets", targets);
 
+	// Implicit parameters (registers read before written)
+	auto params = Napi::Array::New(env, result.implicitParams.size());
+	for (size_t i = 0; i < result.implicitParams.size(); i++) {
+		params.Set(static_cast<uint32_t>(i),
+			Napi::String::New(env, result.implicitParams[i]));
+	}
+	obj.Set("implicitParams", params);
+
 	return obj;
 }
 
@@ -1179,16 +1547,18 @@ LiftBytesWorker::LiftBytesWorker(
 	Napi::Env env,
 	RemillLifter* lifter,
 	std::vector<uint8_t> bytes,
-	uint64_t address)
+	uint64_t address,
+	LiftOptions options)
 	: Napi::AsyncWorker(env),
 	  lifter_(lifter),
 	  bytes_(std::move(bytes)),
 	  address_(address),
+	  options_(options),
 	  deferred_(Napi::Promise::Deferred::New(env)) {}
 
 void LiftBytesWorker::Execute() {
 	try {
-		result_ = lifter_->DoLift(bytes_.data(), bytes_.size(), address_);
+		result_ = lifter_->DoLift(bytes_.data(), bytes_.size(), address_, options_);
 		if (!result_.success) {
 			SetError(result_.error);
 		}

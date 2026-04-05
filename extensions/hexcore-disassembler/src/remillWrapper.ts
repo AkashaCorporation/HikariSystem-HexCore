@@ -25,6 +25,8 @@ interface RemillLifterInstance {
 	getArch(): string;
 	close(): void;
 	isOpen(): boolean;
+	setExternalSymbols?(map: Record<string, string>): number;
+	clearExternalSymbols?(): void;
 }
 
 /**
@@ -41,6 +43,10 @@ export interface LiftResult {
 	address: number;
 	/** Quantidade de bytes consumidos pelo lifter */
 	bytesConsumed: number;
+	/** External call targets discovered during lifting (Phase 3) */
+	callTargets?: number[];
+	/** Implicit parameters (registers read before written) */
+	implicitParams?: string[];
 }
 
 /** Threshold em bytes acima do qual usamos liftBytesAsync */
@@ -124,26 +130,53 @@ export class RemillWrapper {
 	 * Reutiliza a instância existente se a arquitetura não mudou.
 	 * Fecha a instância anterior se a arquitetura mudou.
 	 */
-	private ensureLifter(arch: ArchitectureConfig): RemillLifterInstance {
-		const mapping = mapCapstoneToRemill(arch);
+	private currentOs?: string;
+
+	private ensureLifter(arch: ArchitectureConfig, targetOs?: string): RemillLifterInstance {
+		const mapping = mapCapstoneToRemill(arch, targetOs);
 		if (!mapping.supported) {
 			throw new Error(`Architecture '${arch}' is not supported by Remill. Supported: x86, x64, arm64.`);
 		}
 
-		// Reutilizar instância existente se mesma arquitetura
-		if (this.lifter && this.currentArch === mapping.remillArch) {
+		const effectiveOs = mapping.remillOs ?? 'linux';
+
+		// Reutilizar instância existente se mesma arquitetura E mesmo OS
+		if (this.lifter && this.currentArch === mapping.remillArch && this.currentOs === effectiveOs) {
 			return this.lifter;
 		}
 
-		// Fechar instância anterior se existir
+		// Fechar instância anterior se existir (arch or OS changed)
 		if (this.lifter) {
 			this.lifter.close();
 			this.lifter = undefined;
 		}
 
-		this.lifter = new this.module!.RemillLifter(mapping.remillArch, mapping.remillOs);
+		this.lifter = new this.module!.RemillLifter(mapping.remillArch, effectiveOs);
 		this.currentArch = mapping.remillArch;
+		this.currentOs = effectiveOs;
 		return this.lifter;
+	}
+
+	/**
+	 * FIX-011: Set external symbol map for ET_REL relocation resolution.
+	 * Called before liftBytes() so the C++ Phase 5.6 can inject declares
+	 * into the LLVM Module directly.
+	 * @param symbols Map of fakeAddr → symbolName
+	 */
+	setExternalSymbols(symbols: Map<number, string>): void {
+		if (!this.lifter?.setExternalSymbols) { return; }
+		const map: Record<string, string> = {};
+		for (const [addr, name] of symbols) {
+			map[String(addr)] = name;
+		}
+		this.lifter.setExternalSymbols(map);
+	}
+
+	/**
+	 * FIX-011: Clear external symbol map after lifting.
+	 */
+	clearExternalSymbols(): void {
+		this.lifter?.clearExternalSymbols?.();
 	}
 
 	/**
@@ -155,11 +188,14 @@ export class RemillWrapper {
 	 * @param buffer Bytes do código de máquina
 	 * @param address Endereço base para o lifting
 	 * @param arch Arquitetura Capstone do binário
+	 * @param targetOs OS do binário alvo (overrides host OS detection).
+	 *                 Use 'linux' for ELF/.ko, 'windows' for PE, etc.
 	 */
 	async liftBytes(
 		buffer: Buffer | Uint8Array,
 		address: number,
-		arch: ArchitectureConfig
+		arch: ArchitectureConfig,
+		targetOs?: string,
 	): Promise<LiftResult> {
 		if (!this.available || !this.module) {
 			return {
@@ -172,7 +208,7 @@ export class RemillWrapper {
 		}
 
 		try {
-			const lifter = this.ensureLifter(arch);
+			const lifter = this.ensureLifter(arch, targetOs);
 
 			if (buffer.length > ASYNC_THRESHOLD) {
 				return await lifter.liftBytesAsync(buffer, address);
