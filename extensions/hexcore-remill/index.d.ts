@@ -62,6 +62,68 @@ export interface LiftResult {
 	address: number;
 	/** Number of input bytes that were successfully consumed */
 	bytesConsumed: number;
+	/** Whether lifting stopped early because a configured limit was hit */
+	truncated?: boolean;
+	/** Address where lifting should continue when truncated is true */
+	nextAddress?: number;
+	/** External direct call targets discovered while lifting */
+	callTargets?: number[];
+	/** Reason for truncation when truncated is true */
+	truncationReason?: 'max_instructions' | 'max_blocks' | 'max_bytes';
+	/** Registers read before written in the entry flow */
+	implicitParams?: string[];
+}
+
+/**
+ * Lifting mode — selects format-specific heuristics in Phase 1.
+ *
+ * - `'generic'` — Default behavior with no format assumptions.
+ * - `'pe64'` — Trust .pdata function boundaries, handle int3 padding,
+ *   stop at known function ends, treat out-of-range jmp as tail call.
+ * - `'elf_relocatable'` — Use symtab boundaries, skip ftrace preamble,
+ *   treat retpoline thunks as returns.
+ */
+export type LiftMode = 'generic' | 'pe64' | 'elf_relocatable';
+
+/**
+ * Optional controls for the lifting pipeline.
+ */
+export interface LiftOptions {
+	/** Max decoded instructions per lift */
+	maxInstructions?: number;
+	/** Max discovered basic block leaders per lift */
+	maxBasicBlocks?: number;
+	/** Max bytes decoded from the input buffer */
+	maxBytes?: number;
+	/** Record external call targets when direct calls leave the lifted range */
+	splitAtCalls?: boolean;
+	/** Run LLVM cleanup and simplification passes after lifting */
+	optimizeIR?: boolean;
+	/** Inline semantic helper functions into the lifted body instead of preserving named semantic calls */
+	inlineSemantics?: boolean;
+
+	/**
+	 * Extra basic block entry points discovered by external analysis.
+	 * Injected into the leaders set after Phase 1 scan, before Phase 2.
+	 *
+	 * Sources: jump table targets (.rodata), PE .pdata function boundaries,
+	 * ELF symtab addresses within the lifted range.
+	 */
+	additionalLeaders?: number[];
+
+	/**
+	 * Format-specific lifting mode.
+	 * Controls Phase 1 heuristics for branch following, padding handling,
+	 * and function boundary detection.
+	 */
+	liftMode?: LiftMode;
+
+	/**
+	 * PE64 mode: function end addresses from .pdata exception directory.
+	 * Phase 1 stops scanning when it hits one of these addresses.
+	 * Only meaningful when liftMode is 'pe64'.
+	 */
+	knownFunctionEnds?: number[];
 }
 
 /**
@@ -131,7 +193,7 @@ export class RemillLifter {
 	 * @param address - Virtual address of the first byte
 	 * @returns Lift result with LLVM IR text
 	 */
-	liftBytes(code: Buffer | Uint8Array, address: number | bigint): LiftResult;
+	liftBytes(code: Buffer | Uint8Array, address: number | bigint, options?: LiftOptions): LiftResult;
 
 	/**
 	 * Lift raw machine code bytes to LLVM IR (asynchronous).
@@ -143,7 +205,7 @@ export class RemillLifter {
 	 * @param address - Virtual address of the first byte
 	 * @returns Promise resolving to lift result
 	 */
-	liftBytesAsync(code: Buffer | Uint8Array, address: number | bigint): Promise<LiftResult>;
+	liftBytesAsync(code: Buffer | Uint8Array, address: number | bigint, options?: LiftOptions): Promise<LiftResult>;
 
 	/**
 	 * Get the architecture name this lifter was created with.

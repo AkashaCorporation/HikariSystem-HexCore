@@ -28,6 +28,17 @@ class IntrinsicTable;
 }  // namespace remill
 
 /**
+ * Lifting mode — selects format-specific heuristics in Phase 1.
+ */
+enum class LiftMode {
+	Generic,         // Current default behavior (no format assumptions)
+	PE64,            // Trust .pdata function boundaries, handle int3 padding,
+	                 // stop at known function ends, treat out-of-range jmp as tail call
+	ElfRelocatable   // Use symtab boundaries, skip ftrace preamble,
+	                 // treat retpoline thunks as returns (FIX-019)
+};
+
+/**
  * Options to control lifting boundaries and prevent oversized IR.
  */
 struct LiftOptions {
@@ -37,6 +48,19 @@ struct LiftOptions {
 	bool   splitAtCalls    = true;    // Record external CALL targets
 	bool   optimizeIR      = true;    // Run LLVM passes (mem2reg, instcombine, simplifycfg, dce)
 	bool   inlineSemantics = false;   // Preserve named semantic calls by default for downstream decompilers
+
+	// --- Item 2: Additional BB leaders from external analysis ---
+	// Extra basic block entry points discovered by TypeScript (jump table targets,
+	// .pdata function boundaries, ELF symtab addresses within range).
+	// Injected into the leaders set after Phase 1 scan, before Phase 2.
+	std::vector<uint64_t> additionalLeaders;
+
+	// --- Item 3: Format-specific lifting mode ---
+	LiftMode mode = LiftMode::Generic;
+
+	// PE64-specific: function end addresses from .pdata exception directory.
+	// Phase 1 stops scanning when it hits one of these addresses.
+	std::vector<uint64_t> knownFunctionEnds;
 };
 
 /**

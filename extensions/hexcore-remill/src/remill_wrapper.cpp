@@ -118,6 +118,51 @@ static LiftOptions ParseLiftOptions(const Napi::Value& value) {
 	if (opts.Has("inlineSemantics") && opts.Get("inlineSemantics").IsBoolean())
 		options.inlineSemantics = opts.Get("inlineSemantics").As<Napi::Boolean>().Value();
 
+	// --- Item 2: additionalLeaders ---
+	if (opts.Has("additionalLeaders") && opts.Get("additionalLeaders").IsArray()) {
+		auto arr = opts.Get("additionalLeaders").As<Napi::Array>();
+		options.additionalLeaders.reserve(arr.Length());
+		for (uint32_t i = 0; i < arr.Length(); i++) {
+			Napi::Value el = arr.Get(i);
+			if (el.IsNumber()) {
+				options.additionalLeaders.push_back(
+					static_cast<uint64_t>(el.As<Napi::Number>().Int64Value()));
+			} else if (el.IsBigInt()) {
+				bool lossless = false;
+				options.additionalLeaders.push_back(
+					el.As<Napi::BigInt>().Uint64Value(&lossless));
+			}
+		}
+	}
+
+	// --- Item 3: liftMode ---
+	if (opts.Has("liftMode") && opts.Get("liftMode").IsString()) {
+		std::string modeStr = opts.Get("liftMode").As<Napi::String>().Utf8Value();
+		if (modeStr == "pe64") {
+			options.mode = LiftMode::PE64;
+		} else if (modeStr == "elf_relocatable") {
+			options.mode = LiftMode::ElfRelocatable;
+		}
+		// else: Generic (default)
+	}
+
+	// --- Item 3: knownFunctionEnds (PE64 mode) ---
+	if (opts.Has("knownFunctionEnds") && opts.Get("knownFunctionEnds").IsArray()) {
+		auto arr = opts.Get("knownFunctionEnds").As<Napi::Array>();
+		options.knownFunctionEnds.reserve(arr.Length());
+		for (uint32_t i = 0; i < arr.Length(); i++) {
+			Napi::Value el = arr.Get(i);
+			if (el.IsNumber()) {
+				options.knownFunctionEnds.push_back(
+					static_cast<uint64_t>(el.As<Napi::Number>().Int64Value()));
+			} else if (el.IsBigInt()) {
+				bool lossless = false;
+				options.knownFunctionEnds.push_back(
+					el.As<Napi::BigInt>().Uint64Value(&lossless));
+			}
+		}
+	}
+
 	return options;
 }
 
@@ -487,6 +532,10 @@ LiftResult RemillLifter::DoLift(
 
 	leaders.insert(address);  // Entry is always a leader
 
+	// Pre-compute knownFunctionEnds as a set for O(log n) lookup
+	std::set<uint64_t> functionEndSet(options.knownFunctionEnds.begin(),
+	                                   options.knownFunctionEnds.end());
+
 	{
 		remill::Instruction scanInst;
 		uint64_t scanPC = address;
@@ -494,6 +543,28 @@ LiftResult RemillLifter::DoLift(
 		auto scanContext = arch_->CreateInitialContext();
 
 		while (scanOffset < length) {
+			// ─── PE64 mode: stop at known function end ──────────────────
+			if (options.mode == LiftMode::PE64 && functionEndSet.count(scanPC)) {
+				break;
+			}
+
+			// ─── PE64 mode: treat 0xCC (int3) as padding/terminator ────
+			if (options.mode == LiftMode::PE64 && scanOffset < length) {
+				const uint8_t* p = bytes + scanOffset;
+				if (*p == 0xCC) {
+					// Skip consecutive int3 padding bytes
+					while (scanOffset < length && bytes[scanOffset] == 0xCC) {
+						scanOffset++;
+						scanPC++;
+					}
+					// If there's code after the padding, it's a new leader
+					if (scanOffset < length) {
+						leaders.insert(scanPC);
+					}
+					continue;
+				}
+			}
+
 			std::string_view instrBytes(
 				reinterpret_cast<const char*>(bytes + scanOffset), length - scanOffset);
 
@@ -569,6 +640,32 @@ LiftResult RemillLifter::DoLift(
 							break;
 						}
 					}
+
+					// ─── PE64 mode: out-of-range jmp = tail call ────────
+					// MSVC emits tail calls as `jmp other_function`. If the
+					// target falls outside our function range, record it as
+					// an external call target rather than a BB leader.
+					if (options.mode == LiftMode::PE64) {
+						bool outOfRange = scanInst.branch_taken_pc < address ||
+						                  scanInst.branch_taken_pc >= endAddr;
+						if (outOfRange) {
+							result.callTargets.push_back(scanInst.branch_taken_pc);
+							break;  // Don't add as leader
+						}
+					}
+
+					// ─── ElfRelocatable mode: out-of-.text jmp = external ─
+					// Don't follow branches to addresses outside the provided
+					// buffer (they point to other sections or modules).
+					if (options.mode == LiftMode::ElfRelocatable) {
+						bool outOfRange = scanInst.branch_taken_pc < address ||
+						                  scanInst.branch_taken_pc >= endAddr;
+						if (outOfRange) {
+							result.callTargets.push_back(scanInst.branch_taken_pc);
+							break;
+						}
+					}
+
 					// Normal unconditional jump: target is a leader
 					leaders.insert(scanInst.branch_taken_pc);
 				}
@@ -644,6 +741,22 @@ LiftResult RemillLifter::DoLift(
 		if (result.truncated && !decoded.empty()) {
 			auto& lastInst = decoded.back();
 			result.nextAddress = lastInst.pc + lastInst.size;
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 1.5: Inject additional BB leaders from external analysis
+	// ═══════════════════════════════════════════════════════════════════════
+	// TypeScript can extract leaders from jump table targets (.rodata),
+	// PE .pdata exception directory, or ELF symtab function addresses.
+	// Insert them into the leaders set before Phase 2 creates basic blocks.
+	if (!options.additionalLeaders.empty()) {
+		uint64_t endAddr = address + length;
+		for (uint64_t extraLeader : options.additionalLeaders) {
+			// Only accept leaders that fall within the decoded range
+			if (extraLeader >= address && extraLeader < endAddr) {
+				leaders.insert(extraLeader);
+			}
 		}
 	}
 
@@ -876,6 +989,113 @@ LiftResult RemillLifter::DoLift(
 	}
 
 	result.bytesConsumed = totalOffset;
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 3.5: Gap scan — discover unreached decoded instructions
+	// ═══════════════════════════════════════════════════════════════════════
+	// After Phase 3, some decoded instructions may not belong to any basic
+	// block (their PC doesn't fall in any [leader, next_leader) range).
+	// Instructions after kCategoryIndirectJump or kCategoryFunctionReturn
+	// that weren't reached are potential new leaders — especially switch
+	// case fallthrough or code after conditional return patterns.
+	//
+	// We re-lift discovered gaps into new basic blocks to recover more code.
+	{
+		// Collect all PCs that are leaders (have basic blocks)
+		std::set<uint64_t> coveredLeaders;
+		for (auto& [addr, bb] : bbMap) {
+			coveredLeaders.insert(addr);
+		}
+
+		std::vector<uint64_t> gapLeaders;
+		for (size_t i = 0; i < decoded.size(); i++) {
+			uint64_t pc = decoded[i].pc;
+
+			// Check if this instruction falls within an existing BB range
+			auto it = coveredLeaders.upper_bound(pc);
+			if (it != coveredLeaders.begin()) {
+				--it;
+				// pc >= *it means it's in the range [*it, next_leader)
+				// This instruction is covered by an existing block
+				continue;
+			}
+
+			// This instruction is NOT covered by any block. Check if the
+			// previous instruction was an indirect jump or return — if so,
+			// this is likely a new block (switch case target, code after
+			// conditional return, etc.)
+			if (i > 0) {
+				auto prevCat = decoded[i - 1].inst.category;
+				if (prevCat == remill::Instruction::kCategoryIndirectJump ||
+				    prevCat == remill::Instruction::kCategoryFunctionReturn ||
+				    prevCat == remill::Instruction::kCategoryDirectJump) {
+					gapLeaders.push_back(pc);
+				}
+			}
+		}
+
+		// Create new basic blocks for gap leaders and re-lift
+		if (!gapLeaders.empty()) {
+			uint64_t endAddr = address + length;
+			for (uint64_t gapAddr : gapLeaders) {
+				if (gapAddr >= address && gapAddr < endAddr && !bbMap.count(gapAddr)) {
+					auto* bb = llvm::BasicBlock::Create(
+						liftModule->getContext(),
+						"bb_gap_" + std::to_string(gapAddr),
+						func);
+					bbMap[gapAddr] = bb;
+					leaders.insert(gapAddr);
+
+					// Lift instructions in this gap block
+					for (size_t i = 0; i < decoded.size(); i++) {
+						if (decoded[i].pc < gapAddr) continue;
+
+						// Stop if we've reached another existing leader
+						auto nextLeaderIt = leaders.upper_bound(gapAddr);
+						if (nextLeaderIt != leaders.end() && decoded[i].pc >= *nextLeaderIt) {
+							break;
+						}
+
+						auto& di = decoded[i];
+						// Skip synthetic NOPs
+						if (di.inst.category == remill::Instruction::kCategoryNoOp &&
+							di.size >= 4 && di.size <= 5) {
+							const uint8_t firstByte = static_cast<uint8_t>(di.inst.bytes[0]);
+							if (firstByte == 0xF3 || firstByte == 0xE8) continue;
+						}
+
+						auto status = instLifter->LiftIntoBlock(di.inst, bb, false);
+						if (status != remill::kLiftedInstruction) break;
+
+						// Wire fallthrough to next block if needed
+						uint64_t nextPC = di.pc + di.size;
+						if (di.inst.category == remill::Instruction::kCategoryNormal ||
+						    di.inst.category == remill::Instruction::kCategoryNoOp) {
+							if (bbMap.count(nextPC) && !bb->getTerminator()) {
+								llvm::IRBuilder<> builder(bb);
+								builder.CreateBr(bbMap[nextPC]);
+							}
+						} else if (di.inst.category == remill::Instruction::kCategoryDirectJump) {
+							if (di.inst.branch_taken_pc && bbMap.count(di.inst.branch_taken_pc)) {
+								if (!bb->getTerminator()) {
+									llvm::IRBuilder<> builder(bb);
+									builder.CreateBr(bbMap[di.inst.branch_taken_pc]);
+								}
+							}
+							break;
+						} else if (di.inst.category == remill::Instruction::kCategoryFunctionReturn) {
+							llvm::IRBuilder<> builder(bb);
+							builder.CreateRet(func->getArg(2));
+							break;
+						} else if (di.inst.category == remill::Instruction::kCategoryConditionalBranch ||
+						           di.inst.category == remill::Instruction::kCategoryIndirectJump) {
+							break;  // Already wired or can't resolve
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 4: Ensure every basic block has a terminator

@@ -25,7 +25,7 @@ import {
 } from './automationPipelineRunner';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
-import { RemillWrapper, buildIRHeader, type LiftResult } from './remillWrapper';
+import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions } from './remillWrapper';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
 import { mapCapstoneToRemill } from './archMapper';
@@ -1841,6 +1841,48 @@ export function activate(context: vscode.ExtensionContext): void {
 				remillWrapper.setExternalSymbols(symbolMap);
 			}
 
+			// Build format-specific lift options (Item 2 + Item 3)
+			const fmt = fileInfo?.format ?? '';
+			const targetOs = fmt.startsWith('ELF') ? 'linux'
+				: (fmt === 'PE' || fmt === 'PE64') ? 'windows'
+				: undefined;
+
+			const liftOpts: RemillLiftOptions = {};
+
+			if (fmt === 'PE' || fmt === 'PE64') {
+				liftOpts.liftMode = 'pe64';
+				// Collect function end addresses from .pdata for the lifted range
+				const allFuncs = engine.getFunctions();
+				const endAddr = startAddress + bytes.length;
+				const knownEnds: number[] = [];
+				const nearbyLeaders: number[] = [];
+				for (const fn of allFuncs) {
+					if (fn.endAddress > startAddress && fn.address < endAddr) {
+						if (fn.endAddress > startAddress && fn.endAddress <= endAddr) {
+							knownEnds.push(fn.endAddress);
+						}
+						// Function starts within our range are additional leaders
+						if (fn.address > startAddress && fn.address < endAddr) {
+							nearbyLeaders.push(fn.address);
+						}
+					}
+				}
+				if (knownEnds.length > 0) { liftOpts.knownFunctionEnds = knownEnds; }
+				if (nearbyLeaders.length > 0) { liftOpts.additionalLeaders = nearbyLeaders; }
+			} else if (fileInfo?.isRelocatable) {
+				liftOpts.liftMode = 'elf_relocatable';
+				// ELF symtab: function addresses within lift range as additional leaders
+				const allFuncs = engine.getFunctions();
+				const endAddr = startAddress + bytes.length;
+				const symLeaders: number[] = [];
+				for (const fn of allFuncs) {
+					if (fn.address > startAddress && fn.address < endAddr) {
+						symLeaders.push(fn.address);
+					}
+				}
+				if (symLeaders.length > 0) { liftOpts.additionalLeaders = symLeaders; }
+			}
+
 			// Perform lifting with progress indicator
 			const liftResult = await vscode.window.withProgress(
 				{
@@ -1849,12 +1891,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					cancellable: false,
 				},
 				async () => {
-					// Detect target OS from binary format — ELF → linux, PE → windows
-					const fmt = fileInfo?.format ?? '';
-					const targetOs = fmt.startsWith('ELF') ? 'linux'
-						: (fmt === 'PE' || fmt === 'PE64') ? 'windows'
-						: undefined; // let detectOs() decide
-					return remillWrapper.liftBytes(bytes, startAddress, arch, targetOs);
+					return remillWrapper.liftBytes(bytes, startAddress, arch, targetOs, liftOpts);
 				}
 			);
 
@@ -2210,14 +2247,48 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			// Step 1: Lift to IR
+			// Step 1: Lift to IR — with format-specific options (Item 2 + Item 3)
 			const fmtForOs = engine.getFileInfo()?.format ?? '';
+			const fileInfoDecomp = engine.getFileInfo();
 			const targetOsForLift = fmtForOs.startsWith('ELF') ? 'linux'
 				: (fmtForOs === 'PE' || fmtForOs === 'PE64') ? 'windows'
 				: undefined;
+
+			const decompLiftOpts: RemillLiftOptions = {};
+			if (fmtForOs === 'PE' || fmtForOs === 'PE64') {
+				decompLiftOpts.liftMode = 'pe64';
+				const allFuncs = engine.getFunctions();
+				const endAddr = startAddress + bytes.length;
+				const knownEnds: number[] = [];
+				const nearbyLeaders: number[] = [];
+				for (const fn of allFuncs) {
+					if (fn.endAddress > startAddress && fn.address < endAddr) {
+						if (fn.endAddress > startAddress && fn.endAddress <= endAddr) {
+							knownEnds.push(fn.endAddress);
+						}
+						if (fn.address > startAddress && fn.address < endAddr) {
+							nearbyLeaders.push(fn.address);
+						}
+					}
+				}
+				if (knownEnds.length > 0) { decompLiftOpts.knownFunctionEnds = knownEnds; }
+				if (nearbyLeaders.length > 0) { decompLiftOpts.additionalLeaders = nearbyLeaders; }
+			} else if (fileInfoDecomp?.isRelocatable) {
+				decompLiftOpts.liftMode = 'elf_relocatable';
+				const allFuncs = engine.getFunctions();
+				const endAddr = startAddress + bytes.length;
+				const symLeaders: number[] = [];
+				for (const fn of allFuncs) {
+					if (fn.address > startAddress && fn.address < endAddr) {
+						symLeaders.push(fn.address);
+					}
+				}
+				if (symLeaders.length > 0) { decompLiftOpts.additionalLeaders = symLeaders; }
+			}
+
 			const liftResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Lifting to LLVM IR...', cancellable: false },
-				async () => remillWrapper.liftBytes(bytes, startAddress, arch, targetOsForLift)
+				async () => remillWrapper.liftBytes(bytes, startAddress, arch, targetOsForLift, decompLiftOpts)
 			);
 
 			if (!liftResult.success) {

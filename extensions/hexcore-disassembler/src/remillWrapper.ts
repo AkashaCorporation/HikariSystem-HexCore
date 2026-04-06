@@ -20,13 +20,42 @@ interface RemillModule {
 }
 
 interface RemillLifterInstance {
-	liftBytes(code: Buffer | Uint8Array, address: number | bigint): LiftResult;
-	liftBytesAsync(code: Buffer | Uint8Array, address: number | bigint): Promise<LiftResult>;
+	liftBytes(code: Buffer | Uint8Array, address: number | bigint, options?: RemillLiftOptions): LiftResult;
+	liftBytesAsync(code: Buffer | Uint8Array, address: number | bigint, options?: RemillLiftOptions): Promise<LiftResult>;
 	getArch(): string;
 	close(): void;
 	isOpen(): boolean;
 	setExternalSymbols?(map: Record<string, string>): number;
 	clearExternalSymbols?(): void;
+}
+
+/**
+ * Lifting mode — selects format-specific heuristics in Phase 1.
+ */
+export type LiftMode = 'generic' | 'pe64' | 'elf_relocatable';
+
+/**
+ * Options passed to the native Remill lifter.
+ */
+export interface RemillLiftOptions {
+	/** Max decoded instructions per lift */
+	maxInstructions?: number;
+	/** Max discovered basic block leaders per lift */
+	maxBasicBlocks?: number;
+	/** Max bytes decoded from the input buffer */
+	maxBytes?: number;
+	/** Record external call targets when direct calls leave the lifted range */
+	splitAtCalls?: boolean;
+	/** Run LLVM cleanup and simplification passes after lifting */
+	optimizeIR?: boolean;
+	/** Inline semantic helper functions */
+	inlineSemantics?: boolean;
+	/** Extra BB entry points from external analysis (jump tables, .pdata, symtab) */
+	additionalLeaders?: number[];
+	/** Format-specific lifting mode */
+	liftMode?: LiftMode;
+	/** PE64: function end addresses from .pdata */
+	knownFunctionEnds?: number[];
 }
 
 /**
@@ -190,12 +219,14 @@ export class RemillWrapper {
 	 * @param arch Arquitetura Capstone do binário
 	 * @param targetOs OS do binário alvo (overrides host OS detection).
 	 *                 Use 'linux' for ELF/.ko, 'windows' for PE, etc.
+	 * @param liftOptions Optional native lift options (additionalLeaders, liftMode, etc.)
 	 */
 	async liftBytes(
 		buffer: Buffer | Uint8Array,
 		address: number,
 		arch: ArchitectureConfig,
 		targetOs?: string,
+		liftOptions?: RemillLiftOptions,
 	): Promise<LiftResult> {
 		if (!this.available || !this.module) {
 			return {
@@ -210,11 +241,18 @@ export class RemillWrapper {
 		try {
 			const lifter = this.ensureLifter(arch, targetOs);
 
+			// Build the native options object if provided
+			const nativeOpts = liftOptions ? this.buildNativeOptions(liftOptions) : undefined;
+
 			if (buffer.length > ASYNC_THRESHOLD) {
-				return await lifter.liftBytesAsync(buffer, address);
+				return nativeOpts
+					? await lifter.liftBytesAsync(buffer, address, nativeOpts)
+					: await lifter.liftBytesAsync(buffer, address);
 			}
 
-			return lifter.liftBytes(buffer, address);
+			return nativeOpts
+				? lifter.liftBytes(buffer, address, nativeOpts)
+				: lifter.liftBytes(buffer, address);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return {
@@ -225,6 +263,23 @@ export class RemillWrapper {
 				bytesConsumed: 0,
 			};
 		}
+	}
+
+	/**
+	 * Convert TypeScript LiftOptions into the plain object the native module expects.
+	 */
+	private buildNativeOptions(opts: RemillLiftOptions): Record<string, unknown> {
+		const native: Record<string, unknown> = {};
+		if (opts.maxInstructions !== undefined) { native.maxInstructions = opts.maxInstructions; }
+		if (opts.maxBasicBlocks !== undefined) { native.maxBasicBlocks = opts.maxBasicBlocks; }
+		if (opts.maxBytes !== undefined) { native.maxBytes = opts.maxBytes; }
+		if (opts.splitAtCalls !== undefined) { native.splitAtCalls = opts.splitAtCalls; }
+		if (opts.optimizeIR !== undefined) { native.optimizeIR = opts.optimizeIR; }
+		if (opts.inlineSemantics !== undefined) { native.inlineSemantics = opts.inlineSemantics; }
+		if (opts.additionalLeaders?.length) { native.additionalLeaders = opts.additionalLeaders; }
+		if (opts.liftMode) { native.liftMode = opts.liftMode; }
+		if (opts.knownFunctionEnds?.length) { native.knownFunctionEnds = opts.knownFunctionEnds; }
+		return native;
 	}
 
 	/**

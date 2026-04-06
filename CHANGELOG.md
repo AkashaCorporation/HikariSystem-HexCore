@@ -5,7 +5,7 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.7.4-nightly] - 2026-04-04 - "Remill Refinement + mali_kbase Siege"
+## [3.7.4] - 2026-04-05 - "Remill Refinement + mali_kbase Siege"
 
 > **Remill IR Quality + Pipeline Reliability + Session Persistence + Analysis Hardening + ELF ET_REL Full Resolution + SysV Calling Convention** — LLVM IR quality improvements, autoBacktrack hardening, persistent session database, section-filtered strings, ftrace/CET preamble detection, ELF ET_REL external symbol resolution, and HQL session integration. Battle-tested against `mali_kbase.ko` (45MB, 7313 functions, Arm Mali GPU driver) — external kernel calls (`mutex_lock`, `dma_sync_sg_for_device`, `_dev_warn`, etc.) now appear in decompiled output with correct SysV calling convention.
 
@@ -67,6 +67,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **State Register Naming (Phase 5.3)** — GEPs on the State pointer (arg 0) are annotated with register names (`&RAX`, `&XMM0`). Loads from State are named after their register (`RAX`, `XMM0`). Implicit parameter detection: registers loaded before any store in the entry block are reported in `result.implicitParams[]`.
 - **Third Optimization Round (Phase 5.5)** — Added `InstCombine` → `SimplifyCFG` → `ADCE` after the existing two rounds. Catches dead branches and constant conditions left over from semantic inlining and intrinsic lowering.
 - **`inlineSemantics` Option** — New `LiftOptions.inlineSemantics` field (default: `false`). When `true`, ALL semantic helper functions are inlined (aggressive mode). When `false`, only SSE/FP semantics are inlined (selective mode). Exposed in the N-API `liftBytes` options and async worker.
+
+### Remill Wrapper — Format-Aware Lifting (LiftMode + additionalLeaders) — NEW
+
+- **`LiftMode` Enum** — New `LiftOptions.liftMode` field selects format-specific heuristics in Phase 1. Three modes: `Generic` (default, no format assumptions), `PE64` (trusts .pdata function boundaries, treats int3 as padding, out-of-range `jmp` = tail call), `ElfRelocatable` (symtab boundaries, ftrace skip, retpoline thunks as returns). Eliminates heuristic conflicts between PE64 and ET_REL binaries that share the same lifter.
+- **`additionalLeaders` — External BB Injection (Phase 1.5)** — New `LiftOptions.additionalLeaders` field accepts an array of extra basic block entry points from TypeScript-side analysis (jump table targets from `.rodata`, PE `.pdata` function boundaries, ELF symtab function addresses). Injected into the leaders set after Phase 1 linear scan, before Phase 2 creates LLVM basic blocks. Only addresses within the decoded range are accepted.
+- **PE64 Mode — int3 Padding Skip** — Phase 1 recognizes consecutive `0xCC` bytes as MSVC inter-function padding and skips them. Code after padding is automatically marked as a new basic block leader. Previously, int3 padding caused the decoder to emit phantom blocks.
+- **PE64 Mode — Tail Call Detection** — Unconditional `jmp` targets outside the function's address range (from `.pdata`) are classified as tail calls and recorded in `callTargets[]` instead of being added as basic block leaders. Prevents the lifter from following jumps into adjacent functions.
+- **PE64 Mode — `knownFunctionEnds`** — New `LiftOptions.knownFunctionEnds` field accepts function end addresses from the PE `.pdata` exception directory. Phase 1 stops scanning when it hits a known function boundary, even without a `ret` instruction.
+- **Phase 3.5: Gap Scan** — New pass after Phase 3 lifting discovers decoded instructions not covered by any basic block. Instructions following `IndirectJump`, `FunctionReturn`, or `DirectJump` that have no leader are identified as gap blocks, created as `bb_gap_*` basic blocks, and lifted. Recovers switch case fallthroughs and code after conditional return patterns that the linear scan misses.
+- **TypeScript Integration** — Both `liftToIR` and decompile paths in `extension.ts` now automatically set `liftMode` based on binary format (PE/PE64 → `pe64`, ET_REL → `elf_relocatable`) and populate `additionalLeaders`/`knownFunctionEnds` from `engine.getFunctions()`. The `RemillWrapper.liftBytes()` method accepts an optional `RemillLiftOptions` parameter passed through to the native module.
+- **ROTTR Validation** — Tested against 20 ROTTR PE64 functions: 18/20 IR outputs changed (10 functions shrank by 98–246 lines due to int3/tail call cleanup, 3 grew by 6–12 lines from gap scan recovering real blocks), 20/20 zero Helix crashes.
 
 ### Disassembler — autoBacktrack Fixes
 
