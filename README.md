@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release (2026-03-26):** `v3.7.3` "Deep Analysis + Headless Expansion" — Function boundary detection (native C++ prologue scanner), auto-backtrack for disassembly and decompilation, memory pattern search during live emulation, RTTI class discovery, AOB byte pattern scan, batch string search, PE section-aware string extraction, pipeline step output referencing, 30+ x64 opcode decomposition in the Helix decompiler, and improved confidence scoring. See [CHANGELOG](CHANGELOG.md) for details.
+**Latest release (2026-04-05):** `v3.7.4` "Remill Refinement + mali_kbase Siege" — Format-aware lifting (PE64/ELF modes), Helix 0.8.0 C AST decompiler with 14-pass optimizer, ELF ET_REL external symbol resolution, SysV ABI auto-detection, Session DB persistence, deep PE/ELF analysis, Base64 confidence scoring. See [CHANGELOG](CHANGELOG.md) for details.
 
 **What makes HexCore different:**
 - Full PE and ELF emulation with 70+ API hooks (Windows + Linux)
@@ -44,7 +44,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
 - **IR Lifting** — Machine code → LLVM IR translation via Remill engine
 - **Decompilation** — LLVM IR → pseudo-C via Helix MLIR engine (x86/x64, structured control flow, confidence scoring)
-- **Helix MLIR Decompiler** — C++23/MLIR pipeline with 7 analysis passes, 30+ x64 opcode decomposition, improved confidence scoring, crash-free on loop-at-entry functions
+- **Helix MLIR Decompiler** — C++23/MLIR pipeline with 18 analysis passes, C AST layer with 14-pass optimizer, SysV/Win64 ABI auto-detection, confidence scoring, format-aware lifting (PE64/ELF modes)
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support
@@ -91,12 +91,12 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 
 | Package | Version | Description |
 |---------|---------|-------------|
-| **hexcore-capstone** | 1.3.3 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
-| **hexcore-unicorn** | 1.2.2 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory |
+| **hexcore-capstone** | 1.3.4 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
+| **hexcore-unicorn** | 1.2.3 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory |
 | **hexcore-llvm-mc** | 1.0.1 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.0 | SQLite N-API wrapper for IOC persistence — prebuild packaging for better-sqlite3 |
 | **hexcore-remill** | 0.2.0 | Remill N-API binding — lifts machine code to LLVM IR (experimental, heavy deps) |
-| **hexcore-helix** | 0.7.1 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (7 analysis passes, 30+ x64 opcodes, improved confidence scoring) |
+| **hexcore-helix** | 0.8.0 | Helix MLIR decompiler N-API binding — LLVM IR → pseudo-C via C++23/MLIR pipeline (18 passes, C AST layer, 14-pass optimizer, SysV/Win64 ABI) |
 | **hexcore-rellic** | — | *(deprecated — removal in v3.8.0)* Rellic-based decompiler — superseded by Helix MLIR engine |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
