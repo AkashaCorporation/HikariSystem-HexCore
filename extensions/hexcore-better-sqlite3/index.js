@@ -14,21 +14,28 @@ const path = require('path');
 // 1. Load the native addon using the standard HexCore fallback chain
 // ---------------------------------------------------------------------------
 let nativeAddon;
-try {
-	nativeAddon = require('./prebuilds/' + process.platform + '-' + process.arch + '/node.napi.node');
-} catch (e1) {
+const prebuildDir = './prebuilds/' + process.platform + '-' + process.arch + '/';
+const prebuildNames = [
+	'hexcore-better-sqlite3.node',   // prebuildify convention (hyphen)
+	'hexcore_better_sqlite3.node',   // prebuildify convention (underscore)
+	'node.napi.node',                // generic napi name
+];
+const errors = [];
+for (const name of prebuildNames) {
+	try { nativeAddon = require(prebuildDir + name); break; } catch (e) { errors.push(`${name}: ${e.message}`); }
+}
+if (!nativeAddon) {
 	try {
 		nativeAddon = require('./build/Release/hexcore_sqlite3.node');
 	} catch (e2) {
+		errors.push(`Release: ${e2.message}`);
 		try {
 			nativeAddon = require('./build/Debug/hexcore_sqlite3.node');
 		} catch (e3) {
+			errors.push(`Debug: ${e3.message}`);
 			throw new Error(
 				'Failed to load hexcore-better-sqlite3 native module. ' +
-				'Errors:\n' +
-				`  Prebuild: ${e1.message}\n` +
-				`  Release: ${e2.message}\n` +
-				`  Debug: ${e3.message}`
+				'Errors:\n  ' + errors.join('\n  ')
 			);
 		}
 	}

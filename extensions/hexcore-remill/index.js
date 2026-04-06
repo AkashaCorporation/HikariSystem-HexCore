@@ -26,14 +26,14 @@ const platformDir = './prebuilds/' + process.platform + '-' + process.arch + '/'
 let binding;
 const errors = [];
 
-// prebuildify uses binding.gyp target name (underscore)
-// prebuild-install uses package name (hyphen)
-// Try both conventions for maximum compatibility
+// Prefer freshly built local artifacts during development so source changes
+// take effect immediately in a checkout. Fall back to packaged prebuilds when
+// no local build output exists.
 const candidates = [
-	{ label: 'prebuild (underscore)', path: platformDir + 'hexcore_remill.node' },
-	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-remill.node' },
 	{ label: 'build/Release', path: './build/Release/hexcore_remill.node' },
 	{ label: 'build/Debug', path: './build/Debug/hexcore_remill.node' },
+	{ label: 'prebuild (underscore)', path: platformDir + 'hexcore_remill.node' },
+	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-remill.node' },
 ];
 
 for (const candidate of candidates) {

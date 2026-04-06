@@ -57,6 +57,11 @@ Create a lifter for the given architecture. Loads the Remill semantics module.
 
 Synchronous lift. Decodes and lifts instructions from the buffer.
 
+Pass an optional third `options` object to control lift limits and IR shape.
+Named semantic helper calls are preserved by default for downstream decompiler
+compatibility. Set `inlineSemantics: true` only when you explicitly want the
+semantic helper bodies inlined into the lifted function.
+
 ### `lifter.liftBytesAsync(code, address) → Promise<LiftResult>`
 
 Async lift in a worker thread. Use for large buffers (>64KB).

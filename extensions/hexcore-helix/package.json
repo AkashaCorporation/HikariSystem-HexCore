@@ -1,6 +1,6 @@
 {
   "name": "hexcore-helix",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "HexCore Helix — MLIR-based decompilation engine",
   "main": "./index.js",
   "types": "./index.d.ts",

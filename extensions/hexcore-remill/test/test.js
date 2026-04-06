@@ -128,6 +128,28 @@ test('liftBytes accepts Uint8Array', () => {
 	lifter.close();
 });
 
+test('liftBytes preserves named SSE semantics by default', () => {
+	const lifter = new RemillLifter(ARCH.AMD64);
+	const code = Buffer.from([0x0f, 0x58, 0xc1, 0xc3]);  // addps xmm0, xmm1; ret
+	const result = lifter.liftBytes(code, 0x401000);
+
+	assert.strictEqual(result.success, true);
+	assert.match(result.ir, /call .*ADDPS/);
+
+	lifter.close();
+});
+
+test('liftBytes can inline semantics when requested', () => {
+	const lifter = new RemillLifter(ARCH.AMD64);
+	const code = Buffer.from([0x0f, 0x58, 0xc1, 0xc3]);  // addps xmm0, xmm1; ret
+	const result = lifter.liftBytes(code, 0x401000, { inlineSemantics: true });
+
+	assert.strictEqual(result.success, true);
+	assert.doesNotMatch(result.ir, /call .*ADDPS/);
+
+	lifter.close();
+});
+
 test('liftBytes rejects after close', () => {
 	const lifter = new RemillLifter(ARCH.AMD64);
 	lifter.close();
@@ -153,6 +175,17 @@ test('liftBytesAsync returns promise', async () => {
 
 	assert.strictEqual(result.success, true);
 	assert.ok(result.ir.length > 0);
+
+	lifter.close();
+});
+
+test('liftBytesAsync accepts lift options', async () => {
+	const lifter = new RemillLifter(ARCH.AMD64);
+	const code = Buffer.from([0x0f, 0x58, 0xc1, 0xc3]);  // addps xmm0, xmm1; ret
+	const result = await lifter.liftBytesAsync(code, 0x401000, { inlineSemantics: true });
+
+	assert.strictEqual(result.success, true);
+	assert.doesNotMatch(result.ir, /call .*ADDPS/);
 
 	lifter.close();
 });
