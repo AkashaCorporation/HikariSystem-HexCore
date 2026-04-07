@@ -475,7 +475,9 @@ export class DisassemblerEngine {
 
 			return true;
 		} catch (error) {
-			console.error('Failed to load file:', error);
+			const msg = error instanceof Error ? `${error.message}\n${error.stack}` : String(error);
+			console.log(`[HexCore] loadFile FAILED: ${msg}`);
+			console.error('[HexCore] loadFile error:', error);
 			return false;
 		}
 	}
@@ -3006,6 +3008,8 @@ export class DisassemblerEngine {
 	// ============================================================================
 
 	async analyzeFunction(address: number, name?: string): Promise<Function> {
+		// Safety: coerce BigInt from Capstone prebuilds to number
+		if (typeof address === 'bigint') { address = Number(address); }
 		const existing = this.functions.get(address);
 		if (existing) {
 			return existing;
@@ -3129,15 +3133,17 @@ export class DisassemblerEngine {
 
 		const funcInstructions = instructions.slice(0, endIdx);
 
+		// Coerce address to number — Capstone prebuilds may return BigInt for 64-bit addresses
+		const addrNum = typeof address === 'bigint' ? Number(address) : address;
+		const lastInst = funcInstructions.length > 0 ? funcInstructions[funcInstructions.length - 1] : undefined;
+		const lastAddr = lastInst ? (typeof lastInst.address === 'bigint' ? Number(lastInst.address) : lastInst.address) : addrNum;
+		const lastSize = lastInst ? (typeof lastInst.size === 'bigint' ? Number(lastInst.size) : lastInst.size) : 0;
+
 		const func: Function = {
-			address,
-			name: name || `sub_${address.toString(16).toUpperCase()}`,
-			size: funcInstructions.length > 0
-				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size - address)
-				: 0,
-			endAddress: funcInstructions.length > 0
-				? (funcInstructions[funcInstructions.length - 1].address + funcInstructions[funcInstructions.length - 1].size)
-				: address,
+			address: addrNum,
+			name: name || `sub_${addrNum.toString(16).toUpperCase()}`,
+			size: lastInst ? (lastAddr + lastSize - addrNum) : 0,
+			endAddress: lastInst ? (lastAddr + lastSize) : addrNum,
 			instructions: funcInstructions,
 			callers: [],
 			callees: []
