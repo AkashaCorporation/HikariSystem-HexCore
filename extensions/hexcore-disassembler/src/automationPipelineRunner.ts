@@ -5,8 +5,10 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
 
 export type PipelineOutputFormat = 'json' | 'md';
+export { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
 
 export type OnResultOperator = 'contains' | 'equals' | 'not' | 'gt' | 'lt' | 'regex';
 export type OnResultAction = 'skip' | 'goto' | 'abort' | 'log';
@@ -41,6 +43,7 @@ export interface PipelineJobFile {
 	outDir: string;
 	steps: PipelineStep[];
 	quiet?: boolean;
+	priority?: JobPriority;
 }
 
 export interface PipelineCommandOptions {
@@ -191,6 +194,9 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.decompile', 'hexcore.rellic.decompile'],
 	['hexcore.decompile.ir', 'hexcore.rellic.decompileIR'],
 	['hexcore.liftir', 'hexcore.disasm.liftToIR'],
+	['hexcore.souper', 'hexcore.souper.optimize'],
+	['hexcore.optimize', 'hexcore.souper.optimize'],
+	['hexcore.superoptimize', 'hexcore.souper.optimize'],
 	['hexcore.disasm.disassembleAt', 'hexcore.disasm.disassembleAtHeadless'],
 	['hexcore.disasm.rttiScan', 'hexcore.disasm.rttiScanHeadless'],
 	['hexcore.disasm.scanRtti', 'hexcore.disasm.rttiScanHeadless'],
@@ -199,6 +205,8 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.debug.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemoryHeadless', 'hexcore.debug.searchMemoryHeadless'],
+	['hexcore.struct', 'hexcore.extractStructInfo'],
+	['hexcore.structInfo', 'hexcore.extractStructInfo'],
 ]);
 
 /**
@@ -300,6 +308,8 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.souper.optimize', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.extractStructInfo', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.rttiScanHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.searchBytesHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
@@ -339,12 +349,19 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.debug.setStdinHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.debug.searchMemoryHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.debug.disposeHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
+	['hexcore.elixir.emulateHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.elixir.stalkerDrcovHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.elixir.snapshotRoundTripHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.elixir.smokeTestHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.elfanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.elfanalyzer.analyzeActive', { headless: false, defaultTimeoutMs: 60000, validateOutput: false, reason: 'Interactive command analyzes active editor file.' }],
 	['hexcore.base64.decodeHeadless', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.hexview.dumpHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.hexview.searchHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.pipeline.composeReport', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.pipeline.queueJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.cancelJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.pipeline.jobStatus', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.pipeline.runJob', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Recursive pipeline invocation is not supported from a step.' }]
 ]);
 
@@ -402,6 +419,10 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.debug.setStdinHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.searchMemoryHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.disposeHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.elixir.emulateHeadless', ['hikarisystem.hexcore-elixir']],
+	['hexcore.elixir.stalkerDrcovHeadless', ['hikarisystem.hexcore-elixir']],
+	['hexcore.elixir.snapshotRoundTripHeadless', ['hikarisystem.hexcore-elixir']],
+	['hexcore.elixir.smokeTestHeadless', ['hikarisystem.hexcore-elixir']],
 	['hexcore.elfanalyzer.analyze', ['hikarisystem.hexcore-elfanalyzer']],
 	['hexcore.elfanalyzer.analyzeActive', ['hikarisystem.hexcore-elfanalyzer']],
 	['hexcore.base64.decodeHeadless', ['hikarisystem.hexcore-base64']],
@@ -416,6 +437,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.searchBytesHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.souper.optimize', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.extractStructInfo', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.extractStrings', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.analyzePEHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.analyzeELFHeadless', ['hikarisystem.hexcore-disassembler']],
@@ -425,6 +448,9 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.retypeFunction', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.retypeVariable', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.setBookmark', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.queueJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.cancelJob', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pipeline.jobStatus', ['hikarisystem.hexcore-disassembler']],
 ]);
 
 export interface PipelineCapabilityEntry {
@@ -559,7 +585,7 @@ export function applyOnResultAction(rule: OnResultRule, currentIndex: number, to
 }
 
 export class AutomationPipelineRunner {
-	public async runJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineRunStatus> {
+	public async runJobFile(jobFilePath: string, quietOverride?: boolean, abortSignal?: AbortSignal): Promise<PipelineRunStatus> {
 		const absoluteJobPath = path.resolve(jobFilePath);
 		if (!fs.existsSync(absoluteJobPath)) {
 			throw new Error(`Job file not found: ${absoluteJobPath}`);
@@ -569,7 +595,7 @@ export class AutomationPipelineRunner {
 		const parsed = parseJsonFile(rawContent, absoluteJobPath);
 		const normalized = normalizeJob(parsed, absoluteJobPath, quietOverride);
 
-		return this.run(normalized, absoluteJobPath);
+		return this.run(normalized, absoluteJobPath, abortSignal);
 	}
 
 	public async validateJobFile(jobFilePath: string, quietOverride?: boolean): Promise<PipelineJobValidationReport> {
@@ -584,7 +610,7 @@ export class AutomationPipelineRunner {
 		return createValidationReport(normalized, absoluteJobPath);
 	}
 
-	private async run(job: NormalizedPipelineJob, jobFilePath: string): Promise<PipelineRunStatus> {
+	private async run(job: NormalizedPipelineJob, jobFilePath: string, abortSignal?: AbortSignal): Promise<PipelineRunStatus> {
 		fs.mkdirSync(job.outDir, { recursive: true });
 
 		const logPath = path.join(job.outDir, JOB_LOG_FILENAME);
@@ -620,6 +646,15 @@ export class AutomationPipelineRunner {
 		const stepRecords: StepRecord[] = [];
 
 		while (index < job.steps.length) {
+			// Check if job was aborted
+			if (abortSignal?.aborted) {
+				appendLog(logPath, '[CANCELLED] Job aborted by user.');
+				status.status = 'error';
+				status.finishedAt = new Date().toISOString();
+				writeJson(statusPath, status);
+				return status;
+			}
+
 			const step = job.steps[index];
 			const resolvedCommand = resolveCommand(step.cmd);
 			const capability = COMMAND_CAPABILITIES.get(resolvedCommand);
@@ -1587,4 +1622,37 @@ function toErrorMessage(error: unknown): string {
 		return error.message;
 	}
 	return String(error);
+}
+
+/**
+ * Singleton instance of the JobQueueManager.
+ */
+let jobQueueManagerInstance: JobQueueManager | undefined;
+
+/**
+ * Gets or creates the singleton JobQueueManager instance.
+ * @param concurrencyLimit Optional concurrency limit (default: 2)
+ * @returns The JobQueueManager instance
+ */
+export function getJobQueueManagerInstance(concurrencyLimit?: number): JobQueueManager {
+	if (!jobQueueManagerInstance) {
+		jobQueueManagerInstance = getJobQueueManager(concurrencyLimit);
+		// Configure the job executor to use the AutomationPipelineRunner
+		jobQueueManagerInstance.setJobExecutor(async (filePath: string, abortSignal: AbortSignal) => {
+			const runner = new AutomationPipelineRunner();
+			return runner.runJobFile(filePath, undefined, abortSignal);
+		});
+		jobQueueManagerInstance.start();
+	}
+	return jobQueueManagerInstance;
+}
+
+/**
+ * Disposes the JobQueueManager singleton instance.
+ */
+export function disposeJobQueueManagerInstance(): void {
+	if (jobQueueManagerInstance) {
+		jobQueueManagerInstance.dispose();
+		jobQueueManagerInstance = undefined;
+	}
 }
