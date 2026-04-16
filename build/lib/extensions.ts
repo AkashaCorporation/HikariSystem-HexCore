@@ -357,6 +357,8 @@ const nativeExtensions = [
 	'hexcore-remill',
 	'hexcore-rellic',
 	'hexcore-helix',
+	'hexcore-souper',
+	'hexcore-elixir',
 ];
 
 const excludedExtensions = [
