@@ -1,0 +1,18 @@
+node_modules/**
+src/**
+build/**
+*.log
+*.map
+.gitignore
+README.md
+tsconfig.json
+
+# NAPI-RS binary: force include (overrides .gitignore)
+# Downloaded by hexcore-native-install.js at build time
+!*.node
+
+# Runtime DLL: Elixir dynamically links unicorn.dll — must ship alongside the .node
+!unicorn.dll
+
+# Worker subprocess for ACG bypass — must be included
+!worker/**

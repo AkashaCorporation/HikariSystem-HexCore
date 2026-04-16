@@ -1,0 +1,106 @@
+{
+  "name": "hexcore-elixir",
+  "displayName": "HexCore Elixir",
+  "description": "HexCore Elixir — Clean-room dynamic analysis, emulation, and instrumentation framework (Project Azoth)",
+  "version": "1.0.0",
+  "publisher": "hikarisystem",
+  "license": "Apache-2.0",
+  "main": "./out/extension.js",
+  "types": "./index.d.ts",
+  "categories": [
+    "Debuggers",
+    "Testing"
+  ],
+  "keywords": [
+    "emulation",
+    "dynamic analysis",
+    "azoth",
+    "interceptor",
+    "stalker",
+    "PE",
+    "ELF"
+  ],
+  "napi": {
+    "binaryName": "hexcore-elixir",
+    "targets": [
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-gnu",
+      "x86_64-unknown-linux-musl",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin"
+    ]
+  },
+  "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "author": "HikariSystem",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AkashaCorporation/hexcore-elixir.git"
+  },
+  "activationEvents": [
+    "onCommand:hexcore.elixir.version",
+    "onCommand:hexcore.elixir.smokeTestHeadless",
+    "onCommand:hexcore.elixir.emulateHeadless",
+    "onCommand:hexcore.elixir.stalkerDrcovHeadless",
+    "onCommand:hexcore.elixir.snapshotRoundTripHeadless"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "HexCore Emulator",
+      "properties": {
+        "hexcore.emulator": {
+          "type": "string",
+          "enum": [
+            "azoth",
+            "debugger"
+          ],
+          "enumDescriptions": [
+            "Project Azoth — clean-room C++/Rust emulator (default in v3.8.0, recommended)",
+            "Legacy TypeScript debugger — kept for regression comparison against Azoth"
+          ],
+          "default": "azoth",
+          "description": "Which emulation engine to activate. Only one runs per Extension Host session to avoid libuc state conflicts. Changing this requires a window reload."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "hexcore.elixir.version",
+        "title": "Elixir: Show Engine Version",
+        "category": "HexCore Elixir"
+      },
+      {
+        "command": "hexcore.elixir.smokeTestHeadless",
+        "title": "Elixir: Smoke Test (headless)",
+        "category": "HexCore Elixir"
+      },
+      {
+        "command": "hexcore.elixir.emulateHeadless",
+        "title": "Elixir: Emulate Binary (headless)",
+        "category": "HexCore Elixir"
+      },
+      {
+        "command": "hexcore.elixir.stalkerDrcovHeadless",
+        "title": "Elixir: Stalker + DRCOV Export (headless)",
+        "category": "HexCore Elixir"
+      },
+      {
+        "command": "hexcore.elixir.snapshotRoundTripHeadless",
+        "title": "Elixir: Snapshot Round-Trip Test (headless)",
+        "category": "HexCore Elixir"
+      }
+    ]
+  },
+  "engines": {
+    "node": ">=22.0.0",
+    "vscode": "^1.75.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.x",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.3.3"
+  }
+}

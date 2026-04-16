@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+out/
+node_modules/
+*.log
+*.map
+
+# NAPI-RS binary — downloaded by hexcore-native-install.js or built locally
+# NEVER commit .node files — they're fetched from GitHub Release
+*.node
+
+# Runtime dependency — shipped via standalone release tarball, never committed
+unicorn.dll
