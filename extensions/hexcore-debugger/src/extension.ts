@@ -14,6 +14,26 @@ import { TraceTreeProvider } from './traceView';
 import type { ArchitectureType } from './unicornWrapper';
 
 export function activate(context: vscode.ExtensionContext): void {
+	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
+	if (emulator !== 'debugger') {
+		console.log(`[hexcore-debugger] activation skipped — hexcore.emulator="${emulator}" (Azoth is the default emulator in v3.8.0; set hexcore.emulator="debugger" to enable the legacy TypeScript debugger for regression comparison)`);
+		context.subscriptions.push(
+			vscode.workspace.onDidChangeConfiguration((e) => {
+				if (e.affectsConfiguration('hexcore.emulator')) {
+					vscode.window.showInformationMessage(
+						vscode.l10n.t('HexCore emulator setting changed. Reload the window to apply.'),
+						vscode.l10n.t('Reload Window')
+					).then((choice) => {
+						if (choice) {
+							vscode.commands.executeCommand('workbench.action.reloadWindow');
+						}
+					});
+				}
+			})
+		);
+		return;
+	}
+
 	const engine = new DebugEngine();
 	const debuggerView = new DebuggerViewProvider(context.extensionUri, engine);
 	const registerProvider = new RegisterTreeProvider(engine);
