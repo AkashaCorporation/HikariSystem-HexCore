@@ -35,6 +35,18 @@ export class WinApiHooks {
 	private commandLineWPtr: bigint = 0n;
 	private winMainCommandLineWPtr: bigint = 0n;
 
+	// v3.8.0-nightly: CRT data block (HEXCORE_DEFEAT Fix #3). MSVC CRT init
+	// calls __p___argv / __p___argc / _get_initial_narrow_environment to obtain
+	// live pointers to argv/argc/environ. Without real backing memory, the
+	// unstubbed defaults return 0n and the CRT dereferences NULL → crash at
+	// ~instruction 239 (RIP 0x1400027fb observed).
+	private crtDataPtr: bigint = 0n;
+	private crtArgvPtr: bigint = 0n;
+	private crtWArgvPtr: bigint = 0n;
+	private crtEnvironPtr: bigint = 0n;
+	private crtWEnvironPtr: bigint = 0n;
+	private readonly crtArgcValue: number = 1;
+
 	// Module handle tracking
 	private moduleHandles: Map<string, bigint> = new Map();
 	private imageBase: bigint = 0x400000n;
@@ -46,7 +58,12 @@ export class WinApiHooks {
 		this.emulator = emulator;
 		this.memoryManager = memoryManager;
 		this.architecture = arch;
-		this.tickCount = Date.now() & 0xFFFFFFFF;
+		// FIX: `Date.now() & 0xFFFFFFFF` does a SIGNED int32 mask in JS — when the
+		// high bit is set, the result is a negative Number. Use `>>> 0` to coerce
+		// to unsigned uint32. Without this, downstream `BigInt(this.tickCount)`
+		// produces a negative BigInt and `Buffer.writeBigUInt64LE` throws
+		// `"value out of range"` (HEXCORE_DEFEAT_RESULTS.md FAIL 4).
+		this.tickCount = (Date.now() & 0xFFFFFFFF) >>> 0;
 		this.registerAllHandlers();
 	}
 
@@ -263,6 +280,70 @@ export class WinApiHooks {
 	private getWinMainCommandLineW(): bigint {
 		this.winMainCommandLineWPtr = this.ensureWideString('', this.winMainCommandLineWPtr);
 		return this.winMainCommandLineWPtr;
+	}
+
+	/**
+	 * Lazy-allocate a 256-byte block holding MSVC CRT globals:
+	 *   [0x00] narrow program name    "malware.exe\0" (12 bytes)
+	 *   [0x10] argv (char**)          [&narrow_name, NULL]
+	 *   [0x20] environ (char**)       [NULL]
+	 *   [0x28] wide program name      L"malware.exe\0" (24 bytes)
+	 *   [0x40] wargv (wchar_t**)      [&wide_name, NULL]
+	 *   [0x50] wenviron (wchar_t**)   [NULL]
+	 *
+	 * This unblocks `_get_initial_narrow_environment` → `__p___argv` CRT
+	 * init path that MSVC runs before `main()`. Without real backing memory,
+	 * CRT dereferences NULL and faults at ~instruction 239.
+	 */
+	private ensureCrtDataAllocated(): void {
+		if (this.crtDataPtr !== 0n) { return; }
+
+		const base = this.memoryManager.heapAlloc(256, true);
+		if (base === 0n) { return; }
+		this.crtDataPtr = base;
+
+		const narrowNamePtr = base + 0x00n;
+		const argvArrayPtr  = base + 0x10n;
+		const environArrayPtr = base + 0x20n;
+		const wideNamePtr   = base + 0x28n;
+		const wargvArrayPtr = base + 0x40n;
+		const wenvironArrayPtr = base + 0x50n;
+
+		const narrowName = Buffer.from('malware.exe\0', 'ascii');
+		const wideName = Buffer.alloc(24);
+		const wideStr = 'malware.exe\0';
+		for (let i = 0; i < wideStr.length; i++) {
+			wideName.writeUInt16LE(wideStr.charCodeAt(i), i * 2);
+		}
+
+		const argvArr = Buffer.alloc(16);
+		argvArr.writeBigUInt64LE(narrowNamePtr, 0);
+		argvArr.writeBigUInt64LE(0n, 8);
+
+		const environArr = Buffer.alloc(8);  // single NULL terminator
+
+		const wargvArr = Buffer.alloc(16);
+		wargvArr.writeBigUInt64LE(wideNamePtr, 0);
+		wargvArr.writeBigUInt64LE(0n, 8);
+
+		const wenvironArr = Buffer.alloc(8);
+
+		try {
+			this.emulator.writeMemorySync(narrowNamePtr, narrowName);
+			this.emulator.writeMemorySync(argvArrayPtr, argvArr);
+			this.emulator.writeMemorySync(environArrayPtr, environArr);
+			this.emulator.writeMemorySync(wideNamePtr, wideName);
+			this.emulator.writeMemorySync(wargvArrayPtr, wargvArr);
+			this.emulator.writeMemorySync(wenvironArrayPtr, wenvironArr);
+		} catch {
+			// If write fails we've still stashed the pointers; CRT will read
+			// zeros, which is better than the NULL-deref crash.
+		}
+
+		this.crtArgvPtr = argvArrayPtr;
+		this.crtEnvironPtr = environArrayPtr;
+		this.crtWArgvPtr = wargvArrayPtr;
+		this.crtWEnvironPtr = wenvironArrayPtr;
 	}
 
 	private readVariadicArgs(argListPtr: bigint, maxCount: number = 8): bigint[] {
@@ -514,12 +595,16 @@ export class WinApiHooks {
 		// ===== Timing =====
 		this.handlers.set('kernel32!GetTickCount', (_args) => {
 			this.tickCount += 16; // Advance by ~16ms each call
-			return BigInt(this.tickCount & 0xFFFFFFFF);
+			// FIX: `& 0xFFFFFFFF` returns signed int32 in JS — coerce to uint32
+			// with `>>> 0` before BigInt() so the result is never negative.
+			return BigInt((this.tickCount & 0xFFFFFFFF) >>> 0);
 		});
 
 		this.handlers.set('kernel32!GetTickCount64', (_args) => {
 			this.tickCount += 16;
-			return BigInt(this.tickCount);
+			// FIX: tickCount may have been seeded from `Date.now() & 0xFFFFFFFF`
+			// (a signed int32) — coerce to unsigned before BigInt().
+			return BigInt((this.tickCount & 0xFFFFFFFF) >>> 0);
 		});
 
 		this.handlers.set('kernel32!Sleep', (_args) => {
@@ -532,7 +617,11 @@ export class WinApiHooks {
 			if (counterPtr !== 0n) {
 				this.tickCount += 1000;
 				const buf = Buffer.alloc(8);
-				buf.writeBigUInt64LE(BigInt(this.tickCount));
+				// FIX: coerce to unsigned BigInt before writeBigUInt64LE — the
+				// previous `BigInt(this.tickCount)` could be negative when the
+				// constructor seed had bit 31 set, crashing emulation after
+				// ~23 instructions on PE64 MSVC binaries (HEXCORE_DEFEAT FAIL 4).
+				buf.writeBigUInt64LE(BigInt((this.tickCount & 0xFFFFFFFF) >>> 0));
 				try {
 					this.emulator.writeMemorySync(counterPtr, buf);
 				} catch { /* ignore */ }
@@ -858,6 +947,62 @@ export class WinApiHooks {
 			return this.getWinMainCommandLineW();
 		});
 
+		// ===== v3.8.0-nightly: MSVC CRT init stubs (HEXCORE_DEFEAT Fix #3) =====
+		// These four unblock `__scrt_common_main_seh` → `main()` transition.
+		// _initterm is a no-op (static initializers skipped); upgrade to a real
+		// walker in v3.8.1 if any sample actually requires initializer execution.
+		const crtArgv = (_args: bigint[]): bigint => {
+			this.ensureCrtDataAllocated();
+			return this.crtArgvPtr;
+		};
+		const crtArgc = (_args: bigint[]): bigint => {
+			this.ensureCrtDataAllocated();
+			// __p___argc returns a pointer to int. Reuse the environ slot tail
+			// as scratch storage for the argc int — actually, write into offset
+			// 0x58 of the CRT data block which is unused.
+			if (this.crtDataPtr !== 0n) {
+				try {
+					const argcPtr = this.crtDataPtr + 0x58n;
+					const buf = Buffer.alloc(4);
+					buf.writeInt32LE(this.crtArgcValue, 0);
+					this.emulator.writeMemorySync(argcPtr, buf);
+					return argcPtr;
+				} catch { /* fall through */ }
+			}
+			return BigInt(this.crtArgcValue);
+		};
+		const crtInitterm = (args: bigint[]): bigint => {
+			// _initterm(start, end) — walk function pointer table, call each.
+			// For v3.8.0 we skip execution. Return void (0n).
+			const [start, end] = args;
+			const slots = end > start ? Number((end - start) / 8n) : 0;
+			console.log(`[crt] _initterm(0x${start.toString(16)}, 0x${end.toString(16)}) skipped — ${slots} slots`);
+			return 0n;
+		};
+		const crtIntiterm_e = (args: bigint[]): bigint => {
+			const [start, end] = args;
+			const slots = end > start ? Number((end - start) / 8n) : 0;
+			console.log(`[crt] _initterm_e(0x${start.toString(16)}, 0x${end.toString(16)}) skipped — ${slots} slots`);
+			return 0n; // success
+		};
+		const crtGetNarrowEnv = (_args: bigint[]): bigint => {
+			this.ensureCrtDataAllocated();
+			return this.crtEnvironPtr;
+		};
+		const crtGetWideEnv = (_args: bigint[]): bigint => {
+			this.ensureCrtDataAllocated();
+			return this.crtWEnvironPtr;
+		};
+
+		for (const dll of ['api-ms-win-crt-runtime-l1-1-0.dll', 'ucrtbase.dll', 'msvcrt.dll']) {
+			this.handlers.set(`${dll}!__p___argv`, crtArgv);
+			this.handlers.set(`${dll}!__p___argc`, crtArgc);
+			this.handlers.set(`${dll}!_initterm`, crtInitterm);
+			this.handlers.set(`${dll}!_initterm_e`, crtIntiterm_e);
+			this.handlers.set(`${dll}!_get_initial_narrow_environment`, crtGetNarrowEnv);
+			this.handlers.set(`${dll}!_get_initial_wide_environment`, crtGetWideEnv);
+		}
+
 		this.handlers.set('api-ms-win-crt-stdio-l1-1-0.dll!__stdio_common_vsprintf_s', (args) => {
 			const [_options, bufferPtr, bufferCount, formatPtr, _locale, argListPtr] = args;
 			if (bufferPtr === 0n || formatPtr === 0n) {
@@ -925,6 +1070,89 @@ export class WinApiHooks {
 		this.handlers.set('kernel32!ExitProcess', (_args) => {
 			this.emulator.stop();
 			return 0n;
+		});
+
+		// v3.8.0-nightly: CRT exit variants also stop emulation. Without these,
+		// `exit(0)` returns from the stub and falls into garbage code, causing
+		// the emulator to loop until it hits the instruction cap. (Observed on
+		// `Malware HexCore Defeat.exe` v3: 23,128 api calls, 1M instructions,
+		// emulation trapped re-executing fragments of main's cout chain.)
+		const crtExit = (_args: bigint[]): bigint => {
+			this.emulator.stop();
+			return 0n;
+		};
+		for (const dll of ['api-ms-win-crt-runtime-l1-1-0.dll', 'ucrtbase.dll', 'msvcrt.dll']) {
+			this.handlers.set(`${dll}!exit`, crtExit);
+			this.handlers.set(`${dll}!_exit`, crtExit);
+			this.handlers.set(`${dll}!_Exit`, crtExit);
+			this.handlers.set(`${dll}!quick_exit`, crtExit);
+			this.handlers.set(`${dll}!abort`, crtExit);
+		}
+
+		// ── MSVCP140 / iostream stubs ──────────────────────────────────────
+		// v3.8.0-nightly: the malware's cout/cerr usage calls these mangled
+		// MSVCP140 methods. Without stubs, each call logs "Unhandled API" and
+		// returns 0 which is correct behavior but floods the trace with 40+
+		// noise lines per emulation cycle. These stubs absorb the calls
+		// silently. stdout capture is NOT implemented — the stream data goes
+		// nowhere. This is deliberate: emulating the full streambuf→write
+		// chain requires a virtual ostream state machine, which is v3.8.1 scope.
+		const ostreamNop = (_args: bigint[]): bigint => 0n;
+		// ios_base::good() → return true (1) so the stream appears healthy
+		const iosGood = (_args: bigint[]): bigint => 1n;
+		// operator<< with endl/flush manipulator → return 'this' (first arg)
+		const ostreamChain = (args: bigint[]): bigint => args[0] ?? 0n;
+
+		const msvcp140Stubs: [string, (args: bigint[]) => bigint][] = [
+			['?good@ios_base@std@@QEBA_NXZ', iosGood],
+			['?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z', ostreamNop],
+			['?uncaught_exception@std@@YA_NXZ', ostreamNop],
+			['?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ', ostreamNop],
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z', ostreamChain],
+		];
+		for (const [name, handler] of msvcp140Stubs) {
+			this.handlers.set(`msvcp140.dll!${name}`, handler);
+		}
+
+		// ── advapi32 registry stubs ──────────────────────────────────────
+		// v3.8.0-nightly: RegOpenKeyA/RegCloseKey are called by the malware's
+		// anti-VM checks. Without stubs they log "Unhandled API" noise.
+		// RegOpenKey returns ERROR_FILE_NOT_FOUND (2) to signal "key not found"
+		// which makes anti-VM checks think the VM isn't present.
+		this.handlers.set('advapi32.dll!RegOpenKeyA', (_args) => 2n);
+		this.handlers.set('advapi32.dll!RegOpenKeyExA', (_args) => 2n);
+		this.handlers.set('advapi32.dll!RegOpenKeyW', (_args) => 2n);
+		this.handlers.set('advapi32.dll!RegOpenKeyExW', (_args) => 2n);
+		this.handlers.set('advapi32.dll!RegCloseKey', (_args) => 0n);
+		this.handlers.set('advapi32.dll!RegQueryValueExA', (_args) => 2n);
+		this.handlers.set('advapi32.dll!RegQueryValueExW', (_args) => 2n);
+
+		// kernel32!GetComputerNameA — return a fake name so anti-VM
+		// checks don't see "DESKTOP-SANDBOX" or similar VM indicators
+		this.handlers.set('kernel32.dll!GetComputerNameA', (args) => {
+			// args[0] = lpBuffer, args[1] = nSize pointer
+			if (args[0] && args[0] !== 0n) {
+				const name = Buffer.from('WORKSTATION\0', 'ascii');
+				this.emulator.writeMemory(args[0], name);
+				if (args[1] && args[1] !== 0n) {
+					const sizeBuf = Buffer.alloc(4);
+					sizeBuf.writeUInt32LE(11); // length of "WORKSTATION"
+					this.emulator.writeMemory(args[1], sizeBuf);
+				}
+			}
+			return 1n; // success
+		});
+		this.handlers.set('kernel32.dll!GetComputerNameW', (args) => {
+			if (args[0] && args[0] !== 0n) {
+				const name = Buffer.from('WORKSTATION\0', 'utf16le');
+				this.emulator.writeMemory(args[0], name);
+				if (args[1] && args[1] !== 0n) {
+					const sizeBuf = Buffer.alloc(4);
+					sizeBuf.writeUInt32LE(11);
+					this.emulator.writeMemory(args[1], sizeBuf);
+				}
+			}
+			return 1n;
 		});
 	}
 
