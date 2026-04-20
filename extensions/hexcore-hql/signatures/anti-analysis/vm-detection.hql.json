@@ -1,0 +1,43 @@
+{
+  "id": "anti-analysis.vm_detection",
+  "name": "Virtual Machine Detection",
+  "description": "Detects calls to system enumeration functions (GetComputerName, RegOpenKeyEx) when the operand strings reference VMware, VBox, Virtual Box, or QEMU registry paths. Combined with cpuid hypervisor checks (handled by the instruction scanner), this is the strongest user-mode VM detection signal.",
+  "severity": "high",
+  "mitre": ["T1497.001"],
+  "queries": [
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^(GetComputerName[AW]?|GetSystemFirmwareTable)$" }
+      ]
+    },
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^(RegOpenKeyEx[AW]?|RegQueryValueEx[AW]?)$" }
+      ],
+      "contains": [
+        {
+          "target": "CStringLiteral",
+          "attributes": [
+            { "field": "value", "value": "re:(VMware|VirtualBox|VBOX|VEN_VMWARE|VEN_VBOX|Parallels|QEMU|Hyper-V)" }
+          ]
+        }
+      ]
+    },
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "wbemServices_ExecQuery" }
+      ],
+      "contains": [
+        {
+          "target": "CStringLiteral",
+          "attributes": [
+            { "field": "value", "value": "re:Win32_(BIOS|ComputerSystem|VideoController)" }
+          ]
+        }
+      ]
+    }
+  ]
+}

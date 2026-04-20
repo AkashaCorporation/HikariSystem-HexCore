@@ -49,6 +49,17 @@ export interface IOCMatch {
 	 * Useful for analysts to quickly judge relevance.
 	 */
 	context: string;
+	/**
+	 * v3.8.0-nightly: Optional semantic tags for sub-classification.
+	 * Added for registry keys to distinguish anti-VM / persistence / generic
+	 * registry references. May be extended to other categories in future.
+	 *
+	 * Known tags:
+	 *   - `anti_vm_registry` — VirtualBox / VMware / Parallels / QEMU paths
+	 *   - `persistence_registry` — Run / RunOnce / Winlogon paths
+	 *   - `generic_registry` — everything else
+	 */
+	tags?: string[];
 }
 
 /** Per-category summary count. */

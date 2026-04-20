@@ -51,7 +51,7 @@
   },
   "homepage": "https://github.com/LXrdKnowkill/hexcore-capstone#readme",
   "engines": {
-    "vscode": "^1.0.0",
+    "vscode": "^1.75.0",
     "node": ">=18.0.0"
   },
   "activationEvents": [],

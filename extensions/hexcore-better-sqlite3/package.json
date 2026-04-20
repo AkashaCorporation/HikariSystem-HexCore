@@ -1,6 +1,6 @@
 {
   "name": "hexcore-better-sqlite3",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "HexCore N-API wrapper for SQLite (better-sqlite3 fork)",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -38,7 +38,7 @@
     "url": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3/issues"
   },
   "engines": {
-    "vscode": "^1.0.0",
+    "vscode": "^1.75.0",
     "node": ">=18.0.0"
   },
   "activationEvents": [],
@@ -58,10 +58,5 @@
     "index.d.ts",
     "README.md"
   ],
-  "devDependencies": {
-    "prebuildify": "^6.0.0",
-    "prebuild-install": "^7.1.0",
-    "node-addon-api": "^7.0.0",
-    "node-gyp": "^10.0.0"
-  }
+  "devDependencies": {}
 }

@@ -1,0 +1,30 @@
+{
+  "id": "anti-analysis.api_hash_lookup",
+  "name": "API Hash Lookup Loop",
+  "description": "Detects the canonical hash-loop pattern used to resolve WinAPI imports without naming them in the import table. Looks for a for/while loop containing both a XOR (^) and a left-shift (<<) operation — the shape of djb2, ror13, fnv1a, and most rolling hash functions used in shellcode loaders.",
+  "severity": "high",
+  "mitre": ["T1027.007"],
+  "queries": [
+    {
+      "target": "CForStmt",
+      "contains": [
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "^" }] },
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "<<" }] }
+      ]
+    },
+    {
+      "target": "CWhileStmt",
+      "contains": [
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "^" }] },
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "<<" }] }
+      ]
+    },
+    {
+      "target": "CForStmt",
+      "contains": [
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "^" }] },
+        { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "*" }] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+src/**
+test/**
+build/**
+binding.gyp
+.gitignore
+.eslintrc*
+tsconfig.json
+*.md
+deps/**
+*.zip
+*.tar.gz
+*.tgz
+!prebuilds/
+!prebuilds/**
+!deps/z3/libz3.dll

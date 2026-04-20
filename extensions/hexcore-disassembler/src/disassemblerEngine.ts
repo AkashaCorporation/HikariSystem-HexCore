@@ -161,6 +161,202 @@ export interface ELFAnalysis {
 	/** ELF type: ET_REL, ET_EXEC, ET_DYN, ET_CORE */
 	elfType: string;
 	elfTypeValue: number;
+	/** v3.8.0: Confidence score for analysis quality */
+	confidenceScore?: ConfidenceScore;
+	/** Executable sections with semantic classification */
+	executableSections?: ELFExecutableSection[];
+	/** BTF type data loaded from the binary or vmlinux */
+	btfData?: import('./elfBtfLoader').BTFData;
+	/** v3.8.0: DWARF struct info (fallback when no BTF) — same JSON format as BTF export */
+	dwarfStructInfo?: import('./elfBtfLoader').StructInfoJson;
+}
+
+/**
+ * Confidence score for ELF kernel module analysis quality.
+ * Each component is normalized to [0, 1], overall is the weighted average.
+ */
+export interface ConfidenceScore {
+	/** Weighted average of all components (0-1) */
+	overall: number;
+	/** Percentage of external calls resolved via .rela.text relocations (weight: 0.30) */
+	symbolResolution: number;
+	/** CFG complexity ratio: basic blocks per function (weight: 0.20) */
+	cfgComplexity: number;
+	/** Recognition of known kernel API patterns (weight: 0.20) */
+	patternRecognition: number;
+	/** Percentage of external call targets with known signatures (weight: 0.20) */
+	externalCallCoverage: number;
+	/** Completeness of symtab function entries (weight: 0.10) */
+	symtabCompleteness: number;
+	/** Individual pattern match details */
+	detectedPatterns: string[];
+}
+
+/**
+ * Executable section descriptor for section-aware kernel module analysis.
+ */
+export interface ELFExecutableSection {
+	/** Section name (e.g., '.text', '.init.text', '.exit.text') */
+	name: string;
+	/** File offset of section data */
+	offset: number;
+	/** Section size in bytes */
+	size: number;
+	/** Section flags (SHF_EXECINSTR, SHF_ALLOC, etc.) */
+	flags: number;
+	/** Virtual address (or 0 for ET_REL) */
+	virtualAddress: number;
+	/** Semantic purpose of this section */
+	purpose: 'runtime' | 'module_init' | 'module_cleanup' | 'trampoline' | 'unknown';
+}
+
+/**
+ * Calculate confidence score for ELF kernel module analysis.
+ */
+function calculateConfidenceScore(params: {
+	symbols: ELFSymbolEntry[];
+	relocations: ELFRelocationEntry[];
+	sections: Array<{ name: string; size: number; flags: number }>;
+	totalFunctions: number;
+	totalBasicBlocks: number;
+	resolvedExternalCalls: number;
+	totalExternalCalls: number;
+	hasBtfInfo: boolean;
+	hasDwarfInfo: boolean;
+}): ConfidenceScore {
+	const {
+		symbols,
+		relocations,
+		totalFunctions,
+		totalBasicBlocks,
+		resolvedExternalCalls,
+		totalExternalCalls,
+		hasBtfInfo,
+		hasDwarfInfo
+	} = params;
+
+	// Known kernel API patterns by category
+	const memoryPatterns = ['kmalloc', 'kfree', 'vmalloc', 'vfree', 'kzalloc', 'krealloc'];
+	const refcountPatterns = ['kref_get', 'kref_put', 'atomic_inc', 'atomic_dec', 'refcount_inc', 'refcount_dec'];
+	const syncPatterns = ['mutex_lock', 'mutex_unlock', 'spin_lock', 'spin_unlock', 'down_read', 'up_read', 'down_write', 'up_write'];
+	const userIoPatterns = ['copy_from_user', 'copy_to_user', 'get_user', 'put_user'];
+	const dmaPatterns = ['dma_map_sg', 'dma_unmap_sg', 'dma_alloc_coherent', 'dma_free_coherent'];
+	const processPatterns = ['capable', 'current_cred', 'ns_capable'];
+
+	const allPatterns = [...memoryPatterns, ...refcountPatterns, ...syncPatterns, ...userIoPatterns, ...dmaPatterns, ...processPatterns];
+
+	// Collect all symbol names for pattern matching
+	const symbolNames = symbols.map(s => s.name);
+	const importNames = symbols.filter(s => s.isImport).map(s => s.name);
+
+	// a) symbolResolution (weight 0.30): resolvedExternalCalls / totalExternalCalls
+	const symbolResolution = totalExternalCalls > 0 ? resolvedExternalCalls / totalExternalCalls : 1.0;
+
+	// b) cfgComplexity (weight 0.20): Normalize totalBasicBlocks / totalFunctions ratio
+	// Target ratio ~5-10 BBs/func is ideal (score 1.0). Below 2 = score 0.3. Above 20 = score 0.7.
+	let cfgComplexity = 0.5;
+	if (totalFunctions > 0) {
+		const ratio = totalBasicBlocks / totalFunctions;
+		if (ratio < 2) {
+			// Linear sweep quality - low complexity
+			cfgComplexity = 0.3 + (ratio / 2) * 0.3;
+		} else if (ratio >= 2 && ratio <= 10) {
+			// Ideal range - sigmoid curve peaking at 1.0
+			cfgComplexity = 0.6 + 0.4 * Math.sin((ratio - 2) / 8 * Math.PI / 2);
+		} else if (ratio > 10 && ratio <= 20) {
+			// Good but getting complex
+			cfgComplexity = 1.0 - (ratio - 10) / 10 * 0.3;
+		} else {
+			// Very complex - cap at 0.7
+			cfgComplexity = 0.7;
+		}
+	}
+
+	// c) patternRecognition (weight 0.20): Scan resolved symbol names for known kernel patterns
+	const detectedPatterns: string[] = [];
+	const categoriesFound = new Set<string>();
+
+	for (const name of symbolNames) {
+		for (const pattern of memoryPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`memory:${pattern}`)) {
+				detectedPatterns.push(`memory:${pattern}`);
+				categoriesFound.add('memory');
+			}
+		}
+		for (const pattern of refcountPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`refcount:${pattern}`)) {
+				detectedPatterns.push(`refcount:${pattern}`);
+				categoriesFound.add('refcount');
+			}
+		}
+		for (const pattern of syncPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`sync:${pattern}`)) {
+				detectedPatterns.push(`sync:${pattern}`);
+				categoriesFound.add('sync');
+			}
+		}
+		for (const pattern of userIoPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`userio:${pattern}`)) {
+				detectedPatterns.push(`userio:${pattern}`);
+				categoriesFound.add('userio');
+			}
+		}
+		for (const pattern of dmaPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`dma:${pattern}`)) {
+				detectedPatterns.push(`dma:${pattern}`);
+				categoriesFound.add('dma');
+			}
+		}
+		for (const pattern of processPatterns) {
+			if (name.includes(pattern) && !detectedPatterns.includes(`process:${pattern}`)) {
+				detectedPatterns.push(`process:${pattern}`);
+				categoriesFound.add('process');
+			}
+		}
+	}
+
+	// Score = min(1.0, recognized_categories / 5) — finding 5+ distinct categories = perfect score
+	const patternRecognition = Math.min(1.0, categoriesFound.size / 5);
+
+	// d) externalCallCoverage (weight 0.20): Percentage of external symbols matching known patterns
+	let matchedExternalCalls = 0;
+	for (const name of importNames) {
+		for (const pattern of allPatterns) {
+			if (name.includes(pattern)) {
+				matchedExternalCalls++;
+				break;
+			}
+		}
+	}
+	const externalCallCoverage = importNames.length > 0 ? matchedExternalCalls / importNames.length : 0;
+
+	// e) symtabCompleteness (weight 0.10): Check ratio of STT_FUNC symbols with st_size > 0 vs total STT_FUNC
+	const funcSymbols = symbols.filter(s => s.type === 'FUNC');
+	const funcWithSize = funcSymbols.filter(s => s.size > 0);
+	let symtabCompleteness = funcSymbols.length > 0 ? funcWithSize.length / funcSymbols.length : 0;
+
+	// If hasBtfInfo or hasDwarfInfo, add 0.2 bonus (capped at 1.0)
+	if (hasBtfInfo || hasDwarfInfo) {
+		symtabCompleteness = Math.min(1.0, symtabCompleteness + 0.2);
+	}
+
+	// f) overall: Weighted sum of all components (weights sum to 1.0)
+	const overall =
+		symbolResolution * 0.30 +
+		cfgComplexity * 0.20 +
+		patternRecognition * 0.20 +
+		externalCallCoverage * 0.20 +
+		symtabCompleteness * 0.10;
+
+	return {
+		overall: Math.round(overall * 100) / 100,
+		symbolResolution: Math.round(symbolResolution * 100) / 100,
+		cfgComplexity: Math.round(cfgComplexity * 100) / 100,
+		patternRecognition: Math.round(patternRecognition * 100) / 100,
+		externalCallCoverage: Math.round(externalCallCoverage * 100) / 100,
+		symtabCompleteness: Math.round(symtabCompleteness * 100) / 100,
+		detectedPatterns
+	};
 }
 
 // v3.7.5: Enhanced PE data directories
@@ -205,11 +401,23 @@ export interface CLRHeader {
 	is32BitRequired: boolean;
 }
 
+/** v3.8.0 Pathfinder: PE64 .pdata function entry (RUNTIME_FUNCTION) */
+export interface PdataEntry {
+	/** Function start RVA */
+	beginAddress: number;
+	/** Function end RVA (first byte AFTER the function) */
+	endAddress: number;
+	/** RVA of UNWIND_INFO structure */
+	unwindInfoAddress: number;
+}
+
 export interface PEDataDirectories {
 	tls?: TLSDirectory;
 	debug?: DebugDirectoryEntry[];
 	delayImport?: DelayImportLibrary[];
 	clr?: CLRHeader;
+	/** v3.8.0 Pathfinder: .pdata function entries */
+	pdata?: PdataEntry[];
 	resourceRVA?: number;
 	resourceSize?: number;
 	securitySize?: number;
@@ -1251,6 +1459,98 @@ export class DisassemblerEngine {
 						}
 					}
 				}
+			} else if (this.architecture === 'arm64') {
+				// --- ARM64: ADRP Xn, #imm  +  ADD Xn, Xn, #imm12 ---
+				// Reference: ARM ARM DDI 0487 C6.2.12 (ADRP), C6.2.4 (ADD imm).
+				// ADRP encoding: 1_immlo(2)_10000_immhi(19)_Rd(5), opcode bits
+				//   top byte = 1xx_10000 → mask 0x9F000000, value 0x90000000.
+				// Result: PC-relative page base (bit 12 aligned), target = page | add_imm12.
+				// ADD imm: sf=1, opc=0b00 (ADD), sh(0/1), imm12, Rn, Rd.
+				//   mask 0xFF800000, value 0x91000000 (sf=1, imm shift=0),
+				//   variant with imm<<12 (sh=1) → value 0x91400000; covers both.
+				// Track pending page base per destination register; when matching ADD
+				// with same Rn==Rd resolves within a short window, compute target.
+				// Also pattern: ADRP + LDR Xd, [Xn, #:lo12:sym]  (mask 0xFFC00000 / 0xF9400000)
+				// Windows short — 8 instructions — keeps false positives down.
+				const WINDOW = 8 * 4; // instructions * bytes
+				const pageBases = new Map<number, { page: number; addr: number }>();
+				for (let i = rawStart; i + 4 <= rawEnd; i += 4) {
+					const word = buf.readUInt32LE(i);
+					const instrVA = this.sectionOffsetToAddress(i, section);
+
+					// ADRP — note: do NOT use >>> 0 to truncate. On PIE AArch64 the base
+					// can be 0x5555_5555_4000 which exceeds 32 bits. Using JS arithmetic
+					// on a plain number keeps up to 53-bit precision, enough for page
+					// bases on any realistic ELF/Mach-O/PE ARM64 binary.
+					if ((word & 0x9F000000) === 0x90000000) {
+						const rd = word & 0x1F;
+						const immlo = (word >>> 29) & 0x3;
+						const immhi = (word >>> 5) & 0x7FFFF;
+						let imm = (immhi << 2) | immlo;
+						if (imm & 0x100000) { imm |= ~0x1FFFFF; } // sign-extend 21-bit
+						// instrVA & ~0xFFF is safe because ~0xFFF becomes -0x1000 (i32),
+						// which produces wrong high bits for addresses >= 2^31. Use
+						// arithmetic form instead: (instrVA - (instrVA % 0x1000)).
+						const pcPage = instrVA - (instrVA % 0x1000);
+						const page = pcPage + imm * 0x1000;
+						pageBases.set(rd, { page, addr: instrVA });
+						continue;
+					}
+
+					// ADD (immediate, 64-bit): sf=1, op=0, S=0, shift={00|01}
+					// mask 0xFFC00000 matches both shift=0 and shift=1 variants when using
+					// 0x91000000; explicitly cover shift=1 (imm<<12) variant 0x91400000 too.
+					if ((word & 0xFF800000) === 0x91000000 || (word & 0xFF800000) === 0x91400000) {
+						const rd = word & 0x1F;
+						const rn = (word >>> 5) & 0x1F;
+						const imm12 = (word >>> 10) & 0xFFF;
+						const shift = ((word >>> 22) & 0x1) ? 12 : 0;
+						const base = pageBases.get(rn);
+						if (base && rn === rd && instrVA - base.addr <= WINDOW) {
+							// No >>> 0 truncation — page can exceed 2^32 on PIE.
+							const target = base.page + imm12 * (1 << shift);
+							if (targetAddresses.has(target)) {
+								let refs = result.get(target);
+								if (!refs) { refs = []; result.set(target, refs); }
+								if (!refs.includes(base.addr)) { refs.push(base.addr); }
+								if (!refs.includes(instrVA)) { refs.push(instrVA); }
+							}
+							pageBases.delete(rd);
+						}
+						continue;
+					}
+
+					// LDR (immediate, unsigned offset, 64-bit): size=11, V=0, opc=01
+					// Encoding 1111 1001 01ii iiii iiii iinn nnnd dddd → mask 0xFFC00000,
+					// value 0xF9400000. imm12 is scaled by 8.
+					if ((word & 0xFFC00000) === 0xF9400000) {
+						const rn = (word >>> 5) & 0x1F;
+						const imm12 = (word >>> 10) & 0xFFF;
+						const base = pageBases.get(rn);
+						if (base && instrVA - base.addr <= WINDOW) {
+							const target = base.page + imm12 * 8;
+							if (targetAddresses.has(target)) {
+								let refs = result.get(target);
+								if (!refs) { refs = []; result.set(target, refs); }
+								if (!refs.includes(base.addr)) { refs.push(base.addr); }
+								if (!refs.includes(instrVA)) { refs.push(instrVA); }
+							}
+							// Do not invalidate page base — the same ADRP may feed multiple loads.
+						}
+					}
+				}
+
+				// --- ARM64: also scan for absolute 8-byte addresses in exec sections
+				// (vtables, jump tables embedded in .text are rare but occur in Go/Rust).
+				for (let i = rawStart; i + 8 <= rawEnd; i += 4) {
+					const val = Number(buf.readBigUInt64LE(i));
+					if (targetAddresses.has(val)) {
+						const instrVA = this.sectionOffsetToAddress(i, section);
+						let refs = result.get(val);
+						if (!refs) { refs = []; result.set(val, refs); }
+						if (!refs.includes(instrVA)) { refs.push(instrVA); }
+					}
+				}
 			}
 		}
 
@@ -1441,6 +1741,17 @@ export class DisassemblerEngine {
 			const size = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 84);
 			if (size > 0) {
 				this.peDataDirectories.loadConfigSize = size;
+			}
+		}
+
+		// DataDirectory[3]: Exception Directory (.pdata) — v3.8.0 Pathfinder
+		// Each RUNTIME_FUNCTION: BeginAddress(u32) + EndAddress(u32) + UnwindInfoAddress(u32) = 12 bytes
+		// Gives EXACT function boundaries for every non-leaf x64 function.
+		if (numberOfRvaAndSizes > 3) {
+			const pdataRVA = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 24);
+			const pdataSize = this.fileBuffer.readUInt32LE(dataDirectoryOffset + 28);
+			if (pdataRVA > 0 && pdataSize > 0 && is64) {
+				this.parsePdataDirectory(pdataRVA, pdataSize);
 			}
 		}
 
@@ -1807,6 +2118,48 @@ export class DisassemblerEngine {
 		}
 	}
 
+	/**
+	 * v3.8.0 Pathfinder: Parse .pdata (Exception Directory) for PE64 files.
+	 * Each RUNTIME_FUNCTION entry gives exact function boundaries (BeginAddress, EndAddress).
+	 * ROTTR.exe has ~50,000 entries — every non-leaf function's boundaries are known.
+	 */
+	private parsePdataDirectory(pdataRVA: number, pdataSize: number): void {
+		if (!this.fileBuffer) { return; }
+		const offset = this.rvaToFileOffset(pdataRVA);
+		if (offset < 0) { return; }
+
+		const entrySize = 12; // RUNTIME_FUNCTION: BeginAddress(4) + EndAddress(4) + UnwindInfoAddress(4)
+		const count = Math.min(Math.floor(pdataSize / entrySize), 100000); // Safety cap at 100K
+
+		const entries: PdataEntry[] = [];
+		for (let i = 0; i < count; i++) {
+			const off = offset + i * entrySize;
+			if (off + entrySize > this.fileBuffer.length) { break; }
+
+			const begin = this.fileBuffer.readUInt32LE(off);
+			const end = this.fileBuffer.readUInt32LE(off + 4);
+			const unwind = this.fileBuffer.readUInt32LE(off + 8);
+
+			// Sentinel: all zeros means end of table
+			if (begin === 0 && end === 0) { break; }
+
+			// Sanity: end must be after begin
+			if (end <= begin) { continue; }
+
+			entries.push({ beginAddress: begin, endAddress: end, unwindInfoAddress: unwind });
+		}
+
+		this.peDataDirectories.pdata = entries;
+	}
+
+	/**
+	 * v3.8.0 Pathfinder: Get .pdata entries for function boundary discovery.
+	 * Returns empty array if not a PE64 file or .pdata not present.
+	 */
+	getPdataEntries(): PdataEntry[] {
+		return this.peDataDirectories.pdata ?? [];
+	}
+
 	private parsePETLSDirectory(tlsRVA: number, is64: boolean): void {
 		if (!this.fileBuffer) { return; }
 		const tlsOffset = this.rvaToFileOffset(tlsRVA);
@@ -2050,6 +2403,178 @@ export class DisassemblerEngine {
 	 */
 	getELFAnalysis(): ELFAnalysis | undefined {
 		return this.elfAnalysis;
+	}
+
+	/**
+	 * Extract all executable sections from an ELF binary with semantic classification.
+	 * For kernel modules (.ko), maps section names to their purpose:
+	 * - .text -> 'runtime' (main runtime code)
+	 * - .init.text -> 'module_init' (module initialization, runs once)
+	 * - .exit.text -> 'module_cleanup' (module unload cleanup)
+	 * - .text.unlikely -> 'runtime' (cold code paths)
+	 * - .text.hot -> 'runtime' (hot code paths)
+	 * - Other executable -> 'unknown'
+	 *
+	 * @param elfSections - Raw ELF section headers from parsing
+	 * @returns Array of executable sections with semantic classification
+	 */
+	private extractExecutableSections(
+		elfSections: Array<{ name: string; type: number; flags: number; addr: number; offset: number; size: number }>
+	): ELFExecutableSection[] {
+		const executableSections: ELFExecutableSection[] = [];
+
+		for (const sec of elfSections) {
+			// Check SHF_EXECINSTR flag (0x4)
+			const isExecutable = (sec.flags & 0x4) !== 0;
+			if (!isExecutable) {
+				continue;
+			}
+
+			// Determine semantic purpose based on section name
+			let purpose: ELFExecutableSection['purpose'] = 'unknown';
+
+			switch (sec.name) {
+				case '.text':
+				case '.text.hot':
+				case '.text.unlikely':
+				case '.text.rare':
+					purpose = 'runtime';
+					break;
+				case '.init.text':
+					purpose = 'module_init';
+					break;
+				case '.exit.text':
+					purpose = 'module_cleanup';
+					break;
+				case '.plt':
+				case '.plt.got':
+					purpose = 'trampoline';
+					break;
+				default:
+					// Check for .text.* patterns (e.g., .text.funcname from -ffunction-sections)
+					if (sec.name.startsWith('.text.')) {
+						purpose = 'runtime';
+					}
+					break;
+			}
+
+			executableSections.push({
+				name: sec.name,
+				offset: sec.offset,
+				size: sec.size,
+				flags: sec.flags,
+				virtualAddress: sec.addr,
+				purpose
+			});
+		}
+
+		// Sort by file offset for consistent ordering
+		return executableSections.sort((a, b) => a.offset - b.offset);
+	}
+
+	/**
+	 * v3.8.1: Idempotent lazy load of BTF/DWARF debug info.  Safe to call
+	 * from hot paths (liftToIR, Pathfinder) — early-returns if already
+	 * loaded.  Split out from computeELFConfidenceScore so decompilation
+	 * flows that don't run the full confidence-score pipeline (liftToIR
+	 * direct, automation job without analyzeELFHeadless step) still pick
+	 * up type info before Helix emits the `.c` file.
+	 */
+	async ensureDebugInfoLoaded(): Promise<void> {
+		if (!this.elfAnalysis || !this.fileBuffer || !this.currentFile) {
+			return;
+		}
+
+		const hasBtfInfo = this.sections.some(s => s.name === '.BTF' || s.name === '.BTF.ext');
+		const hasDwarfInfo = this.sections.some(s =>
+			s.name.startsWith('.debug_') || s.name === '.eh_frame' || s.name === '.eh_frame_hdr'
+		);
+
+		// BTF takes priority when available — gate DWARF on its absence.
+		if (hasBtfInfo && !this.elfAnalysis.btfData) {
+			try {
+				const { loadBtfFromFile } = await import('./elfBtfLoader');
+				const btfData = await loadBtfFromFile(this.currentFile);
+				if (btfData) {
+					this.elfAnalysis.btfData = btfData;
+				}
+			} catch (error) {
+				console.warn('Failed to load BTF data:', error);
+			}
+		}
+
+		if (!this.elfAnalysis.btfData && hasDwarfInfo && !this.elfAnalysis.dwarfStructInfo) {
+			try {
+				const { loadDwarfStructInfo } = await import('./elfDwarfLoader');
+				const dwarfStructInfo = await loadDwarfStructInfo(this.currentFile);
+				if (dwarfStructInfo) {
+					this.elfAnalysis.dwarfStructInfo = dwarfStructInfo;
+					console.log(`[dwarf] Loaded ${Object.keys(dwarfStructInfo.structs).length} structs, ${Object.keys(dwarfStructInfo.functions).length} functions, ${dwarfStructInfo.boundaries?.length ?? 0} boundaries`);
+				}
+			} catch (error) {
+				console.warn('Failed to load DWARF struct info:', error);
+			}
+		}
+	}
+
+	/**
+	 * v3.8.0: Compute and attach confidence score to ELF analysis.
+	 * Should be called after analyzeAll() for accurate CFG metrics.
+	 * Also loads BTF type information when available.
+	 */
+	async computeELFConfidenceScore(): Promise<ConfidenceScore | undefined> {
+		if (!this.elfAnalysis || !this.fileBuffer) {
+			return undefined;
+		}
+
+		// Load BTF / DWARF debug info (idempotent — safe if already loaded).
+		await this.ensureDebugInfoLoaded();
+
+		// Count external calls from text relocations
+		const resolvedExternalCalls = this.textRelocations.size;
+		const totalExternalCalls = this.elfAnalysis.symbols.filter(s => s.isImport).length;
+
+		// Count total basic blocks across all functions
+		let totalBasicBlocks = 0;
+		for (const func of this.functions.values()) {
+			// Simple BB count: count leaders (entry point + targets of jumps/calls)
+			const leaders = new Set<number>();
+			leaders.add(func.address);
+			for (const inst of func.instructions) {
+				if (inst.isJump || inst.isCall) {
+					if (inst.targetAddress && inst.targetAddress >= func.address && inst.targetAddress < func.endAddress) {
+						leaders.add(inst.targetAddress);
+					}
+				}
+			}
+			totalBasicBlocks += leaders.size;
+		}
+
+		// Prepare sections data for scoring
+		const sectionsData = this.sections.map(s => ({
+			name: s.name,
+			size: s.rawSize,
+			flags: s.characteristics
+		}));
+
+		const hasBtfInfo = this.sections.some(s => s.name === '.BTF' || s.name === '.BTF.ext');
+		const hasDwarfInfo = this.sections.some(s =>
+			s.name.startsWith('.debug_') || s.name === '.eh_frame' || s.name === '.eh_frame_hdr'
+		);
+		const score = calculateConfidenceScore({
+			symbols: this.elfAnalysis.symbols,
+			relocations: this.elfAnalysis.relocations,
+			sections: sectionsData,
+			totalFunctions: this.functions.size,
+			totalBasicBlocks,
+			resolvedExternalCalls,
+			totalExternalCalls,
+			hasBtfInfo,
+			hasDwarfInfo
+		});
+
+		this.elfAnalysis.confidenceScore = score;
+		return score;
 	}
 
 	/**
@@ -2511,8 +3036,8 @@ export class DisassemblerEngine {
 				const relaSections = elfSections.filter(s =>
 					(s.type === 4 /* SHT_RELA */ || s.type === 9 /* SHT_REL */) &&
 					(textSecIndices.has(s.info) ||
-					 s.name === '.rela.text' || s.name === '.rel.text' ||
-					 s.name.startsWith('.rela.text.') || s.name.startsWith('.rel.text.')));
+						s.name === '.rela.text' || s.name === '.rel.text' ||
+						s.name.startsWith('.rela.text.') || s.name.startsWith('.rel.text.')));
 
 				console.log(`[HexCore] FIX-011: Found ${relaSections.length} text relocation sections: ` +
 					relaSections.map(s => `"${s.name}"(type=${s.type},size=${s.size},info=${s.info})`).join(', '));
@@ -2944,6 +3469,9 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// -- Extract executable sections with semantic classification --
+		const executableSections = this.extractExecutableSections(elfSections);
+
 		// -- Store the complete analysis --
 		this.elfAnalysis = {
 			programHeaders,
@@ -2955,7 +3483,8 @@ export class DisassemblerEngine {
 			soname,
 			interpreter: interpPath,
 			elfType: ELF_TYPE_NAMES[eType] || `ET_${eType}`,
-			elfTypeValue: eType
+			elfTypeValue: eType,
+			executableSections
 		};
 	}
 
@@ -3156,29 +3685,51 @@ export class DisassemblerEngine {
 
 		for (const inst of funcInstructions) {
 			if (inst.isCall && inst.targetAddress && this.functions.size < this.maxFunctions) {
-				func.callees.push(inst.targetAddress);
-				this.addXRef({ from: inst.address, to: inst.targetAddress, type: 'call' });
+				// Ghost-function guard: only treat the call target as a function if it
+				// lies in an executable/code section. A direct `call 0x402000` into .data
+				// or .rdata must not spawn a sub_402000 stub — that pollutes the function
+				// list with hundreds of fake entries on obfuscated/packed binaries.
+				// Xref to the target is still recorded (useful for data-ref UI), but we
+				// only add it to callees when it's really code.
+				const targetIsCode = this.isAnalyzableFunctionAddress(inst.targetAddress);
+				this.addXRef({
+					from: inst.address,
+					to: inst.targetAddress,
+					type: targetIsCode ? 'call' : 'data'
+				});
 
-				// Track caller in target function
-				const target = this.functions.get(inst.targetAddress);
-				if (target) {
-					if (!target.callers.includes(inst.address)) {
-						target.callers.push(inst.address);
+				if (targetIsCode) {
+					func.callees.push(inst.targetAddress);
+
+					// Track caller in target function
+					const target = this.functions.get(inst.targetAddress);
+					if (target) {
+						if (!target.callers.includes(inst.address)) {
+							target.callers.push(inst.address);
+						}
 					}
-				}
 
-				if (!this.functions.has(inst.targetAddress)) {
-					childTargets.push(inst.targetAddress);
+					if (!this.functions.has(inst.targetAddress)) {
+						childTargets.push(inst.targetAddress);
+					}
 				}
 			}
 
 			// Record jump xrefs and follow unconditional jump targets as new functions
 			if (inst.isJump && inst.targetAddress) {
-				this.addXRef({ from: inst.address, to: inst.targetAddress, type: 'jump' });
+				const jumpTargetIsCode = this.isAnalyzableFunctionAddress(inst.targetAddress);
+				this.addXRef({
+					from: inst.address,
+					to: inst.targetAddress,
+					type: jumpTargetIsCode ? 'jump' : 'data'
+				});
 
 				// Follow unconditional jumps whose targets are outside this function
 				// (trampolines, tail calls, thunks) — treat target as a new function
-				if (!inst.isConditional &&
+				// ONLY when the target is actually in a code section. Otherwise a tail
+				// jmp into an import thunk / absolute data pointer becomes sub_XX ghost.
+				if (jumpTargetIsCode &&
+					!inst.isConditional &&
 					inst.targetAddress !== address &&
 					!this.functions.has(inst.targetAddress) &&
 					this.functions.size < this.maxFunctions) {

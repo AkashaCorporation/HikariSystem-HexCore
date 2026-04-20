@@ -1,18 +1,42 @@
-# HexCore Automation — v3.7.4
+# HexCore Automation — v3.8.0
 
-HexCore supports running analysis pipelines from a workspace job file named `.hexcore_job.json`.
+HexCore supports running analysis pipelines from workspace job files.
 
 ## How It Works
 
-- If `.hexcore_job.json` exists in the workspace, HexCore watches it and runs it automatically on create/change.
+### Job File Naming
+
+HexCore recognizes any file matching the pattern `*.hexcore_job.json`:
+
+| File Name | Example | Use Case |
+|-----------|---------|----------|
+| `.hexcore_job.json` | `.hexcore_job.json` | **Canonical** — default for `Run Job`, auto-detected first |
+| `{name}.hexcore_job.json` | `sotr-triage.hexcore_job.json` | **Named** — auto-detected by watcher + queue picker |
+
+Agents can create multiple named jobs in a workspace and ALL will be auto-detected:
+
+```
+my-project/
+├── .hexcore_job.json                  ← canonical (Run Job finds this first)
+├── strings-deep.hexcore_job.json      ← named job (auto-detected)
+├── disasm-export.hexcore_job.json     ← named job (auto-detected)
+└── queue-launcher.hexcore_job.json    ← orchestrator that queues the others
+```
+
+### Execution
+
+- **Auto-run:** HexCore watches `**/*.hexcore_job.json` and runs automatically on create/change.
 - Auto-run serializes repeated triggers to avoid overlapping runs.
-- Manual run: `Run HexCore Automation Job` (`hexcore.pipeline.runJob`).
+- **Manual run:** `Run HexCore Automation Job` (`hexcore.pipeline.runJob`) — finds canonical `.hexcore_job.json` first, then any named `*.hexcore_job.json`.
+- **Queue job:** `Queue Job` (`hexcore.pipeline.queueJob`) — file picker shows ALL `*.hexcore_job.json` files in workspace. **(v3.8.0)**
+- **Cancel job:** `Cancel Queued Job` (`hexcore.pipeline.cancelJob`) — cancel by job ID. **(v3.8.0)**
+- **Job status:** `Show Job Queue Status` (`hexcore.pipeline.jobStatus`) — view all queued/running/completed jobs. **(v3.8.0)**
 - Generate from preset: `Create HexCore Job from Preset` (`hexcore.pipeline.createPresetJob`).
   - Built-in presets: **quick triage**, **full static**, **ctf reverse**.
 - Save as reusable profile: `Save Current Job as Workspace Profile` (`hexcore.pipeline.saveJobAsProfile`).
   - Stored in `.hexcore_profiles.json` per workspace.
 - Validate before running: `Validate HexCore Automation Job` (`hexcore.pipeline.validateJob`).
-- Batch validate: `Validate HexCore Jobs in Workspace` (`hexcore.pipeline.validateWorkspace`).
+- Batch validate: `Validate HexCore Jobs in Workspace` (`hexcore.pipeline.validateWorkspace`) — scans `**/*.hexcore_job.json`.
 - Diagnose health: `Run HexCore Pipeline Doctor` (`hexcore.pipeline.doctor`).
 - Schema validation via `hexcore-disassembler/schemas/hexcore-job.schema.json`.
 - Job execution writes `hexcore-pipeline.log` and `hexcore-pipeline.status.json` to `outDir`.
@@ -23,6 +47,7 @@ HexCore supports running analysis pipelines from a workspace job file named `.he
 {
   "file": "C:\\samples\\target.exe",
   "outDir": "C:\\reports\\target",
+  "priority": "normal",
   "quiet": true,
   "steps": [
     { "cmd": "hexcore.filetype.detect" },
@@ -280,6 +305,106 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 - `hexcore.debug.emulateHeadless` accepts `permissiveMemoryMapping: true` for PE/ELF worker paths.
 - `hexcore.debug.setBreakpointHeadless` now supports `output.path` correctly in pipeline jobs.
 
+### Emulator — Project Azoth / Elixir (v3.8.0) 🜇
+
+Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's default emulation path. Activated via the `hexcore.emulator` setting (`"azoth"`, `"debugger"`, or `"both"` — default `"both"`). Each command runs in a forked system Node.js subprocess (not in-host) to bypass Electron's Arbitrary Code Guard (ACG) — see `docs/ELIXIR_VSCODE_WORKER_PATTERN.md`.
+
+| Command | Timeout | Description | Arch |
+|---------|---------|-------------|------|
+| `hexcore.elixir.version` | — | Show the native Elixir engine version string (interactive toast). Not pipeline-safe. | n/a |
+| `hexcore.elixir.smokeTestHeadless` | 30s | Verify the native `.node` loaded and capability surface is exposed. Returns `{ok, version, loadError, platform, arch, codename: "Project Azoth", surface: [...] }`. | n/a |
+| `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE/ELF → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, stopReason, apiCallCount, apiCalls}`. | x86_64, ELF x86_64 |
+| `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes DRCOV v2 binary (IDA Lighthouse format) to `output.path.drcov`. Returns `{file, entry, stopReason, blockCount, drcovBytes}`. | x86_64, ELF x86_64 |
+| `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. | x86_64, ELF x86_64 |
+
+**Args for emulateHeadless / stalkerDrcovHeadless / snapshotRoundTripHeadless:**
+
+| Arg | Type | Default | Description |
+|-----|------|---------|-------------|
+| `file` | string | — **required** | Path to PE or ELF binary. `binaryPath` is also accepted as an alias. |
+| `maxInstructions` | number | `1_000_000` | Instruction cap for the emulation run. (Not used by snapshot command.) |
+| `verbose` | boolean | `false` | Stream additional trace lines to the Elixir output channel. |
+| `output.path` | string | — | Write JSON result to this path. For `stalkerDrcovHeadless`, a `.drcov` variant is written alongside (or replaces `.json` with `.drcov`). |
+
+**stopReason shape:** `{ kind: "Exit" | "InsnLimit" | "Error" | "User", address: string, instructionsExecuted: number, message: string }`.
+
+**Worker process behaviour:**
+
+- Commands spawn `worker/emulateWorker.js` via `child_process.fork`. The worker uses the system Node.exe (PATH-resolved or `findSystemNode()` fallback) rather than Electron, because `uc_emu_start` crashes the Extension Host with `STATUS_ACCESS_VIOLATION` under ACG.
+- Worker IPC uses `process.send({ok:true/false, kind, ...})`. After sending, the worker waits for the disconnect to drain before exiting (fixes lost messages on large payloads like stalker drcov blobs).
+- Worker 10-second IPC handshake timeout. Host-side run timeout is per-command (600s for emulate/stalker, 60s for snapshot).
+
+**Activation gating (pipeline-safe):**
+
+The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command to the `"azoth"` setting value. If `hexcore.emulator` is `"debugger"`, elixir steps are marked `skipped` (not `error`); if `"both"` or `"azoth"`, they run. See "Pipeline Administration" → `hexcore.emulator.switch` (status-bar QuickPick) for the UX entry point.
+
+### Vulnerability Audit Engine (v3.8.0) 🛡
+
+> Automates the refcount / error-path / BUG_ON patterns that produced the 4 bounty bugs found during HexCore battle-testing. Operates on decompiled C output (Helix `.c` files or raw sources) — no emulator or Unicorn required.
+
+| Command | Timeout | Description |
+|---------|---------|-------------|
+| `hexcore.audit.refcountScan` | 60s | Scan a decompiled C file for 4 vulnerability patterns (A/B/C/E). Returns `RefcountAuditReport` with per-finding severity, confidence, snippet, affected symbol, and bounty-bug attribution. |
+
+**Args for `hexcore.audit.refcountScan`:**
+
+| Arg | Type | Default | Description |
+|-----|------|---------|-------------|
+| `input` | string | — **required** | Path to a `.c` / `.helix.c` / raw C file to audit. `file` is accepted as an alias. |
+| `output.path` | string | — | Write JSON report to this path. |
+| `quiet` | boolean | `false` | Suppress the VS Code toast showing finding count + scan time. |
+
+**Patterns detected (v0.1):**
+
+| Pattern | What it catches | Bounty bug tag |
+|---------|-----------------|-----------------|
+| **A** | `get()`-family call followed by `goto err:` / `return -E*` without a matching `put()` on the error path | Mali Bug #1 (`kbase_gpu_mmap`) when family = `kbase_*` |
+| **B** | Functions named `*_force` that never call any `put()` primitive, OR callers invoking a `*_force(...)` variant | Mali Bug #2 (`release_force`) |
+| **C** | `if (!foo_get(obj)) { ... }` where the success branch dereferences `obj` without bail-out on failure | Qualcomm Bug #2 (`vm_open UAF`) when family = `kgsl_*` |
+| **E** | `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap` reachable from error paths (NULL / OOM / `copy_from_user` gated) | Qualcomm Bug #1 (`VBO BUG_ON`) when gating is NULL/OOM |
+
+**Pattern D (lock-drop-reacquire with stale pointer)** is deferred to v0.2 — requires flow-sensitive dataflow that regex + label tracking cannot safely approximate.
+
+**Output shape (`RefcountAuditReport`):**
+
+```json
+{
+  "inputFile": "...helix.c",
+  "fileSize": 12345,
+  "scannedLines": 456,
+  "functionsScanned": 12,
+  "findings": [
+    {
+      "pattern": "A",
+      "severity": "high",
+      "confidence": 95,
+      "title": "Possible refcount leak: kbase get without matching put on error path",
+      "description": "...",
+      "functionName": "vulnerable_get",
+      "line": 6,
+      "snippet": ">>> 6:    kbase_mem_get(kctx, id);\n    7:    err = ...",
+      "affectedSymbol": "kctx",
+      "suggestion": "...",
+      "referenceBug": "Mali Bug #1 (kbase_gpu_mmap)"
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "byPattern": { "A": 1, "B": 1, "C": 1, "E": 1 },
+    "bySeverity": { "high": 4, "medium": 0, "low": 0 },
+    "highestConfidence": 95
+  },
+  "scanTimeMs": 7
+}
+```
+
+**Typical usage:** chain after `hexcore.helix.decompile` using `$step[N].output`:
+
+```json
+{ "cmd": "hexcore.helix.decompile", "args": { "address": "0x140001000", "count": 300 }, "output": { "path": "func.helix.c" } },
+{ "cmd": "hexcore.audit.refcountScan", "args": { "input": "$step[0].output" }, "output": { "path": "audit.json" } }
+```
+
 ### Report Composer
 
 | Command | Timeout | Description |
@@ -301,10 +426,129 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 |---------|---------|-------------|
 | `hexcore.pipeline.listCapabilities` | 30s | Export capability map (headless/interactive per command) |
 | `hexcore.pipeline.validateJob` | 30s | Preflight validation of current job |
-| `hexcore.pipeline.validateWorkspace` | 30s | Validate all `.hexcore_job.json` in workspace |
+| `hexcore.pipeline.validateWorkspace` | 30s | Validate all `*.hexcore_job.json` in workspace |
 | `hexcore.pipeline.createPresetJob` | 30s | Generate job from built-in preset |
 | `hexcore.pipeline.saveJobAsProfile` | 30s | Save current job as workspace profile |
 | `hexcore.pipeline.doctor` | 30s | Diagnose command registration and extension health |
+| `hexcore.pipeline.queueJob` | 30s | Queue a `*.hexcore_job.json` file for execution with optional priority **(v3.8.0)** |
+| `hexcore.pipeline.cancelJob` | 30s | Cancel a queued or running job by ID **(v3.8.0)** |
+| `hexcore.pipeline.jobStatus` | 30s | Get status of a specific job or all jobs **(v3.8.0)** |
+
+### Pipeline Job Queue — v3.8.0
+
+HexCore v3.8.0 introduces a job queue system for managing multiple automation jobs with priority levels.
+
+**Named job files:** The queue picker and watcher accept any file matching `*.hexcore_job.json`. Agents can create descriptive names like `sotr-strings.hexcore_job.json` and they will be auto-detected without manual intervention.
+
+#### `hexcore.pipeline.queueJob`
+
+Queue a `*.hexcore_job.json` file for execution with optional priority.
+
+```json
+{
+  "cmd": "hexcore.pipeline.queueJob",
+  "args": {
+    "file": "path/to/job.json",
+    "priority": "high"
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `file` | `string` | *(required)* | Path to the `*.hexcore_job.json` file. Accepts both canonical (`.hexcore_job.json`) and named (`sotr-triage.hexcore_job.json`) formats. |
+| `priority` | `string` | `"normal"` | Priority level: `"high"`, `"normal"`, or `"low"`. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+#### `hexcore.pipeline.cancelJob`
+
+Cancel a queued or running job by ID.
+
+```json
+{
+  "cmd": "hexcore.pipeline.cancelJob",
+  "args": {
+    "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `jobId` | `string` | *(required)* | The job ID returned by `queueJob`. |
+
+**Returns:**
+
+```json
+{
+  "success": true,
+  "cancelled": true,
+  "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
+#### `hexcore.pipeline.jobStatus`
+
+Get status of a specific job or all jobs.
+
+```json
+{
+  "cmd": "hexcore.pipeline.jobStatus",
+  "args": {
+    "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000"
+  }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `jobId` | `string` | — | Specific job ID. If omitted, returns all jobs. |
+
+**Returns (single job):**
+
+```json
+{
+  "success": true,
+  "job": {
+    "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000",
+    "status": "running",
+    "priority": "high",
+    "createdAt": "2026-04-11T10:30:00.000Z",
+    "startedAt": "2026-04-11T10:30:05.000Z",
+    "completedAt": null,
+    "error": null
+  }
+}
+```
+
+**Returns (all jobs):**
+
+```json
+{
+  "success": true,
+  "jobs": [
+    {
+      "jobId": "hc-job-550e8400...",
+      "status": "done",
+      "priority": "normal",
+      "createdAt": "2026-04-11T10:30:00.000Z",
+      "startedAt": "2026-04-11T10:30:02.000Z",
+      "completedAt": "2026-04-11T10:32:15.000Z",
+      "error": null
+    }
+  ]
+}
+```
+
+**Status values:** `queued`, `running`, `done`, `failed`, `cancelled`
 
 ---
 
@@ -329,6 +573,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration **(DEPRECATED)** |
 | `hexcore.helix.decompileUI` | Opens Helix decompile panel with editor integration |
 | `hexcore.pipeline.runJob` | Recursive pipeline invocation is not supported |
+| `hexcore.elixir.version` | Shows VS Code toast with engine version — use `hexcore.elixir.smokeTestHeadless` for pipelines **(v3.8.0)** |
+| `hexcore.emulator.switch` | Opens the QuickPick switcher for `hexcore.emulator` setting — status-bar UX only **(v3.8.0)** |
 
 ---
 
@@ -449,6 +695,122 @@ When loading an ELF with `e_type == ET_REL`, a warning is emitted in pipeline ou
 
 ---
 
+## ELF Analysis Features — v3.8.0
+
+### Section-Aware Lifting
+
+The `hexcore.disasm.liftToIR` command now supports `allExecutableSections` option for lifting multiple executable sections in ELF files.
+
+```json
+{
+  "cmd": "hexcore.disasm.liftToIR",
+  "args": {
+    "address": "0x0",
+    "allExecutableSections": true
+  },
+  "output": { "path": "kernel-module.ll" }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `allExecutableSections` | `boolean` | `false` | When `true`, lifts ALL executable sections (`.text`, `.init.text`, `.exit.text`) instead of just `.text`. |
+
+**Output structure:**
+
+```json
+{
+  "success": true,
+  "functions": [...],
+  "sections": [
+    {
+      "name": ".text",
+      "purpose": "primary",
+      "functions": [...]
+    },
+    {
+      "name": ".init.text",
+      "purpose": "init",
+      "functions": [...]
+    },
+    {
+      "name": ".exit.text",
+      "purpose": "exit",
+      "functions": [...]
+    }
+  ],
+  "generatedAt": "2026-04-11T10:30:00.000Z"
+}
+```
+
+**Purpose classification:**
+- `primary` — Main code section (`.text`)
+- `init` — Module initialization (`.init.text`)
+- `exit` — Module cleanup (`.exit.text`)
+
+> **Backward compatibility:** The flat `functions` array is still present in the output for existing pipelines.
+
+### Confidence Scoring in `hexcore.disasm.analyzeELFHeadless`
+
+ELF `.ko` kernel module analysis now includes automatic confidence scoring.
+
+**Output fields:**
+
+```json
+{
+  "success": true,
+  "confidenceScore": {
+    "overall": 0.87,
+    "symbolResolution": 0.95,
+    "cfgComplexity": 0.82,
+    "patternRecognition": 0.90,
+    "externalCallCoverage": 0.75,
+    "symtabCompleteness": 0.98,
+    "detectedPatterns": ["ftrace_preamble", "kernel_api_calls", "module_init_exit"]
+  }
+}
+```
+
+| Field | Range | Description |
+|-------|-------|-------------|
+| `overall` | 0-1 | Aggregate confidence score. |
+| `symbolResolution` | 0-1 | Percentage of symbols successfully resolved. |
+| `cfgComplexity` | 0-1 | Inverse of control flow complexity. |
+| `patternRecognition` | 0-1 | Confidence in detected patterns. |
+| `externalCallCoverage` | 0-1 | Coverage of external call targets. |
+| `symtabCompleteness` | 0-1 | Completeness of symbol table parsing. |
+| `detectedPatterns` | `string[]` | List of detected patterns (e.g., `ftrace_preamble`, `kernel_api_calls`). |
+
+> **Note:** Confidence scoring is automatically computed; no additional arguments are required.
+
+### BTF Type Loading
+
+When an ELF file contains a `.BTF` (BPF Type Format) section, type data is automatically parsed and made available in analysis results.
+
+**BTF data population:**
+
+```json
+{
+  "success": true,
+  "btfData": {
+    "version": 1,
+    "types": [...],
+    "strings": [...],
+    "typeCount": 156,
+    "hasBTF": true
+  }
+}
+```
+
+**Benefits:**
+- Kernel struct type recovery for decompilation
+- Accurate type information for kernel modules
+- Enhanced symbol resolution for BPF-related binaries
+
+> **Note:** BTF parsing is automatic when the `.BTF` section is present. No additional arguments are required.
+
+---
+
 ## Architecture Notes
 
 - **Arch-agnostic commands** (filetype, hash, entropy, strings, YARA, IOC, base64) operate on raw bytes — no architecture dependency.
@@ -465,6 +827,12 @@ When loading an ELF with `e_type == ET_REL`, a warning is emitted in pipeline ou
 - **Section-filtered strings** (v3.7.4) — `hexcore.disasm.extractStrings` accepts `sections: [".rdata", ".data"]` to scan only specific PE/ELF sections. Eliminates noise from `.text`.
 - **Session persistence** (v3.7.4) — `.hexcore_session.db` stores function renames, variable retypes, comments, bookmarks, and `analyzeAll` cache across sessions. Keyed by binary SHA-256.
 - **ELF ET_REL support** (v3.7.4) — Relocatable ELF files (`.ko`, `.o`) have `.rela.text` processed before lifting. External symbols resolved to named declarations. ftrace preambles auto-skipped.
+- **Section-aware lifting** (v3.8.0) — `liftToIR` with `allExecutableSections: true` lifts all executable sections (`.text`, `.init.text`, `.exit.text`) with per-section function grouping.
+- **ELF confidence scoring** (v3.8.0) — `analyzeELFHeadless` automatically computes confidence scores for `.ko` analysis including symbol resolution, CFG complexity, and pattern recognition.
+- **BTF type loading** (v3.8.0) — Automatic parsing of `.BTF` sections in ELF files for kernel struct type recovery.
+- **Job queue with priority** (v3.8.0) — Pipeline jobs can be queued with `high`/`normal`/`low` priority via `hexcore.pipeline.queueJob`. Commands available in Command Palette: **Queue Job**, **Cancel Queued Job**, **Show Job Queue Status**.
+- **Named job files** (v3.8.0) — Job watcher and picker accept any `*.hexcore_job.json` file (not just `.hexcore_job.json`). Agents can create descriptive names like `sotr-strings.hexcore_job.json` and they will be auto-detected without manual intervention.
+- **Pathfinder CFG recovery** (v3.8.0) — Pre-lift CFG analysis using `.pdata`/`.symtab` boundaries, Capstone batch decode, and jump table resolution. Produces `additionalLeaders` for Remill. Architecture-aware: x86 batch decode, ARM64 linear decode.
 
 ---
 
@@ -672,6 +1040,7 @@ Lift machine code to LLVM IR using the Remill engine. Requires a loaded binary w
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `50` | Number of instructions to lift. |
+| `allExecutableSections` | `boolean` | `false` | When `true`, lifts ALL executable sections (`.text`, `.init.text`, `.exit.text`) with per-section grouping. **(v3.8.0)** |
 | `output` | `{ path? }` | — | Output file path for LLVM IR text. |
 
 ### `hexcore.rellic.decompile` *(Deprecated — use `hexcore.helix.decompile`)*
@@ -1178,6 +1547,26 @@ Relative output paths are resolved from `outDir`.
 - `outputPath` is only reported for steps that actually request/provide output.
 - Commands marked as interactive are blocked with a clear error.
 
+### Observability fields (v3.8.0)
+
+`hexcore-pipeline.status.json` exposes extra metrics for dashboards and report
+composers (all backward compatible — missing on older runs):
+
+- **Per-step** — `outputBytes` (size of the artifact written by the step, or
+  `undefined` if no output). Lets you spot empty/truncated outputs without
+  opening the file.
+- **Run-level `summary`** (populated on terminal status — `ok` / `error` /
+  `partial`):
+  - `totalSteps`, `okCount`, `errorCount`, `skippedCount`
+  - `totalDurationMs` — wall-clock from `startedAt` to `finishedAt`
+  - `slowestStepCmd` / `slowestStepMs` — slowest successful step (skip
+    budgeting and retries dominate the honest timings)
+  - `queueSnapshot` — `{queued, running, done, failed, cancelled}` from the
+    `JobQueueManager` singleton if one is active.
+
+The runner writes `status.json` after every step (progressive observability),
+so a watcher tailing the file sees each transition live.
+
 ---
 
 ## Troubleshooting
@@ -1249,3 +1638,87 @@ Skipping `disposeHeadless` causes `UC_ERR_MAP (code 11)` — Unicorn rejects re-
   { "cmd": "hexcore.debug.setRegisterHeadless", "args": { "register": "ESP", "value": "0x5f00000" } }
 ]
 ```
+
+---
+
+## Job File Naming Convention — v3.8.0
+
+### File Name Pattern
+
+HexCore detects any file matching `*.hexcore_job.json`:
+
+```
+.hexcore_job.json              ← canonical (backward compatible)
+sotr-triage.hexcore_job.json   ← named job
+strings-deep.hexcore_job.json  ← named job
+queue-launcher.hexcore_job.json ← orchestrator job
+```
+
+### Detection Priority
+
+1. **FileSystemWatcher** — watches `**/*.hexcore_job.json` for create/change events → auto-runs
+2. **Run Job** (`hexcore.pipeline.runJob`) — finds `.hexcore_job.json` first, then first `*.hexcore_job.json`
+3. **Queue Job** (`hexcore.pipeline.queueJob`) — file picker shows ALL `*.hexcore_job.json` in workspace
+4. **Validate Workspace** — scans ALL `*.hexcore_job.json`
+
+### For Agents
+
+When creating automation jobs from an agent session:
+
+```
+workspace/
+├── .hexcore_job.json                  ← main triage job (auto-detected first)
+├── phase2-strings.hexcore_job.json    ← agent creates this for deep string analysis
+├── phase3-decompile.hexcore_job.json  ← agent creates this for batch decompilation
+└── hexcore-reports/                   ← output directory
+```
+
+The agent does NOT need to ask the user to manually "Run Job" — the watcher picks up new files automatically.
+
+### Multi-Job Orchestration
+
+A job can enqueue other jobs via `hexcore.pipeline.queueJob`:
+
+```json
+{
+  "file": "target.exe",
+  "outDir": "./reports/orchestrator",
+  "steps": [
+    {
+      "comment": "Enqueue strings job (normal priority)",
+      "cmd": "hexcore.pipeline.queueJob",
+      "args": {
+        "file": "phase2-strings.hexcore_job.json",
+        "priority": "normal"
+      }
+    },
+    {
+      "comment": "Enqueue decompile job (low priority — runs last)",
+      "cmd": "hexcore.pipeline.queueJob",
+      "args": {
+        "file": "phase3-decompile.hexcore_job.json",
+        "priority": "low"
+      }
+    },
+    {
+      "comment": "Check queue status",
+      "cmd": "hexcore.pipeline.jobStatus",
+      "output": { "path": "queue-status.json" }
+    }
+  ]
+}
+```
+
+Priority levels: `high` > `normal` > `low`. Default: `normal`. Max concurrent: 2 (configurable).
+
+### Built-in Presets
+
+Generate a job from a preset via `Create HexCore Job from Preset` (`hexcore.pipeline.createPresetJob`):
+
+| Preset | Description |
+|--------|-------------|
+| `quick-triage` | File type + hashes + entropy + PE/ELF headers + strings |
+| `full-static` | Everything in quick-triage + YARA + IOC + RTTI + AOB patterns |
+| `ctf-reverse` | Focused on CTF challenges: strings + disasm + decompile + emulation |
+
+Presets generate a `.hexcore_job.json` in the workspace root.

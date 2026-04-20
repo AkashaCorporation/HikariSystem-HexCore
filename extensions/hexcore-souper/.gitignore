@@ -1,0 +1,13 @@
+node_modules/
+build/
+deps/
+*.node
+*.obj
+*.o
+*.lib
+*.a
+*.log
+*.tgz
+*.tar.gz
+*.zip
+.vscode/

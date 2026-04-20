@@ -61,6 +61,40 @@ const DOMAIN_NOISE = new Set([
 	'out.of', 'read.only', 'write.only',
 ]);
 
+// v3.8.0-nightly: Registry path sub-classification (HEXCORE_DEFEAT Fix #8)
+// Case-insensitive substring matching is intentional — malware authors use
+// varied casing in their anti-VM checks ("VirtualBox", "VBOX", "VMWARE Tools").
+const REGISTRY_ANTI_VM_SUBSTRINGS = [
+	'virtualbox', 'vbox', 'vmware', 'parallels', 'qemu', 'xen',
+	'hyper-v', 'hyperv', 'vmtools', 'virtual machine', 'vmci',
+];
+const REGISTRY_PERSISTENCE_SUBSTRINGS = [
+	'\\run\\', '\\runonce\\', '\\runonceex\\', '\\winlogon\\',
+	'\\explorer\\run', '\\image file execution options\\',
+	'\\appinit_dlls', '\\shellserviceobjectdelayload',
+	'\\currentversion\\run', '\\currentversion\\runonce',
+];
+
+/**
+ * Classify a registry path string into anti-vm / persistence / generic buckets.
+ * Returns an array of tags (one classification each). A path can have multiple
+ * tags if it matches more than one category.
+ */
+function classifyRegistryPath(value: string): string[] {
+	const lower = value.toLowerCase();
+	const tags: string[] = [];
+	if (REGISTRY_ANTI_VM_SUBSTRINGS.some(s => lower.includes(s))) {
+		tags.push('anti_vm_registry');
+	}
+	if (REGISTRY_PERSISTENCE_SUBSTRINGS.some(s => lower.includes(s))) {
+		tags.push('persistence_registry');
+	}
+	if (tags.length === 0) {
+		tags.push('generic_registry');
+	}
+	return tags;
+}
+
 /**
  * TLDs we actually care about.  Restricting the domain regex to real TLDs
  * cuts noise dramatically compared to matching `\.[a-z]{2,}`.
@@ -139,6 +173,42 @@ function validateURL(raw: string): string | null {
 	}
 }
 
+/**
+ * Well-known Windows system / COM / .NET GUIDs that appear in nearly every
+ * PE binary and should not be flagged as mutex IOCs. This list is intentionally
+ * short and covers high-frequency offenders — a full filter would pull from
+ * HKCR\CLSID (~20k entries) and is overkill for noise reduction.
+ *
+ * ref: https://learn.microsoft.com/en-us/windows/win32/com/com-class-objects-and-clsids
+ */
+const WELLKNOWN_GUID_BLACKLIST = new Set<string>([
+	'{00000000-0000-0000-0000-000000000000}', // NULL GUID
+	'{ffffffff-ffff-ffff-ffff-ffffffffffff}', // -1 GUID
+	'{00020813-0000-0000-c000-000000000046}', // Microsoft Excel Application
+	'{00020819-0000-0000-c000-000000000046}', // Excel Workbook
+	'{000214e6-0000-0000-c000-000000000046}', // IShellFolder
+	'{00000000-0000-0000-c000-000000000046}', // IUnknown
+	'{0002df01-0000-0000-c000-000000000046}', // InternetExplorer
+	'{00021401-0000-0000-c000-000000000046}', // ShellLink
+	'{1f4de370-d627-11d1-ba4f-00a0c91eedba}', // SearchRoot
+	'{c0dcf3d4-49cb-5a3c-8c6c-7c16a09a0ab1}', // .NET framework
+]);
+
+function validateMutex(raw: string): string | null {
+	// Named mutex paths always pass — they almost never appear as legitimate
+	// resource strings in clean binaries, so false-positive rate is already low.
+	if (raw.startsWith('\\') || raw.startsWith('Global\\') || raw.startsWith('Local\\')) {
+		return raw;
+	}
+	// GUID form: reject well-known Windows / .NET / Office CLSIDs.
+	const lower = raw.toLowerCase();
+	if (WELLKNOWN_GUID_BLACKLIST.has(lower)) { return null; }
+	// Reject all-zero / all-same-character GUIDs (Null, MAX, placeholders).
+	const hex = lower.replace(/[{}-]/g, '');
+	if (/^(.)\1+$/.test(hex)) { return null; }
+	return raw;
+}
+
 function validateCryptoWallet(raw: string): string | null {
 	// Bitcoin: 25-62 chars starting with 1, 3, or bc1
 	// Ethereum: 42 chars starting with 0x
@@ -189,7 +259,13 @@ const IOC_PATTERNS: IOCPattern[] = [
 	// --- Host Indicators ---
 	{
 		category: 'registryKey',
-		regex: /\b(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU|HKCC)\\[A-Za-z0-9\\_./ \-]{4,256}/g,
+		// v3.8.0-nightly: expanded to catch standalone SOFTWARE\..., SYSTEM\...
+		// and HARDWARE\... paths (common in RegOpenKeyEx(HKLM, "SOFTWARE\...") calls
+		// where the root key is a constant and only the subkey appears as a string).
+		// Character class allows alphanumeric, backslash, underscore, dot, comma,
+		// hyphen, and single space (for "Inc.", "VMware Tools", etc.) — but not
+		// continuous whitespace runs to avoid greedy capture beyond the key.
+		regex: /\b(?:HKEY_[A-Z_]+|HKLM|HKCU|HKCR|HKU|HKCC|SOFTWARE|SYSTEM|HARDWARE)(?:\\[A-Za-z0-9_,.\-]+(?: [A-Za-z0-9_,.\-]+)*){1,12}/g,
 	},
 	{
 		category: 'filePath',
@@ -201,7 +277,15 @@ const IOC_PATTERNS: IOCPattern[] = [
 	},
 	{
 		category: 'mutex',
-		regex: /\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\}/g,
+		// v3.8.0: capture both forms analysts actually care about:
+		//   1. Named mutex paths: `Global\Foo`, `Local\Bar`, `Session\N\Baz`
+		//      These are what malware creates via CreateMutex / CreateEvent.
+		//   2. GUIDs in the canonical `{8-4-4-4-12}` form.
+		// Keeping both under one category preserves backwards compat (the
+		// reportGenerator already labels the section "Mutexes / GUIDs").
+		// Filtering of well-known Windows CLSIDs is done in the validator.
+		regex: /(?:\\(?:Global|Local|Session\\\d+)\\BaseNamedObjects\\[A-Za-z0-9_.\-]{3,128}|(?:Global|Local)\\[A-Za-z0-9_.\-]{3,128}|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})/g,
+		validate: validateMutex,
 	},
 
 	// --- Cryptographic Hashes ---
@@ -294,6 +378,12 @@ function hasValidPrintableContext(
 		}
 	}
 
+	// v3.8.0-nightly: also accept when the match itself is long enough to
+	// constitute valid printable context. Previously a full-region match
+	// (e.g. `SOFTWARE\VirtualBox Guest Additions\0` as a standalone string
+	// in .rdata) was rejected because both adjacent bytes were nulls, even
+	// though the match itself was clearly a legitimate printable run.
+	if (matchLength >= MIN_PRINTABLE_CONTEXT) { return true; }
 	return printableBefore >= MIN_PRINTABLE_CONTEXT || printableAfter >= MIN_PRINTABLE_CONTEXT;
 }
 
@@ -624,12 +714,34 @@ function matchPatterns(
 			const matchBufferPos = regionBufferOffset + matchIndexInSource;
 			const context = extractContext(buffer, matchBufferPos, matchLengthInSource);
 
+			// v3.8.0-nightly: semantic sub-classification tags for registry paths
+			// (HEXCORE_DEFEAT Fix #8). Tags let downstream consumers distinguish
+			// anti-VM / persistence / generic registry references.
+			let tags: string[] | undefined;
+			if (pattern.category === 'registryKey') {
+				tags = classifyRegistryPath(value);
+			} else if (pattern.category === 'mutex') {
+				// Distinguish named-mutex strings (what CreateMutexA/W takes)
+				// from GUID forms. Analysts usually only care about the former
+				// for YARA rule authoring and hunting.
+				if (value.startsWith('{') && value.endsWith('}')) {
+					tags = ['guid'];
+				} else if (/(^|\\)Global\\/.test(value)) {
+					tags = ['named_mutex_global'];
+				} else if (/(^|\\)Local\\/.test(value)) {
+					tags = ['named_mutex_local'];
+				} else {
+					tags = ['named_mutex'];
+				}
+			}
+
 			const added = store.addMatch({
 				category: pattern.category,
 				value,
 				offset: fileOffset + matchIndexInSource,
 				encoding,
 				context,
+				...(tags ? { tags } : {}),
 			});
 			if (!added) {
 				continue;

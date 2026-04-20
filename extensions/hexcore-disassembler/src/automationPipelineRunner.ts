@@ -44,6 +44,13 @@ export interface PipelineJobFile {
 	steps: PipelineStep[];
 	quiet?: boolean;
 	priority?: JobPriority;
+	/**
+	 * When true, this acts as the default for every step that doesn't set its
+	 * own `continueOnError`. v3.8.0-nightly: previously the top-level flag
+	 * was silently ignored; now it propagates to all steps without a step-level
+	 * override. Intuition: "keep going through failures across the whole job".
+	 */
+	continueOnError?: boolean;
 }
 
 export interface PipelineCommandOptions {
@@ -65,17 +72,53 @@ export interface PipelineStepStatus {
 	durationMs: number;
 	attemptCount: number;
 	outputPath?: string;
+	/**
+	 * v3.8.0 observability: size of the output artifact written by this step,
+	 * in bytes. `undefined` when the step did not produce an output file or
+	 * the probe failed. Backward compatible — older consumers simply ignore
+	 * this field.
+	 */
+	outputBytes?: number;
 	error?: string;
+}
+
+/**
+ * v3.8.0 observability: run-level aggregate summary written at job finish.
+ * Populated alongside `status`/`finishedAt` so one-shot consumers can read a
+ * single file to get headline numbers without walking the `steps` array.
+ * Backward compatible — missing on mid-run snapshots and legacy status files.
+ */
+export interface PipelineRunSummary {
+	totalSteps: number;
+	okCount: number;
+	errorCount: number;
+	skippedCount: number;
+	totalDurationMs: number;
+	slowestStepCmd?: string;
+	slowestStepMs?: number;
+	// Queue snapshot at the moment this job finished, if a queue was running.
+	queueSnapshot?: {
+		queued: number;
+		running: number;
+		done: number;
+		failed: number;
+		cancelled: number;
+	};
 }
 
 export interface PipelineRunStatus {
 	jobFile: string;
 	file: string;
 	outDir: string;
-	status: 'running' | 'ok' | 'error';
+	status: 'running' | 'ok' | 'error' | 'partial';
 	startedAt: string;
 	finishedAt?: string;
 	steps: PipelineStepStatus[];
+	/**
+	 * v3.8.0: populated when the job transitions to a terminal status
+	 * (`ok` / `error` / `partial`). Absent while `status === 'running'`.
+	 */
+	summary?: PipelineRunSummary;
 }
 
 export interface PipelineValidationIssue {
@@ -150,6 +193,13 @@ interface NormalizedPipelineJob {
 	outDir: string;
 	steps: PipelineStep[];
 	quiet: boolean;
+	/**
+	 * H1 fix (v3.8.0-beta): the job-file `priority` field is now honoured by
+	 * `normalizeJob`. Defaults to `'normal'` when absent; invalid values fall
+	 * back to `'normal'` with a console warning. Consumed by the queueJob
+	 * command path when no explicit priority arg is provided.
+	 */
+	priority: JobPriority;
 }
 
 interface StepOutputPath {
@@ -312,6 +362,9 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.extractStructInfo', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.rttiScanHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	// v3.8.0-nightly Wave 3.2 — Milestone 2.1 refcount audit scanner.
+	// Input: decompiled C file. Output: JSON report with RefcountAuditFinding[].
+	['hexcore.audit.refcountScan', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.disasm.searchBytesHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.extractStrings', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.getSessionDbPath', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
@@ -434,6 +487,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.liftToIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.disassembleAtHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.rttiScanHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.audit.refcountScan', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.searchBytesHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
@@ -452,6 +506,92 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.pipeline.cancelJob', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.jobStatus', ['hikarisystem.hexcore-disassembler']],
 ]);
+
+// v3.8.0: Emulator-gated commands. The `hexcore.emulator` setting selects
+// which emulator activates its commands — hexcore-debugger skips activation
+// when emulator != "debugger", and symmetrically hexcore-elixir when
+// emulator != "azoth". Steps targeting the inactive emulator are marked
+// `skipped` by the pipeline runner instead of failing the job.
+const EMULATOR_GATED_COMMANDS = new Map<string, 'debugger' | 'azoth'>([
+	// hexcore-debugger (legacy TypeScript debugger)
+	['hexcore.debug.emulate', 'debugger'],
+	['hexcore.debug.emulateWithArch', 'debugger'],
+	['hexcore.debug.emulateHeadless', 'debugger'],
+	['hexcore.debug.continueHeadless', 'debugger'],
+	['hexcore.debug.stepHeadless', 'debugger'],
+	['hexcore.debug.readMemoryHeadless', 'debugger'],
+	['hexcore.debug.getRegistersHeadless', 'debugger'],
+	['hexcore.debug.setBreakpointHeadless', 'debugger'],
+	['hexcore.debug.getStateHeadless', 'debugger'],
+	['hexcore.debug.snapshotHeadless', 'debugger'],
+	['hexcore.debug.restoreSnapshotHeadless', 'debugger'],
+	['hexcore.debug.exportTraceHeadless', 'debugger'],
+	['hexcore.debug.emulateFullHeadless', 'debugger'],
+	['hexcore.debug.writeMemoryHeadless', 'debugger'],
+	['hexcore.debug.setRegisterHeadless', 'debugger'],
+	['hexcore.debug.setStdinHeadless', 'debugger'],
+	['hexcore.debug.searchMemoryHeadless', 'debugger'],
+	['hexcore.debug.disposeHeadless', 'debugger'],
+	// hexcore-elixir (Project Azoth — default emulator in v3.8.0)
+	['hexcore.elixir.emulateHeadless', 'azoth'],
+	['hexcore.elixir.stalkerDrcovHeadless', 'azoth'],
+	['hexcore.elixir.snapshotRoundTripHeadless', 'azoth'],
+	['hexcore.elixir.smokeTestHeadless', 'azoth'],
+]);
+
+function checkEmulatorGate(command: string): { skip: true; reason: string } | { skip: false } {
+	const required = EMULATOR_GATED_COMMANDS.get(command);
+	if (!required) { return { skip: false }; }
+	const active = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'both');
+	// "both" activates debugger and elixir side-by-side, so gates always pass.
+	if (active === required || active === 'both') { return { skip: false }; }
+	return {
+		skip: true,
+		reason: `hexcore.emulator="${active}" selects a different emulator; run "HexCore: Switch Emulator…" (Command Palette) or click the emulator indicator in the status bar to change this.`
+	};
+}
+
+// Elixir commands that require PE32+ (x86_64). Running them against a PE32
+// (x86) binary produces a legitimate but noisy "error" status; arch mismatch
+// is better modelled as `skipped` so pipelines targeting mixed-arch corpora
+// don't halt on `continueOnError: false` and don't pollute partial-status
+// reports with predictable incompatibilities.
+const ELIXIR_X64_ONLY_COMMANDS = new Set<string>([
+	'hexcore.elixir.emulateHeadless',
+	'hexcore.elixir.stalkerDrcovHeadless',
+	'hexcore.elixir.snapshotRoundTripHeadless'
+]);
+
+function checkBinaryArchGate(command: string, targetPath: string): { skip: true; reason: string } | { skip: false } {
+	if (!ELIXIR_X64_ONLY_COMMANDS.has(command)) { return { skip: false }; }
+	try {
+		if (!fs.existsSync(targetPath)) { return { skip: false }; }
+		const fd = fs.openSync(targetPath, 'r');
+		try {
+			const head = Buffer.alloc(0x400);
+			const n = fs.readSync(fd, head, 0, head.length, 0);
+			if (n < 0x40) { return { skip: false }; }
+			if (head[0] !== 0x4d || head[1] !== 0x5a) { return { skip: false }; } // not PE, let the command handle it
+			const lfanew = head.readUInt32LE(0x3c);
+			if (lfanew + 6 > n) { return { skip: false }; }
+			if (head.readUInt32LE(lfanew) !== 0x00004550) { return { skip: false }; }
+			const machine = head.readUInt16LE(lfanew + 4);
+			if (machine === 0x8664) { return { skip: false }; }
+			const archLabel = machine === 0x014c ? 'x86 (PE32)'
+				: machine === 0xaa64 ? 'ARM64'
+				: machine === 0x01c0 ? 'ARM'
+				: `machine=0x${machine.toString(16)}`;
+			return {
+				skip: true,
+				reason: `${command} requires x86_64 (PE32+); ${path.basename(targetPath)} is ${archLabel}. Use hexcore.emulator="debugger" for PE32 targets, or run "HexCore: Switch Emulator…".`
+			};
+		} finally {
+			fs.closeSync(fd);
+		}
+	} catch {
+		return { skip: false }; // on probe failure, let the command throw the real error
+	}
+}
 
 export interface PipelineCapabilityEntry {
 	command: string;
@@ -640,6 +780,7 @@ export class AutomationPipelineRunner {
 		appendLog(logPath, '='.repeat(60));
 
 		let failed = false;
+		let halted = false;
 		let index = 0;
 		let loopCounter = 0;
 		// Accumulates one record per completed step for $step[N] interpolation.
@@ -688,6 +829,7 @@ export class AutomationPipelineRunner {
 				writeJson(statusPath, status);
 				failed = true;
 				if (!step.continueOnError) {
+					halted = true;
 					break;
 				}
 				index++;
@@ -712,8 +854,55 @@ export class AutomationPipelineRunner {
 				writeJson(statusPath, status);
 				failed = true;
 				if (!step.continueOnError) {
+					halted = true;
 					break;
 				}
+				index++;
+				continue;
+			}
+
+			// Emulator gate: hexcore-debugger and hexcore-elixir register
+			// mutually-exclusive commands based on the hexcore.emulator
+			// setting. Mark the inactive-emulator step as `skipped` instead
+			// of letting ensureCommandReady fail with "not registered".
+			const emulatorGate = checkEmulatorGate(resolvedCommand);
+			if (emulatorGate.skip) {
+				const stepStatus = createStepStatus(
+					step,
+					resolvedCommand,
+					startedAt,
+					0,
+					output?.path,
+					'skipped',
+					emulatorGate.reason
+				);
+				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
+				appendLog(logPath, `[Step ${index + 1}] SKIPPED: ${emulatorGate.reason}`);
+				writeJson(statusPath, status);
+				index++;
+				continue;
+			}
+
+			// Arch gate: Elixir is x86_64-only. Running an emulate/stalker/snapshot
+			// step against a PE32 (x86) binary is a predictable incompatibility,
+			// not a runtime failure — mark it `skipped` so the pipeline stays green
+			// and reports the real reason instead of surfacing it as `error`.
+			const archGate = checkBinaryArchGate(resolvedCommand, job.file);
+			if (archGate.skip) {
+				const stepStatus = createStepStatus(
+					step,
+					resolvedCommand,
+					startedAt,
+					0,
+					output?.path,
+					'skipped',
+					archGate.reason
+				);
+				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: output?.path, result: undefined });
+				appendLog(logPath, `[Step ${index + 1}] SKIPPED: ${archGate.reason}`);
+				writeJson(statusPath, status);
 				index++;
 				continue;
 			}
@@ -737,6 +926,7 @@ export class AutomationPipelineRunner {
 				writeJson(statusPath, status);
 				failed = true;
 				if (!step.continueOnError) {
+					halted = true;
 					break;
 				}
 				index++;
@@ -763,6 +953,7 @@ export class AutomationPipelineRunner {
 				writeJson(statusPath, status);
 				failed = true;
 				if (!step.continueOnError) {
+					halted = true;
 					break;
 				}
 				index++;
@@ -834,12 +1025,14 @@ export class AutomationPipelineRunner {
 					writeJson(statusPath, status);
 					failed = true;
 					if (!step.continueOnError) {
+						halted = true;
 						break;
 					}
 				}
 			}
 
 			if (!completed && executionError && !step.continueOnError) {
+				halted = true;
 				break;
 			}
 
@@ -852,8 +1045,8 @@ export class AutomationPipelineRunner {
 					if (isRecord(parsed)) {
 						stepOutputData = parsed;
 					}
-				} catch {
-					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for step result capture`);
+				} catch (readErr) {
+					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for step result capture: ${toErrorMessage(readErr)} (path=${output?.path ?? '<none>'})`);
 				}
 			}
 
@@ -886,9 +1079,47 @@ export class AutomationPipelineRunner {
 		}
 
 		status.finishedAt = new Date().toISOString();
-		status.status = failed ? 'error' : 'ok';
+		// 'error' = pipeline halted on a step failure; 'partial' = some steps
+		// failed but continueOnError kept the job running to completion.
+		if (!failed) {
+			status.status = 'ok';
+		} else if (halted) {
+			status.status = 'error';
+		} else {
+			status.status = 'partial';
+		}
+
+		// v3.8.0 observability: build run-level summary (headline metrics +
+		// queue snapshot) so dashboards and report composers can read a
+		// single file instead of walking `steps`. Best-effort queue probe —
+		// missing queue singleton is not an error.
+		const summary: PipelineRunSummary = {
+			totalSteps: status.steps.length,
+			okCount: status.steps.filter(s => s.status === 'ok').length,
+			errorCount: status.steps.filter(s => s.status === 'error').length,
+			skippedCount: status.steps.filter(s => s.status === 'skipped').length,
+			totalDurationMs: new Date(status.finishedAt).getTime() - new Date(status.startedAt).getTime()
+		};
+		let slowest: PipelineStepStatus | undefined;
+		for (const s of status.steps) {
+			if (s.status === 'ok' && (!slowest || s.durationMs > slowest.durationMs)) {
+				slowest = s;
+			}
+		}
+		if (slowest) {
+			summary.slowestStepCmd = slowest.resolvedCmd;
+			summary.slowestStepMs = slowest.durationMs;
+		}
+		try {
+			if (jobQueueManagerInstance) {
+				summary.queueSnapshot = jobQueueManagerInstance.getQueueStats();
+			}
+		} catch { /* singleton not initialised or getter threw — skip */ }
+		status.summary = summary;
+
 		writeJson(statusPath, status);
 		appendLog(logPath, `Job finished with status: ${status.status}`);
+		appendLog(logPath, `Summary: ok=${summary.okCount} error=${summary.errorCount} skipped=${summary.skippedCount} totalMs=${summary.totalDurationMs}${summary.slowestStepCmd ? ` slowest=${summary.slowestStepCmd}(${summary.slowestStepMs}ms)` : ''}`);
 
 		return status;
 	}
@@ -1029,16 +1260,47 @@ function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolea
 		throw new Error(`Invalid job format in ${jobFilePath}: "steps" must be a non-empty array`);
 	}
 
-	const steps: PipelineStep[] = rawSteps.map((step, index) => normalizeStep(step, index, jobFilePath));
+	// v3.8.0-nightly: honour top-level `continueOnError: true` as a default
+	// for every step that doesn't explicitly set its own value. Without this
+	// fallback, users who set the flag at the job root (the natural intuition
+	// for "continue through failures on this whole job") would see the first
+	// step-failure halt everything, because only step-level flags were read.
+	const jobDefaultContinueOnError = data.continueOnError === true;
+
+	const steps: PipelineStep[] = rawSteps.map((step, index) => {
+		const normalized = normalizeStep(step, index, jobFilePath);
+		if (jobDefaultContinueOnError && isRecord(step) && typeof step.continueOnError !== 'boolean') {
+			normalized.continueOnError = true;
+		}
+		return normalized;
+	});
 	const quiet = typeof quietOverride === 'boolean'
 		? quietOverride
 		: (typeof data.quiet === 'boolean' ? data.quiet : true);
+
+	// H1 fix (v3.8.0-beta): parse top-level `priority` from the job file.
+	// Previously this field was declared in the TS interface + JSON schema
+	// but silently dropped here, so user-configured priorities were ignored
+	// at runtime. Invalid values warn and fall back to 'normal'.
+	let priority: JobPriority = 'normal';
+	if (data.priority !== undefined) {
+		if (data.priority === 'high' || data.priority === 'normal' || data.priority === 'low') {
+			priority = data.priority;
+		} else {
+			console.warn(
+				`[hexcore.pipeline] Invalid "priority" in ${jobFilePath}: ` +
+				`expected 'high' | 'normal' | 'low', got ${JSON.stringify(data.priority)}. ` +
+				`Falling back to 'normal'.`
+			);
+		}
+	}
 
 	return {
 		file,
 		outDir,
 		steps,
-		quiet
+		quiet,
+		priority
 	};
 }
 
@@ -1465,6 +1727,31 @@ function createStepStatus(
 	error?: string
 ): PipelineStepStatus {
 	const finishedAt = new Date();
+	// When a step errors and the command never wrote its output file,
+	// leave an error stub so downstream consumers ({ $step[N].output.path })
+	// can Read() it and see the failure reason instead of getting file-not-found.
+	if (status === 'error' && outputPath && !fs.existsSync(outputPath)) {
+		try {
+			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+			fs.writeFileSync(outputPath, JSON.stringify({
+				ok: false,
+				error: error ?? 'Step failed',
+				cmd: step.cmd,
+				resolvedCmd,
+				attemptCount,
+				stub: true
+			}, null, 2));
+		} catch { /* ignore — status is still reported via status.json */ }
+	}
+	// v3.8.0 observability: probe output size for `ok` + stubbed `error` cases.
+	// Best-effort; never throws — missing files just omit the field.
+	let outputBytes: number | undefined;
+	if (outputPath) {
+		try {
+			const st = fs.statSync(outputPath);
+			outputBytes = st.size;
+		} catch { /* ignore — field stays undefined */ }
+	}
 	return {
 		cmd: step.cmd,
 		resolvedCmd,
@@ -1474,6 +1761,7 @@ function createStepStatus(
 		durationMs: finishedAt.getTime() - startedAt.getTime(),
 		attemptCount,
 		outputPath,
+		outputBytes,
 		error
 	};
 }

@@ -15,8 +15,8 @@ import type { ArchitectureType } from './unicornWrapper';
 
 export function activate(context: vscode.ExtensionContext): void {
 	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
-	if (emulator !== 'debugger') {
-		console.log(`[hexcore-debugger] activation skipped — hexcore.emulator="${emulator}" (Azoth is the default emulator in v3.8.0; set hexcore.emulator="debugger" to enable the legacy TypeScript debugger for regression comparison)`);
+	if (emulator !== 'debugger' && emulator !== 'both') {
+		console.log(`[hexcore-debugger] activation skipped — hexcore.emulator="${emulator}" (Azoth is the default emulator in v3.8.0; set hexcore.emulator="debugger" or "both" to enable the legacy TypeScript debugger)`);
 		context.subscriptions.push(
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (e.affectsConfiguration('hexcore.emulator')) {
@@ -877,6 +877,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			if (sideChannelDataResult) {
 				exportData.sideChannelData = sideChannelDataResult;
+			}
+
+			// v3.8.0-nightly diagnostic: anti-analysis hook install + fire
+			// counts. If `installs.rdtsc > 0 && fires.rdtsc == 0` the byte-
+			// pattern scan found opcodes but the watchAddress dispatch never
+			// reached them — suggests SAB path mismatch or wrong addresses.
+			// If `installs == 0` the scan missed the opcodes entirely.
+			const antiAnalysisStats = engine.getAntiAnalysisStats?.();
+			if (antiAnalysisStats) {
+				exportData.antiAnalysisStats = antiAnalysisStats;
 			}
 
 			if (outputOptions?.path) {

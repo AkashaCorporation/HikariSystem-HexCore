@@ -1,14 +1,18 @@
-# HexCore Job Templates — v3.7.4
+# HexCore Job Templates — v3.8.0
 
-Safe default `.hexcore_job.json` templates for users and AI agents.
+Safe default job templates for users and AI agents.
 
 ## Rules
 
-- Keep `.hexcore_job.json` in the workspace root used by HexCore.
+- Job files must match the pattern `*.hexcore_job.json` to be auto-detected.
+  - `.hexcore_job.json` — canonical (backward compatible, detected first by `Run Job`)
+  - `{name}.hexcore_job.json` — named jobs (auto-detected by watcher + queue picker)
+- Keep job files in the workspace root or subdirectories.
 - Prefer absolute paths for `file` in multi-folder workspaces.
 - Set `expectOutput: false` when you do not need step artifacts.
 - Use explicit `output` only for reports you want to keep.
-- See `docs/HEXCORE_AUTOMATION.md` for full command reference.
+- Agents can create multiple named jobs — all are auto-detected without manual intervention.
+- See `docs/HEXCORE_AUTOMATION.md` for full command reference and naming convention details.
 
 ---
 
@@ -991,3 +995,586 @@ Batch rename and retype functions and variables via pipeline, then decompile wit
 - All renames/retypes persist in `.hexcore_session.db` — no need to re-apply next session.
 - `helix.decompile` output reflects annotations: `sub_140859DE8` → `PlayerAwareness_UpdatePosition`, `int64_t r14` → `GlobalWorldContext* r14`.
 - Session DB is auto-created next to the binary on first annotation command.
+
+---
+
+## v3.8.0 Templates
+
+New templates covering priority job queuing, section-aware ELF kernel module analysis with confidence scoring, and BTF-enhanced deep kernel analysis.
+
+---
+
+## Template: Priority Job Queue — Batch Analysis (v3.8.0)
+
+Queue multiple analysis jobs with different priorities. High-priority jobs execute first.
+
+```json
+{
+  "file": "C:\\path\\to\\critical-malware.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\priority-batch",
+  "priority": "high",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" }, "timeoutMs": 90000 },
+    { "cmd": "hexcore.entropy.analyze", "timeoutMs": 90000 },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "timeoutMs": 120000, "continueOnError": true },
+    { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
+    { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "PRIORITY_REPORT.md", "format": "md" }, "timeoutMs": 60000 }
+  ]
+}
+```
+
+**Notes:**
+- `priority: "high"` ensures this job runs before `"normal"` and `"low"` priority jobs in the queue.
+- Use `hexcore.pipeline.queueJob` to submit: `{ "cmd": "hexcore.pipeline.queueJob", "args": { "file": "path/to/job.json", "priority": "high" } }`
+- Monitor with `hexcore.pipeline.jobStatus` — returns `queued`, `running`, `done`, `failed`, or `cancelled`.
+- Cancel with `hexcore.pipeline.cancelJob` using the `jobId` returned by `queueJob`.
+- Queue supports up to 5 concurrent workers (default: 2). Configure in HexCore settings.
+
+---
+
+## Template: Section-Aware ELF Kernel Module Analysis (v3.8.0)
+
+Analyze Linux kernel modules with section-aware lifting — processes `.text`, `.init.text`, and `.exit.text` separately for complete module coverage.
+
+```json
+{
+  "file": "C:\\path\\to\\driver.ko",
+  "outDir": "C:\\path\\to\\hexcore-reports\\section-aware-ko",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    { "cmd": "hexcore.elfanalyzer.analyze", "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.disasm.analyzeELFHeadless",
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 5000, "maxFunctionSize": 65536, "forceReload": true },
+      "timeoutMs": 600000
+    },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "allExecutableSections": true },
+      "output": { "path": "all-sections-lifted.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.disasm.extractStrings",
+      "args": { "sections": [".rodata"], "minLength": 5, "maxStrings": 50000 },
+      "output": { "path": "strings-rodata.json" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": { "queries": ["ioctl", "copy_from_user", "copy_to_user", "mutex_lock", "kmalloc", "kfree", "kref_get", "kref_put"] },
+      "output": { "path": "kernel-api-xrefs.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "KERNEL_MODULE_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- `allExecutableSections: true` in `liftToIR` processes `.text`, `.init.text`, `.exit.text` and any other executable sections.
+- Output includes `sections` array with per-section grouping: `{ name: ".init.text", purpose: "module_init", functions: [...] }`.
+- Section purposes: `runtime` (.text), `module_init` (.init.text), `module_cleanup` (.exit.text), `trampoline` (.plt).
+- `analyzeELFHeadless` now includes `confidenceScore` in output — weighted score (0-1) based on symbol resolution, CFG complexity, kernel pattern recognition, and symtab completeness.
+- Confidence score `detectedPatterns` lists recognized kernel APIs (mutex_lock, copy_from_user, kref_get, etc.).
+
+---
+
+## Template: BTF-Enhanced Kernel Module Deep Analysis (v3.8.0)
+
+Full kernel module reverse engineering with BTF type information from vmlinux for struct field naming and parameter typing.
+
+```json
+{
+  "file": "C:\\path\\to\\driver.ko",
+  "outDir": "C:\\path\\to\\hexcore-reports\\btf-enhanced",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    {
+      "cmd": "hexcore.disasm.analyzeELFHeadless",
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 5000, "maxFunctionSize": 65536, "forceReload": true },
+      "timeoutMs": 600000
+    },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "allExecutableSections": true },
+      "output": { "path": "all-sections.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "entry", "count": 500, "autoBacktrack": true },
+      "output": { "path": "entry-decompiled.helix.c" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": { "queries": ["copy_from_user", "copy_to_user", "kref_get", "kref_put", "mutex_lock", "BUG_ON", "capable"] },
+      "output": { "path": "security-api-xrefs.json" },
+      "timeoutMs": 120000
+    },
+    { "cmd": "hexcore.yara.scan", "args": { "categories": ["drivers"] }, "timeoutMs": 180000 },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "BTF_ENHANCED_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- When the `.ko` file or a linked `vmlinux` contains a `.BTF` section, HexCore automatically parses BTF type data.
+- BTF enables: kernel struct layout recovery, function parameter auto-typing (e.g., `kctx` → `struct kbase_context *`), and struct field naming.
+- `analyzeELFHeadless` output includes `btfData` when BTF is available, plus `confidenceScore` with bonus for BTF/DWARF presence.
+- BTF is standard in modern Linux kernels (5.2+, Ubuntu 20.04+, Fedora 31+). For older kernels, DWARF fallback is planned.
+- Combine with section-aware lifting for complete `.init.text`/`.exit.text` coverage.
+
+---
+
+## Template: Named Job — Strings Deep Scan (v3.8.0)
+
+Named job file (`strings-deep.hexcore_job.json`) — auto-detected by watcher alongside the canonical `.hexcore_job.json`.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\strings-deep",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.strings.extract", "args": { "minLength": 4, "maxStrings": 100000 }, "output": { "path": "strings-all.json" }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.strings.extractAdvanced", "output": { "path": "strings-advanced.json" }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.base64.decodeHeadless", "output": { "path": "base64-decoded.json" }, "timeoutMs": 90000 },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": { "query": "password" },
+      "output": { "path": "xref-password.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.disasm.searchStringHeadless",
+      "args": { "query": "token" },
+      "output": { "path": "xref-token.json" },
+      "timeoutMs": 120000
+    }
+  ]
+}
+```
+
+**Notes:**
+- Save as `strings-deep.hexcore_job.json` (not `.hexcore_job.json`) to run alongside other jobs.
+- The watcher auto-detects `*.hexcore_job.json` — no manual "Run Job" needed.
+
+---
+
+## Template: Multi-Job Orchestrator (v3.8.0)
+
+Orchestrator job that enqueues other named jobs with priority levels. Save as `orchestrator.hexcore_job.json`.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\orchestrator",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    {
+      "comment": "Phase 1: Quick triage (high priority — runs first)",
+      "cmd": "hexcore.pipeline.queueJob",
+      "args": {
+        "file": "triage.hexcore_job.json",
+        "priority": "high"
+      },
+      "output": { "path": "queue-triage-id.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "comment": "Phase 2: Deep strings (normal priority)",
+      "cmd": "hexcore.pipeline.queueJob",
+      "args": {
+        "file": "strings-deep.hexcore_job.json",
+        "priority": "normal"
+      },
+      "output": { "path": "queue-strings-id.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "comment": "Phase 3: Batch decompile (low priority — runs last)",
+      "cmd": "hexcore.pipeline.queueJob",
+      "args": {
+        "file": "decompile-batch.hexcore_job.json",
+        "priority": "low"
+      },
+      "output": { "path": "queue-decompile-id.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "comment": "Show queue status",
+      "cmd": "hexcore.pipeline.jobStatus",
+      "output": { "path": "queue-status.json" },
+      "timeoutMs": 30000
+    }
+  ]
+}
+```
+
+**Notes:**
+- Each `queueJob` step returns a `jobId` for tracking.
+- Priority order: `high` → `normal` → `low`. Jobs at the same priority level run FIFO.
+- The orchestrator itself runs instantly (just enqueues) — the heavy work runs in queued jobs.
+- Monitor with `hexcore.pipeline.jobStatus`, cancel with `hexcore.pipeline.cancelJob`.
+
+---
+
+## Emulator Setting — `hexcore.emulator` (v3.8.0)
+
+HexCore ships two emulation engines that can coexist. The `hexcore.emulator` user/workspace setting picks which ones activate:
+
+| Value | What activates | When to use |
+|-------|---------------|-------------|
+| `"both"` **(default)** | Azoth + legacy TypeScript debugger side-by-side | Pipelines that exercise both engines; side-by-side comparison |
+| `"azoth"` | Only Project Azoth (hexcore-elixir) | Lighter activation; Azoth-only analysis |
+| `"debugger"` | Only legacy hexcore-debugger | Regression comparison against Azoth |
+
+Each extension has its own native module, so `"both"` does NOT create libuc conflicts — they run independently.
+
+**How to switch (no settings.json editing required):**
+- Click the `$(debug-alt) Emulator: Both` indicator in the VS Code status bar (bottom right) — opens a QuickPick with all three options.
+- Or open the Command Palette (`Ctrl+Shift+P`) and run **`HexCore: Switch Emulator…`**.
+- The switcher writes to workspace settings if a workspace is open (so the choice travels with `.hexcore_job.json`), otherwise to user-global.
+- A "Reload Window" prompt appears after the switch.
+
+**Pipeline gating:**
+The runner automatically marks `hexcore.debug.*` steps as `skipped` (not `error`) when `hexcore.emulator = "azoth"`, and `hexcore.elixir.*` steps as `skipped` when `hexcore.emulator = "debugger"`. With `"both"`, nothing is gated.
+
+---
+
+## Template: Dual-Emulator Malware Analysis — Ashaka Shadow v3 (v3.8.0)
+
+Full malware test pipeline with BOTH emulators running for side-by-side comparison. Targets v3.0-style anti-analysis malware (multi-byte XOR `"Ashaka"`, djb2 API hashing, dynamic `ShellExecuteW`, registry anti-VM).
+
+Requires `hexcore.emulator: "both"`.
+
+```json
+{
+  "file": "C:\\path\\to\\suspect.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\dual-emu",
+  "quiet": false,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" }, "timeoutMs": 90000 },
+    { "cmd": "hexcore.entropy.analyze", "timeoutMs": 90000 },
+    { "cmd": "hexcore.strings.extract", "args": { "minLength": 4, "maxStrings": 10000 }, "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.strings.extractAdvanced",
+      "timeoutMs": 180000,
+      "output": { "path": "05-strings-deobfuscated.json" }
+    },
+    { "cmd": "hexcore.base64.decodeHeadless", "timeoutMs": 90000 },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "timeoutMs": 120000 },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 500, "maxFunctionSize": 65536, "forceReload": true },
+      "timeoutMs": 300000
+    },
+    { "cmd": "hexcore.disasm.rttiScanHeadless", "timeoutMs": 120000 },
+    { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
+    { "cmd": "hexcore.ioc.extract", "timeoutMs": 120000 },
+
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "IsDebuggerPresent" }, "output": { "path": "12-search-antidebug.json" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "VMware" }, "output": { "path": "13-search-vmware.json" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "VirtualBox" }, "output": { "path": "14-search-virtualbox.json" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "ShellExecuteW" }, "output": { "path": "15-search-shellexecute.json" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "shell32.dll" }, "output": { "path": "15b-search-shell32.json" }, "timeoutMs": 60000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "NtQueryInformationProcess" }, "output": { "path": "15c-search-ntquery.json" }, "timeoutMs": 60000 },
+
+    { "cmd": "hexcore.disasm.searchBytesHeadless", "args": { "pattern": "41 53 68 61 73 6B 61" }, "output": { "path": "16-xor-key-ashaka.json" }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.disasm.searchBytesHeadless", "args": { "pattern": "29 27 1C 11 00 51 4E 6E" }, "output": { "path": "16b-c2-url-encoded.json" }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.disasm.searchBytesHeadless", "args": { "pattern": "4E 4B 52 E4" }, "output": { "path": "16c-djb2-hash-isdebuggerpresent.json" }, "timeoutMs": 120000 },
+
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "entry", "count": 300 },
+      "output": { "path": "17-main-lifted.ll" },
+      "timeoutMs": 180000,
+      "continueOnError": true
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[20].output" },
+      "output": { "path": "17b-main-decompiled.helix.c" },
+      "timeoutMs": 180000,
+      "continueOnError": true
+    },
+
+    {
+      "cmd": "hexcore.debug.emulateFullHeadless",
+      "args": { "address": "entry", "maxSteps": 50000, "permissiveMemoryMapping": true, "traceAPIs": true },
+      "output": { "path": "18-emulation-unicorn.json" },
+      "timeoutMs": 300000,
+      "continueOnError": true
+    },
+    { "cmd": "hexcore.elixir.smokeTestHeadless", "timeoutMs": 30000 },
+    {
+      "cmd": "hexcore.elixir.snapshotRoundTripHeadless",
+      "output": { "path": "19-elixir-snapshot.json" },
+      "timeoutMs": 60000
+    },
+    {
+      "cmd": "hexcore.elixir.emulateHeadless",
+      "args": { "maxInstructions": 1000000 },
+      "output": { "path": "20-emulation-elixir.json" },
+      "timeoutMs": 600000,
+      "continueOnError": true
+    },
+    {
+      "cmd": "hexcore.elixir.stalkerDrcovHeadless",
+      "args": { "maxInstructions": 1000000 },
+      "output": { "path": "21-elixir-stalker.json" },
+      "timeoutMs": 600000,
+      "continueOnError": true
+    },
+
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "FINAL_REPORT.md", "format": "md" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+**Notes:**
+- **Dual emulator**: `18-emulation-unicorn.json` (legacy debugger + hexcore-unicorn) and `20-emulation-elixir.json` (Project Azoth) are produced in the same run so you can diff API traces between the two engines. Requires `hexcore.emulator: "both"` — otherwise one side is skipped.
+- **Lift + Decompile split**: Step 20 emits raw LLVM IR (`.ll`), Step 21 runs Helix on it (`.helix.c`). Use `$step[20].output` so the IR path resolves at runtime (zero hardcoded paths). Gives you both the IR for manual inspection and the pseudo-C.
+- **v3.0 anti-analysis patterns** baked in:
+  - `41 53 68 61 73 6B 61` — ASCII "Ashaka" multi-byte XOR key (in `.rdata`)
+  - `29 27 1C 11 00 51 4E 6E` — first 8 bytes of the XOR'd C2 URL
+  - `4E 4B 52 E4` — djb2 hash of `"IsDebuggerPresent"` in little-endian (`0xE4524B4E`)
+  - Dynamic loading strings: `shell32.dll`, `ShellExecuteW`, `NtQueryInformationProcess`
+- **Advanced strings deobfuscation**: `hexcore.strings.extractAdvanced` tests key sizes `[2,3,4,5,6,7,8,12,16]` by default in v3.8.0 — covers the 7-byte `"Ashaka"` key. Kasiski auto-detection is on.
+- `continueOnError: true` on all emulation steps so one engine choking doesn't kill the other's output.
+
+---
+
+## Template: Decompile → Audit Chain (v3.8.0 Wave 3.3) — RACE-SAFE
+
+**Problem this solves.** Running phase2 decompile and phase3 audit as two *separate* job files (each triggered by the filesystem watcher) creates a race window: the watcher sees both `.hexcore_job.json` files, fires them in parallel, and the audit step wins the race while the decompile step is still writing. Result: `ENOENT: no such file` on the `.helix.c` that would have existed a second later. Same root cause for any chained pipeline where step B depends on step A's output file.
+
+**Fix: a single job with `$step[N].output` references.** The pipeline runner resolves `$step[N].output` to the exact path step N wrote — no filesystem polling, no race, no watcher coordination needed. Step B runs only after step A has finished.
+
+```json
+{
+    "file": "target.exe",
+    "outDir": "./hexcore-reports/decompile-audit-chain",
+    "continueOnError": true,
+    "steps": [
+        {
+            "cmd": "hexcore.helix.decompile",
+            "args": {
+                "functionAddress": "0x5D010C",
+                "autoBacktrack": true
+            },
+            "output": {
+                "path": "./hexcore-reports/decompile-audit-chain/00-helix.helix.c"
+            }
+        },
+        {
+            "cmd": "hexcore.audit.refcountScan",
+            "args": {
+                "input": "$step[0].output"
+            },
+            "output": {
+                "path": "./hexcore-reports/decompile-audit-chain/01-refcount-audit.json"
+            }
+        }
+    ]
+}
+```
+
+**Why this works.**
+
+- `$step[0].output` resolves at step 1's dispatch time to the literal path step 0 wrote (whether set explicitly in `output.path` or auto-derived by the runner)
+- If step 0 errored, Wave 3.3 error-stub writes `{"ok": false, "error": ...}` to that path, and step 1's `audit.refcountScan` fails with a clear "read file JSON parse error" instead of ENOENT — the stub makes failure visible at every link in the chain
+- With `continueOnError: true` the job completes to `status: "partial"` when a link fails, so downstream orchestration scripts can branch on partial vs error
+
+**When to use `$step[N].output` vs separate jobs**
+
+- **Chain in a single job** when step B reads a file step A writes
+- **Separate jobs** when the consumers are independent (two phase3 jobs scanning the same phase2 output in parallel is fine)
+- **Named job + orchestrator** when you want the UX of separate jobs but need ordering — the orchestrator template already does this for strings-deep / decompile-batch
+
+Runnable sample: `extensions/hexcore-disassembler/test/sample_decompile_audit_chain.hexcore_job.json`.
+
+---
+
+## Workspace Layout Example (v3.8.0)
+
+```
+my-analysis/
+├── target.exe                             ← binary to analyze
+├── .hexcore_job.json                      ← canonical job (Run Job finds this first)
+├── strings-deep.hexcore_job.json          ← named job (auto-detected by watcher)
+├── decompile-batch.hexcore_job.json       ← named job (auto-detected by watcher)
+├── orchestrator.hexcore_job.json          ← queues the others with priority
+└── hexcore-reports/                       ← all output goes here
+    ├── quick-triage/
+    ├── strings-deep/
+    ├── decompile-batch/
+    └── orchestrator/
+```
+
+All `*.hexcore_job.json` files are auto-detected — agents create them, the watcher picks them up, zero manual intervention.
+
+---
+
+## Template: Malware Deep-Dive — Azoth + Refcount Audit (v3.8.0)
+
+End-to-end malware triage that exercises the v3.8.0 Wave 2/3 surface:
+Azoth (Elixir) emulation, YARA with HQL anti-analysis rules, IOC extraction,
+Helix decompile of the entry point, and the new refcount-audit scanner against
+the decompiled C. `onResult` gates the deep passes on an entropy signal, so
+low-value benign binaries short-circuit after the static phase.
+
+Writes a run-level `summary` (okCount/errorCount/skippedCount/totalDurationMs
+/queueSnapshot) and per-step `outputBytes` into `hexcore-pipeline.status.json`
+(v3.8.0 observability fields).
+
+```json
+{
+  "file": "C:\\samples\\suspect.exe",
+  "outDir": "C:\\samples\\hexcore-reports\\malware-deep-dive",
+  "quiet": true,
+  "priority": "high",
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
+    { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" } },
+    {
+      "cmd": "hexcore.entropy.analyze",
+      "onResult": {
+        "field": "maxEntropy",
+        "operator": "lt",
+        "value": 6.5,
+        "action": "skip",
+        "actionValue": 2
+      }
+    },
+    { "cmd": "hexcore.strings.extractAdvanced", "args": { "minLength": 6 } },
+    { "cmd": "hexcore.base64.decodeHeadless" },
+    { "cmd": "hexcore.peanalyzer.analyze" },
+    { "cmd": "hexcore.yara.scan", "args": { "useDefaultRules": true }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.ioc.extract" },
+    {
+      "cmd": "hexcore.elixir.emulateHeadless",
+      "args": { "maxInstructions": 2000000, "stopOnException": false },
+      "timeoutMs": 300000,
+      "retryCount": 1,
+      "retryDelayMs": 2000
+    },
+    {
+      "cmd": "hexcore.elixir.stalkerDrcovHeadless",
+      "args": { "maxInstructions": 2000000 },
+      "output": { "path": "drcov-trace.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "entry", "count": 300 },
+      "output": { "path": "decompiled-entry.helix.c" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.audit.refcountScan",
+      "args": { "input": "$step[prev].output" },
+      "output": { "path": "refcount-audit.json" }
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "MALWARE_REPORT.md", "format": "md" }
+    }
+  ]
+}
+```
+
+Validate in the Command Palette: `HexCore: Validate Job File` → pick this job.
+Run: `HexCore: Run Job File`. Inspect progress in `hexcore-pipeline.status.json`
+(live-updated per step) and the final `summary` block.
+
+---
+
+## Template: Crypto Hunt — Entropy-Gated (v3.8.0)
+
+Lightweight scanner tuned for packed/encrypted payloads. Entropy gates the
+deep work with `onResult goto`: low-entropy binaries skip straight to the
+report step, high-entropy binaries trigger Base64/XOR/AOB scanning and YARA
+crypto rules. Demonstrates the full `onResult` operator set (gt/regex/goto).
+
+```json
+{
+  "file": "C:\\samples\\packed-unknown.bin",
+  "outDir": "C:\\samples\\hexcore-reports\\crypto-hunt",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect" },
+    {
+      "cmd": "hexcore.entropy.analyze",
+      "onResult": {
+        "field": "maxEntropy",
+        "operator": "gt",
+        "value": 7.2,
+        "action": "goto",
+        "actionValue": 3
+      }
+    },
+    {
+      "cmd": "hexcore.hashcalc.calculate",
+      "onResult": {
+        "field": "note",
+        "operator": "contains",
+        "value": "skipped",
+        "action": "goto",
+        "actionValue": 8
+      }
+    },
+    { "cmd": "hexcore.strings.extractAdvanced", "args": { "detectXorKeys": true, "minLength": 6 } },
+    { "cmd": "hexcore.base64.decodeHeadless" },
+    {
+      "cmd": "hexcore.disasm.searchBytesHeadless",
+      "args": { "pattern": "?? ?? ?? ?? 48 8B ?? ?? ?? ?? ??", "maxMatches": 64 },
+      "output": { "path": "aob-crypto-loops.json" },
+      "continueOnError": true
+    },
+    { "cmd": "hexcore.yara.scan", "args": { "category": "crypto", "useDefaultRules": true } },
+    { "cmd": "hexcore.ioc.extract" },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "CRYPTO_REPORT.md", "format": "md" }
+    }
+  ]
+}
+```
+
+After the run, `hexcore-pipeline.status.json` → `summary.slowestStepCmd`
+immediately points at the dominant cost (usually `hexcore.yara.scan` on big
+binaries), and `summary.skippedCount` reports how many steps the entropy gate
+bypassed.

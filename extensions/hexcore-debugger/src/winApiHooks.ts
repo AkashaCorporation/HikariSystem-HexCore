@@ -51,6 +51,12 @@ export class WinApiHooks {
 	private moduleHandles: Map<string, bigint> = new Map();
 	private imageBase: bigint = 0x400000n;
 
+	// v3.8.0-nightly: captured stdout. Populated by the MSVCP140 iostream
+	// stubs (sputn, operator<<(const char*)) so pipelines can observe what
+	// `std::cout`/`std::cerr` printed during emulation. Retrieved via
+	// getStdoutBuffer(); merged into DebugEngine.getStdoutBuffer() output.
+	private stdoutBuffer: string = '';
+
 	/** Optional TraceManager for centralized trace recording */
 	private traceManager: TraceManager | null = null;
 
@@ -1093,26 +1099,154 @@ export class WinApiHooks {
 		// v3.8.0-nightly: the malware's cout/cerr usage calls these mangled
 		// MSVCP140 methods. Without stubs, each call logs "Unhandled API" and
 		// returns 0 which is correct behavior but floods the trace with 40+
-		// noise lines per emulation cycle. These stubs absorb the calls
-		// silently. stdout capture is NOT implemented — the stream data goes
-		// nowhere. This is deliberate: emulating the full streambuf→write
-		// chain requires a virtual ostream state machine, which is v3.8.1 scope.
+		// noise lines per emulation cycle. The sputn + operator<<(const char*)
+		// stubs additionally capture the string payload into `stdoutBuffer`
+		// so pipelines can observe what the emulated program printed.
 		const ostreamNop = (_args: bigint[]): bigint => 0n;
 		// ios_base::good() → return true (1) so the stream appears healthy
 		const iosGood = (_args: bigint[]): bigint => 1n;
-		// operator<< with endl/flush manipulator → return 'this' (first arg)
-		const ostreamChain = (args: bigint[]): bigint => args[0] ?? 0n;
+		// operator<< with endl/flush manipulator → append newline and return 'this'
+		const ostreamEndl = (args: bigint[]): bigint => {
+			this.stdoutBuffer += '\n';
+			return args[0] ?? 0n;
+		};
+
+		// streambuf::sputn(s, n) — this is where the actual string bytes flow
+		// for `std::cout << "text"`. Read n bytes from args[1] and append.
+		// Returns n (all bytes "written").
+		const sputnCapture = (args: bigint[]): bigint => {
+			const strPtr = args[1];
+			const n = args[2];
+			if (!strPtr || strPtr === 0n || !n || n === 0n) { return n ?? 0n; }
+			const len = Number(n);
+			if (len <= 0 || len > 65536) { return n; } // sanity cap
+			try {
+				const bytes = this.emulator.readMemorySync(strPtr, len);
+				this.stdoutBuffer += bytes.toString('utf8');
+			} catch { /* ignore unmapped reads */ }
+			return n;
+		};
+
+		// operator<<(ostream&, const char*) — method form (ostream receives
+		// const char*). args[0]=this, args[1]=char*. Walks until NUL.
+		const ostreamWriteCStr = (args: bigint[]): bigint => {
+			const strPtr = args[1];
+			if (strPtr && strPtr !== 0n) {
+				try {
+					// Read up to 4KB, stop at NUL
+					const bytes = this.emulator.readMemorySync(strPtr, 4096);
+					const nulIdx = bytes.indexOf(0);
+					const end = nulIdx >= 0 ? nulIdx : bytes.length;
+					this.stdoutBuffer += bytes.subarray(0, end).toString('utf8');
+				} catch { /* ignore */ }
+			}
+			return args[0] ?? 0n;
+		};
+
+		// operator<<(numeric) — format the arg as decimal (we don't track
+		// ostream-per-stream std::hex/dec state; defaulting to decimal gets
+		// ~all real-world diagnostic output right) and append to stdout.
+		// CRITICAL: must return args[0] (the ostream `this` pointer) so the
+		// chained `<< "x" << n << "y"` expression dereferences a valid
+		// ostream on the next call. Returning 0 → UC_ERR_READ_UNMAPPED
+		// when the caller reads ios_base state off the null ostream.
+		const makeNumericStub = (formatter: (v: bigint) => string) => (args: bigint[]): bigint => {
+			const v = args[1] ?? 0n;
+			this.stdoutBuffer += formatter(v);
+			return args[0] ?? 0n;
+		};
+		const asDec = (v: bigint) => v.toString(10);
+		const asDecSigned32 = (v: bigint) => {
+			const low = Number(v & 0xFFFFFFFFn);
+			return ((low | 0) as number).toString(10); // signed 32-bit
+		};
+		const asDecSigned64 = (v: bigint) => {
+			const hi = v & (1n << 63n);
+			return hi ? (v - (1n << 64n)).toString(10) : v.toString(10);
+		};
 
 		const msvcp140Stubs: [string, (args: bigint[]) => bigint][] = [
 			['?good@ios_base@std@@QEBA_NXZ', iosGood],
 			['?setstate@?$basic_ios@DU?$char_traits@D@std@@@std@@QEAAXH_N@Z', ostreamNop],
 			['?uncaught_exception@std@@YA_NXZ', ostreamNop],
 			['?_Osfx@?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAXXZ', ostreamNop],
-			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z', ostreamChain],
+			// operator<<(ostream&(*)(ostream&)) — endl/flush. Append newline.
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV01@AEAV01@@Z@Z', ostreamEndl],
+			// operator<<(ios_base&(*)(ios_base&)) — std::hex / std::dec / std::oct
+			// / std::noboolalpha / etc. Pure formatting manipulator, no output
+			// byte emitted. MUST return args[0] (ostream this) to keep the
+			// chained `<< std::hex << n << std::dec` expression alive.
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAVios_base@1@AEAV21@@Z@Z', (args) => args[0] ?? 0n],
+			// operator<<(basic_ios&(*)(basic_ios&)) — resetiosflags etc.
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@P6AAEAV?$basic_ios@DU?$char_traits@D@std@@@1@AEAV21@@Z@Z', (args) => args[0] ?? 0n],
+			// streambuf::sputn — captures actual payload bytes for const char*.
+			['?sputn@?$basic_streambuf@DU?$char_traits@D@std@@@std@@QEAA_JPEBD_J@Z', sputnCapture],
+			// operator<<(ostream&, const char*) — free function form (MSVC free fn)
+			['??$?6U?$char_traits@D@std@@@std@@YAAEAV?$basic_ostream@DU?$char_traits@D@std@@@0@AEAV10@PEBD@Z', ostreamWriteCStr],
+			// operator<<(const char*) — method form (some MSVC versions emit this)
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBD@Z', ostreamWriteCStr],
+			// operator<<(char) — single char literal
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@D@Z', (args) => {
+				const ch = Number(args[1] ?? 0n) & 0xff;
+				if (ch > 0) { this.stdoutBuffer += String.fromCharCode(ch); }
+				return args[0] ?? 0n;
+			}],
+			// operator<<(numeric) — MSVC mangled suffixes: H=int F=short I=unsigned E=ushort
+			// J=long K=ulong _J=__int64 _K=uint64 M=float N=double O=long double
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@H@Z',  makeNumericStub(asDecSigned32)],  // int
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@I@Z',  makeNumericStub(asDec)],          // unsigned
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@F@Z',  makeNumericStub(asDecSigned32)],  // short
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@G@Z',  makeNumericStub(asDec)],          // ushort
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@J@Z',  makeNumericStub(asDecSigned32)],  // long (32 on Win)
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@K@Z',  makeNumericStub(asDec)],          // unsigned long
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_J@Z', makeNumericStub(asDecSigned64)],  // __int64
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@_K@Z', makeNumericStub(asDec)],          // uint64
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@N@Z',  makeNumericStub(asDec)],          // bool
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEBX@Z', makeNumericStub(v => '0x' + v.toString(16))], // const void*
+			['??6?$basic_ostream@DU?$char_traits@D@std@@@std@@QEAAAEAV01@PEAX@Z', makeNumericStub(v => '0x' + v.toString(16))], // void*
+			// Free-function wide-string operator<< — msvcp140 sometimes routes
+			// small formatters through it. Pass through to preserve chain.
+			['??$?6U?$char_traits@D@std@@@std@@YAAEAV?$basic_ostream@DU?$char_traits@D@std@@@0@AEAV10@D@Z', (args) => {
+				const ch = Number(args[1] ?? 0n) & 0xff;
+				if (ch > 0) { this.stdoutBuffer += String.fromCharCode(ch); }
+				return args[0] ?? 0n;
+			}],
 		];
 		for (const [name, handler] of msvcp140Stubs) {
 			this.handlers.set(`msvcp140.dll!${name}`, handler);
 		}
+
+		// ── shell32 ShellExecute* stubs ──────────────────────────────────
+		// v3.8.0-nightly: return 42 (any value > 32) to signal "success"
+		// per MSDN ShellExecute return codes. Legitimate ShellExecute would
+		// open the URL in the default browser; under emulation we just
+		// acknowledge without side effects. The log entry captures what URL
+		// the malware was trying to beacon to.
+		const shellExecuteOk = (args: bigint[]): bigint => {
+			// args[2] (x64 fastcall) is lpFile — for ShellExecuteW it's a
+			// wide string. Read and log the target URL for the trace.
+			const lpFile = args[2] ?? 0n;
+			if (lpFile && lpFile !== 0n) {
+				try {
+					const buf = this.emulator.readMemorySync(lpFile, 512);
+					// Wide string: read until double-null
+					let end = 0;
+					while (end + 1 < buf.length) {
+						if (buf[end] === 0 && buf[end + 1] === 0) { break; }
+						end += 2;
+					}
+					const wstr = buf.subarray(0, end).toString('utf16le');
+					this.stdoutBuffer += `[emulator] ShellExecute target: ${wstr}\n`;
+				} catch { /* ignore */ }
+			}
+			return 42n; // > 32 = success
+		};
+		this.handlers.set('shell32.dll!ShellExecuteA', shellExecuteOk);
+		this.handlers.set('shell32.dll!ShellExecuteW', shellExecuteOk);
+		this.handlers.set('shell32!ShellExecuteA', shellExecuteOk);
+		this.handlers.set('shell32!ShellExecuteW', shellExecuteOk);
+		this.handlers.set('shell32.dll!ShellExecuteExA', (_args) => 1n);
+		this.handlers.set('shell32.dll!ShellExecuteExW', (_args) => 1n);
 
 		// ── advapi32 registry stubs ──────────────────────────────────────
 		// v3.8.0-nightly: RegOpenKeyA/RegCloseKey are called by the malware's
@@ -1128,30 +1262,44 @@ export class WinApiHooks {
 		this.handlers.set('advapi32.dll!RegQueryValueExW', (_args) => 2n);
 
 		// kernel32!GetComputerNameA — return a fake name so anti-VM
-		// checks don't see "DESKTOP-SANDBOX" or similar VM indicators
+		// checks don't see "DESKTOP-SANDBOX" or similar VM indicators.
+		// Honors the nSize-in/out contract: if caller-provided capacity
+		// is insufficient, write required size and return 0 (so active
+		// anti-emulation probes with tiny buffers cannot fingerprint us).
 		this.handlers.set('kernel32.dll!GetComputerNameA', (args) => {
-			// args[0] = lpBuffer, args[1] = nSize pointer
-			if (args[0] && args[0] !== 0n) {
-				const name = Buffer.from('WORKSTATION\0', 'ascii');
-				this.emulator.writeMemory(args[0], name);
-				if (args[1] && args[1] !== 0n) {
-					const sizeBuf = Buffer.alloc(4);
-					sizeBuf.writeUInt32LE(11); // length of "WORKSTATION"
-					this.emulator.writeMemory(args[1], sizeBuf);
-				}
+			if (!args[0] || args[0] === 0n || !args[1] || args[1] === 0n) { return 0n; }
+			const NAME = 'WORKSTATION';
+			const required = NAME.length + 1; // includes NUL
+			const capBuf = this.emulator.readMemorySync(args[1], 4);
+			const capacity = capBuf.readUInt32LE(0);
+			if (capacity < required) {
+				const sz = Buffer.alloc(4);
+				sz.writeUInt32LE(required);
+				this.emulator.writeMemorySync(args[1], sz);
+				return 0n; // ERROR_BUFFER_OVERFLOW (122) on real Windows
 			}
-			return 1n; // success
+			this.emulator.writeMemorySync(args[0], Buffer.from(`${NAME}\0`, 'ascii'));
+			const sz = Buffer.alloc(4);
+			sz.writeUInt32LE(NAME.length); // chars written, excluding NUL
+			this.emulator.writeMemorySync(args[1], sz);
+			return 1n;
 		});
 		this.handlers.set('kernel32.dll!GetComputerNameW', (args) => {
-			if (args[0] && args[0] !== 0n) {
-				const name = Buffer.from('WORKSTATION\0', 'utf16le');
-				this.emulator.writeMemory(args[0], name);
-				if (args[1] && args[1] !== 0n) {
-					const sizeBuf = Buffer.alloc(4);
-					sizeBuf.writeUInt32LE(11);
-					this.emulator.writeMemory(args[1], sizeBuf);
-				}
+			if (!args[0] || args[0] === 0n || !args[1] || args[1] === 0n) { return 0n; }
+			const NAME = 'WORKSTATION';
+			const required = NAME.length + 1; // TCHARs including NUL
+			const capBuf = this.emulator.readMemorySync(args[1], 4);
+			const capacity = capBuf.readUInt32LE(0);
+			if (capacity < required) {
+				const sz = Buffer.alloc(4);
+				sz.writeUInt32LE(required);
+				this.emulator.writeMemorySync(args[1], sz);
+				return 0n;
 			}
+			this.emulator.writeMemorySync(args[0], Buffer.from(`${NAME}\0`, 'utf16le'));
+			const sz = Buffer.alloc(4);
+			sz.writeUInt32LE(NAME.length);
+			this.emulator.writeMemorySync(args[1], sz);
 			return 1n;
 		});
 	}
@@ -1184,5 +1332,33 @@ export class WinApiHooks {
 		const key = `${dll.toLowerCase()}!${name}`;
 		const keyNoExt = `${dll.toLowerCase().replace('.dll', '')}!${name}`;
 		return this.handlers.has(key) || this.handlers.has(keyNoExt);
+	}
+
+	/**
+	 * Get the stdout buffer populated by iostream stubs (sputn, operator<<).
+	 * Returns whatever `std::cout`/`std::cerr` emitted during emulation.
+	 */
+	getStdoutBuffer(): string {
+		return this.stdoutBuffer;
+	}
+
+	/**
+	 * v3.8.0-nightly: pre-populate the moduleHandles map with synthetic
+	 * DllBases from PELoader.setupSyntheticDlls(). After this call,
+	 * LoadLibraryA("shell32.dll") / GetModuleHandle("kernel32") return
+	 * the real PE-header-bearing synthetic base so hash-resolving
+	 * shellcode can parse the export directory from there.
+	 */
+	registerSyntheticModules(modules: Map<string, bigint>): void {
+		for (const [name, base] of modules) {
+			this.moduleHandles.set(name, base);
+		}
+	}
+
+	/**
+	 * Clear the captured stdout buffer.
+	 */
+	clearStdoutBuffer(): void {
+		this.stdoutBuffer = '';
 	}
 }

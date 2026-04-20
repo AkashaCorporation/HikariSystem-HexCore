@@ -28,13 +28,16 @@ jobs:
           - name: hexcore-better-sqlite3
             repo: LXrdKnowkill/hexcore-better-sqlite3
           - name: hexcore-remill
-            repo: LXrdKnowkill/hexcore-remill
+            repo: AkashaCorporation/hexcore-remill
             deps_asset: remill-deps-win32-x64.zip
+            deps_tag: v0.4.0
+          - name: hexcore-souper
+            repo: AkashaCorporation/hexcore-souper
+            deps_asset: souper-deps-win32-x64.zip
             deps_tag: v0.1.0
-          - name: hexcore-rellic
-            repo: LXrdKnowkill/hexcore-rellic
-            deps_asset: rellic-deps-win32-x64.zip
-            deps_tag: v0.1.0
+          # NOTE: hexcore-elixir is NOT in this matrix. Elixir uses NAPI-RS + Rust
+          # (like Helix), not node-gyp + prebuildify. It has its own dedicated job
+          # below: prebuild-elixir-windows (mirroring prebuild-helix-windows).
     steps:
       - name: Checkout Engine Repository
         uses: actions/checkout@v6
@@ -73,8 +76,8 @@ jobs:
           Expand-Archive -Path $asset -DestinationPath engine -Force
           Remove-Item $asset
 
-      - name: Fetch Rellic deps (hexcore-rellic)
-        if: ${{ matrix.engine.name == 'hexcore-rellic' && matrix.engine.deps_asset }}
+      - name: Fetch Souper deps (hexcore-souper)
+        if: ${{ matrix.engine.name == 'hexcore-souper' && matrix.engine.deps_asset }}
         run: |
           $tag = "${{ matrix.engine.deps_tag }}"
           $asset = "${{ matrix.engine.deps_asset }}"
@@ -373,6 +376,164 @@ jobs:
           gh release view $tag --repo $env:GH_REPO *> $null
           if ($LASTEXITCODE -ne 0) {
             gh release create $tag --repo $env:GH_REPO --title $tag --notes "Automated NAPI-RS prebuilds for Helix $env:ENGINE_VERSION"
+          }
+          $asset = "engine/${{ steps.pack-napi.outputs.asset }}"
+          if (-not (Test-Path $asset)) {
+            throw "NAPI-RS binary not found: $asset"
+          }
+          gh release upload $tag $asset --repo $env:GH_REPO --clobber
+
+  # ---------------------------------------------------------------------------
+  # Elixir — NAPI-RS build (separate job, Project Azoth clean-room emulator)
+  # Mirrors the Helix pattern above: NAPI-RS + Rust + vendored hexcore-unicorn
+  # dependency. Deps zip (elixir-deps-win32-x64.zip) contains the vendored
+  # hexcore-unicorn headers/libs/DLL that the engine CMake build consumes.
+  # ---------------------------------------------------------------------------
+  prebuild-elixir-windows:
+    name: Build Elixir NAPI-RS (Windows)
+    runs-on: windows-latest
+    env:
+      HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
+    steps:
+      - name: Checkout Elixir Repository
+        uses: actions/checkout@v6
+        with:
+          repository: AkashaCorporation/HexCore-Elixir
+          path: engine
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install NAPI-RS CLI
+        run: npm install -g @napi-rs/cli
+
+      - name: Cache Elixir Deps (hexcore-unicorn vendored)
+        id: cache-elixir-deps
+        uses: actions/cache@v4
+        with:
+          path: engine/deps
+          key: elixir-deps-win32-x64-v1-${{ hashFiles('engine/package.json', 'engine/Cargo.lock') }}
+
+      - name: Download Elixir Deps
+        if: steps.cache-elixir-deps.outputs.cache-hit != 'true'
+        working-directory: engine
+        run: |
+          $version = node -p "require('./package.json').version"
+          $tag = "v$version"
+          $asset = "elixir-deps-win32-x64.zip"
+          $url = "https://github.com/AkashaCorporation/HexCore-Elixir/releases/download/$tag/$asset"
+          Write-Host "Downloading Elixir deps from $url (tag: $tag) ..."
+
+          $maxRetries = 3
+          $retryCount = 0
+          $success = $false
+
+          while (-not $success -and $retryCount -lt $maxRetries) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $asset -TimeoutSec 300
+              $success = $true
+            } catch {
+              $retryCount++
+              Write-Host "Download failed (attempt $retryCount/$maxRetries): $_"
+              if ($retryCount -lt $maxRetries) {
+                Write-Host "Retrying in 10 seconds..."
+                Start-Sleep -Seconds 10
+              } else {
+                throw "Failed to download after $maxRetries attempts"
+              }
+            }
+          }
+
+          Expand-Archive -Path $asset -DestinationPath . -Force
+          Remove-Item $asset
+
+      - name: Verify vendored hexcore-unicorn
+        working-directory: engine
+        run: |
+          $headerPath = "deps/hexcore-unicorn/include/unicorn/unicorn.h"
+          $libPath = "deps/hexcore-unicorn/lib/unicorn-import.lib"
+          $dllPath = "deps/hexcore-unicorn/bin/unicorn.dll"
+          $missing = $false
+          foreach ($p in @($headerPath, $libPath, $dllPath)) {
+            if (Test-Path $p) {
+              $size = (Get-Item $p).Length / 1KB
+              Write-Host "✓ $p ($([math]::Round($size, 2)) KB)"
+            } else {
+              Write-Host "✗ $p NOT FOUND"
+              $missing = $true
+            }
+          }
+          if ($missing) { exit 1 }
+
+      - name: Install Dependencies
+        working-directory: engine
+        run: npm ci --ignore-scripts
+
+      - name: Build NAPI-RS Module
+        working-directory: engine
+        run: npm run build
+
+      - name: Read Engine Version
+        id: engine-version
+        working-directory: engine
+        run: |
+          $version = node -p "require('./package.json').version"
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Locate and Pack NAPI-RS Binary
+        id: pack-napi
+        working-directory: engine
+        run: |
+          $version = "${{ steps.engine-version.outputs.version }}"
+          $binaryName = node -p "require('./package.json').napi.binaryName"
+          $nodeFile = "$binaryName.win32-x64-msvc.node"
+          # NAPI-RS may output to cwd or crates/hexcore-elixir/
+          $candidates = @(
+            "$nodeFile",
+            "crates/hexcore-elixir/$nodeFile"
+          )
+          $found = $null
+          foreach ($c in $candidates) {
+            if (Test-Path $c) { $found = $c; break }
+          }
+          if (-not $found) {
+            throw "NAPI-RS .node file not found. Searched: $($candidates -join ', ')"
+          }
+          # Copy to root for upload
+          if ($found -ne $nodeFile) {
+            Copy-Item $found $nodeFile
+          }
+          $asset = "$binaryName-v$version-napi-win32-x64.node"
+          Copy-Item $nodeFile $asset
+          "asset=$asset" >> $env:GITHUB_OUTPUT
+          "nodeFile=$nodeFile" >> $env:GITHUB_OUTPUT
+          Write-Host "Packed NAPI-RS binary: $asset ($(Get-Item $asset | Select-Object -ExpandProperty Length) bytes)"
+
+      - name: Upload NAPI-RS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hexcore-elixir-napi-win32
+          path: |
+            engine/${{ steps.pack-napi.outputs.asset }}
+
+      - name: Upload NAPI-RS Binary to Release
+        if: ${{ env.HEXCORE_RELEASE_TOKEN != '' }}
+        env:
+          GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
+          GH_REPO: AkashaCorporation/HexCore-Elixir
+          ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
+        run: |
+          $tag = "v$env:ENGINE_VERSION"
+          gh release view $tag --repo $env:GH_REPO *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GH_REPO --title $tag --notes "Automated NAPI-RS prebuilds for Elixir $env:ENGINE_VERSION (Project Azoth)"
           }
           $asset = "engine/${{ steps.pack-napi.outputs.asset }}"
           if (-not (Test-Path $asset)) {

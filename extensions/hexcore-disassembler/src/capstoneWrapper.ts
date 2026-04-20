@@ -150,54 +150,82 @@ export class CapstoneWrapper {
 		const opStr = inst.opStr.toLowerCase().trim();
 
 		// --- Call detection ---
-		// x86: call
-		// ARM32: bl, blx
-		// ARM64: bl, blr (register-indirect call)
+		// x86: call (direct + indirect)
+		// ARM32: bl (+ conditional forms bleq/blne/... per ARM ARM A8.8.25), blx
+		// ARM64: bl (A64 direct), blr (indirect),
+		//        blraa/blrab/blraaz/blrabz (pointer-auth indirect — ARMv8.3 FEAT_PAuth)
+		// Reference: Intel SDM Vol.2 CALL; ARM ARM DDI 0487 C6.2 (A64), A8.8.25 (A32)
+		const arm32CondBL = new Set([
+			'bl', 'blx',
+			'bleq', 'blne', 'blcs', 'blhs', 'blcc', 'bllo',
+			'blmi', 'blpl', 'blvs', 'blvc',
+			'blhi', 'blls', 'blge', 'bllt', 'blgt', 'blle', 'blal'
+		]);
 		const isCall = mnemonic === 'call'
-			|| mnemonic === 'bl'
-			|| mnemonic === 'blx'
+			|| arm32CondBL.has(mnemonic)
 			|| mnemonic === 'blr'
-			|| mnemonic === 'blraa' || mnemonic === 'blrab'  // ARM64 PAC variants
+			|| mnemonic === 'blraa' || mnemonic === 'blrab'
 			|| mnemonic === 'blraaz' || mnemonic === 'blrabz';
 
 		// --- Return detection ---
-		// x86: ret, retn, retf, iret
-		// ARM32: bx lr (Capstone emits mnemonic="bx" opStr="lr"), pop {pc}
-		// ARM64: ret (Capstone emits mnemonic="ret"), retaa, retab (PAC variants)
+		// x86: ret, retn, retf, iret, iretd, iretq; sysret/sysretq/sysexit are kernel returns
+		//      (treated as ret for CFG terminator purposes — they never return to caller)
+		// x86: ud2 is a trap/terminator (undefined opcode), treat as ret so CFG ends cleanly
+		// ARM32: bx lr, pop {..., pc}, ldm sp!, {..., pc}, mov pc, lr
+		// ARM64: ret, retaa, retab (PAC variants — ARMv8.3)
+		// Reference: Intel SDM Vol.2 RET/IRET/SYSRET; ARM ARM C6.2.244 (RET*)
 		const isRet = mnemonic === 'ret' || mnemonic === 'retn'
 			|| mnemonic === 'retf' || mnemonic === 'iret'
+			|| mnemonic === 'iretd' || mnemonic === 'iretq'
+			|| mnemonic === 'sysret' || mnemonic === 'sysretq' || mnemonic === 'sysexit'
 			|| mnemonic === 'retaa' || mnemonic === 'retab'
+			|| mnemonic === 'eret' || mnemonic === 'eretaa' || mnemonic === 'eretab'
+			|| mnemonic === 'ud2'
 			|| (mnemonic === 'bx' && opStr === 'lr')
-			|| (mnemonic === 'pop' && opStr.includes('pc'));
+			|| (mnemonic === 'pop' && /\bpc\b/.test(opStr))
+			|| ((mnemonic === 'ldm' || mnemonic === 'ldmfd' || mnemonic === 'ldmia') && /\bpc\b/.test(opStr))
+			|| (mnemonic === 'mov' && /^pc\s*,\s*lr$/.test(opStr));
 
 		// --- Jump detection ---
-		// x86 jumps
+		// x86 jumps (conditional + unconditional). xbegin/xabort are TSX — skip.
 		const x86Jumps = new Set([
 			'jmp', 'je', 'jne', 'jz', 'jnz', 'jg', 'jge', 'jl', 'jle',
 			'ja', 'jae', 'jb', 'jbe', 'jo', 'jno', 'js', 'jns', 'jp', 'jnp',
-			'jcxz', 'jecxz', 'jrcxz', 'loop', 'loope', 'loopne'
+			'jc', 'jnc', 'jpe', 'jpo',
+			'jcxz', 'jecxz', 'jrcxz', 'loop', 'loope', 'loopne', 'loopnz', 'loopz'
 		]);
 		// ARM32 conditional branches (Capstone uses beq, bne, etc.)
+		// Reference: ARM ARM A8.8.18 (B)
 		const arm32Jumps = new Set([
 			'b', 'beq', 'bne', 'bgt', 'blt', 'bge', 'ble',
 			'bhi', 'blo', 'bhs', 'bls', 'bpl', 'bmi',
 			'bvs', 'bvc', 'bcc', 'bcs', 'bal'
 		]);
-		// ARM64 conditional branches (Capstone uses b.eq, b.ne, etc. — dot notation)
+		// ARM64 branches (direct + indirect).
+		// Reference: ARM ARM C6.2.26..C6.2.33 (B/B.cond/BR/CBZ/TBZ)
 		const arm64Jumps = new Set([
 			'b.eq', 'b.ne', 'b.gt', 'b.lt', 'b.ge', 'b.le',
 			'b.hi', 'b.lo', 'b.hs', 'b.ls', 'b.pl', 'b.mi',
 			'b.vs', 'b.vc', 'b.cs', 'b.cc', 'b.al', 'b.nv',
-			'cbz', 'cbnz',   // Compare and Branch if Zero/Non-Zero
-			'tbz', 'tbnz',   // Test bit and Branch if Zero/Non-Zero
-			'br'              // Indirect branch (unconditional)
+			'cbz', 'cbnz',                 // Compare and branch
+			'tbz', 'tbnz',                 // Test-bit and branch
+			'br',                          // Indirect branch
+			'braa', 'brab', 'braaz', 'brabz' // ARMv8.3 PAC indirect branches
 		]);
+		// ARM32 indirect-branch-as-jump: bx <reg> where reg != lr (bx lr is ret above).
+		// A `bx` to a non-lr register is a tail-call-ish indirect branch; classify as jump.
+		const isArm32IndirectBx =
+			(mnemonic === 'bx' || mnemonic === 'bxj') && opStr !== 'lr' && opStr.length > 0;
 
-		const isJump = x86Jumps.has(mnemonic) || arm32Jumps.has(mnemonic) || arm64Jumps.has(mnemonic);
+		const isJump = x86Jumps.has(mnemonic) || arm32Jumps.has(mnemonic)
+			|| arm64Jumps.has(mnemonic) || isArm32IndirectBx;
 
 		// --- Conditional detection ---
-		// Unconditional: jmp, b (standalone), br
-		const unconditionalSet = new Set(['jmp', 'b', 'br', 'bal', 'b.al']);
+		// Unconditional: jmp, b (standalone), br/braa/... (indirect), bal/b.al, bx reg
+		const unconditionalSet = new Set([
+			'jmp', 'b', 'br', 'braa', 'brab', 'braaz', 'brabz',
+			'bal', 'b.al', 'bx', 'bxj'
+		]);
 		const isConditional = isJump && !unconditionalSet.has(mnemonic);
 
 		// --- Target address parsing ---

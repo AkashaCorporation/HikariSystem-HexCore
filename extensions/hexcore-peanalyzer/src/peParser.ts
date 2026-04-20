@@ -43,7 +43,87 @@ export interface PEAnalysis {
 	antiDebug: AntiDebugTechnique[];
 	mitigations: SecurityMitigation[];
 
+	// v3.8.0-nightly: Anti-analysis instruction scanner output (Issue: HEXCORE_DEFEAT Fix #7 + #9)
+	securityIndicators?: SecurityIndicators;
+
 	timestamps: TimestampInfo;
+}
+
+/**
+ * v3.8.0-nightly: single anti-analysis instruction hit from the byte-pattern
+ * scanner. Reports every `rdtsc`, `cpuid`, `int 2d`, `vmcall`, PEB access,
+ * `lock cmpxchg8b`, etc. detected in the binary's code sections.
+ */
+export interface AntiAnalysisInstruction {
+	/** File offset of the instruction */
+	offset: number;
+	/** RVA (approximate — depends on section) */
+	rva?: number;
+	/** Section name where the instruction was found */
+	section: string;
+	/** Instruction type */
+	type:
+		| 'rdtsc'
+		| 'rdtscp'
+		| 'cpuid'
+		| 'int2d'
+		| 'vmcall'
+		| 'peb_x64'
+		| 'peb_x86'
+		| 'lock_cmpxchg8b';
+	/** Human-readable mnemonic */
+	mnemonic: string;
+	/** Hex representation of the opcode bytes */
+	opcodeHex: string;
+	/** High-level category */
+	category: 'timing' | 'vm_detect' | 'peb_access' | 'legacy_anti_debug';
+}
+
+/**
+ * v3.8.0-nightly: aggregated security indicators derived from the anti-analysis
+ * instruction scanner. Mirrors fields used by the pipeline report composer.
+ *
+ * Important: the `has*` flags are TRUE/FALSE signals, not a threat score.
+ * Clean MSVC CRT binaries (notepad.exe, cmd.exe) legitimately have rdtsc,
+ * cpuid and PEB access from the runtime library — `hasTimingChecks: true`
+ * alone is not suspicious. The `density` field is the real discriminator:
+ * a ~20KB malware with 10 hits (1.0/KB) is ~18× denser than a 300KB notepad
+ * with 9 hits (0.03/KB). The `suspiciousDensity` flag captures this.
+ */
+export interface SecurityIndicators {
+	/** True when any rdtsc/rdtscp instruction was found */
+	hasTimingChecks: boolean;
+	/** True when any cpuid instruction was found */
+	hasCpuidChecks: boolean;
+	/** True when direct PEB access (gs:[0x60] or fs:[0x30]) was found */
+	hasDirectPebAccess: boolean;
+	/** True when any VM-detection instruction was found (cpuid + vmcall) */
+	hasVmDetection: boolean;
+	/**
+	 * Anti-analysis instruction density: hits per KB of executable code.
+	 * < 0.1 = baseline CRT noise (notepad.exe, cmd.exe, PING.exe)
+	 * 0.1-0.5 = mild suspicion (dual-use binaries, some runtime checks)
+	 * > 0.5 = suspicious (targeted anti-analysis — `Malware HexCore Defeat.exe` = 1.0)
+	 */
+	density: number;
+	/** True when density > 0.5 — purely anti-analysis focused binaries */
+	suspiciousDensity: boolean;
+	/** Total size of executable sections in bytes (used by density calculation) */
+	executableCodeSize: number;
+	/** Raw list of anti-analysis instructions detected */
+	antiAnalysisInstructions: AntiAnalysisInstruction[];
+	/**
+	 * v3.8.0-nightly: API hash resolution (HEXCORE_DEFEAT Fix #6).
+	 * Only populated when `hasDirectPebAccess` is true (pre-filter).
+	 * Each entry maps a 4-byte constant found in executable code to a
+	 * known WinAPI name via one of 6 hash algorithms.
+	 */
+	apiHashResolution?: Array<{
+		offset: number;
+		constant: number;
+		apiName: string;
+		algorithm: 'djb2' | 'sdbm' | 'fnv1' | 'fnv1a' | 'ror13' | 'crc32';
+	}>;
 }
 
 export interface DOSHeader {
@@ -303,6 +383,189 @@ const PACKER_SIGNATURES: Array<{ name: string; pattern: RegExp | string }> = [
 ];
 
 // ============================================================================
+// ANTI-ANALYSIS INSTRUCTION SCANNER (v3.8.0-nightly, HEXCORE_DEFEAT Fix #7 + #9)
+// ============================================================================
+
+/**
+ * Byte-pattern scanner for anti-analysis instructions. Scans only the
+ * executable sections of the PE file for 8 well-known opcode sequences:
+ *
+ *   - rdtsc            (0F 31)             → timing
+ *   - rdtscp           (0F 01 F9)          → timing
+ *   - cpuid            (0F A2)             → vm_detect
+ *   - int 2d           (CD 2D)             → legacy_anti_debug
+ *   - vmcall           (0F 01 C1)          → vm_detect
+ *   - mov rax, gs:[0x60]  (65 48 8B 04 25 60 00 00 00) → peb_access (x64)
+ *   - mov eax, fs:[0x30]  (64 A1 30 00 00 00)          → peb_access (x86)
+ *   - lock cmpxchg8b   (F0 0F C7)          → legacy_anti_debug (incomplete pattern, catches prefix)
+ *
+ * Only scans sections whose `characteristics` include `IMAGE_SCN_MEM_EXECUTE`
+ * ('EXECUTE' flag in the peanalyzer's string array) or `CODE` to avoid false
+ * positives on random byte sequences in data sections.
+ *
+ * Design note: this is a raw byte scanner, not a full disassembler. It reports
+ * every occurrence of the exact byte sequence. Overlapping false positives are
+ * possible but much rarer than a full decode would suggest because the 2+ byte
+ * opcodes we scan for are statistically uncommon outside real code.
+ */
+export function scanAntiAnalysisInstructions(
+	buffer: Buffer,
+	sections: SectionHeader[]
+): AntiAnalysisInstruction[] {
+	const hits: AntiAnalysisInstruction[] = [];
+
+	// Pattern table — opcode bytes paired with metadata. Order matters: longer
+	// patterns are matched first so `0F 01 F9` (rdtscp) doesn't get eaten by
+	// `0F 01 C1` (vmcall) or vice versa.
+	const patterns: Array<{
+		bytes: Buffer;
+		type: AntiAnalysisInstruction['type'];
+		mnemonic: string;
+		category: AntiAnalysisInstruction['category'];
+	}> = [
+		// 9-byte PEB access x64 (must match before shorter patterns)
+		{
+			bytes: Buffer.from([0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00]),
+			type: 'peb_x64',
+			mnemonic: 'mov rax, gs:[0x60]',
+			category: 'peb_access',
+		},
+		// 6-byte PEB access x86
+		{
+			bytes: Buffer.from([0x64, 0xA1, 0x30, 0x00, 0x00, 0x00]),
+			type: 'peb_x86',
+			mnemonic: 'mov eax, fs:[0x30]',
+			category: 'peb_access',
+		},
+		// 3-byte rdtscp
+		{
+			bytes: Buffer.from([0x0F, 0x01, 0xF9]),
+			type: 'rdtscp',
+			mnemonic: 'rdtscp',
+			category: 'timing',
+		},
+		// 3-byte vmcall
+		{
+			bytes: Buffer.from([0x0F, 0x01, 0xC1]),
+			type: 'vmcall',
+			mnemonic: 'vmcall',
+			category: 'vm_detect',
+		},
+		// 3-byte lock cmpxchg8b prefix (F0 0F C7) — catches old anti-debug tricks
+		{
+			bytes: Buffer.from([0xF0, 0x0F, 0xC7]),
+			type: 'lock_cmpxchg8b',
+			mnemonic: 'lock cmpxchg8b',
+			category: 'legacy_anti_debug',
+		},
+		// 2-byte rdtsc
+		{
+			bytes: Buffer.from([0x0F, 0x31]),
+			type: 'rdtsc',
+			mnemonic: 'rdtsc',
+			category: 'timing',
+		},
+		// 2-byte cpuid
+		{
+			bytes: Buffer.from([0x0F, 0xA2]),
+			type: 'cpuid',
+			mnemonic: 'cpuid',
+			category: 'vm_detect',
+		},
+		// 2-byte int 2d
+		{
+			bytes: Buffer.from([0xCD, 0x2D]),
+			type: 'int2d',
+			mnemonic: 'int 2d',
+			category: 'legacy_anti_debug',
+		},
+	];
+
+	// Scan each executable section.
+	for (const section of sections) {
+		// Accept either EXECUTE flag or CODE flag — both indicate executable content.
+		const isExec = section.characteristics.includes('EXECUTE')
+			|| section.characteristics.includes('CODE');
+		if (!isExec) { continue; }
+
+		const start = section.pointerToRawData;
+		const end = Math.min(start + section.sizeOfRawData, buffer.length);
+		if (end <= start) { continue; }
+
+		// Linear scan. At each offset, test every pattern; the LONGEST matching
+		// pattern wins so rdtscp (3 bytes) is preferred over rdtsc (2 bytes).
+		let offset = start;
+		while (offset < end) {
+			let bestMatch: typeof patterns[number] | null = null;
+			for (const pattern of patterns) {
+				if (offset + pattern.bytes.length > end) { continue; }
+				let match = true;
+				for (let i = 0; i < pattern.bytes.length; i++) {
+					if (buffer[offset + i] !== pattern.bytes[i]) { match = false; break; }
+				}
+				if (match && (!bestMatch || pattern.bytes.length > bestMatch.bytes.length)) {
+					bestMatch = pattern;
+				}
+			}
+
+			if (bestMatch) {
+				hits.push({
+					offset,
+					rva: section.virtualAddress + (offset - section.pointerToRawData),
+					section: section.name,
+					type: bestMatch.type,
+					mnemonic: bestMatch.mnemonic,
+					opcodeHex: bestMatch.bytes.toString('hex').toUpperCase(),
+					category: bestMatch.category,
+				});
+				offset += bestMatch.bytes.length;
+			} else {
+				offset++;
+			}
+		}
+	}
+
+	return hits;
+}
+
+/**
+ * Derive `SecurityIndicators` from a list of scanner hits plus section info.
+ * Separated from `scanAntiAnalysisInstructions` so callers can aggregate hits
+ * from multiple sources (e.g. future Capstone-based decoder) before deriving
+ * the flags.
+ */
+export function deriveSecurityIndicators(
+	hits: AntiAnalysisInstruction[],
+	sections: SectionHeader[]
+): SecurityIndicators {
+	// Total size of executable code sections (reused as density denominator).
+	let executableCodeSize = 0;
+	for (const section of sections) {
+		const isExec = section.characteristics.includes('EXECUTE')
+			|| section.characteristics.includes('CODE');
+		if (isExec) {
+			executableCodeSize += section.sizeOfRawData;
+		}
+	}
+
+	// Density = hits per KB of executable code. Guard against divide-by-zero.
+	const density = executableCodeSize > 0
+		? (hits.length / (executableCodeSize / 1024))
+		: 0;
+
+	return {
+		hasTimingChecks: hits.some(h => h.category === 'timing'),
+		hasCpuidChecks: hits.some(h => h.type === 'cpuid'),
+		hasDirectPebAccess: hits.some(h => h.category === 'peb_access'),
+		hasVmDetection: hits.some(h => h.category === 'vm_detect'),
+		density: Math.round(density * 1000) / 1000,  // round to 3 decimals
+		suspiciousDensity: density > 0.5,
+		executableCodeSize,
+		antiAnalysisInstructions: hits,
+	};
+}
+
+// ============================================================================
 // MAIN PARSER
 // ============================================================================
 
@@ -400,6 +663,18 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 
 		// Extract suspicious strings
 		analysis.suspiciousStrings = extractSuspiciousStrings(buffer);
+
+		// v3.8.0-nightly: scan for anti-analysis instructions (HEXCORE_DEFEAT Fix #7 + #9)
+		const antiAnalysisHits = scanAntiAnalysisInstructions(buffer, analysis.sections);
+		analysis.securityIndicators = deriveSecurityIndicators(antiAnalysisHits, analysis.sections);
+
+		// v3.8.0-nightly: API hash resolution (HEXCORE_DEFEAT Fix #6).
+		// Pre-filter on hasDirectPebAccess — without that, we'd burn CPU
+		// scanning every benign binary for hashes that aren't there.
+		if (analysis.securityIndicators.hasDirectPebAccess) {
+			const { resolveApiHashes } = require('./apiHashResolver');
+			analysis.securityIndicators.apiHashResolution = resolveApiHashes(buffer, analysis.sections);
+		}
 
 		fs.closeSync(fd);
 	} catch (error: any) {

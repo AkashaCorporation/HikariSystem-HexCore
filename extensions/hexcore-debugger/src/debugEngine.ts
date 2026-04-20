@@ -226,6 +226,15 @@ export class DebugEngine {
 			await this.loadRawBinary();
 		}
 
+		// ── Anti-analysis instruction hooks (rdtsc, cpuid) ─────────────────
+		// v3.8.0-nightly: scan .text for rdtsc (0F 31), rdtscp (0F 01 F9), and
+		// cpuid (0F A2). Register targeted code hooks that return fake values
+		// so the emulated binary can't detect it's being analyzed. Without these,
+		// timing-based anti-emulation kills the payload before it decodes.
+		if (this.emulator && this.fileType === 'pe' && this.fileBuffer) {
+			this.installAntiAnalysisHooks();
+		}
+
 		this.isRunning = true;
 		this.emit('emulation-started', {
 			entryPoint: this.baseAddress,
@@ -249,6 +258,42 @@ export class DebugEngine {
 		this.apiHooks = new WinApiHooks(this.emulator!, this.memoryManager!, this.architecture);
 		this.apiHooks.setImageBase(peInfo.imageBase);
 		this.apiHooks.setTraceManager(this._traceManager);
+		// Pre-seed LoadLibrary/GetModuleHandle with synthetic DllBases so
+		// hash-resolving shellcode gets PE-header-bearing addresses that
+		// ResolveExport can parse.
+		this.apiHooks.registerSyntheticModules(this.peLoader.getSyntheticModules());
+
+		// v3.8.0-nightly: register every synthetic DLL stub as an
+		// address-specific code hook so the SAB fast-path dispatcher
+		// sees it in `watchAddresses` and routes the call through
+		// winApiHooks. Without this, hash-resolving shellcode like
+		// Ashaka v5 Mirage jumps to the synth stub but the SAB hot
+		// loop skips the dispatch (its `codeHooks.get(addr)` lookup
+		// only finds address-keyed entries, and synth stubs previously
+		// lived only in `peLoader.stubMap`).
+		for (const imp of this.peLoader.getImports()) {
+			if (imp.stubAddress === 0n) { continue; }
+			const stubAddrNum = Number(imp.stubAddress);
+			this.emulator!.registerCodeHookAtAddress(stubAddrNum, (addr) => {
+				// Dispatch mirrors the PE code-execute handler:
+				// lookup stub → call winApiHooks → set RAX → redirect.
+				try {
+					const entry = this.peLoader!.lookupStub(addr);
+					if (!entry) { return; }
+					const returnValue = this.apiHooks!.handleCall(entry.dll, entry.name);
+					if (this.architecture === 'x64') {
+						this.emulator!.setRegisterSync('rax', returnValue);
+					} else {
+						this.emulator!.setRegisterSync('eax', returnValue);
+					}
+					this.emulator!.notifyApiRedirect();
+					this.emit('api-call', { dll: entry.dll, name: entry.name, returnValue });
+				} catch (error: unknown) {
+					const message = error instanceof Error ? error.message : String(error);
+					console.warn(`[debugEngine] synth stub dispatch failed at 0x${addr.toString(16)}: ${message}`);
+				}
+			});
+		}
 
 		// Initialize heap
 		this.memoryManager!.initializeHeap();
@@ -272,6 +317,10 @@ export class DebugEngine {
 		if (this.architecture === 'x64' || this.architecture === 'x86') {
 			const PE_STUB_BASE = 0x70000000n;
 			const PE_STUB_END = PE_STUB_BASE + 0x100000n;
+			// v3.8.0-nightly: synthetic DLL region (setupSyntheticDlls) is
+			// a separate stub range the worker must also route to host.
+			const SYNTH_DLL_START = 0x72000000n;
+			const SYNTH_DLL_END = 0x72040000n;
 
 			await this.emulator!.setPe32WorkerMode(PE_STUB_BASE, PE_STUB_END, async (stubAddress: bigint) => {
 				// Worker hit a WinAPI stub — dispatch on the host side.
@@ -379,7 +428,7 @@ export class DebugEngine {
 				}
 
 				return { returnValue, newPc: returnAddress };
-			});
+			}, [{ start: SYNTH_DLL_START, end: SYNTH_DLL_END }]);
 
 			// Pass permissiveMemoryMapping flag to the PE32 worker via IPC.
 			// When true, the worker auto-maps faulted pages with RWX (UC_PROT_ALL).
@@ -1166,6 +1215,144 @@ export class DebugEngine {
 		}
 	}
 
+	// ── Anti-analysis instruction scanner + hook installer ─────────────
+	// Scans PE .text sections for rdtsc/rdtscp/cpuid byte patterns and
+	// installs targeted UC_HOOK_CODE callbacks via the codeHooks map.
+	// On SAB path, these addresses become watchAddresses so the hook only
+	// fires for these specific instructions (no per-instruction overhead).
+	private _rdtscCounter = 0n;
+	// v3.8.0-nightly diagnostic: counts hook fires per scan type. Surfaced
+	// in emulation result output so pipelines can see whether anti-analysis
+	// bypass actually ran (zero fires + "[!] rdtsc timing" in stdout means
+	// the byte-pattern scan missed the instruction).
+	private _antiAnalysisHookFires: { rdtsc: number; rdtscp: number; cpuid: number } = { rdtsc: 0, rdtscp: 0, cpuid: 0 };
+	private _antiAnalysisHookInstalls: { rdtsc: number; rdtscp: number; cpuid: number } = { rdtsc: 0, rdtscp: 0, cpuid: 0 };
+
+	getAntiAnalysisStats(): { installs: { rdtsc: number; rdtscp: number; cpuid: number }; fires: { rdtsc: number; rdtscp: number; cpuid: number } } {
+		return { installs: { ...this._antiAnalysisHookInstalls }, fires: { ...this._antiAnalysisHookFires } };
+	}
+
+	private installAntiAnalysisHooks(): void {
+		if (!this.emulator || !this.fileBuffer || !this.peLoader) { return; }
+
+		const peInfo = this.peLoader.getPEInfo();
+		if (!peInfo) { return; }
+
+		const REG = this.emulator.getX86Reg();
+		if (!REG) { return; }
+
+		const textSection = peInfo.sections.find(
+			(s) => s.name === '.text' || s.name === '.code'
+		);
+		if (!textSection) { return; }
+
+		const textVA = textSection.virtualAddress + peInfo.imageBase;
+		const textRaw = textSection.rawOffset;
+		const textSize = Math.min(textSection.rawSize, textSection.virtualSize);
+		const buf = this.fileBuffer;
+
+		let rdtscCount = 0;
+		let cpuidCount = 0;
+
+		// Byte-pattern scan: may register hooks at addresses that aren't
+		// true instruction boundaries (e.g. 0F 31 appearing inside an
+		// immediate or displacement). On the SAB path the hook fires by
+		// exact-address match, so false positives never execute. On the
+		// legacy TSFN path, every code-hook closure runs on every
+		// instruction — the `hitAddr !== addr` guard prevents register
+		// corruption when the captured address doesn't match the
+		// currently executing PC.
+		//
+		// IMPORTANT: Unicorn's CODE hook fires BEFORE the instruction
+		// executes, and a mid-instruction RIP rewrite is NOT honored —
+		// the fetched rdtsc/cpuid opcode runs anyway and clobbers the
+		// faked RAX/RDX with real host values. We use the same escape
+		// hatch as API interception: after seeding registers, call
+		// `notifyApiRedirect()` so `start()` stops the engine and
+		// resumes emulation at the new RIP, which points past the
+		// skipped instruction. The legacy opcode is never executed.
+		for (let i = textRaw; i < textRaw + textSize - 1; i++) {
+			// rdtsc: 0F 31
+			if (buf[i] === 0x0F && buf[i + 1] === 0x31) {
+				const addr = textVA + BigInt(i - textRaw);
+				this.emulator.registerCodeHookAtAddress(Number(addr), (hitAddr) => {
+					if (hitAddr !== addr) { return; }
+					this._antiAnalysisHookFires.rdtsc++;
+					this._rdtscCounter += 100n;
+					this.emulator!.writeRegById(REG.RAX, this._rdtscCounter & 0xFFFFFFFFn);
+					this.emulator!.writeRegById(REG.RDX, (this._rdtscCounter >> 32n) & 0xFFFFFFFFn);
+					this.emulator!.writeRegById(REG.RIP, addr + 2n);
+					this.emulator!.notifyApiRedirect();
+				});
+				rdtscCount++;
+				this._antiAnalysisHookInstalls.rdtsc++;
+			}
+			// rdtscp: 0F 01 F9
+			if (i < textRaw + textSize - 2 && buf[i] === 0x0F && buf[i + 1] === 0x01 && buf[i + 2] === 0xF9) {
+				const addr = textVA + BigInt(i - textRaw);
+				this.emulator.registerCodeHookAtAddress(Number(addr), (hitAddr) => {
+					if (hitAddr !== addr) { return; }
+					this._antiAnalysisHookFires.rdtscp++;
+					this._rdtscCounter += 100n;
+					this.emulator!.writeRegById(REG.RAX, this._rdtscCounter & 0xFFFFFFFFn);
+					this.emulator!.writeRegById(REG.RDX, (this._rdtscCounter >> 32n) & 0xFFFFFFFFn);
+					this.emulator!.writeRegById(REG.RCX, 0n);
+					this.emulator!.writeRegById(REG.RIP, addr + 3n);
+					this.emulator!.notifyApiRedirect();
+				});
+				rdtscCount++;
+				this._antiAnalysisHookInstalls.rdtscp++;
+			}
+			// cpuid: 0F A2
+			if (buf[i] === 0x0F && buf[i + 1] === 0xA2) {
+				const addr = textVA + BigInt(i - textRaw);
+				this.emulator.registerCodeHookAtAddress(Number(addr), (hitAddr) => {
+					if (hitAddr !== addr) { return; }
+					this._antiAnalysisHookFires.cpuid++;
+					const eax = this.emulator!.readRegById(REG.RAX);
+					if (eax === 1n) {
+						// Leaf 1: feature info. ECX bit 31 cleared → no hypervisor.
+						this.emulator!.writeRegById(REG.RAX, 0x000306C3n);
+						this.emulator!.writeRegById(REG.RBX, 0x00100800n);
+						this.emulator!.writeRegById(REG.RCX, 0x7FFAFBFFn);
+						this.emulator!.writeRegById(REG.RDX, 0xBFEBFBFFn);
+					} else if (eax === 0n) {
+						// Leaf 0: vendor string "GenuineIntel"
+						this.emulator!.writeRegById(REG.RAX, 0x16n);
+						this.emulator!.writeRegById(REG.RBX, 0x756E6547n);
+						this.emulator!.writeRegById(REG.RCX, 0x6C65746En);
+						this.emulator!.writeRegById(REG.RDX, 0x49656E69n);
+					} else if (eax === 0x40000000n) {
+						// Hypervisor leaf — v5 "Ashaka Mirage" checks this to
+						// distinguish sandbox VMs from bare-metal Win11 VBS.
+						// Return zero EBX/ECX/EDX so the vendor string is empty
+						// (matches no sandbox signature) and EAX = max leaf = 0.
+						// This is the "not running in a hypervisor" answer a
+						// real bare-metal-without-VBS machine would give.
+						this.emulator!.writeRegById(REG.RAX, 0n);
+						this.emulator!.writeRegById(REG.RBX, 0n);
+						this.emulator!.writeRegById(REG.RCX, 0n);
+						this.emulator!.writeRegById(REG.RDX, 0n);
+					} else {
+						// Unknown leaf — zero everything, safest default.
+						this.emulator!.writeRegById(REG.RAX, 0n);
+						this.emulator!.writeRegById(REG.RBX, 0n);
+						this.emulator!.writeRegById(REG.RCX, 0n);
+						this.emulator!.writeRegById(REG.RDX, 0n);
+					}
+					this.emulator!.writeRegById(REG.RIP, addr + 2n);
+					this.emulator!.notifyApiRedirect();
+				});
+				cpuidCount++;
+				this._antiAnalysisHookInstalls.cpuid++;
+			}
+		}
+
+		if (rdtscCount > 0 || cpuidCount > 0) {
+			console.log(`[anti-analysis] installed hooks: ${rdtscCount} rdtsc/rdtscp, ${cpuidCount} cpuid`);
+		}
+	}
+
 	/**
 	 * Detect file type from magic bytes
 	 */
@@ -1676,12 +1863,16 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Get captured stdout from emulation (both PLT hooks and direct ARM64 syscalls)
+	 * Get captured stdout from emulation (PLT hooks, ARM64 syscalls,
+	 * and Windows iostream sputn/operator<< stubs).
 	 */
 	getStdoutBuffer(): string {
 		let buffer = this._arm64StdoutBuffer;
 		if (this.linuxApiHooks) {
 			buffer += this.linuxApiHooks.getStdoutBuffer();
+		}
+		if (this.apiHooks) {
+			buffer += this.apiHooks.getStdoutBuffer();
 		}
 		return buffer;
 	}

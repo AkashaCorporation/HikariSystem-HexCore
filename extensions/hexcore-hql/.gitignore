@@ -1,0 +1,17 @@
+# Build output
+dist/
+
+# Dependencies
+node_modules/
+package-lock.json
+
+# Logs and transient files
+*.log
+typescript-errors.txt
+
+# Environment and private files
+.env
+.env.*
+.vscode/
+.gemini/
+GEMINI.md

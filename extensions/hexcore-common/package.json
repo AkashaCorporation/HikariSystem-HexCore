@@ -2,11 +2,11 @@
 	"name": "hexcore-common",
 	"displayName": "HexCore Common Utilities",
 	"description": "Shared utilities for HexCore extensions",
-	"version": "1.0.0",
+	"version": "1.1.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
-		"vscode": "^1.70.0"
+		"vscode": "^1.75.0"
 	},
 	"main": "./out/index.js",
 	"types": "./index.d.ts",

@@ -9,6 +9,8 @@
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
+		"onStartupFinished",
+		"onCommand:hexcore.emulator.switch",
 		"onCommand:hexcore.pipeline.runJob",
 		"onCommand:hexcore.pipeline.listCapabilities",
 		"onCommand:hexcore.pipeline.validateJob",
@@ -16,6 +18,9 @@
 		"onCommand:hexcore.pipeline.createPresetJob",
 		"onCommand:hexcore.pipeline.saveJobAsProfile",
 		"onCommand:hexcore.pipeline.doctor",
+		"onCommand:hexcore.pipeline.queueJob",
+		"onCommand:hexcore.pipeline.cancelJob",
+		"onCommand:hexcore.pipeline.jobStatus",
 		"onCommand:hexcore.disasm.buildFormula",
 		"onCommand:hexcore.disasm.checkConstants",
 		"onCustomEditor:hexcore.disassembler.editor",
@@ -60,6 +65,12 @@
 			}
 		],
 		"commands": [
+			{
+				"command": "hexcore.emulator.switch",
+				"title": "Switch Emulator…",
+				"category": "HexCore",
+				"icon": "$(debug-alt)"
+			},
 			{
 				"command": "hexcore.disasm.openFile",
 				"title": "Open Binary File...",
@@ -256,6 +267,24 @@
 				"icon": "$(heart)"
 			},
 			{
+				"command": "hexcore.pipeline.queueJob",
+				"title": "Queue Job",
+				"category": "HexCore Automation",
+				"icon": "$(add)"
+			},
+			{
+				"command": "hexcore.pipeline.cancelJob",
+				"title": "Cancel Queued Job",
+				"category": "HexCore Automation",
+				"icon": "$(close)"
+			},
+			{
+				"command": "hexcore.pipeline.jobStatus",
+				"title": "Show Job Queue Status",
+				"category": "HexCore Automation",
+				"icon": "$(list-ordered)"
+			},
+			{
 				"command": "hexcore.disasm.searchStringHeadless",
 				"title": "Search String References (Headless)",
 				"category": "HexCore Automation"
@@ -274,6 +303,12 @@
 				"command": "hexcore.disasm.rttiScanHeadless",
 				"title": "RTTI Scan (Headless)",
 				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.audit.refcountScan",
+				"title": "Refcount Audit Scan (Headless)",
+				"category": "HexCore Automation",
+				"icon": "$(shield)"
 			},
 			{
 				"command": "hexcore.disasm.searchBytesHeadless",
@@ -309,6 +344,12 @@
 				"title": "Helix: Decompile IR to C",
 				"category": "HexCore Disassembler",
 				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.extractStructInfo",
+				"title": "Extract Struct Info (BTF/DWARF)",
+				"category": "HexCore Disassembler",
+				"icon": "$(symbol-structure)"
 			}
 		],
 		"menus": {

@@ -68,19 +68,81 @@ export function activate(context: vscode.ExtensionContext): void {
 		logActivationError('Tree provider registration', error);
 	}
 
-	// ── Load built-in rules ──────────────────────────────────────────────
-	const rulesDir = path.join(context.extensionPath, 'rules');
-	try {
-		if (fs.existsSync(rulesDir)) {
-			engine.loadRulesFromDirectory(rulesDir);
+	// ── Read YARA configuration ─────────────────────────────────────────
+	const config = vscode.workspace.getConfiguration('hexcore.yara');
+	const builtinRulesEnabled = config.get<boolean>('builtinRulesEnabled', true);
+	const defenderPath = config.get<string>('defenderYaraPath', '');
+	const customRulesPath = config.get<string>('rulesPath', '');
+
+	// ── Load built-in (bundled) anti-analysis rules ─────────────────────
+	// v3.8.0-nightly: ships rules/AntiAnalysis/*.yar with the extension so
+	// evasive malware (anti-debug, anti-VM, API hashing) produces
+	// threatScore > 0 without user configuration. Toggle off via
+	// hexcore.yara.builtinRulesEnabled = false.
+	//
+	// Also try several candidate locations because VS Code dev mode can
+	// load the extension from `.build/extensions/` instead of the source
+	// `extensions/` dir, and the rules/ subfolder may not be copied across.
+	// We check the canonical extensionPath first, then walk up to find the
+	// source `extensions/hexcore-yara/rules/` if available.
+	if (builtinRulesEnabled) {
+		const rulesCandidates: string[] = [
+			path.join(context.extensionPath, 'rules'),
+		];
+		// Walk up to root looking for extensions/hexcore-yara/rules (handles
+		// dev builds where extensionPath resolves to a copy without rules/).
+		let walk = context.extensionPath;
+		for (let i = 0; i < 6; i++) {
+			walk = path.dirname(walk);
+			const candidate = path.join(walk, 'extensions', 'hexcore-yara', 'rules');
+			if (!rulesCandidates.includes(candidate)) { rulesCandidates.push(candidate); }
+			if (walk === path.dirname(walk)) { break; }
 		}
-	} catch (error) {
-		logActivationError('Built-in rules load', error);
+
+		let loadedFrom: string | null = null;
+		for (const candidate of rulesCandidates) {
+			try {
+				if (fs.existsSync(candidate)) {
+					const countBefore = engine.getAllRules().length;
+					engine.loadRulesFromDirectory(candidate);
+					const countAfter = engine.getAllRules().length;
+					outputChannel.appendLine(`[YARA] Built-in rules loaded from ${candidate}: ${countAfter - countBefore} rules (total ${countAfter})`);
+					loadedFrom = candidate;
+					break;
+				}
+			} catch (error) {
+				logActivationError(`Built-in rules load (${candidate})`, error);
+			}
+		}
+		if (!loadedFrom) {
+			outputChannel.appendLine(`[YARA] No built-in rules found. Candidates tried:\n  - ${rulesCandidates.join('\n  - ')}`);
+			outputChannel.appendLine(`[YARA] context.extensionPath = ${context.extensionPath}`);
+		}
+	} else {
+		outputChannel.appendLine('[YARA] Built-in rules disabled via hexcore.yara.builtinRulesEnabled = false');
+	}
+
+	// ── Load user's custom rules (previously-bugged rulesPath setting) ──
+	// v3.8.0-nightly: the hexcore.yara.rulesPath setting was declared in
+	// package.json but never actually consumed by the extension. This block
+	// fixes that — if the user configures a rules directory it is now loaded
+	// at activation time alongside the built-in and DefenderYara paths.
+	if (customRulesPath) {
+		try {
+			if (fs.existsSync(customRulesPath)) {
+				const countBefore = engine.getAllRules().length;
+				engine.loadRulesFromDirectory(customRulesPath);
+				const countAfter = engine.getAllRules().length;
+				outputChannel.appendLine(`[YARA] Custom rules loaded from ${customRulesPath}: ${countAfter - countBefore} rules`);
+			} else {
+				outputChannel.appendLine(`[YARA] WARN: hexcore.yara.rulesPath does not exist: ${customRulesPath}`);
+			}
+		} catch (error) {
+			logActivationError('Custom rules load', error);
+		}
 	}
 
 	// ── Auto-detect DefenderYara ─────────────────────────────────────────
-	const config = vscode.workspace.getConfiguration('hexcore.yara');
-	const defenderPath = config.get<string>('defenderYaraPath', '');
 
 	const autoDetectDefenderYara = async (): Promise<void> => {
 		if (defenderPath && fs.existsSync(defenderPath)) {
@@ -440,6 +502,16 @@ function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void
 				categories: result.categories,
 				matchCount: result.matches.length,
 				matches: result.matches,
+				// v3.8.0-nightly diagnostic: number of YARA rules active at
+				// scan time. Zero = rules failed to load (packaging issue).
+				// Non-zero + matchCount 0 = legitimate no-match.
+				activeRules: result.activeRules,
+				// v3.8.0-nightly diagnostic: which paths the engine tried
+				// when loading built-in rules and which succeeded (if any).
+				// Surfaces `triedPaths` + `loadedFrom` so operators can see
+				// exactly why a scan came back empty without diving into
+				// the Output panel.
+				ruleLoadDiagnostics: result.ruleLoadDiagnostics,
 				generatedAt: new Date().toISOString()
 			},
 			null,

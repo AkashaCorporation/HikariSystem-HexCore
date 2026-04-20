@@ -333,7 +333,7 @@ const handlers = {
 	// Instead of detecting SYSCALL/INT 0x80 (ELF), PE32 detects when PC enters
 	// a stub address range (PE import stubs) provided by the host.
 	// terminalRanges: optional array of {start, end} pairs — if PC falls within any range, stop.
-	executeBatch(startPc, count, terminalAddresses, terminalRanges, stubRangeStart, stubRangeEnd) {
+	executeBatch(startPc, count, terminalAddresses, terminalRanges, stubRangeStart, stubRangeEnd, additionalStubRanges) {
 		if (!engine || !uc) {
 			throw new Error('Engine not initialized');
 		}
@@ -372,6 +372,17 @@ const handlers = {
 		// Parse stub range for PE import stub detection
 		const stubStart = stubRangeStart !== undefined && stubRangeStart !== null ? BigInt(stubRangeStart) : null;
 		const stubEnd = stubRangeEnd !== undefined && stubRangeEnd !== null ? BigInt(stubRangeEnd) : null;
+		// v3.8.0-nightly: additional stub ranges (e.g. synthetic DLL region
+		// 0x72000000..0x72040000). Hash-resolving shellcode jumps into these
+		// ranges after resolving exports from the synth PE; without this
+		// check, PC lands in the range but the worker doesn't yield to the
+		// host, so the RET stub runs and returns garbage.
+		const extraRanges = [];
+		if (Array.isArray(additionalStubRanges)) {
+			for (const r of additionalStubRanges) {
+				extraRanges.push({ start: BigInt(r.start), end: BigInt(r.end) });
+			}
+		}
 
 		let currentPc = BigInt(startPc);
 
@@ -401,6 +412,15 @@ const handlers = {
 				results.stubAddress = currentPc;
 				results.pc = currentPc;
 				return results;
+			}
+			// Additional stub ranges (synthetic DLL export stubs)
+			for (const r of extraRanges) {
+				if (currentPc >= r.start && currentPc < r.end) {
+					results.stubHit = true;
+					results.stubAddress = currentPc;
+					results.pc = currentPc;
+					return results;
+				}
 			}
 
 			// Execute 1 instruction

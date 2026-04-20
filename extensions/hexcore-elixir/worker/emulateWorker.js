@@ -67,6 +67,41 @@ function fail(err) {
 process.on('uncaughtException', fail);
 process.on('unhandledRejection', fail);
 
+const MACHINE_LABELS = {
+    0x014c: 'x86 (PE32, IMAGE_FILE_MACHINE_I386)',
+    0x0200: 'ia64 (IMAGE_FILE_MACHINE_IA64)',
+    0x8664: 'x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64)',
+    0x01c0: 'ARM (IMAGE_FILE_MACHINE_ARM)',
+    0xaa64: 'ARM64 (IMAGE_FILE_MACHINE_ARM64)',
+    0x01c4: 'ARM Thumb-2 (IMAGE_FILE_MACHINE_ARMNT)'
+};
+
+function preflightPe(data, binaryPath) {
+    if (data.length < 0x40) {
+        throw new Error(`Binary too small to be a PE (${data.length} bytes): ${binaryPath}`);
+    }
+    if (data[0] !== 0x4d || data[1] !== 0x5a) {
+        throw new Error(`Not a PE file (missing MZ magic): ${binaryPath}`);
+    }
+    const lfanew = data.readUInt32LE(0x3c);
+    if (lfanew + 24 > data.length) {
+        throw new Error(`Invalid PE header offset 0x${lfanew.toString(16)}: ${binaryPath}`);
+    }
+    if (data.readUInt32LE(lfanew) !== 0x00004550) {
+        throw new Error(`Not a PE file (missing PE\\0\\0 signature): ${binaryPath}`);
+    }
+    const machine = data.readUInt16LE(lfanew + 4);
+    if (machine !== 0x8664) {
+        const label = MACHINE_LABELS[machine] || `unknown (0x${machine.toString(16)})`;
+        throw new Error(
+            `Elixir requires x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64=0x8664); ` +
+            `got ${label} — ${path.basename(binaryPath)}. ` +
+            `Rebuild the binary as 64-bit or use the legacy debugger (hexcore.emulator="debugger").`
+        );
+    }
+    return machine;
+}
+
 process.on('message', (msg) => {
     let emu = null;
     try {
@@ -75,7 +110,7 @@ process.on('message', (msg) => {
             return;
         }
 
-        const { op, binaryPath, maxInstructions, verbose } = msg;
+        const { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir } = msg;
 
         const elixir = require(path.join(__dirname, '..', 'index.js'));
         if (!elixir || elixir.isAvailable === false || !elixir.Emulator) {
@@ -90,6 +125,8 @@ process.on('message', (msg) => {
 
         const data = fs.readFileSync(binaryPath);
 
+        preflightPe(data, binaryPath);
+
         emu = new elixir.Emulator({
             arch: 'x86_64',
             maxInstructions: maxInstructions || 1000000,
@@ -99,19 +136,75 @@ process.on('message', (msg) => {
         const entry = emu.load(data);
         process.stderr.write(`[elixir-worker] loaded ${path.basename(binaryPath)} entry=${hex(entry)}\n`);
 
+        let payload;
         if (op === 'emulate') {
             const reason = emu.run(entry, 0n);
             const apiCallCount = emu.getApiCallCount();
             const apiCalls = emu.getApiCalls() || [];
             process.stderr.write(`[elixir-worker] emu.run → ${reason.kind} (${reason.instructionsExecuted} insns, ${apiCallCount} api calls)\n`);
-            process.send({
+            const serializedCalls = apiCalls.map(serializeApiCall);
+
+            // Always spill apiCalls to a companion file (same pattern as .drcov
+            // export) when a path is provided. Keeps the main JSON small and
+            // human-readable, scales to MB-sized traces without hitting the
+            // IPC channel's 10s drain window. Inline sample (first 10) stays
+            // in the main result for quick triage.
+            let apiCallsPath = null;
+            let apiCallsInline = serializedCalls;
+            if (apiCallsOverflowPath) {
+                // Containment layer 2 (worker): re-validate that the overflow
+                // path the parent asked us to write is inside the declared
+                // overflow directory. Defense-in-depth for CWE-22 — the parent
+                // already validated, but if an untrusted caller ever forks this
+                // worker directly (or if the IPC message is tampered with) we
+                // refuse to write outside apiCallsOverflowDir.
+                let allowed = false;
+                if (apiCallsOverflowDir && typeof apiCallsOverflowDir === 'string') {
+                    const resolvedDir = path.resolve(apiCallsOverflowDir);
+                    const resolvedTarget = path.resolve(apiCallsOverflowPath);
+                    const sep = path.sep;
+                    allowed =
+                        resolvedTarget === resolvedDir ||
+                        resolvedTarget.startsWith(resolvedDir + sep);
+                    if (!allowed) {
+                        process.stderr.write(
+                            `[elixir-worker] refusing apiCalls companion write — ` +
+                            `${resolvedTarget} escapes ${resolvedDir}\n`
+                        );
+                    }
+                } else {
+                    // Backward-compat: older parents that don't send
+                    // apiCallsOverflowDir still work, but log so the missing
+                    // containment is observable.
+                    allowed = true;
+                    process.stderr.write(
+                        `[elixir-worker] apiCallsOverflowDir not supplied — ` +
+                        `parent-side containment only\n`
+                    );
+                }
+                if (allowed) {
+                    try {
+                        fs.mkdirSync(path.dirname(apiCallsOverflowPath), { recursive: true });
+                        fs.writeFileSync(apiCallsOverflowPath, JSON.stringify(serializedCalls, null, 2));
+                        apiCallsPath = apiCallsOverflowPath;
+                        apiCallsInline = serializedCalls.slice(0, 10);
+                        process.stderr.write(`[elixir-worker] apiCalls → ${apiCallsOverflowPath} (${serializedCalls.length} calls, ${apiCallsInline.length} inlined as preview)\n`);
+                    } catch (err) {
+                        process.stderr.write(`[elixir-worker] apiCalls companion write failed: ${err.message}\n`);
+                    }
+                }
+            }
+
+            payload = {
                 ok: true,
                 kind: 'emulate',
                 entry: hex(entry),
                 stopReason: serializeStopReason(reason),
                 apiCallCount,
-                apiCalls: apiCalls.map(serializeApiCall)
-            });
+                apiCalls: apiCallsInline,
+                apiCallsPath,
+                apiCallsTotal: serializedCalls.length
+            };
         } else if (op === 'stalker') {
             emu.stalkerFollow();
             const reason = emu.run(entry, 0n);
@@ -119,21 +212,39 @@ process.on('message', (msg) => {
             const blockCount = emu.stalkerBlockCount();
             const drcov = emu.stalkerExportDrcov();
             process.stderr.write(`[elixir-worker] stalker.drcov → ${blockCount} blocks, ${drcov.length} bytes\n`);
-            process.send({
+            payload = {
                 ok: true,
                 kind: 'stalker',
                 entry: hex(entry),
                 stopReason: serializeStopReason(reason),
                 blockCount,
                 drcovBase64: drcov.toString('base64')
-            });
+            };
         } else {
             fail(new Error('Unknown op: ' + op));
             return;
         }
 
         try { emu.dispose(); } catch { /* ignore */ }
-        process.exit(0);
+
+        // process.send is async and buffered; for large payloads (stalker
+        // base64 drcov can exceed hundreds of KB) the IPC write may not
+        // flush before process.exit(0). Use the callback form so we only
+        // exit after the message is fully handed to the IPC channel, then
+        // disconnect() to drain before exit.
+        process.send(payload, undefined, {}, (err) => {
+            if (err) {
+                process.stderr.write(`[elixir-worker] process.send failed: ${err.message}\n`);
+                process.exit(1);
+                return;
+            }
+            if (typeof process.disconnect === 'function') {
+                process.once('disconnect', () => process.exit(0));
+                try { process.disconnect(); } catch { process.exit(0); }
+            } else {
+                process.exit(0);
+            }
+        });
     } catch (err) {
         try { if (emu) emu.dispose(); } catch { /* ignore */ }
         fail(err);

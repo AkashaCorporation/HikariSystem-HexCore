@@ -76,6 +76,42 @@ function bigintToString(v: bigint): string {
 	return '0x' + v.toString(16);
 }
 
+const PE_MACHINE_LABELS: Record<number, string> = {
+	0x014c: 'x86 (PE32, IMAGE_FILE_MACHINE_I386)',
+	0x0200: 'ia64 (IMAGE_FILE_MACHINE_IA64)',
+	0x8664: 'x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64)',
+	0x01c0: 'ARM (IMAGE_FILE_MACHINE_ARM)',
+	0xaa64: 'ARM64 (IMAGE_FILE_MACHINE_ARM64)',
+	0x01c4: 'ARM Thumb-2 (IMAGE_FILE_MACHINE_ARMNT)'
+};
+
+// Matches the preflight in worker/emulateWorker.js — duplicated intentionally
+// for the in-process paths (snapshotRoundTripHeadless etc) that don't fork.
+function preflightPeMachine(data: Buffer, binaryPath: string): void {
+	if (data.length < 0x40) {
+		throw new Error(`Binary too small to be a PE (${data.length} bytes): ${binaryPath}`);
+	}
+	if (data[0] !== 0x4d || data[1] !== 0x5a) {
+		throw new Error(`Not a PE file (missing MZ magic): ${binaryPath}`);
+	}
+	const lfanew = data.readUInt32LE(0x3c);
+	if (lfanew + 24 > data.length) {
+		throw new Error(`Invalid PE header offset 0x${lfanew.toString(16)}: ${binaryPath}`);
+	}
+	if (data.readUInt32LE(lfanew) !== 0x00004550) {
+		throw new Error(`Not a PE file (missing PE\\0\\0 signature): ${binaryPath}`);
+	}
+	const machine = data.readUInt16LE(lfanew + 4);
+	if (machine !== 0x8664) {
+		const label = PE_MACHINE_LABELS[machine] ?? `unknown (0x${machine.toString(16)})`;
+		throw new Error(
+			`Elixir requires x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64=0x8664); ` +
+			`got ${label} — ${path.basename(binaryPath)}. ` +
+			`Rebuild the binary as 64-bit or use the legacy debugger (hexcore.emulator="debugger").`
+		);
+	}
+}
+
 /**
  * Locate a system Node.js binary without ACG (Arbitrary Code Guard) in its PE header.
  *
@@ -112,16 +148,25 @@ function findSystemNode(): string | null {
 	candidates.push('C:\\Program Files\\nodejs\\node.exe');
 	candidates.push('C:\\Program Files (x86)\\nodejs\\node.exe');
 
+	const binaryNames = process.platform === 'win32' ? ['node.exe'] : ['node'];
 	const pathDirs = (process.env.PATH || '').split(path.delimiter);
 	for (const dir of pathDirs) {
 		if (!dir) continue;
-		const candidate = path.join(dir, 'node.exe');
-		if (!candidates.includes(candidate)) {
-			candidates.push(candidate);
+		for (const name of binaryNames) {
+			const candidate = path.join(dir, name);
+			if (!candidates.includes(candidate)) {
+				candidates.push(candidate);
+			}
 		}
 	}
 
-	candidates.push('/usr/local/bin/node', '/usr/bin/node');
+	if (process.platform !== 'win32') {
+		candidates.push(
+			'/usr/local/bin/node',
+			'/usr/bin/node',
+			'/opt/homebrew/bin/node', // macOS Apple Silicon Homebrew
+		);
+	}
 
 	for (const candidate of candidates) {
 		try {
@@ -143,6 +188,8 @@ interface WorkerEmulateResult {
 	stopReason: { kind: string; address: string; instructionsExecuted: number; message: string };
 	apiCallCount: number;
 	apiCalls: Array<{ address: string | null; name: string | null; module: string | null; returnValue: string | null }>;
+	apiCallsPath?: string | null;
+	apiCallsTotal?: number;
 }
 
 interface WorkerStalkerResult {
@@ -161,7 +208,7 @@ interface WorkerFailure {
 
 type WorkerResult = WorkerEmulateResult | WorkerStalkerResult | WorkerFailure;
 
-function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructions: number, verbose: boolean, timeoutMs: number): Promise<WorkerResult> {
+function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructions: number, verbose: boolean, timeoutMs: number, apiCallsOverflowPath?: string, apiCallsOverflowDir?: string): Promise<WorkerResult> {
 	return new Promise((resolve, reject) => {
 		const workerPath = path.join(__dirname, '..', 'worker', 'emulateWorker.js');
 		if (!fs.existsSync(workerPath)) {
@@ -174,7 +221,11 @@ function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructi
 		const env = { ...process.env };
 		if (!systemNode) {
 			env.ELECTRON_RUN_AS_NODE = '1';
-			output.appendLine('[elixir] WARNING: no system Node.exe found — falling back to Electron with ELECTRON_RUN_AS_NODE=1. Emulation may crash due to ACG. Install Node.js from nodejs.org to fix.');
+			if (process.platform === 'win32') {
+				output.appendLine('[elixir] WARNING: no system Node.exe found — falling back to Electron with ELECTRON_RUN_AS_NODE=1. Emulation may crash due to ACG. Install Node.js from nodejs.org to fix.');
+			} else {
+				output.appendLine('[elixir] INFO: no system Node binary found — falling back to Electron with ELECTRON_RUN_AS_NODE=1.');
+			}
 		} else {
 			output.appendLine(`[elixir] spawning worker via system Node: ${systemNode}`);
 		}
@@ -240,7 +291,7 @@ function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructi
 			reject(err);
 		});
 
-		worker.send({ op, binaryPath, maxInstructions, verbose });
+		worker.send({ op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir });
 	});
 }
 
@@ -269,8 +320,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(output);
 
 	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
-	if (emulator !== 'azoth') {
-		output.appendLine(`[elixir] activation skipped — hexcore.emulator="${emulator}" (set hexcore.emulator="azoth" to enable Project Azoth)`);
+	if (emulator !== 'azoth' && emulator !== 'both') {
+		output.appendLine(`[elixir] activation skipped — hexcore.emulator="${emulator}" (set hexcore.emulator="azoth" or "both" to enable Project Azoth)`);
 		context.subscriptions.push(
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (e.affectsConfiguration('hexcore.emulator')) {
@@ -329,9 +380,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand('hexcore.elixir.smokeTestHeadless', () => {
+		vscode.commands.registerCommand('hexcore.elixir.smokeTestHeadless', (args: HeadlessArgs = {}) => {
 			const n = loadNative();
-			return {
+			const result = {
 				ok: !!(n && n.isAvailable !== false && n.Emulator),
 				version: n && n.isAvailable !== false ? n.getVersion() : null,
 				loadError: loadError?.message ?? n?.loadError ?? null,
@@ -342,6 +393,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					? ['getVersion', 'Emulator', 'Interceptor', 'Stalker', 'snapshotSave', 'snapshotRestore']
 					: ['getVersion']
 			};
+			writeJsonResult(args, result);
+			return result;
 		})
 	);
 
@@ -372,8 +425,36 @@ export function activate(context: vscode.ExtensionContext): void {
 				// the Extension Host with STATUS_ACCESS_VIOLATION.
 				const file = resolveBinary(args, 'hexcore.elixir.emulateHeadless');
 				const maxInstructions = args.maxInstructions ?? 1_000_000;
+				const outPath = args?.output?.path;
+				// Containment layer 1 (host): derive the apiCalls companion strictly
+				// inside the same directory as outPath, stripping any path
+				// components a job file could smuggle via output.path. The basename
+				// is re-extracted so traversal attempts like
+				// output.path="/safe/../../etc/passwd" collapse to /etc/passwd's
+				// basename "passwd" inside /safe/.. resolved root. CWE-22.
+				let overflowPath: string | undefined;
+				let overflowDir: string | undefined;
+				if (outPath) {
+					const resolvedOut = path.resolve(outPath);
+					overflowDir = path.dirname(resolvedOut);
+					const base = path.basename(resolvedOut).replace(/\.json$/i, '');
+					const candidate = path.resolve(overflowDir, base + '.apicalls.json');
+					// Defense-in-depth: the resolved companion MUST sit inside
+					// overflowDir. path.resolve normalizes "..", so a candidate
+					// that doesn't start with overflowDir + sep means something
+					// rewrote the basename to escape (shouldn't happen with
+					// basename(), but we guard anyway).
+					const sep = path.sep;
+					if (candidate === overflowDir || candidate.startsWith(overflowDir + sep)) {
+						overflowPath = candidate;
+					} else {
+						throw new Error(
+							`apiCalls overflow path escapes output directory: ${candidate} not under ${overflowDir}`
+						);
+					}
+				}
 				output.appendLine(`[elixir] emulateHeadless ${path.basename(file)} — delegating to worker (maxInstructions=${maxInstructions})`);
-				const workerResult = await runInWorker('emulate', file, maxInstructions, !!args.verbose, 600_000);
+				const workerResult = await runInWorker('emulate', file, maxInstructions, !!args.verbose, 600_000, overflowPath, overflowDir);
 				if (!workerResult.ok) {
 					throw new Error(`Elixir emulation failed: ${workerResult.error}`);
 				}
@@ -386,7 +467,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					entry: emuResult.entry,
 					stopReason: emuResult.stopReason,
 					apiCallCount: emuResult.apiCallCount,
-					apiCalls: emuResult.apiCalls
+					apiCalls: emuResult.apiCalls,
+					apiCallsPath: emuResult.apiCallsPath ?? null,
+					apiCallsTotal: emuResult.apiCallsTotal ?? emuResult.apiCalls.length
 				};
 				output.appendLine(
 					`[elixir] run → ${result.stopReason.kind} @${result.stopReason.address} ` +
@@ -444,6 +527,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				const n = requireNative();
 				const file = resolveBinary(args, 'hexcore.elixir.snapshotRoundTripHeadless');
 				const data = fs.readFileSync(file);
+				preflightPeMachine(data, file);
 				const emu = new n.Emulator({ arch: 'x86_64', maxInstructions: 100_000, verbose: false });
 				try {
 					const entry = emu.load(data);

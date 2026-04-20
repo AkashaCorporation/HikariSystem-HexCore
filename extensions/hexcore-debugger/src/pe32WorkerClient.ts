@@ -351,7 +351,8 @@ export class Pe32WorkerClient {
 		terminalAddresses: bigint[],
 		stubRangeStart: bigint,
 		stubRangeEnd: bigint,
-		terminalRanges?: Array<{ start: bigint; end: bigint }>
+		terminalRanges?: Array<{ start: bigint; end: bigint }>,
+		additionalStubRanges?: Array<{ start: bigint; end: bigint }>
 	): Promise<Pe32ExecuteBatchResult> {
 		const result = await this.call(
 			'executeBatch',
@@ -360,7 +361,8 @@ export class Pe32WorkerClient {
 			terminalAddresses,
 			terminalRanges ?? [],
 			stubRangeStart,
-			stubRangeEnd
+			stubRangeEnd,
+			additionalStubRanges ?? []
 		) as Record<string, unknown>;
 		return {
 			pc: result.pc as bigint,

@@ -9,7 +9,17 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-02-19 — v3.5.4 "Stability & Isolation")
+## Current Snapshot (2026-04-19 — v3.8.0-nightly final polish, pre-release)
+
+- P0 delivered: **5/5**
+- P1 delivered: **4/5** (#6 PRNG still pending)
+- P2 delivered: **2/4** (#10, #11 pending)
+- Infrastructure delivered: **9/9** (all)
+- v3.5.0 audit delivered: **7/7**
+- v3.5.4 VVM audit: **1/5** (#31 SAB DONE in v3.8.0; #28/29/30/32 still pending)
+- v3.8.0 extras beyond the original backlog (see `docs/HexCore.3.8.0.md`): Souper integration, Pathfinder CFG engine, Helix 0.9.0 engine, Project Azoth clean-room emulator, KUSER_SHARED_DATA + synth DLL region, DWARF+PDB+ET_REL metadata feeder, YARA anti-analysis pack, refcount audit scanner v0.1, Remill FIX-024/025 + FIX-027 cleanup.
+
+## Historical Snapshot (2026-02-19 — v3.5.4 "Stability & Isolation")
 - P0 delivered: **5/5** (`#1`, `#2`, `#3`, `#4`, `#5`)
 - P1 delivered: **4/5** (`#7a`, `#8`, `#7b`, `#9`)
 - P2 delivered: **2/4** (`#24`, `#27`)
@@ -396,11 +406,12 @@ Items discovered during the comprehensive stress test and audit against a comple
 - **Target**: v3.7.0+
 
 ### 31. Zero-Copy IPC Shared Memory (SharedArrayBuffer)
-- **Status**: `PENDING`
+- **Status**: `DONE` (v3.8.0, "Project Perseus")
 - **Feature**: Erradicate the N-API context switch overhead during Unicorn Hook callbacks by exposing the C++ CPU state block directly to the Node.js V8 engine via a `BigUint64Array` typed view of an external ArrayBuffer.
 - **Why**: To push emulation speeds from 50k inst/sec to 10M+ inst/sec by eliminating JSON-RPC marshalling and N-API transition latencies during heavy API hooking. Also includes Native Hook Filters in C++.
+- **Shipped**: Phases 1–4 delivered (SharedRingBuffer SPSC, native `CodeHookSabCB` + `hookAddSAB`, split-path dispatch preserving `emuStop()` semantics, end-to-end JS consumer with backpressure). Measured 1.34× throughput and 100% delivery vs ~35% legacy on the reference workload. 7/7 SAB hook tests + SAB benchmark passing. Full CPU-state BigUint64Array view (10M+ inst/sec target) still deferred to v4.0.0.
 - **Priority**: P3 (Architectural Refactor / Advanced Niche)
-- **Target**: v4.0.0
+- **Target**: v3.8.0 ✅
 
 ### 32. Basic Symbolic Execution (Constraint Solving)
 - **Status**: `PENDING`

@@ -3,10 +3,32 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as path from 'path';
-import { loadNativeModule } from 'hexcore-common';
+import { loadNativeModule, SharedRingBuffer } from 'hexcore-common';
 import { Arm64WorkerClient } from './arm64WorkerClient';
 import { X64ElfWorkerClient } from './x64ElfWorkerClient';
 import { Pe32WorkerClient } from './pe32WorkerClient';
+
+// v4.0.0 — SharedArrayBuffer zero-copy IPC support detection (Issue #31).
+// Phase 4 will use this flag to switch the CODE hook from the legacy TSFN path
+// to the lock-free SAB ring buffer path. The extension host is Node.js, so SAB
+// is unconditionally available since Node 16, but we keep the runtime check as
+// a safety net for environments that disable it via flags.
+const SAB_AVAILABLE: boolean = typeof SharedArrayBuffer !== 'undefined'
+	&& typeof Atomics !== 'undefined'
+	&& typeof Atomics.load === 'function'
+	&& typeof Atomics.store === 'function';
+
+if (!SAB_AVAILABLE) {
+	console.warn('[unicorn] SharedArrayBuffer unavailable — SAB hook path disabled, falling back to legacy TSFN path.');
+}
+
+/**
+ * v4.0.0 — Module-level flag indicating whether the SAB-backed hook path can
+ * be attempted. Phase 4 reads this in `start()` to choose between `hookAddSAB`
+ * (fast) and `hookAdd` (legacy). Operators can force the legacy path by setting
+ * `HEXCORE_DISABLE_SAB=1` in the environment regardless of this flag.
+ */
+export const HEXCORE_SAB_HOOKS_SUPPORTED: boolean = SAB_AVAILABLE;
 
 // Types from hexcore-unicorn
 interface UnicornModule {
@@ -37,6 +59,20 @@ interface UnicornInstance {
 	regWrite(regId: number, value: bigint | number): void;
 	hookAdd(type: number, callback: Function, begin?: bigint | number, end?: bigint | number): number;
 	hookDel(hookHandle: number): void;
+	// v4.0.0 — SAB zero-copy CODE hook (Issue #31). Optional because older
+	// .node prebuilds may not have it; runtime check via `typeof === 'function'`.
+	hookAddSAB?(
+		type: number,
+		sabRef: SharedArrayBuffer | Uint8Array,
+		slotSize: number,
+		slotCount: number,
+		watchAddresses: bigint[],
+		legacyCallback: ((address: bigint, size: number, sequenceNumber: bigint) => void) | null,
+		begin?: bigint | number,
+		end?: bigint | number,
+	): number;
+	breakpointAdd?(address: bigint | number): void;
+	breakpointDel?(address: bigint | number): void;
 	contextSave(): UnicornContext;
 	contextRestore(context: UnicornContext): void;
 	close(): void;
@@ -225,6 +261,10 @@ export class UnicornWrapper {
 	// Stub address range for PE32 WinAPI interception
 	private _pe32StubRangeStart: bigint = 0n;
 	private _pe32StubRangeEnd: bigint = 0n;
+	// v3.8.0-nightly: additional address ranges that should also trigger
+	// the WinAPI dispatch callback in the PE32 worker (e.g. synthetic DLL
+	// export stubs at 0x72000000..0x72040000).
+	private _pe32StubRangesExtra: Array<{ start: bigint; end: bigint }> = [];
 	// Callback for PE32 stub dispatch: called when the worker hits a stub address.
 	// The caller (debugEngine.ts) provides this to handle WinAPI dispatch.
 	private _pe32StubCallback?: (stubAddress: bigint) => Promise<{ returnValue: bigint; newPc: bigint } | null>;
@@ -237,6 +277,13 @@ export class UnicornWrapper {
 	// instead of emuStartAsync to avoid STATUS_HEAP_CORRUPTION (0xC0000374)
 	// caused by TSFN threading issues with multiple native hooks installed.
 	private _elfSyncMode: boolean = false;
+
+	// v4.0.0 — SharedArrayBuffer zero-copy CODE hook state (Issue #31).
+	// _sabRing is created once per start() call when the SAB path is active.
+	// _sabDrainScheduled prevents the setImmediate drain loop from re-arming
+	// itself on every event — only one drain tick is in flight at a time.
+	private _sabRing?: SharedRingBuffer;
+	private _sabDrainScheduled: boolean = false;
 
 	/**
 	 * Initialize the Unicorn engine
@@ -599,7 +646,8 @@ export class UnicornWrapper {
 	async setPe32WorkerMode(
 		stubRangeStart: bigint,
 		stubRangeEnd: bigint,
-		stubCallback?: (stubAddress: bigint) => Promise<{ returnValue: bigint; newPc: bigint } | null>
+		stubCallback?: (stubAddress: bigint) => Promise<{ returnValue: bigint; newPc: bigint } | null>,
+		additionalStubRanges?: Array<{ start: bigint; end: bigint }>
 	): Promise<void> {
 		if (!this.uc || !this.unicornModule) {
 			throw new Error('Unicorn not initialized — cannot enable PE32 worker mode');
@@ -607,6 +655,7 @@ export class UnicornWrapper {
 
 		this._pe32StubRangeStart = stubRangeStart;
 		this._pe32StubRangeEnd = stubRangeEnd;
+		this._pe32StubRangesExtra = additionalStubRanges ?? [];
 		if (stubCallback) {
 			this._pe32StubCallback = stubCallback;
 		}
@@ -991,7 +1040,9 @@ export class UnicornWrapper {
 
 				const result = await this._pe32Worker.executeBatch(
 					currentPc, thisBatch, terminalAddresses,
-					this._pe32StubRangeStart, this._pe32StubRangeEnd
+					this._pe32StubRangeStart, this._pe32StubRangeEnd,
+					undefined,
+					this._pe32StubRangesExtra
 				);
 
 				totalExecuted += result.instructionsExecuted;
@@ -1488,34 +1539,105 @@ export class UnicornWrapper {
 		this.deferredMemoryWrites = [];
 		this.deferredRegisterWrites.clear();
 
-		// Add code hook for tracking
+		// v4.0.0 — Decide between SAB fast path and legacy TSFN path (Issue #31).
+		// SAB path: ~10M inst/sec ceiling via lock-free ring buffer.
+		// Legacy path: ~50K inst/sec via per-fire TSFN NonBlockingCall.
+		// Operators can force the legacy path with HEXCORE_DISABLE_SAB=1.
+		// Native breakpointAdd/breakpointDel are required because the SAB
+		// path relies on native BreakpointHookCB (no JS-side bp check in the
+		// hot loop). If either is missing, fall back to the legacy path to
+		// avoid silently dropping every breakpoint.
+		const sabPathEnabled = HEXCORE_SAB_HOOKS_SUPPORTED
+			&& typeof this.uc!.hookAddSAB === 'function'
+			&& typeof this.uc!.breakpointAdd === 'function'
+			&& typeof this.uc!.breakpointDel === 'function'
+			&& process.env.HEXCORE_DISABLE_SAB !== '1';
+
 		const HOOK = this.unicornModule!.HOOK;
-		const hookHandle = this.uc!.hookAdd(HOOK.CODE, (addr: bigint, size: number) => {
-			this.state.currentAddress = addr;
-			this.state.instructionsExecuted++;
+		let hookHandle: number;
 
-			// Check for breakpoints (skip if it's the start address to avoid re-triggering)
-			if (this.breakpoints.has(addr) && !isFirstInstruction) {
-				this.uc!.emuStop();
-				this.state.isPaused = true;
-				return; // Don't fire code hooks when hitting a breakpoint
+		if (sabPathEnabled) {
+			// ── SAB fast path ──────────────────────────────────────────────
+			// Allocate a fresh ring buffer per start() call. 4096 × 32 B = 128 KB.
+			const SLOT_SIZE = 32;
+			const SLOT_COUNT = 4096;
+			this._sabRing = new SharedRingBuffer({ slotSize: SLOT_SIZE, slotCount: SLOT_COUNT });
+
+			// Watch set: addresses that have a JS code hook registered (API stubs,
+			// breakpoints) must route through the legacy callback so emuStop()
+			// semantics survive. Everything else writes to the ring with zero
+			// allocations on the C++ side.
+			const watchAddresses: bigint[] = Array.from(this.codeHooks.keys()).map(k => BigInt(k));
+
+			// Native breakpoints — install all current breakpoints into Unicorn
+			// directly. Native BreakpointHookCB calls uc_emu_stop() from the
+			// Unicorn thread which is the correct semantic.
+			// (breakpointAdd availability is already a precondition for
+			// sabPathEnabled, so the optional-chain is belt-and-suspenders.)
+			for (const bp of this.breakpoints) {
+				try {
+					this.uc!.breakpointAdd?.(bp);
+				} catch { /* best-effort */ }
 			}
 
-			isFirstInstruction = false;
+			hookHandle = this.uc!.hookAddSAB!(
+				HOOK.CODE,
+				this._sabRing.buffer,
+				SLOT_SIZE,
+				SLOT_COUNT,
+				watchAddresses,
+				// Legacy callback — only fires for watched addresses (API stubs).
+				// Mirrors the existing dispatch logic but only for the rare slow path.
+				(addr: bigint, size: number, _seq: bigint) => {
+					this.state.currentAddress = addr;
+					this.state.instructionsExecuted++;
 
-			// Reset API redirect flag before calling hooks
-			this._apiHookRedirected = false;
+					// Reset API redirect flag before calling hooks
+					this._apiHookRedirected = false;
 
-			// Notify registered code hooks (API interception, etc.)
-			this.codeHooks.forEach(cb => cb(addr, size));
+					// Notify the registered code hook for this exact address
+					const cb = this.codeHooks.get(Number(addr));
+					if (cb) {
+						cb(addr, size);
+					}
 
-			// If an API interceptor redirected execution, stop emulation now
-			// to prevent the stub instruction (RET) from executing and corrupting the stack.
-			// The start() loop will restart emulation from the redirected address.
-			if (this._apiHookRedirected) {
-				this.uc!.emuStop();
-			}
-		});
+					if (this._apiHookRedirected) {
+						this.uc!.emuStop();
+					}
+				},
+			);
+
+			// Start the ring drain loop — runs while emulation is in flight.
+			this._startSabDrainLoop();
+		} else {
+			// ── Legacy TSFN path (unchanged) ───────────────────────────────
+			hookHandle = this.uc!.hookAdd(HOOK.CODE, (addr: bigint, size: number) => {
+				this.state.currentAddress = addr;
+				this.state.instructionsExecuted++;
+
+				// Check for breakpoints (skip if it's the start address to avoid re-triggering)
+				if (this.breakpoints.has(addr) && !isFirstInstruction) {
+					this.uc!.emuStop();
+					this.state.isPaused = true;
+					return; // Don't fire code hooks when hitting a breakpoint
+				}
+
+				isFirstInstruction = false;
+
+				// Reset API redirect flag before calling hooks
+				this._apiHookRedirected = false;
+
+				// Notify registered code hooks (API interception, etc.)
+				this.codeHooks.forEach(cb => cb(addr, size));
+
+				// If an API interceptor redirected execution, stop emulation now
+				// to prevent the stub instruction (RET) from executing and corrupting the stack.
+				// The start() loop will restart emulation from the redirected address.
+				if (this._apiHookRedirected) {
+					this.uc!.emuStop();
+				}
+			});
+		}
 
 		try {
 			// Loop to handle API hook redirects transparently.
@@ -1525,6 +1647,36 @@ export class UnicornWrapper {
 			const isStepping = count === 1;
 			const MAX_API_REDIRECTS = 1000; // Safety limit to prevent infinite loops
 			let redirectCount = 0;
+
+			// Step-over-breakpoint for the SAB path: native BreakpointHookCB
+			// has no "skip first instruction" concept, so a continue() from a
+			// breakpoint would re-fire on the first fetch. Temporarily remove
+			// the bp, execute a single instruction, then restore it. The
+			// legacy TSFN path handles this via the `isFirstInstruction` flag.
+			if (sabPathEnabled && this.breakpoints.has(currentStart)) {
+				const bpAddr = currentStart;
+				try {
+					this.uc!.breakpointDel?.(bpAddr);
+					try {
+						await this.uc!.emuStartAsync(currentStart, endAddress, timeout, 1);
+					} finally {
+						this.applyDeferredMutations();
+						try { this.uc!.breakpointAdd?.(bpAddr); } catch { /* best-effort */ }
+					}
+					this.syncCurrentAddress();
+					currentStart = this.state.currentAddress;
+
+					// Caller asked for a single-step and we just executed one
+					// instruction past the breakpoint — done.
+					if (isStepping) {
+						return;
+					}
+				} catch (err: any) {
+					this.state.lastError = err?.message ?? String(err);
+					try { this.uc!.breakpointAdd?.(bpAddr); } catch { /* best-effort */ }
+					throw err;
+				}
+			}
 
 			while (true) {
 				this._apiHookRedirected = false;
@@ -2669,9 +2821,16 @@ export class UnicornWrapper {
 
 	/**
 	 * Add breakpoint
+	 *
+	 * Mirrors to native when `breakpointAdd` is available so live SAB
+	 * emulation sees the new bp immediately (native BreakpointHookCB
+	 * reads its own `breakpoints_` set, not the JS `breakpoints` set).
+	 * The JS `breakpoints` Set remains the source of truth and is
+	 * fully reinstalled into native at every start() call.
 	 */
 	addBreakpoint(address: bigint): void {
 		this.breakpoints.add(address);
+		try { this.uc?.breakpointAdd?.(address); } catch { /* best-effort */ }
 	}
 
 	/**
@@ -2679,6 +2838,7 @@ export class UnicornWrapper {
 	 */
 	removeBreakpoint(address: bigint): void {
 		this.breakpoints.delete(address);
+		try { this.uc?.breakpointDel?.(address); } catch { /* best-effort */ }
 	}
 
 	/**
@@ -3293,6 +3453,41 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Register a code hook at a specific guest address.
+	 * On SAB path, this address becomes a watchAddress so the hook fires
+	 * efficiently only when execution reaches it (no per-instruction overhead).
+	 * Used by installAntiAnalysisHooks for targeted rdtsc/cpuid interception.
+	 */
+	registerCodeHookAtAddress(address: number, callback: CodeHookCallback): void {
+		this.codeHooks.set(address, callback);
+	}
+
+	/**
+	 * Get x86 register constants for direct regRead/regWrite calls.
+	 * Returns the unicorn X86_REG namespace (RAX, RDX, RCX, RIP, etc.)
+	 */
+	getX86Reg(): X86RegConstants | undefined {
+		return this.unicornModule?.X86_REG;
+	}
+
+	/**
+	 * Direct register write via numeric ID — used by anti-analysis hooks
+	 * that need to modify registers during code hook callbacks.
+	 */
+	writeRegById(regId: number, value: bigint): void {
+		if (this.uc) {
+			this.uc.regWrite(regId, value);
+		}
+	}
+
+	readRegById(regId: number): bigint {
+		if (this.uc) {
+			return BigInt(this.uc.regRead(regId));
+		}
+		return 0n;
+	}
+
+	/**
 	 * Remove code hook
 	 */
 	removeCodeHook(id: number): void {
@@ -3369,6 +3564,21 @@ export class UnicornWrapper {
 			this.savedContext = undefined;
 		}
 		if (this.uc) {
+			// H2 — Flush native breakpoint set before tearing down the engine.
+			// addBreakpoint() mirrors into native uc.breakpointAdd() so the SAB
+			// fast path sees new bps live. If a session ran with SAB enabled
+			// and the next start() uses the legacy TSFN path (e.g. operator
+			// set HEXCORE_DISABLE_SAB=1 between runs, or sabPathEnabled
+			// resolves false because breakpointAdd is missing on that build),
+			// the stale native set would still fire BreakpointHookCB on the
+			// Unicorn thread without the JS drain active — causing silent
+			// "hit twice" or inconsistent state in mixed runs. Explicitly
+			// drain native before zeroing this.uc so every new engine starts
+			// with a clean native set. start() always reinstalls from the JS
+			// Set, so the source-of-truth invariant is preserved.
+			for (const bp of this.breakpoints) {
+				try { this.uc.breakpointDel?.(bp); } catch { /* best-effort */ }
+			}
 			this.uc.close();
 			this.uc = undefined;
 		}
@@ -3385,6 +3595,62 @@ export class UnicornWrapper {
 		this._pe32StubCallback = undefined;
 		this._pe32StubRangeStart = 0n;
 		this._pe32StubRangeEnd = 0n;
+		// v4.0.0 — Tear down SAB ring on dispose.
+		this._sabRing = undefined;
+		this._sabDrainScheduled = false;
+	}
+
+	/**
+	 * v4.0.0 — Drain the SharedArrayBuffer ring buffer that receives CODE
+	 * hook events from the native producer (Issue #31).
+	 *
+	 * Runs as a `setImmediate` chain while emulation is in flight on the
+	 * Unicorn worker thread. Each tick processes up to 1024 slots and
+	 * yields back to the event loop. After emulation stops, performs one
+	 * final drain to consume any tail events.
+	 *
+	 * The drain is intentionally minimal — it only bumps the
+	 * `instructionsExecuted` counter. The real CFG / state work happens
+	 * either via the native breakpoint hook (which calls uc_emu_stop) or
+	 * via the watch-set legacy callback (which fires on API stub addresses).
+	 *
+	 * `_sabDrainScheduled` prevents re-entrant `setImmediate` chains when
+	 * `start()` is called multiple times for one Unicorn instance.
+	 */
+	private _startSabDrainLoop(): void {
+		if (!this._sabRing || this._sabDrainScheduled) {
+			return;
+		}
+		this._sabDrainScheduled = true;
+
+		const drainOnce = () => {
+			if (!this._sabRing) {
+				this._sabDrainScheduled = false;
+				return;
+			}
+
+			// Process up to 1024 slots per tick — yields back to the event
+			// loop after that to keep the UI responsive on long emulation runs.
+			const processed = this._sabRing.drain(() => {
+				this.state.instructionsExecuted++;
+			}, 1024);
+
+			if (this.state.isRunning) {
+				// More work expected — re-arm.
+				setImmediate(drainOnce);
+			} else {
+				// Emulation finished. Final drain to flush any tail events.
+				if (this._sabRing) {
+					this._sabRing.drain(() => {
+						this.state.instructionsExecuted++;
+					}, 1_000_000);
+				}
+				this._sabDrainScheduled = false;
+			}
+			void processed;
+		};
+
+		setImmediate(drainOnce);
 	}
 }
 

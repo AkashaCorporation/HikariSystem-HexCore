@@ -25,6 +25,27 @@ export interface ReportSection {
 }
 
 /**
+ * Cross-module evidence for a single IOC / offset — when multiple analyzers
+ * (strings, YARA, IOC extractor) independently flag the same thing, we
+ * collapse them into a single high-confidence finding. Built by
+ * `fuseEvidence()` from the JSON reports before Markdown serialization.
+ *
+ * v3.8.0: the rationale is that two analysts looking at the same binary
+ * want ONE line saying "http://evil.tld was flagged by {strings, ioc, yara}
+ * at offsets {0x1234, 0x1234, 0x1300}" rather than three disjoint lists.
+ */
+export interface CrossModuleFinding {
+	/** Normalized value (URL, IP, offset, hash). */
+	value: string;
+	/** Which analyzer reports referenced this finding. */
+	sources: string[];
+	/** File offsets where the finding appears (may be empty if unknown). */
+	offsets: number[];
+	/** Classification (url / ip / domain / mutex / offset / yara-rule / hash). */
+	kind: string;
+}
+
+/**
  * The fully composed report aggregating multiple sources.
  */
 export interface ComposedReport {
@@ -34,6 +55,8 @@ export interface ComposedReport {
 	sources: ReportSource[];
 	sections: ReportSection[];
 	analystNotes?: string;
+	/** v3.8.0 cross-module evidence fusion — findings corroborated by ≥ 2 sources. */
+	crossModuleFindings?: CrossModuleFinding[];
 }
 
 /**
@@ -88,6 +111,130 @@ function slugify(title: string): string {
 		.replace(/[^\w\s-]/g, '')
 		.replace(/\s+/g, '-')
 		.trim();
+}
+
+// ---------------------------------------------------------------------------
+// v3.8.0: Cross-module evidence fusion
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract candidate finding "values" from a report source. Parses JSON sources
+ * structurally; falls back to a best-effort regex pass for Markdown sources.
+ *
+ * The goal is NOT to re-implement every analyzer's output schema — it's to
+ * spot the same URL / IP / domain / mutex / offset / YARA rule name showing
+ * up across ≥ 2 reports and collapse them into a single fused finding.
+ */
+interface RawEvidence {
+	value: string;
+	kind: string;
+	offset?: number;
+}
+
+function extractEvidenceFromSource(source: ReportSource): RawEvidence[] {
+	const ev: RawEvidence[] = [];
+	const lowerName = source.fileName.toLowerCase();
+
+	// JSON structured path — try to parse and pick common shapes.
+	if (lowerName.endsWith('.json')) {
+		try {
+			const data = JSON.parse(source.content);
+			// IOC extractor shape: { indicators: { url: [{value, offset, ...}], ... } }
+			if (data && typeof data === 'object' && data.indicators && typeof data.indicators === 'object') {
+				for (const [cat, arr] of Object.entries<any>(data.indicators)) {
+					if (!Array.isArray(arr)) { continue; }
+					for (const item of arr) {
+						if (item && typeof item.value === 'string') {
+							ev.push({ value: item.value, kind: String(cat), offset: typeof item.offset === 'number' ? item.offset : undefined });
+						}
+					}
+				}
+			}
+			// YARA shape: { matches: [{ ruleName, strings: [{offset}] }] }
+			if (data && Array.isArray(data.matches)) {
+				for (const m of data.matches) {
+					if (m && typeof m.ruleName === 'string') {
+						ev.push({ value: m.ruleName, kind: 'yara-rule' });
+					}
+					if (m && Array.isArray(m.strings)) {
+						for (const s of m.strings) {
+							if (s && typeof s.offset === 'number') {
+								ev.push({ value: `0x${s.offset.toString(16)}`, kind: 'offset', offset: s.offset });
+							}
+						}
+					}
+				}
+			}
+			// Strings shape: { results: [{ value, offset }] } (conservative)
+			if (data && Array.isArray(data.results)) {
+				for (const r of data.results) {
+					if (r && typeof r.value === 'string' && typeof r.offset === 'number') {
+						ev.push({ value: r.value, kind: 'string', offset: r.offset });
+					}
+				}
+			}
+		} catch { /* not JSON; fall through to regex */ }
+	}
+
+	// Best-effort regex scan on the raw content — catches Markdown-rendered
+	// reports and anything the JSON branch missed.
+	const urlRx = /https?:\/\/[A-Za-z0-9\-._~:/?#%=&]+/g;
+	const ipRx = /\b(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)(?:\.(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)){3}\b/g;
+	const offRx = /\b0x[0-9a-fA-F]{4,16}\b/g;
+	for (const m of source.content.matchAll(urlRx)) { ev.push({ value: m[0], kind: 'url' }); }
+	for (const m of source.content.matchAll(ipRx))  { ev.push({ value: m[0], kind: 'ipv4' }); }
+	for (const m of source.content.matchAll(offRx)) {
+		const n = parseInt(m[0], 16);
+		if (Number.isFinite(n)) { ev.push({ value: m[0].toLowerCase(), kind: 'offset', offset: n }); }
+	}
+
+	return ev;
+}
+
+/**
+ * Fuse evidence across multiple reports. A finding is emitted only when at
+ * least two distinct source files reference the same value — this prevents
+ * trivially-quadratic expansion from a single analyzer's dump.
+ */
+export function fuseEvidence(sources: ReportSource[]): CrossModuleFinding[] {
+	// Map<"kind::value", { sources: Set, offsets: Set }>
+	const bucket = new Map<string, { value: string; kind: string; sources: Set<string>; offsets: Set<number> }>();
+
+	for (const src of sources) {
+		const evidence = extractEvidenceFromSource(src);
+		// Track which source names we already charged for a (kind,value) pair
+		// in THIS source — prevents double-count from a source that mentions
+		// the same URL 20 times.
+		const seenThisSource = new Set<string>();
+		for (const e of evidence) {
+			const key = `${e.kind}::${e.value}`;
+			let bucketEntry = bucket.get(key);
+			if (!bucketEntry) {
+				bucketEntry = { value: e.value, kind: e.kind, sources: new Set(), offsets: new Set() };
+				bucket.set(key, bucketEntry);
+			}
+			if (!seenThisSource.has(key)) {
+				bucketEntry.sources.add(src.fileName);
+				seenThisSource.add(key);
+			}
+			if (typeof e.offset === 'number') { bucketEntry.offsets.add(e.offset); }
+		}
+	}
+
+	const findings: CrossModuleFinding[] = [];
+	for (const entry of bucket.values()) {
+		// Only emit findings corroborated by 2+ distinct reports.
+		if (entry.sources.size < 2) { continue; }
+		findings.push({
+			value: entry.value,
+			kind: entry.kind,
+			sources: [...entry.sources].sort(),
+			offsets: [...entry.offsets].sort((a, b) => a - b),
+		});
+	}
+	// Sort: more sources = higher confidence, then alphabetical
+	findings.sort((a, b) => b.sources.length - a.sources.length || a.value.localeCompare(b.value));
+	return findings;
 }
 
 /**
@@ -161,6 +308,14 @@ export class ReportAggregator {
 			report.analystNotes = notes;
 		}
 
+		// v3.8.0: run cross-module evidence fusion. Only attach when we found
+		// at least one corroborated finding — keeps the report clean for
+		// single-analyzer runs.
+		const fused = fuseEvidence(sources);
+		if (fused.length > 0) {
+			report.crossModuleFindings = fused;
+		}
+
 		return report;
 	}
 
@@ -196,6 +351,27 @@ export class ReportAggregator {
 			lines.push('## Analyst Notes');
 			lines.push('');
 			lines.push(report.analystNotes);
+			lines.push('');
+		}
+
+		// v3.8.0: Cross-module corroborated findings. Rendered BEFORE individual
+		// sections so analysts see the high-signal summary first.
+		if (report.crossModuleFindings && report.crossModuleFindings.length > 0) {
+			lines.push('## Cross-Module Findings');
+			lines.push('');
+			lines.push('Findings corroborated by two or more analyzers (higher confidence).');
+			lines.push('');
+			lines.push('| Kind | Value | Sources | Offsets |');
+			lines.push('|------|-------|---------|---------|');
+			for (const f of report.crossModuleFindings) {
+				const offsetsStr = f.offsets.length === 0
+					? '—'
+					: f.offsets.slice(0, 5).map(o => `0x${o.toString(16)}`).join(', ')
+						+ (f.offsets.length > 5 ? ` (+${f.offsets.length - 5} more)` : '');
+				// Markdown-escape the value (primarily for `|` which breaks tables)
+				const safeValue = f.value.replace(/\|/g, '\\|');
+				lines.push(`| ${f.kind} | \`${safeValue}\` | ${f.sources.length} (${f.sources.join(', ')}) | ${offsetsStr} |`);
+			}
 			lines.push('');
 		}
 
@@ -279,8 +455,9 @@ export class ReportAggregator {
 			}
 		}
 
-		// Extract sections (## headings that are not TOC, Analyst Notes, or Sources)
-		const skipHeadings = new Set(['Table of Contents', 'Analyst Notes', 'Sources']);
+		// Extract sections (## headings that are not TOC, Analyst Notes, Sources,
+		// or the v3.8.0 Cross-Module Findings summary block).
+		const skipHeadings = new Set(['Table of Contents', 'Analyst Notes', 'Sources', 'Cross-Module Findings']);
 		const sections: ReportSection[] = [];
 		for (let i = 0; i < lines.length; i++) {
 			const headingMatch = lines[i].match(/^## (.+)$/);

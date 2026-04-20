@@ -6,7 +6,7 @@
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
-		"vscode": "^1.70.0"
+		"vscode": "^1.75.0"
 	},
 	"categories": [
 		"Other",
@@ -133,10 +133,15 @@
 		"configuration": {
 			"title": "HexCore YARA",
 			"properties": {
+				"hexcore.yara.builtinRulesEnabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Load bundled anti-analysis YARA rules from the extension's rules/ directory (anti-debug, anti-VM, API hashing, obfuscation, dynamic API). Disable to fall back to user-provided rules only."
+				},
 				"hexcore.yara.rulesPath": {
 					"type": "string",
 					"default": "",
-					"description": "Path to custom YARA rules directory"
+					"description": "Path to custom YARA rules directory (loaded alongside built-in and DefenderYara rules)"
 				},
 				"hexcore.yara.defenderYaraPath": {
 					"type": "string",

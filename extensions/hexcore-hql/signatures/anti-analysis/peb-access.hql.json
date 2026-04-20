@@ -1,0 +1,27 @@
+{
+  "id": "anti-analysis.peb_access",
+  "name": "Direct PEB Access",
+  "description": "Detects direct access to the Process Environment Block via field access (ProcessEnvironmentBlock) or NtQueryInformationProcess(ProcessDebugPort) — both are common anti-debug primitives that bypass IsDebuggerPresent.",
+  "severity": "high",
+  "mitre": ["T1622"],
+  "queries": [
+    {
+      "target": "CFieldAccessExpr",
+      "attributes": [
+        { "field": "field", "value": "ProcessEnvironmentBlock" }
+      ]
+    },
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "NtQueryInformationProcess" }
+      ]
+    },
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^Zw(QueryInformationProcess|QueryInformationThread)$" }
+      ]
+    }
+  ]
+}

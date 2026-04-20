@@ -1,7 +1,7 @@
 {
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"title": "HexCore Automation Job",
-	"description": "Schema for .hexcore_job.json pipeline jobs.",
+	"description": "Schema for .hexcore_job.json pipeline jobs (v3.8.0).",
 	"type": "object",
 	"additionalProperties": false,
 	"required": [
@@ -25,6 +25,17 @@
 			"default": true,
 			"description": "Suppress UI notifications during pipeline execution."
 		},
+		"priority": {
+			"type": "string",
+			"enum": ["high", "normal", "low"],
+			"default": "normal",
+			"description": "Job execution priority in the queue."
+		},
+		"continueOnError": {
+			"type": "boolean",
+			"default": false,
+			"description": "v3.8.0: job-level default for step.continueOnError. When true, every step that does not set its own continueOnError inherits this value. Per-step overrides always win."
+		},
 		"steps": {
 			"type": "array",
 			"minItems": 1,
@@ -40,9 +51,18 @@
 						"minLength": 1,
 						"description": "Command ID to execute via vscode.commands.executeCommand."
 					},
+					"description": {
+						"type": "string",
+						"description": "Optional human-readable note for this step (not consumed by runner; useful for generated job files and IDE tooltips)."
+					},
+					"id": {
+						"type": "string",
+						"pattern": "^[A-Za-z0-9_\\-]+$",
+						"description": "Optional stable identifier for this step (not consumed by runner today; reserved for named step references in a future revision)."
+					},
 					"args": {
 						"type": "object",
-						"description": "Additional command arguments merged into headless options.",
+						"description": "Additional command arguments merged into headless options. String values may include $step[N].output / $step[N].result.<field> / $step[prev].* tokens for inter-step data flow.",
 						"additionalProperties": true
 					},
 					"output": {
@@ -89,6 +109,37 @@
 						"minimum": 0,
 						"default": 1000,
 						"description": "Delay between retry attempts in milliseconds."
+					},
+					"onResult": {
+						"type": "object",
+						"additionalProperties": false,
+						"description": "Conditional branching rule evaluated against the step output JSON. See docs/HEXCORE_AUTOMATION.md §Conditional Branching.",
+						"required": ["field", "operator", "value", "action"],
+						"properties": {
+							"field": {
+								"type": "string",
+								"minLength": 1,
+								"description": "Top-level field name in the step output JSON to evaluate."
+							},
+							"operator": {
+								"type": "string",
+								"enum": ["contains", "equals", "not", "gt", "lt", "regex"],
+								"description": "Comparison operator. contains/equals/not/regex work on string coercion; gt/lt coerce to Number."
+							},
+							"value": {
+								"type": ["string", "number"],
+								"description": "Value compared against the field. For regex, the string is compiled as a RegExp."
+							},
+							"action": {
+								"type": "string",
+								"enum": ["skip", "goto", "abort", "log"],
+								"description": "skip N (actionValue=N, default 1); goto INDEX (actionValue=0-based step index); abort (actionValue=reason string); log (actionValue=message)."
+							},
+							"actionValue": {
+								"type": ["string", "number"],
+								"description": "Action parameter. Integer for skip/goto, string for abort/log. Jumps are bounded by MAX_LOOP_ITERATIONS (100)."
+							}
+						}
 					}
 				}
 			}

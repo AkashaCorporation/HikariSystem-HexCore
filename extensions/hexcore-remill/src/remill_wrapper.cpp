@@ -68,6 +68,16 @@
 #include <set>
 #include <vector>
 #include <filesystem>
+#include <mutex>
+
+// FIX-024: Intel XED Instruction Length Decoder for x86 desync recovery.
+// When Remill's arch_->DecodeInstruction fails on exotic x86 instructions
+// (AVX-512, APX, MPX, etc.), XED-ILD gives us the instruction length so
+// we can emit a NoOp placeholder and advance exactly one instruction,
+// preserving code density and all subsequent basic blocks.
+extern "C" {
+#include <xed/xed-interface.h>
+}
 
 // Forward-declare Win32 functions to avoid #include <windows.h> which
 // conflicts with Sleigh's CHAR token (ghidra::sleightokentype::CHAR
@@ -78,6 +88,62 @@ __declspec(dllimport) void* __stdcall GetModuleHandleA(const char*);
 __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void*, char*, unsigned long);
 }
 #endif
+
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-024: XED Instruction Length Decoder helper
+// ═══════════════════════════════════════════════════════════════════════
+
+/**
+ * One-time thread-safe initialization of XED tables.
+ * XED is stateless after init, so a single global init is sufficient.
+ */
+static void EnsureXedInitialized() {
+	static std::once_flag xedInitFlag;
+	std::call_once(xedInitFlag, []() {
+		xed_tables_init();
+	});
+}
+
+/**
+ * Decode instruction length using XED-ILD (Instruction Length Decoder).
+ * Returns the length in bytes, or 0 if XED also fails to recognize the
+ * instruction (truly invalid bytes).
+ *
+ * @param bytes     Pointer to the instruction bytes
+ * @param maxLen    Maximum bytes available to read (avoid overrun)
+ * @param is64Bit   True for LONG_64 mode, false for LEGACY_32
+ */
+static size_t XedInstructionLength(const uint8_t* bytes, size_t maxLen, bool is64Bit) {
+	if (!bytes || maxLen == 0) {
+		return 0;
+	}
+
+	EnsureXedInitialized();
+
+	xed_decoded_inst_t xedd;
+	xed_decoded_inst_zero(&xedd);
+	xed_decoded_inst_set_mode(
+		&xedd,
+		is64Bit ? XED_MACHINE_MODE_LONG_64 : XED_MACHINE_MODE_LEGACY_32,
+		is64Bit ? XED_ADDRESS_WIDTH_64b   : XED_ADDRESS_WIDTH_32b);
+
+	// xed_ild_decode is the length-only decoder — much faster than xed_decode.
+	// It only parses the prefix/opcode structure to compute length, without
+	// decoding operands. Perfect for our use case.
+	const unsigned int capLen = static_cast<unsigned int>(
+		maxLen > XED_MAX_INSTRUCTION_BYTES ? XED_MAX_INSTRUCTION_BYTES : maxLen);
+
+	xed_error_enum_t err = xed_ild_decode(&xedd, bytes, capLen);
+	if (err != XED_ERROR_NONE) {
+		return 0;
+	}
+
+	unsigned int len = xed_decoded_inst_get_length(&xedd);
+	if (len == 0 || len > maxLen) {
+		return 0;
+	}
+	return static_cast<size_t>(len);
+}
 
 static llvm::AllocaInst* FindNamedAlloca(llvm::Function* func, llvm::StringRef name) {
 	if (!func) {
@@ -536,6 +602,11 @@ LiftResult RemillLifter::DoLift(
 	std::set<uint64_t> functionEndSet(options.knownFunctionEnds.begin(),
 	                                   options.knownFunctionEnds.end());
 
+	// FIX-024 debug counters
+	size_t fix024_xedRecovered = 0;
+	size_t fix024_xedFailed = 0;
+	size_t fix024_decodeFailures = 0;
+
 	{
 		remill::Instruction scanInst;
 		uint64_t scanPC = address;
@@ -569,6 +640,7 @@ LiftResult RemillLifter::DoLift(
 				reinterpret_cast<const char*>(bytes + scanOffset), length - scanOffset);
 
 			if (!arch_->DecodeInstruction(scanPC, instrBytes, scanInst, scanContext)) {
+				fix024_decodeFailures++;
 				// FIX-023: Intercept endbr64/endbr32 — Remill has no semantic for these
 				// CET instructions, but they are architectural NOPs. Create a synthetic
 				// DecodedInst so the scan continues past them instead of stopping.
@@ -609,6 +681,82 @@ LiftResult RemillLifter::DoLift(
 						scanPC += 5;
 						continue;
 					}
+				}
+
+				// ═══════════════════════════════════════════════════════════════
+				// FIX-024: Desync recovery via XED Instruction Length Decoder
+				// ═══════════════════════════════════════════════════════════════
+				// Remill's DecodeInstruction only supports instructions with full
+				// semantic models. Exotic x86 instructions (AVX-512, APX, MPX,
+				// some SSE4/AES/SHA variants) will fail even though they are
+				// architecturally valid. Stopping the scan here loses the entire
+				// rest of the function — observed on kernel modules where only
+				// ~33 of ~500 instructions were lifted before this fix.
+				//
+				// Instead, use XED-ILD (Intel's official length decoder, already
+				// linked via deps/xed/lib/xed-ild.lib) to determine the instruction
+				// length, emit a NoOp placeholder of the correct size, and advance
+				// exactly one instruction. The undecodable instruction becomes a
+				// no-op stub in the lifted IR, but all its neighbors lift normally.
+				//
+				// For ARM64, instructions are fixed 4 bytes, so we just advance 4.
+				// For AMD64/x86, we call XED-ILD.
+				//
+				// If XED also fails (truly invalid bytes like alignment padding
+				// in the middle of code), fall through to the break.
+				{
+					const uint8_t* p = bytes + scanOffset;
+					const size_t remaining = length - scanOffset;
+					size_t insnLen = 0;
+
+					// Match archName_ string (set in constructor, e.g. "amd64_avx",
+					// "x86", "aarch64"). Avoids dependency on remill::Arch internal
+					// enum layout which may change between versions.
+					const std::string& an = archName_;
+					const bool isAMD64 = (
+						an == "amd64" || an == "amd64_avx" || an == "amd64_avx512");
+					const bool isX86 = (
+						an == "x86" || an == "x86_avx" || an == "x86_avx512");
+					const bool isAArch64 = (
+						an == "aarch64" || an == "aarch64_little_endian");
+
+					if (isAMD64 || isX86) {
+						insnLen = XedInstructionLength(p, remaining, isAMD64);
+					} else if (isAArch64) {
+						// ARM64 instructions are always 4 bytes, always 4-byte aligned
+						if (remaining >= 4 && (scanPC & 0x3) == 0) {
+							insnLen = 4;
+						}
+					}
+
+					if (insnLen > 0 && insnLen <= remaining) {
+						DecodedInst di;
+						di.pc = scanPC;
+						di.size = insnLen;
+						di.inst.category = remill::Instruction::kCategoryNoOp;
+						di.inst.bytes = std::string(reinterpret_cast<const char*>(p), insnLen);
+						di.inst.branch_taken_pc = 0;
+						di.inst.branch_not_taken_pc = 0;
+						decoded.push_back(di);
+						scanOffset += insnLen;
+						scanPC += insnLen;
+						fix024_xedRecovered++;
+						continue;
+					}
+				}
+
+				// XED/ARM fallback also failed — truly invalid bytes. Stop scan.
+				fix024_xedFailed++;
+				{
+					char bytesHex[64] = {0};
+					size_t written = 0;
+					for (size_t k = 0; k < 8 && scanOffset + k < length && written < 60; k++) {
+						written += snprintf(bytesHex + written, 64 - written, "%02x ",
+						                    (unsigned)(uint8_t)bytes[scanOffset + k]);
+					}
+					llvm::errs() << "[FIX-024] XED recovery FAILED at 0x"
+					             << llvm::Twine::utohexstr(scanPC) << " (arch=" << archName_
+					             << ", first bytes: " << bytesHex << ")\n";
 				}
 				break;
 			}
@@ -741,6 +889,23 @@ LiftResult RemillLifter::DoLift(
 		if (result.truncated && !decoded.empty()) {
 			auto& lastInst = decoded.back();
 			result.nextAddress = lastInst.pc + lastInst.size;
+		}
+
+		// FIX-024: Phase 1 summary — silent safety net.
+		// Only log when XED recovery was actually needed (exotic ISA encountered).
+		// Counters are always incremented so we can diagnose future binaries that
+		// activate the path. For normal x86_64 / AArch64 code this never fires.
+		if (fix024_decodeFailures > 0 || fix024_xedRecovered > 0 || fix024_xedFailed > 0) {
+			llvm::errs() << "[FIX-024] Phase 1 @0x"
+			             << llvm::Twine::utohexstr(address)
+			             << ": decoded=" << decoded.size()
+			             << " leaders=" << leaders.size()
+			             << " scanned=" << scanOffset << "/" << length << " bytes"
+			             << " decodeFailures=" << fix024_decodeFailures
+			             << " xedRecovered=" << fix024_xedRecovered
+			             << " xedFailed=" << fix024_xedFailed
+			             << " truncated=" << (result.truncated ? result.truncationReason : "no")
+			             << "\n";
 		}
 	}
 
@@ -970,9 +1135,29 @@ LiftResult RemillLifter::DoLift(
 		}
 
 		case remill::Instruction::kCategoryNormal:
-		case remill::Instruction::kCategoryNoOp: {
-			// Normal instruction: if the NEXT instruction starts a new block,
-			// add a fallthrough branch to connect them
+		case remill::Instruction::kCategoryNoOp:
+		// ═══════════════════════════════════════════════════════════════
+		// FIX-025: Fall-through after CALL to next BB (return point).
+		// ═══════════════════════════════════════════════════════════════
+		// A direct/indirect CALL is lifted by Remill as if the call returns
+		// normally — execution flows through to the next PC. When the next
+		// instruction begins a new basic block (marked as a leader, e.g. by
+		// pathfinder because a branch target lands there), we MUST wire a
+		// fall-through br so LLVM sees that BB as reachable.
+		//
+		// Without this, Phase 4's "add ret to orphan BBs" fallback forces a
+		// ret at the end of the caller's block, severing its link to the
+		// return-point BB. LLVM DCE then removes the return-point BB and
+		// everything only reachable through it — on kbase_jit_allocate this
+		// collapsed 134 BBs down to ~7 and lost 95% of the function body.
+		//
+		// AsyncHyperCall (e.g. syscall) also returns and falls through.
+		case remill::Instruction::kCategoryDirectFunctionCall:
+		case remill::Instruction::kCategoryIndirectFunctionCall:
+		case remill::Instruction::kCategoryAsyncHyperCall:
+		case remill::Instruction::kCategoryConditionalAsyncHyperCall: {
+			// If the NEXT instruction starts a new block, add a fallthrough
+			// branch to connect them.
 			if (i + 1 < decoded.size() && bbMap.count(nextPC)) {
 				// Only add branch if this block doesn't already have a terminator
 				if (!currentBlock->getTerminator()) {
@@ -1057,7 +1242,7 @@ LiftResult RemillLifter::DoLift(
 						}
 
 						auto& di = decoded[i];
-						// Skip synthetic NOPs
+						// Skip synthetic NOPs (endbr64 / __fentry__)
 						if (di.inst.category == remill::Instruction::kCategoryNoOp &&
 							di.size >= 4 && di.size <= 5) {
 							const uint8_t firstByte = static_cast<uint8_t>(di.inst.bytes[0]);
@@ -1067,10 +1252,15 @@ LiftResult RemillLifter::DoLift(
 						auto status = instLifter->LiftIntoBlock(di.inst, bb, false);
 						if (status != remill::kLiftedInstruction) break;
 
-						// Wire fallthrough to next block if needed
+						// Wire fallthrough to next block if needed.
+						// FIX-025: CALL categories also fall-through to return point.
 						uint64_t nextPC = di.pc + di.size;
 						if (di.inst.category == remill::Instruction::kCategoryNormal ||
-						    di.inst.category == remill::Instruction::kCategoryNoOp) {
+						    di.inst.category == remill::Instruction::kCategoryNoOp ||
+						    di.inst.category == remill::Instruction::kCategoryDirectFunctionCall ||
+						    di.inst.category == remill::Instruction::kCategoryIndirectFunctionCall ||
+						    di.inst.category == remill::Instruction::kCategoryAsyncHyperCall ||
+						    di.inst.category == remill::Instruction::kCategoryConditionalAsyncHyperCall) {
 							if (bbMap.count(nextPC) && !bb->getTerminator()) {
 								llvm::IRBuilder<> builder(bb);
 								builder.CreateBr(bbMap[nextPC]);

@@ -682,6 +682,45 @@ export declare class Unicorn {
     hookAdd(type: number, callback: HookCallback, begin?: bigint | number, end?: bigint | number, extra?: number): number;
 
     /**
+     * v4.0.0 — Add a SharedArrayBuffer-backed CODE hook (Issue #31).
+     *
+     * Zero-copy alternative to `hookAdd` for high-frequency CODE hooks. Each
+     * hook fire writes a 32-byte event into the SAB ring buffer instead of
+     * marshalling through ThreadSafeFunction. The JS consumer drains the ring
+     * via `SharedRingBuffer.drain()` from `hexcore-common`.
+     *
+     * Watched addresses (`watchAddresses` array) bypass the ring and route
+     * through the legacy callback path so that synchronous behavior such as
+     * `emuStop()` still works for breakpoints and API interception.
+     *
+     * Target throughput: 10M+ instructions/sec (vs ~50K with `hookAdd`).
+     *
+     * @param type Hook type — only `HOOK.CODE` is supported in v4.0.0.
+     * @param sabRef SharedArrayBuffer of size >= 64 + slotSize * slotCount.
+     *               The buffer header is initialized in place and the ring
+     *               buffer is owned by Unicorn until `hookDel` is called.
+     * @param slotSize Bytes per slot. Must be >= 32 and a multiple of 8.
+     * @param slotCount Number of slots. Must be a power of two (4096 recommended).
+     * @param watchAddresses Addresses that should fire `legacyCallback` instead
+     *                       of being written to the ring.
+     * @param legacyCallback Optional callback invoked for watched addresses.
+     *                       Same signature as the standard `CodeHookCallback`.
+     * @param begin Start address (optional, default 1).
+     * @param end End address (optional, default 0 = all addresses).
+     * @returns Hook handle (number) — pass to `hookDel` to remove.
+     */
+    hookAddSAB(
+        type: number,
+        sabRef: SharedArrayBuffer,
+        slotSize: number,
+        slotCount: number,
+        watchAddresses: bigint[],
+        legacyCallback?: ((address: bigint, size: number, sequenceNumber: bigint) => void) | null,
+        begin?: bigint | number,
+        end?: bigint | number,
+    ): number;
+
+    /**
      * Remove a hook
      * @param hookHandle - Handle returned by hookAdd
      */

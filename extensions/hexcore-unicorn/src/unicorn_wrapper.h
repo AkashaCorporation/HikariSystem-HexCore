@@ -16,6 +16,7 @@
 
 // Forward declarations
 struct HookData;
+struct HookSabData; // v4.0.0 — SAB zero-copy IPC (Issue #31)
 class UnicornContext;
 
 /**
@@ -40,6 +41,8 @@ public:
 	friend bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
 	// CodeHookCB needs access to codeHookSeq_ (BUG-UNI-007)
 	friend void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
+	// v4.0.0 — CodeHookSabCB needs access to codeHookSeq_ for the SAB ring path (Issue #31)
+	friend void CodeHookSabCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 
 private:
 	uc_engine* engine_;
@@ -52,6 +55,10 @@ private:
 	// Map of active hooks: hook handle -> HookData
 	std::unordered_map<uc_hook, std::unique_ptr<HookData>> hooks_;
 	uc_hook nextHookId_;
+
+	// v4.0.0 — Map of SAB-backed hooks: hook handle -> HookSabData (Issue #31)
+	// Lives in parallel with hooks_; HookDel and CleanupHooks check both maps.
+	std::unordered_map<uc_hook, std::unique_ptr<HookSabData>> sabHooks_;
 
 	// Native Breakpoints
 	std::unordered_set<uint64_t> breakpoints_;
@@ -183,6 +190,26 @@ private:
 	 * @returns Hook handle (number)
 	 */
 	Napi::Value HookAdd(const Napi::CallbackInfo& info);
+
+	/**
+	 * v4.0.0 — Add a SAB-backed CODE hook (Issue #31).
+	 *
+	 * Zero-copy alternative to HookAdd for high-frequency CODE hooks. Writes
+	 * each hook event into a SharedArrayBuffer ring buffer instead of marshalling
+	 * via TSFN. Watched addresses (breakpoints, API stubs) still route through
+	 * the legacy callback to preserve emuStop() semantics.
+	 *
+	 * @param info[0] hookType (HOOK.CODE only in v4.0.0)
+	 * @param info[1] sabRef    SharedArrayBuffer >= 64 + slotSize*slotCount bytes
+	 * @param info[2] slotSize  bytes per slot (32 for CODE)
+	 * @param info[3] slotCount power of two (4096 recommended)
+	 * @param info[4] watchAddresses bigint[] — addresses that should fire via TSFN
+	 * @param info[5] legacyCallback Function | null — only invoked for watched hits
+	 * @param info[6] begin     start address (optional, default 1)
+	 * @param info[7] end       end address (optional, default 0 = all addresses)
+	 * @returns hook handle (number)
+	 */
+	Napi::Value HookAddSAB(const Napi::CallbackInfo& info);
 
 	/**
 	 * Remove a hook
@@ -377,6 +404,73 @@ struct InvalidMemHookCallData {
 	bool result{false};
 };
 
+// ============== v4.0.0 — SAB Zero-Copy IPC (Issue #31) ==============
+
+/**
+ * 64-byte cache-line aligned ring buffer header.
+ *
+ * MUST be byte-for-byte identical to the TypeScript layout in
+ * extensions/hexcore-common/src/sharedRingBuffer.ts. Any change here MUST
+ * be mirrored in the TS class. The static_asserts in unicorn_wrapper.cpp
+ * catch ABI mismatches at compile time.
+ */
+struct alignas(64) RingHeader {
+	uint32_t magic;                       // offset 0  — 0x48524E47 ("HRNG")
+	uint32_t version;                     // offset 4  — 1
+	uint32_t slotSize;                    // offset 8  — bytes per slot
+	uint32_t slotCount;                   // offset 12 — must be power of two
+	std::atomic<uint32_t> head;           // offset 16 — producer cursor
+	uint32_t _pad0;                       // offset 20
+	std::atomic<uint32_t> tail;           // offset 24 — consumer cursor
+	uint32_t _pad1;                       // offset 28
+	std::atomic<uint32_t> droppedCount;   // offset 32 — producer increments on overflow
+	uint32_t producerSeqHi;               // offset 36 — reserved for 64-bit seq assembly
+	uint32_t _reserved[6];                // offsets 40..63
+};
+
+/**
+ * 32-byte ring slot for CODE hook events.
+ * MUST match the JS-side reader in unicornWrapper.ts drain callback.
+ */
+struct alignas(8) CodeHookSabSlot {
+	uint64_t sequenceNumber;  // offset 0  — monotonic per hook fire
+	uint64_t address;         // offset 8  — instruction address
+	uint32_t size;            // offset 16 — instruction size
+	uint32_t flags;           // offset 20 — reserved (bit 0 = also-watched)
+	uint64_t timestamp;       // offset 24 — reserved (rdtsc), zero in v4.0.0
+};
+
+/**
+ * Per-hook context for SAB-backed CODE hooks.
+ *
+ * One instance per active hookAddSAB registration. The `sabRef` ObjectReference
+ * pins the SharedArrayBuffer so V8 cannot free it while the hook is live.
+ * The `header` and `payload` pointers are raw pointers into the SAB — they are
+ * valid for the lifetime of the pinned reference.
+ */
+struct HookSabData {
+	Napi::ObjectReference sabRef;            // pin the SAB (prevents GC)
+	RingHeader* header;                      // pointer into SAB at offset 0
+	uint8_t* payload;                        // pointer into SAB at offset 64
+	uint32_t slotMask;                       // slotCount - 1 for fast modulo
+	uint32_t slotStride;                     // runtime slot stride (bytes) — may exceed sizeof(CodeHookSabSlot) for cache-line padding
+	std::unordered_set<uint64_t> watchSet;   // addresses routed via legacyTsfn
+	Napi::ThreadSafeFunction legacyTsfn;     // only used for watched hits, may be empty
+	uc_hook handle;
+	int type;
+	UnicornWrapper* wrapper;
+	bool active;
+
+	HookSabData()
+		: header(nullptr), payload(nullptr), slotMask(0), slotStride(0),
+		  handle(0), type(0), wrapper(nullptr), active(true) {}
+	~HookSabData() {
+		if (legacyTsfn) {
+			legacyTsfn.Release();
+		}
+	}
+};
+
 // ============== Hook Callback Functions ==============
 
 void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
@@ -385,6 +479,8 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data);
 void InsnHookCB(uc_engine* uc, void* user_data);
 bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
+// v4.0.0 — SAB-backed CODE hook (Issue #31)
+void CodeHookSabCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 void BreakpointHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 
 // ============== Utility Functions ==============

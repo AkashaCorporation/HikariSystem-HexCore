@@ -1,0 +1,45 @@
+{
+  "id": "anti-analysis.timing_check",
+  "name": "Timing-based Anti-Analysis",
+  "description": "Detects loops or branches comparing two timer reads (rdtsc, GetTickCount, QueryPerformanceCounter). Sandboxes and debuggers introduce timing perturbations that this pattern is designed to detect.",
+  "severity": "high",
+  "mitre": ["T1497.003"],
+  "queries": [
+    {
+      "target": "CForStmt",
+      "contains": [
+        {
+          "target": "CCallExpr",
+          "attributes": [
+            { "field": "callee", "value": "re:^(rdtsc|rdtscp|GetTickCount(64)?|QueryPerformanceCounter)$" }
+          ]
+        }
+      ]
+    },
+    {
+      "target": "CWhileStmt",
+      "contains": [
+        {
+          "target": "CCallExpr",
+          "attributes": [
+            { "field": "callee", "value": "re:^(rdtsc|rdtscp|GetTickCount(64)?|QueryPerformanceCounter)$" }
+          ]
+        }
+      ]
+    },
+    {
+      "target": "CBinaryExpr",
+      "attributes": [
+        { "field": "operator", "value": "-" }
+      ],
+      "contains": [
+        {
+          "target": "CCallExpr",
+          "attributes": [
+            { "field": "callee", "value": "re:^(rdtsc|GetTickCount|QueryPerformanceCounter)$" }
+          ]
+        }
+      ]
+    }
+  ]
+}

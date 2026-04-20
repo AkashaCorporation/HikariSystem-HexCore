@@ -91,7 +91,10 @@ export interface MultiByteXorOptions {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_KEY_SIZES = [2, 4, 8, 16];
+// v3.8.0-nightly: expanded from [2,4,8,16] to cover odd sizes commonly used
+// by malware. 7 targets the "Ashaka" key from HEXCORE_DEFEAT v2 specifically;
+// 3/5/6/12 are frequent custom key lengths found in the wild.
+const DEFAULT_KEY_SIZES = [2, 3, 4, 5, 6, 7, 8, 12, 16];
 const DEFAULT_MIN_LENGTH = 6;
 const DEFAULT_MIN_CONFIDENCE = 0.6;
 

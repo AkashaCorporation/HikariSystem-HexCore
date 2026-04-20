@@ -55,14 +55,16 @@
           "type": "string",
           "enum": [
             "azoth",
-            "debugger"
+            "debugger",
+            "both"
           ],
           "enumDescriptions": [
-            "Project Azoth — clean-room C++/Rust emulator (default in v3.8.0, recommended)",
-            "Legacy TypeScript debugger — kept for regression comparison against Azoth"
+            "Project Azoth only — clean-room C++/Rust emulator (lighter, faster activation)",
+            "Legacy TypeScript debugger only — kept for regression comparison against Azoth",
+            "Azoth + debugger side-by-side (default in v3.8.0; both emulators available for pipelines that exercise both)"
           ],
-          "default": "azoth",
-          "description": "Which emulation engine to activate. Only one runs per Extension Host session to avoid libuc state conflicts. Changing this requires a window reload."
+          "default": "both",
+          "description": "Which emulation engine(s) to activate. Tip: open the Command Palette and run \"HexCore: Switch Emulator…\" or click the emulator name in the status bar to change this without editing settings.json. Changing this requires a window reload."
         }
       }
     },

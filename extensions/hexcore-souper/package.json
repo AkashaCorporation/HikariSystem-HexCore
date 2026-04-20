@@ -1,0 +1,38 @@
+{
+  "name": "hexcore-souper",
+  "version": "0.1.0",
+  "description": "HexCore Souper — LLVM IR superoptimizer via Z3 SMT solving",
+  "main": "./index.js",
+  "module": "./index.mjs",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./index.mjs",
+      "require": "./index.js",
+      "types": "./index.d.ts"
+    }
+  },
+  "scripts": {
+    "install": "node ../../scripts/hexcore-native-install.js",
+    "build": "node-gyp rebuild",
+    "build:debug": "node-gyp rebuild --debug",
+    "prebuild": "prebuildify --napi --strip",
+    "test": "node test/test.js",
+    "clean": "node-gyp clean"
+  },
+  "engines": {
+    "vscode": "^1.75.0",
+    "node": ">=18.0.0"
+  },
+  "activationEvents": [],
+  "binary": {
+    "napi_versions": [8]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AkashaCorporation/hexcore-souper.git"
+  },
+  "author": "HikariSystem",
+  "license": "MIT",
+  "devDependencies": {}
+}

@@ -9,6 +9,9 @@ import { Worker } from 'worker_threads';
 import { loadNativeModule } from 'hexcore-common';
 import type { ArchitectureConfig } from './capstoneWrapper';
 import { mapCapstoneToHelix, isHelixArchSupported, HelixArch, type HelixArchValue } from './helixArchMapper';
+import type { StructInfoJson } from './elfBtfLoader';
+import { applyStructFieldNames, type PostProcessResult } from './structFieldPostProcessor';
+import { cleanupHelixSource, type CleanupOptions } from './helixCleanupPostProcessor';
 
 // ---------------------------------------------------------------------------
 // Interfaces do módulo nativo hexcore-helix
@@ -192,7 +195,22 @@ export class HelixWrapper {
 	 * because Remill IR already encodes the architecture in the IR text,
 	 * and the Helix engine uses x86_64 backend for both x86 variants.
 	 */
-	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64', options?: { optimizeIR?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> }): Promise<HelixResult> {
+	async decompileIr(irText: string, arch: ArchitectureConfig = 'x64', options?: {
+		optimizeIR?: boolean;
+		useCastLayer?: boolean;
+		variableRenames?: Array<{ oldName: string; newName: string }>;
+		/** v3.8.0: Struct field info from BTF/DWARF/PDB for field naming */
+		structInfo?: StructInfoJson;
+		/** Function name for param type resolution against structInfo */
+		functionName?: string;
+		/**
+		 * v3.8.0: Safe text-level cleanup of Helix output (cast stripping,
+		 * intrinsic normalization, logical-op fixes, dead-decl pruning).
+		 * Pass `false` to disable. Pass a partial object to enable a subset.
+		 * Default: enabled with all transformations on.
+		 */
+		cleanup?: boolean | CleanupOptions;
+	}): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
 		}
@@ -287,6 +305,47 @@ export class HelixWrapper {
 					engine.clearVariableRenames();
 				}
 			} catch { /* ignore */ }
+		}
+
+		// v3.8.0: Apply struct field naming from BTF/DWARF/PDB debug info
+		if (result.success && options?.structInfo) {
+			try {
+				const postResult = applyStructFieldNames(
+					result.source,
+					options.structInfo,
+					options.functionName,
+				);
+				if (postResult.totalRenames > 0) {
+					result = { ...result, source: postResult.source };
+					console.log(`[helix-struct] Applied ${postResult.totalRenames} renames (${postResult.fieldRenames.length} fields, ${postResult.paramRenames.length} params)`);
+				}
+			} catch (err) {
+				console.warn('[helix-struct] Post-processing failed:', err);
+				// Don't fail the decompilation — return unmodified result
+			}
+		}
+
+		// v3.8.0: Safe text-level cleanup of residual emitter artifacts
+		// (literal casts, intrinsic prefixes, bitwise-on-bool, dead regs).
+		// Runs AFTER struct renaming so dead-decl pruning sees the final names.
+		if (result.success && options?.cleanup !== false) {
+			try {
+				const cleanupOpts: CleanupOptions | undefined =
+					typeof options?.cleanup === 'object' ? options.cleanup : undefined;
+				const cleaned = cleanupHelixSource(result.source, cleanupOpts);
+				if (cleaned.stats.totalRewrites > 0) {
+					result = { ...result, source: cleaned.source };
+					const s = cleaned.stats;
+					console.log(
+						`[helix-cleanup] Applied ${s.totalRewrites} rewrites ` +
+						`(casts=${s.redundantCasts}, intrinsics=${s.intrinsicsNormalized}, ` +
+						`logicOps=${s.logicalOpsFixed}, deadDecls=${s.deadDeclarations})`,
+					);
+				}
+			} catch (err) {
+				console.warn('[helix-cleanup] Post-processing failed:', err);
+				// Non-fatal: return the un-cleaned source
+			}
 		}
 
 		return result;

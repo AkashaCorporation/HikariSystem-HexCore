@@ -107,9 +107,11 @@ jobs:
           cd extensions/hexcore-capstone && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-unicorn && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
-          cd ../hexcore-better-sqlite3 && npm ci
+          cd ../hexcore-better-sqlite3 && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-souper && node ../../scripts/hexcore-native-install.js
+          cd ../hexcore-elixir && node ../../scripts/hexcore-native-install.js
 
       - name: Verify Unicorn Runtime DLL
         continue-on-error: true
@@ -298,7 +300,7 @@ jobs:
 
       - name: Fetch HexCore Native Dependencies
         run: |
-          cd extensions/hexcore-better-sqlite3 && npm ci
+          cd extensions/hexcore-better-sqlite3 && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Remill Prebuilds (Linux)
         continue-on-error: true
@@ -310,10 +312,20 @@ jobs:
         run: |
           cd extensions/hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
+      - name: Fetch HexCore Souper Prebuilds (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-souper && node ../../scripts/hexcore-native-install.js
+
       - name: Fetch HexCore Helix Prebuilds (Linux)
         continue-on-error: true
         run: |
           cd extensions/hexcore-helix && node ../../scripts/hexcore-native-install.js
+
+      - name: Fetch HexCore Elixir Prebuilds (Linux)
+        continue-on-error: true
+        run: |
+          cd extensions/hexcore-elixir && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Remill Semantics (Linux)
         continue-on-error: true

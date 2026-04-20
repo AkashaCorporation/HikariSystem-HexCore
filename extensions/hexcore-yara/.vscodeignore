@@ -1,0 +1,17 @@
+.vscode/**
+.vscode-test/**
+src/**
+**/*.map
+**/tsconfig.json
+**/tsconfig.*.json
+node_modules/**
+**/.DS_Store
+.gitignore
+tsconfig.json
+
+# Explicitly keep built-in rules — they MUST ship so threatScore > 0
+# works out-of-the-box without user configuration.
+!rules/**
+!out/**
+!package.json
+!README.md

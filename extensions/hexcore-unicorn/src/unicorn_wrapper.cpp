@@ -8,6 +8,29 @@
 #include <cstring>
 #include <sstream>
 
+// v4.0.0 — SAB Zero-Copy IPC ABI guarantees (Issue #31).
+// These static_asserts catch any compiler that produces a layout incompatible
+// with the JavaScript Int32Array reader in extensions/hexcore-common/src/sharedRingBuffer.ts.
+static_assert(sizeof(RingHeader) == 64, "RingHeader must be exactly 64 bytes for cache-line alignment");
+static_assert(alignof(RingHeader) == 64, "RingHeader must be 64-byte aligned");
+static_assert(sizeof(CodeHookSabSlot) == 32, "CodeHookSabSlot must be exactly 32 bytes (TS layout contract)");
+static_assert(sizeof(std::atomic<uint32_t>) == sizeof(uint32_t), "std::atomic<uint32_t> must be ABI-compatible with uint32_t");
+static_assert(alignof(std::atomic<uint32_t>) == 4, "std::atomic<uint32_t> must be 4-byte aligned");
+static_assert(offsetof(RingHeader, magic) == 0, "RingHeader.magic offset");
+static_assert(offsetof(RingHeader, version) == 4, "RingHeader.version offset");
+static_assert(offsetof(RingHeader, slotSize) == 8, "RingHeader.slotSize offset");
+static_assert(offsetof(RingHeader, slotCount) == 12, "RingHeader.slotCount offset");
+static_assert(offsetof(RingHeader, head) == 16, "RingHeader.head offset");
+static_assert(offsetof(RingHeader, tail) == 24, "RingHeader.tail offset");
+static_assert(offsetof(RingHeader, droppedCount) == 32, "RingHeader.droppedCount offset");
+static_assert(offsetof(CodeHookSabSlot, sequenceNumber) == 0, "Slot.seq offset");
+static_assert(offsetof(CodeHookSabSlot, address) == 8, "Slot.address offset");
+static_assert(offsetof(CodeHookSabSlot, size) == 16, "Slot.size offset");
+
+// Magic constant — must match RING_BUFFER_MAGIC in sharedRingBuffer.ts
+constexpr uint32_t SAB_RING_MAGIC = 0x48524E47;  // "HRNG"
+constexpr uint32_t SAB_RING_VERSION = 1;
+
 Napi::FunctionReference UnicornWrapper::constructor;
 Napi::FunctionReference UnicornContext::constructor;
 
@@ -73,6 +96,8 @@ Napi::Object UnicornWrapper::Init(Napi::Env env, Napi::Object exports) {
 		// Hook operations
 		InstanceMethod<&UnicornWrapper::HookAdd>("hookAdd"),
 		InstanceMethod<&UnicornWrapper::HookDel>("hookDel"),
+		// v4.0.0 — SAB zero-copy CODE hook (Issue #31)
+		InstanceMethod<&UnicornWrapper::HookAddSAB>("hookAddSAB"),
 
 		// Native Breakpoints
 		InstanceMethod<&UnicornWrapper::BreakpointAdd>("breakpointAdd"),
@@ -157,6 +182,18 @@ void UnicornWrapper::CleanupHooks() {
 		}
 	}
 	hooks_.clear();
+
+	// v4.0.0 — Drain SAB hooks alongside the legacy hooks (Issue #31).
+	for (auto& pair : sabHooks_) {
+		if (pair.second) {
+			pair.second->active = false;
+			if (pair.second->legacyTsfn) {
+				pair.second->legacyTsfn.Abort();
+			}
+			uc_hook_del(engine_, pair.first);
+		}
+	}
+	sabHooks_.clear();
 }
 
 // ============== Emulation Control ==============
@@ -1140,9 +1177,24 @@ Napi::Value UnicornWrapper::RegWrite(const Napi::CallbackInfo& info) {
 	} else if (info[1].IsBigInt()) {
 		bool lossless;
 		uint64_t value = info[1].As<Napi::BigInt>().Uint64Value(&lossless);
+		// FIX (HEXCORE_DEFEAT FAIL 4): Mask to actual register width so a
+		// negative BigInt (e.g. -1n → 0xFFFFFFFFFFFFFFFF) doesn't bleed
+		// stale upper bits into smaller registers.
+		if (regSize == 1) value &= 0xFFULL;
+		else if (regSize == 2) value &= 0xFFFFULL;
+		else if (regSize == 4) value &= 0xFFFFFFFFULL;
 		err = uc_reg_write(engine_, regId, &value);
 	} else if (info[1].IsNumber()) {
+		// FIX (HEXCORE_DEFEAT FAIL 4): JS Number can be a negative int32 (e.g.
+		// `Date.now() & 0xFFFFFFFF` produces -1849236473 when the high bit is
+		// set). Int64Value() returns the signed value, then static_cast to
+		// uint64 sign-extends to 0xFFFFFFFFXXXXXXXX. For sub-64-bit registers
+		// this writes garbage into the upper half. Mask to actual register
+		// width here too.
 		uint64_t value = static_cast<uint64_t>(info[1].As<Napi::Number>().Int64Value());
+		if (regSize == 1) value &= 0xFFULL;
+		else if (regSize == 2) value &= 0xFFFFULL;
+		else if (regSize == 4) value &= 0xFFFFFFFFULL;
 		err = uc_reg_write(engine_, regId, &value);
 	} else {
 		Napi::TypeError::New(env, "value must be a Buffer, BigInt, or Number").ThrowAsJavaScriptException();
@@ -1251,9 +1303,19 @@ Napi::Value UnicornWrapper::RegWriteBatch(const Napi::CallbackInfo& info) {
 		} else if (val.IsBigInt()) {
 			bool lossless;
 			uint64_t value = val.As<Napi::BigInt>().Uint64Value(&lossless);
+			// FIX (HEXCORE_DEFEAT FAIL 4): mask to actual register width to
+			// prevent sign-extended negative BigInts from leaking upper bits.
+			if (regSize == 1) value &= 0xFFULL;
+			else if (regSize == 2) value &= 0xFFFFULL;
+			else if (regSize == 4) value &= 0xFFFFFFFFULL;
 			err = uc_reg_write(engine_, regId, &value);
 		} else if (val.IsNumber()) {
+			// FIX (HEXCORE_DEFEAT FAIL 4): see RegWrite for the negative-int32
+			// sign-extension case. Mask to the actual register width.
 			uint64_t value = static_cast<uint64_t>(val.As<Napi::Number>().Int64Value());
+			if (regSize == 1) value &= 0xFFULL;
+			else if (regSize == 2) value &= 0xFFFFULL;
+			else if (regSize == 4) value &= 0xFFFFFFFFULL;
 			err = uc_reg_write(engine_, regId, &value);
 		} else {
 			Napi::TypeError::New(env, "All values must be Buffer, BigInt, or Number").ThrowAsJavaScriptException();
@@ -1454,6 +1516,76 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	return true; // Fault handled, Unicorn retries the access
 }
 
+// ============== v4.0.0 — SAB Zero-Copy CODE Hook (Issue #31) ==============
+
+/**
+ * Split-path CODE hook callback. Watched addresses (breakpoints, API stubs)
+ * route through the legacy TSFN slow path so emuStop() semantics are preserved.
+ * Everything else writes 32 bytes to the SAB ring buffer with zero allocations
+ * and zero N-API transitions on the hot path.
+ *
+ * This callback runs on the Unicorn worker thread (EmuAsyncWorker::Execute).
+ * The release barrier on h->head.store synchronizes-with the JS-side
+ * Atomics.load on the same field via SharedArrayBuffer semantics.
+ */
+void CodeHookSabCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data) {
+	(void)uc;
+	auto* data = static_cast<HookSabData*>(user_data);
+	if (!data || !data->active) return;
+
+	const uint64_t seq = data->wrapper->codeHookSeq_.fetch_add(1, std::memory_order_relaxed);
+
+	// ── Slow path: watched address → legacy TSFN ─────────────────────
+	// Preserves emuStop() correctness for breakpoints and API interception.
+	if (!data->watchSet.empty() && data->watchSet.count(address) > 0) {
+		if (!data->legacyTsfn) {
+			return; // no callback registered, watched addresses are silently dropped
+		}
+		auto callData = std::make_unique<CodeHookCallData>();
+		callData->address = address;
+		callData->size = size;
+		callData->sequenceNumber = seq;
+		auto* raw = callData.release();
+		napi_status status = data->legacyTsfn.NonBlockingCall(raw,
+			[](Napi::Env env, Napi::Function cb, CodeHookCallData* d) {
+				cb.Call({
+					Napi::BigInt::New(env, d->address),
+					Napi::Number::New(env, d->size),
+					Napi::BigInt::New(env, d->sequenceNumber)
+				});
+				delete d;
+			});
+		if (status != napi_ok) {
+			delete raw;
+		}
+		return;
+	}
+
+	// ── Fast path: lock-free single-producer ring write ───────────────
+	// Zero allocations, zero N-API calls. ~8 instructions on x86_64.
+	RingHeader* h = data->header;
+	const uint32_t head = h->head.load(std::memory_order_relaxed);
+	const uint32_t next = (head + 1) & data->slotMask;
+	const uint32_t tail = h->tail.load(std::memory_order_acquire);
+	if (next == tail) {
+		// Ring full: drop newest. JS detects gap via sequenceNumber.
+		h->droppedCount.fetch_add(1, std::memory_order_relaxed);
+		return;
+	}
+	// Use runtime slotStride (not compile-time sizeof) so callers that
+	// pad slots for cache-line alignment (e.g. slotSize = 64) write at
+	// the same stride the JS consumer reads from h->slotSize.
+	auto* slot = reinterpret_cast<CodeHookSabSlot*>(
+		data->payload + head * data->slotStride);
+	slot->sequenceNumber = seq;
+	slot->address = address;
+	slot->size = size;
+	slot->flags = 0;
+	slot->timestamp = 0;
+	// Release: publishes the slot write to the consumer.
+	h->head.store(next, std::memory_order_release);
+}
+
 Napi::Value UnicornWrapper::HookAdd(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
 
@@ -1572,6 +1704,189 @@ Napi::Value UnicornWrapper::HookAdd(const Napi::CallbackInfo& info) {
 	return Napi::Number::New(env, static_cast<double>(handle));
 }
 
+// ============== v4.0.0 — HookAddSAB (Issue #31) ==============
+
+Napi::Value UnicornWrapper::HookAddSAB(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_) {
+		Napi::Error::New(env, "Engine is closed").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	if (emulating_) {
+		Napi::Error::New(env, "Cannot add hooks while emulation is running").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Signature: hookAddSAB(type, sabRef, slotSize, slotCount, watchAddresses[], legacyCallback?, begin?, end?)
+	if (info.Length() < 5) {
+		Napi::TypeError::New(env,
+			"hookAddSAB: expected (type, sabRef, slotSize, slotCount, watchAddresses[, legacyCallback, begin, end])"
+		).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	const int hookType = info[0].As<Napi::Number>().Int32Value();
+	if (hookType != UC_HOOK_CODE) {
+		Napi::TypeError::New(env, "hookAddSAB v4.0.0 only supports UC_HOOK_CODE").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	// Accept either a plain ArrayBuffer/SharedArrayBuffer (info[1].IsArrayBuffer())
+	// or a TypedArray view over a SAB (info[1].IsTypedArray()). N-API's
+	// IsArrayBuffer() returns false for SharedArrayBuffer because V8 distinguishes
+	// the two at the JS type level even though they share C++ storage. The same
+	// pattern is used in extensions/hexcore-capstone/src/capstone_wrapper.cpp:105.
+	Napi::ArrayBuffer sab;
+	Napi::Object pinObject;  // The object we keep persistent — must own the SAB lifetime.
+	if (info[1].IsArrayBuffer()) {
+		sab = info[1].As<Napi::ArrayBuffer>();
+		pinObject = info[1].As<Napi::Object>();
+	} else if (info[1].IsTypedArray()) {
+		Napi::TypedArray ta = info[1].As<Napi::TypedArray>();
+		sab = ta.ArrayBuffer();
+		// Pin the TypedArray itself — it owns the underlying SAB reference.
+		pinObject = info[1].As<Napi::Object>();
+	} else {
+		Napi::TypeError::New(env, "hookAddSAB: sabRef must be a SharedArrayBuffer or a TypedArray over one").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	if (sab.IsDetached()) {
+		Napi::Error::New(env, "hookAddSAB: SharedArrayBuffer is detached").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	const uint32_t slotSize = info[2].As<Napi::Number>().Uint32Value();
+	const uint32_t slotCount = info[3].As<Napi::Number>().Uint32Value();
+	if (slotSize < sizeof(CodeHookSabSlot) || (slotSize & 7) != 0) {
+		Napi::RangeError::New(env, "hookAddSAB: slotSize must be >= 32 and multiple of 8").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	if (slotCount == 0 || (slotCount & (slotCount - 1)) != 0) {
+		Napi::RangeError::New(env, "hookAddSAB: slotCount must be a power of two").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	const size_t requiredBytes = sizeof(RingHeader) + static_cast<size_t>(slotSize) * slotCount;
+	if (sab.ByteLength() < requiredBytes) {
+		std::stringstream ss;
+		ss << "hookAddSAB: SAB too small (" << sab.ByteLength() << " < " << requiredBytes << ")";
+		Napi::RangeError::New(env, ss.str()).ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	if (!info[4].IsArray()) {
+		Napi::TypeError::New(env, "hookAddSAB: watchAddresses must be an array").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	Napi::Array watchArr = info[4].As<Napi::Array>();
+
+	const bool hasLegacyCb = info.Length() > 5 && info[5].IsFunction();
+
+	uint64_t begin = 1;
+	uint64_t end = 0;
+	if (info.Length() > 6 && !info[6].IsUndefined()) {
+		if (info[6].IsBigInt()) {
+			bool lossless;
+			begin = info[6].As<Napi::BigInt>().Uint64Value(&lossless);
+		} else if (info[6].IsNumber()) {
+			begin = static_cast<uint64_t>(info[6].As<Napi::Number>().Int64Value());
+		}
+	}
+	if (info.Length() > 7 && !info[7].IsUndefined()) {
+		if (info[7].IsBigInt()) {
+			bool lossless;
+			end = info[7].As<Napi::BigInt>().Uint64Value(&lossless);
+		} else if (info[7].IsNumber()) {
+			end = static_cast<uint64_t>(info[7].As<Napi::Number>().Int64Value());
+		}
+	}
+
+	// Build the hook data
+	auto sabData = std::make_unique<HookSabData>();
+	sabData->type = hookType;
+	sabData->wrapper = this;
+	sabData->active = true;
+	sabData->slotMask = slotCount - 1;
+	sabData->slotStride = slotSize; // matches h->slotSize published to consumer
+
+	// Pin the SAB (or the TypedArray that owns it) so V8 cannot collect it
+	// while the hook is live.
+	sabData->sabRef = Napi::Persistent(pinObject);
+
+	// Direct pointer access into the SAB.
+	uint8_t* base = static_cast<uint8_t*>(sab.Data());
+	sabData->header = reinterpret_cast<RingHeader*>(base);
+	sabData->payload = base + sizeof(RingHeader);
+
+	// Initialize the header in place. Idempotent on reuse — head/tail/dropped reset.
+	RingHeader* h = sabData->header;
+	h->magic = SAB_RING_MAGIC;
+	h->version = SAB_RING_VERSION;
+	h->slotSize = slotSize;
+	h->slotCount = slotCount;
+	h->head.store(0, std::memory_order_relaxed);
+	h->tail.store(0, std::memory_order_relaxed);
+	h->droppedCount.store(0, std::memory_order_relaxed);
+	h->producerSeqHi = 0;
+	for (int i = 0; i < 6; i++) h->_reserved[i] = 0;
+	h->_pad0 = 0;
+	h->_pad1 = 0;
+
+	// Populate the watch set from the JS array.
+	const uint32_t watchLen = watchArr.Length();
+	sabData->watchSet.reserve(watchLen);
+	for (uint32_t i = 0; i < watchLen; i++) {
+		Napi::Value v = watchArr[i];
+		uint64_t addr = 0;
+		if (v.IsBigInt()) {
+			bool lossless;
+			addr = v.As<Napi::BigInt>().Uint64Value(&lossless);
+		} else if (v.IsNumber()) {
+			addr = static_cast<uint64_t>(v.As<Napi::Number>().Int64Value());
+		} else {
+			Napi::TypeError::New(env, "hookAddSAB: watchAddresses entries must be bigint or number").ThrowAsJavaScriptException();
+			return env.Undefined();
+		}
+		sabData->watchSet.insert(addr);
+	}
+
+	// Create TSFN only if a legacy callback was provided.
+	if (hasLegacyCb) {
+		Napi::Function callback = info[5].As<Napi::Function>();
+		sabData->legacyTsfn = Napi::ThreadSafeFunction::New(
+			env,
+			callback,
+			"UnicornHookSAB",
+			0,
+			1,
+			[](Napi::Env) {} // Release callback
+		);
+	}
+
+	// Register the hook with Unicorn.
+	uc_hook handle;
+	uc_err err = uc_hook_add(engine_, &handle, UC_HOOK_CODE,
+		(void*)CodeHookSabCB, sabData.get(), begin, end);
+
+	if (err != UC_ERR_OK) {
+		if (sabData->legacyTsfn) {
+			sabData->legacyTsfn.Abort();
+		}
+		ThrowUnicornError(env, err, "Failed to add SAB hook");
+		return env.Undefined();
+	}
+
+	sabData->handle = handle;
+
+	// Store in the SAB hooks map.
+	{
+		std::lock_guard<std::mutex> lock(hookMutex_);
+		sabHooks_[handle] = std::move(sabData);
+	}
+
+	return Napi::Number::New(env, static_cast<double>(handle));
+}
+
 Napi::Value UnicornWrapper::HookDel(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
 
@@ -1605,13 +1920,22 @@ Napi::Value UnicornWrapper::HookDel(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	// Remove from our map
+	// Remove from whichever map owns it (legacy or v4.0.0 SAB).
 	{
 		std::lock_guard<std::mutex> lock(hookMutex_);
-		auto it = hooks_.find(handle);
-		if (it != hooks_.end()) {
-			DeactivateHook(it->second.get());
-			hooks_.erase(it);
+		auto legacyIt = hooks_.find(handle);
+		if (legacyIt != hooks_.end()) {
+			DeactivateHook(legacyIt->second.get());
+			hooks_.erase(legacyIt);
+		} else {
+			auto sabIt = sabHooks_.find(handle);
+			if (sabIt != sabHooks_.end()) {
+				sabIt->second->active = false;
+				if (sabIt->second->legacyTsfn) {
+					sabIt->second->legacyTsfn.Abort();
+				}
+				sabHooks_.erase(sabIt);
+			}
 		}
 	}
 

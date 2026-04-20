@@ -151,3 +151,20 @@ export {
 	type RiskLevel
 } from './riskMapping';
 
+// v4.0.0 — SharedArrayBuffer zero-copy IPC primitives (Issue #31)
+export {
+	SharedRingBuffer,
+	type SharedRingBufferOptions,
+	type SlotConsumer,
+	RING_BUFFER_MAGIC,
+	RING_BUFFER_VERSION,
+	RING_BUFFER_HEADER_SIZE
+} from './sharedRingBuffer';
+
+export {
+	SharedMemoryBuffer,
+	type SharedMemoryBufferOptions,
+	SHARED_MEMORY_HEADER_SIZE,
+	SHARED_MEMORY_STATUS
+} from './sharedMemoryBuffer';
+

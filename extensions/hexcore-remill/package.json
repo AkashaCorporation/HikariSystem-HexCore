@@ -1,7 +1,7 @@
 {
   "name": "hexcore-remill",
-  "version": "0.1.2",
-  "description": "N-API bindings for Remill — lifts machine code to LLVM IR bitcode",
+  "version": "0.4.0",
+  "description": "HikariSystem fork of Remill N-API bindings — customized for the HexCore-Helix decompiler pipeline",
   "main": "./index.js",
   "module": "./index.mjs",
   "types": "./index.d.ts",
@@ -51,7 +51,7 @@
   },
   "homepage": "https://github.com/LXrdKnowkill/hexcore-remill#readme",
   "engines": {
-    "vscode": "^1.0.0",
+    "vscode": "^1.75.0",
     "node": ">=18.0.0"
   },
   "activationEvents": [],
