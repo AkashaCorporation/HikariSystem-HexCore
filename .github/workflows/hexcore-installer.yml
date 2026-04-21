@@ -200,7 +200,7 @@ jobs:
           Compress-Archive -Path "../VSCode-win32-x64/*" -DestinationPath "HexCore-win32-x64.zip"
 
       - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: HexCore-win32-x64
           path: HexCore-win32-x64.zip
@@ -373,7 +373,7 @@ jobs:
           tar -czvf HexCore-linux-x64.tar.gz -C .. VSCode-linux-x64
 
       - name: Upload Linux artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: HexCore-linux-x64
           path: HexCore-linux-x64.tar.gz
