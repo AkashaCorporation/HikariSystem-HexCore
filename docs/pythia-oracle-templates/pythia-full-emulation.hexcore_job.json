@@ -1,0 +1,75 @@
+{
+  "$schema": "../../extensions/hexcore-disassembler/schemas/hexcore-job.schema.json",
+  "file": "C:\\Users\\Mazum\\Desktop\\AkashaCorporationMalware\\Malware HexCore Defeat\\Malware HexCore Defeat v5.exe",
+  "outDir": "C:\\reports\\pythia-v5-full",
+  "quiet": true,
+  "description": "Full Oracle-driven emulation on Malware HexCore Defeat v5. Pre-scans statically, then emulates with Pythia intervening at known anti-debug trigger PCs. Baseline for comparison: run the same job with the 'oracle' block REMOVED to see how baseline emulation fails silently vs how Pythia bypasses.",
+  "steps": [
+    {
+      "cmd": "hexcore.filetype.detect"
+    },
+    {
+      "cmd": "hexcore.hashcalc.calculate",
+      "args": { "algorithms": "all" }
+    },
+    {
+      "cmd": "hexcore.entropy.analyze"
+    },
+    {
+      "cmd": "hexcore.peanalyzer.analyze"
+    },
+    {
+      "cmd": "hexcore.strings.extractAdvanced",
+      "args": { "minLength": 5 }
+    },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "filterJunk": true }
+    },
+    {
+      "cmd": "hexcore.debug.emulateFullHeadless",
+      "timeoutMs": 600000,
+      "args": {
+        "arch": "x64",
+        "permissiveMemoryMapping": true,
+        "maxInstructions": 5000000,
+        "collectSideChannels": true,
+        "oracle": {
+          "triggers": [
+            {
+              "kind": "instruction",
+              "value": "0x140001a3f",
+              "reason": "QueryPerformanceCounter delta check at sv_t1 — threshold 500000 ticks"
+            },
+            {
+              "kind": "instruction",
+              "value": "0x140001b80",
+              "reason": "PEB BeingDebugged byte read at sv_t3 (gs:[0x60]+0x02)"
+            },
+            {
+              "kind": "instruction",
+              "value": "0x140001250",
+              "reason": "API hash resolver entry at sv2 (FNV-1a walk over PEB Ldr)"
+            },
+            {
+              "kind": "exception",
+              "value": "*",
+              "reason": "unmapped read / div-by-0 / GP fault fallback — Pythia decides abort vs recover"
+            }
+          ],
+          "maxBudgetUsd": 5.0
+        },
+        "output": { "path": "emulation.json", "format": "json" }
+      }
+    },
+    {
+      "cmd": "hexcore.ioc.extract"
+    },
+    {
+      "cmd": "hexcore.yara.scan"
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport"
+    }
+  ]
+}

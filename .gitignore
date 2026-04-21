@@ -75,6 +75,8 @@ extensions/hexcore-llvm-mc/prebuilds/
 
 # HexCore automation job files (generated per-workspace)
 *.hexcore_job.json
+# Exception: documented templates (Project Pythia / other skill examples) are versioned
+!docs/pythia-oracle-templates/*.hexcore_job.json
 
 # Wiki (managed separately by GitHub)
 wiki/
