@@ -465,6 +465,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// settings.json to switch between Azoth, legacy debugger, or both.
 	setupEmulatorSwitcher(context);
 
+	// Project Pythia — Oracle Hook (Issue #17). Registers three commands
+	// under `hexcore.oracle.*`. Gated by `hexcore.oracle.enabled` setting
+	// which is false by default, so this is a no-op for regular users.
+	void import('./oracle/oracleCommands').then((m) => m.registerOracleCommands(context));
+
 	// Use Factory to get the initial global engine (or specific if we knew context)
 	const factory = DisassemblerFactory.getInstance();
 	const engine = factory.getEngine(); // Default global engine for now

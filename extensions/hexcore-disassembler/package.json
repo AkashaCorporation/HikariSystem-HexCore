@@ -350,6 +350,24 @@
 				"title": "Extract Struct Info (BTF/DWARF)",
 				"category": "HexCore Disassembler",
 				"icon": "$(symbol-structure)"
+			},
+			{
+				"command": "hexcore.oracle.listSessions",
+				"title": "List Oracle Sessions",
+				"category": "HexCore Oracle",
+				"icon": "$(list-tree)"
+			},
+			{
+				"command": "hexcore.oracle.inspectConfig",
+				"title": "Inspect Oracle Config",
+				"category": "HexCore Oracle",
+				"icon": "$(gear)"
+			},
+			{
+				"command": "hexcore.oracle.demoHeadless",
+				"title": "Run Oracle Demo (headless)",
+				"category": "HexCore Oracle",
+				"icon": "$(play)"
 			}
 		],
 		"menus": {
@@ -507,6 +525,51 @@
 					"type": "number",
 					"default": 5000,
 					"description": "Maximum number of functions to discover during analysis"
+				},
+				"hexcore.oracle.enabled": {
+					"type": "boolean",
+					"default": false,
+					"description": "Enable the Oracle Hook integration (Project Pythia). When off, hexcore.oracle.* commands short-circuit without spawning the agent."
+				},
+				"hexcore.oracle.defaultTransport": {
+					"type": "string",
+					"default": "stdio",
+					"enum": [
+						"stdio",
+						"sab"
+					],
+					"description": "Transport used to talk to Pythia. stdio is supported today; sab (SharedArrayBuffer zero-copy) lands in v3.9.0 stable."
+				},
+				"hexcore.oracle.pauseTimeoutMs": {
+					"type": "number",
+					"default": 30000,
+					"description": "Max milliseconds HexCore waits for a DecisionResponse before falling back to action=continue. Emulation never hangs on a silent oracle."
+				},
+				"hexcore.oracle.pythiaRepoPath": {
+					"type": "string",
+					"default": "",
+					"description": "Absolute path to the Project-Pythia repo clone. Required for Oracle commands to spawn the agent."
+				},
+				"hexcore.oracle.pythiaNodeBin": {
+					"type": "string",
+					"default": "",
+					"description": "Node binary used to spawn Pythia. Defaults to npx.cmd on Windows, npx elsewhere. Override if your PATH doesn't expose npx."
+				},
+				"hexcore.oracle.pythiaSpawnArgs": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					},
+					"default": [
+						"tsx",
+						"test/pythia-server.ts"
+					],
+					"description": "Arguments passed to pythiaNodeBin to launch the agent. Default runs the dev-mode server via tsx."
+				},
+				"hexcore.oracle.maxBudgetUsd": {
+					"type": "number",
+					"default": 5.0,
+					"description": "Per-session hard budget cap for Anthropic API spend. Pythia degrades to rehearsal stubs above this."
 				}
 			}
 		}
