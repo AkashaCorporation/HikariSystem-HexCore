@@ -45,7 +45,7 @@ HexCore workspace
 5. You read those files and report findings.
 ```
 
-**Transport:** stdio NDJSON today. SharedArrayBuffer (Project Perseus) is planned for v3.9.0.
+**Transport:** stdio NDJSON — the ONLY option. Pythia is a separate Node subprocess, so SharedArrayBuffer isn't applicable (SAB doesn't cross process boundaries in Node). Do NOT confuse this with Project Perseus SAB, which operates INSIDE the main process between C++ and JS for Unicorn hook callbacks — that stays on its own path, untouched by Oracle. The stdio overhead is ~10µs per frame; a Claude decision takes 5-25s, so transport latency is irrelevant.
 **Models:** Haiku 4.5 default, Sonnet 4.6 on crypto/unpacking/exception, Opus 4.7 reserved for one `identify_family` call per session. Routing is automatic inside Pythia.
 **Budget:** per-session hard cap in `hexcore.oracle.maxBudgetUsd` (default $5). Pythia degrades to deterministic stubs above budget.
 
@@ -61,6 +61,11 @@ These must be set in VS Code settings.json before any Oracle step runs:
 | `hexcore.oracle.pythiaRepoPath` | **YES** | Absolute path to the Project-Pythia clone. Typical: `C:\\Users\\Mazum\\Desktop\\HexCore-Oracle-Agent`. |
 | `hexcore.oracle.maxBudgetUsd` | no | Session hard cap. Default `5.0`. Lower for CI, higher for deep analysis. |
 | `hexcore.oracle.pauseTimeoutMs` | no | Max wait per decision before fallback. Default `30000`. |
+
+There is NO transport selector — stdio is hard-wired. Earlier drafts of this
+skill mentioned `hexcore.oracle.defaultTransport` with an `sab` option; that
+setting was removed in Phase 4 because SharedArrayBuffer doesn't cross Node
+process boundaries and the whole point of stdio is the process isolation.
 
 Pythia also needs `ANTHROPIC_API_KEY` set — it reads from `$PYTHIA_REPO/.env` automatically (gitignored).
 

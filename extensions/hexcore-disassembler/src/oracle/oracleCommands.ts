@@ -58,7 +58,7 @@ async function inspectConfig(): Promise<void> {
     channel.clear();
     channel.appendLine(`[Oracle Config]`);
     channel.appendLine(`  enabled:            ${cfg.enabled}`);
-    channel.appendLine(`  defaultTransport:   ${cfg.defaultTransport}`);
+    channel.appendLine(`  transport:          stdio (only option — Pythia is a subprocess)`);
     channel.appendLine(`  pauseTimeoutMs:     ${cfg.pauseTimeoutMs}`);
     channel.appendLine(`  pythiaRepoPath:     ${cfg.pythiaRepoPath || '(unset)'}`);
     channel.appendLine(`  pythiaNodeBin:      ${cfg.pythiaNodeBin}`);
@@ -155,7 +155,6 @@ async function demoHeadless(arg?: DemoHeadlessArgs): Promise<{ ok: boolean; reas
 
 interface OracleConfig {
     enabled: boolean;
-    defaultTransport: 'sab' | 'stdio';
     pauseTimeoutMs: number;
     pythiaRepoPath: string;
     pythiaNodeBin: string;
@@ -181,7 +180,6 @@ function resolveOracleConfig(): OracleConfig {
         : ['tsx', 'test/pythia-server.ts'];
     return {
         enabled: section.get<boolean>('enabled', false),
-        defaultTransport: section.get<'sab' | 'stdio'>('defaultTransport', 'stdio'),
         pauseTimeoutMs: section.get<number>('pauseTimeoutMs', 30_000),
         pythiaRepoPath: resolvedPath,
         pythiaNodeBin: nodeBin,

@@ -531,15 +531,6 @@
 					"default": false,
 					"description": "Enable the Oracle Hook integration (Project Pythia). When off, hexcore.oracle.* commands short-circuit without spawning the agent."
 				},
-				"hexcore.oracle.defaultTransport": {
-					"type": "string",
-					"default": "stdio",
-					"enum": [
-						"stdio",
-						"sab"
-					],
-					"description": "Transport used to talk to Pythia. stdio is supported today; sab (SharedArrayBuffer zero-copy) lands in v3.9.0 stable."
-				},
 				"hexcore.oracle.pauseTimeoutMs": {
 					"type": "number",
 					"default": 30000,
