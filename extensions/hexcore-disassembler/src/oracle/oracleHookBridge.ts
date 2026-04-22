@@ -286,12 +286,31 @@ export class OracleHookBridge {
                 // naturally later), jump to target, re-add only if the skip
                 // target isn't downstream of the BP (rare edge case — we always
                 // re-add for consistency with the demo policy).
-                await this.registry.restore(trigger);
                 const target = this.resolveSkipTarget(logicalPc, resp.skip);
-                const resumePc = target ?? await this.host.regRead(this.host.regIds.rip);
-                await this.host.regWrite(this.host.regIds.rip, resumePc);
+
+                if (target === null) {
+                    // Pythia emitted action=skip without skip.untilAddress or
+                    // skip.instructions. Degrade to continue-like behavior —
+                    // step exactly one instruction past the BP'd insn so we
+                    // make progress instead of re-looping on the same trigger.
+                    // The session prompt treats this as a hard schema violation
+                    // but we still recover gracefully.
+                    this.log(`[oracle-bridge] skip without target at ${hex(logicalPc)} — degrading to step-1 (check Pythia prompt?)`);
+                    await this.registry.restore(trigger);
+                    try {
+                        await this.host.stepOne(logicalPc);
+                    } catch (e) {
+                        this.log(`[oracle-bridge] stepOne-degrade threw: ${(e as Error).message}`);
+                        return { kind: 'continue', continueFromPc: await this.host.regRead(this.host.regIds.rip) };
+                    }
+                    await this.registry.reinject(trigger);
+                    return { kind: 'continue', continueFromPc: await this.host.regRead(this.host.regIds.rip) };
+                }
+
+                await this.registry.restore(trigger);
+                await this.host.regWrite(this.host.regIds.rip, target);
                 await this.registry.reinject(trigger);
-                return { kind: 'continue', continueFromPc: resumePc };
+                return { kind: 'continue', continueFromPc: target };
             }
             case 'abort':
                 this.log(`[oracle-bridge] Pythia requested abort: ${resp.reasoning ?? '(no reason)'}`);
