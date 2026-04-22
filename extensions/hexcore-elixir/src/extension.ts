@@ -208,7 +208,25 @@ interface WorkerFailure {
 
 type WorkerResult = WorkerEmulateResult | WorkerStalkerResult | WorkerFailure;
 
-function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructions: number, verbose: boolean, timeoutMs: number, apiCallsOverflowPath?: string, apiCallsOverflowDir?: string): Promise<WorkerResult> {
+// Oracle Hook opaque config shape — passed through to the worker verbatim.
+interface OracleWorkerConfig {
+	pythiaRepoPath: string;
+	pythiaNodeBin?: string;
+	pythiaSpawnArgs?: string[];
+	pauseTimeoutMs?: number;
+	triggers: Array<{ kind: string; value: string; reason?: string }>;
+}
+
+function runInWorker(
+	op: 'emulate' | 'stalker' | 'oracle',
+	binaryPath: string,
+	maxInstructions: number,
+	verbose: boolean,
+	timeoutMs: number,
+	apiCallsOverflowPath?: string,
+	apiCallsOverflowDir?: string,
+	oracle?: OracleWorkerConfig,
+): Promise<WorkerResult> {
 	return new Promise((resolve, reject) => {
 		const workerPath = path.join(__dirname, '..', 'worker', 'emulateWorker.js');
 		if (!fs.existsSync(workerPath)) {
@@ -291,7 +309,7 @@ function runInWorker(op: 'emulate' | 'stalker', binaryPath: string, maxInstructi
 			reject(err);
 		});
 
-		worker.send({ op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir });
+		worker.send({ op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle });
 	});
 }
 
@@ -453,27 +471,77 @@ export function activate(context: vscode.ExtensionContext): void {
 						);
 					}
 				}
-				output.appendLine(`[elixir] emulateHeadless ${path.basename(file)} — delegating to worker (maxInstructions=${maxInstructions})`);
-				const workerResult = await runInWorker('emulate', file, maxInstructions, !!args.verbose, 600_000, overflowPath, overflowDir);
+				// Project Pythia Oracle Hook (v3.9.0-preview.oracle.azoth). When
+				// args.oracle is provided, the worker delegates to oracleAdapter
+				// which spawns Pythia, registers breakpoints, drives the pause/
+				// resume loop against the live Elixir engine, and returns a
+				// session summary alongside the usual emulation result.
+				const oracleArg = (args as HeadlessArgs & { oracle?: OracleWorkerConfig }).oracle;
+				const workerOp: 'emulate' | 'oracle' = oracleArg && Array.isArray(oracleArg.triggers) && oracleArg.pythiaRepoPath
+					? 'oracle'
+					: 'emulate';
+
+				output.appendLine(
+					`[elixir] emulateHeadless ${path.basename(file)} — delegating to worker ` +
+					`(op=${workerOp}, maxInstructions=${maxInstructions}` +
+					(workerOp === 'oracle' ? `, triggers=${oracleArg!.triggers.length}` : '') +
+					`)`,
+				);
+				const workerResult = await runInWorker(workerOp, file, maxInstructions, !!args.verbose, 600_000, overflowPath, overflowDir, oracleArg);
 				if (!workerResult.ok) {
 					throw new Error(`Elixir emulation failed: ${workerResult.error}`);
 				}
-				if (workerResult.kind !== 'emulate') {
-					throw new Error('Unexpected worker result kind for emulate op');
+				if (workerOp === 'emulate') {
+					if (workerResult.kind !== 'emulate') {
+						throw new Error('Unexpected worker result kind for emulate op');
+					}
+					const emuResult = workerResult as WorkerEmulateResult;
+					const result = {
+						file,
+						entry: emuResult.entry,
+						stopReason: emuResult.stopReason,
+						apiCallCount: emuResult.apiCallCount,
+						apiCalls: emuResult.apiCalls,
+						apiCallsPath: emuResult.apiCallsPath ?? null,
+						apiCallsTotal: emuResult.apiCallsTotal ?? emuResult.apiCalls.length,
+					};
+					output.appendLine(
+						`[elixir] run → ${result.stopReason.kind} @${result.stopReason.address} ` +
+						`(${result.stopReason.instructionsExecuted} insns, ${result.apiCallCount} api calls)`,
+					);
+					writeJsonResult(args, result);
+					return result;
 				}
-				const emuResult = workerResult as WorkerEmulateResult;
+				// Oracle variant — worker result kind is 'oracle' with the oracle block.
+				const oracleResult = workerResult as unknown as {
+					ok: true;
+					kind: 'oracle';
+					entry: string;
+					stopReason: { kind: string; address: string; instructionsExecuted: number; message: string };
+					oracle: {
+						pauseCount: number;
+						patchesApplied: number;
+						totalCostUsd: number;
+						decisions: unknown[];
+					};
+					apiCallCount: number;
+					apiCalls: unknown[];
+					apiCallsTotal: number;
+				};
 				const result = {
 					file,
-					entry: emuResult.entry,
-					stopReason: emuResult.stopReason,
-					apiCallCount: emuResult.apiCallCount,
-					apiCalls: emuResult.apiCalls,
-					apiCallsPath: emuResult.apiCallsPath ?? null,
-					apiCallsTotal: emuResult.apiCallsTotal ?? emuResult.apiCalls.length
+					entry: oracleResult.entry,
+					stopReason: oracleResult.stopReason,
+					apiCallCount: oracleResult.apiCallCount,
+					apiCalls: oracleResult.apiCalls,
+					apiCallsTotal: oracleResult.apiCallsTotal,
+					oracle: oracleResult.oracle,
 				};
 				output.appendLine(
-					`[elixir] run → ${result.stopReason.kind} @${result.stopReason.address} ` +
-					`(${result.stopReason.instructionsExecuted} insns, ${result.apiCallCount} api calls)`
+					`[elixir] oracle run → pauses=${oracleResult.oracle.pauseCount} ` +
+					`patches=${oracleResult.oracle.patchesApplied} ` +
+					`cost=$${oracleResult.oracle.totalCostUsd.toFixed(4)} ` +
+					`(${result.apiCallCount} api calls)`,
 				);
 				writeJsonResult(args, result);
 				return result;

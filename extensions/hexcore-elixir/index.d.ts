@@ -90,6 +90,23 @@ export class Emulator {
 	interceptorDetach(address: bigint): void;
 	interceptorLogCount(): number;
 
+	// Project Pythia Oracle Hook — native breakpoints (v3.9.0-preview.oracle).
+	// run() returns cleanly when PC matches any registered address; stopReason.kind
+	// becomes "breakpoint". Call run(currentPc, 0n) to resume.
+	breakpointAdd(address: bigint): void;
+	breakpointDel(address: bigint): void;
+	breakpointClear(): void;
+
+	// Single-step N instructions with an explicit cap. Used by the Oracle
+	// bridge to step exactly 1 instruction past a just-removed breakpoint
+	// before re-installing it.
+	runN(start: bigint, end: bigint, maxInsns: bigint): {
+		kind: string;
+		address: bigint;
+		instructionsExecuted: number;
+		message: string;
+	};
+
 	// Stalker bound to this emulator instance
 	stalkerFollow(): void;
 	stalkerUnfollow(): void;
