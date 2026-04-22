@@ -54,10 +54,13 @@ export interface OracleHookHost {
     sessionId: string;
     /** Numeric register IDs exposed by `hexcore-unicorn`'s X86_REG constants. */
     regIds: RegisterIds;
-    regRead(regId: number): bigint;
-    regWrite(regId: number, value: bigint): void;
-    memRead(address: bigint, size: number): Buffer;
-    memWrite(address: bigint, data: Buffer): void;
+    // All register/memory ops are async so implementations routing through
+    // the PE32 worker process (hexcore-debugger) can be plugged in directly.
+    // In-process implementations wrap their return in Promise.resolve().
+    regRead(regId: number): Promise<bigint>;
+    regWrite(regId: number, value: bigint): Promise<void>;
+    memRead(address: bigint, size: number): Promise<Buffer>;
+    memWrite(address: bigint, data: Buffer): Promise<void>;
 }
 
 // ─── Bridge ───────────────────────────────────────────────────────────────
@@ -121,12 +124,12 @@ export class OracleHookBridge {
         const start = Date.now();
         this.pauseCount++;
 
-        const request = this.buildDecisionRequest(trigger, logicalPc);
+        const request = await this.buildDecisionRequest(trigger, logicalPc);
         this.log(`[oracle-bridge] pause #${this.pauseCount} trigger=${trigger.kind}:${trigger.value} eventId=${request.eventId}`);
 
         const response = await this.transport.decide(request);
 
-        const outcome = this.applyDecision(trigger, logicalPc, response);
+        const outcome = await this.applyDecision(trigger, logicalPc, response);
 
         const summary: OraclePauseSummary = {
             eventId: request.eventId,
@@ -169,9 +172,9 @@ export class OracleHookBridge {
 
     // ─── DecisionRequest construction ─────────────────────────────────────
 
-    private buildDecisionRequest(trigger: RegisteredTrigger, logicalPc: bigint): DecisionRequest {
-        const registers = this.captureRegisterState(logicalPc);
-        const memoryWindow = this.captureMemoryWindow(logicalPc);
+    private async buildDecisionRequest(trigger: RegisteredTrigger, logicalPc: bigint): Promise<DecisionRequest> {
+        const registers = await this.captureRegisterState(logicalPc);
+        const memoryWindow = await this.captureMemoryWindow(logicalPc);
         return {
             kind: 'decision_request',
             eventId: OracleTransport.newEventId(`evt_${trigger.kind}`),
@@ -192,31 +195,31 @@ export class OracleHookBridge {
         };
     }
 
-    private captureRegisterState(logicalPc: bigint): RegisterState {
+    private async captureRegisterState(logicalPc: bigint): Promise<RegisterState> {
         const r = this.host.regIds;
-        const read = (id: number): string => hex(this.host.regRead(id));
+        const read = async (id: number): Promise<string> => hex(await this.host.regRead(id));
         const state: RegisterState = {
-            rax: read(r.rax), rbx: read(r.rbx), rcx: read(r.rcx), rdx: read(r.rdx),
-            rsi: read(r.rsi), rdi: read(r.rdi), rbp: read(r.rbp), rsp: read(r.rsp),
-            r8:  read(r.r8),  r9:  read(r.r9),  r10: read(r.r10), r11: read(r.r11),
-            r12: read(r.r12), r13: read(r.r13), r14: read(r.r14), r15: read(r.r15),
+            rax: await read(r.rax), rbx: await read(r.rbx), rcx: await read(r.rcx), rdx: await read(r.rdx),
+            rsi: await read(r.rsi), rdi: await read(r.rdi), rbp: await read(r.rbp), rsp: await read(r.rsp),
+            r8:  await read(r.r8),  r9:  await read(r.r9),  r10: await read(r.r10), r11: await read(r.r11),
+            r12: await read(r.r12), r13: await read(r.r13), r14: await read(r.r14), r15: await read(r.r15),
             rip: hex(logicalPc), // override with the logical "user-visible" PC
-            rflags: read(r.rflags),
+            rflags: await read(r.rflags),
         };
         if (r.gsBase !== undefined) {
-            try { state.gs_base = read(r.gsBase); } catch { /* segment MSR might not be readable */ }
+            try { state.gs_base = await read(r.gsBase); } catch { /* segment MSR might not be readable */ }
         }
         if (r.fsBase !== undefined) {
-            try { state.fs_base = read(r.fsBase); } catch { /* ignore */ }
+            try { state.fs_base = await read(r.fsBase); } catch { /* ignore */ }
         }
         return state;
     }
 
-    private captureMemoryWindow(pc: bigint): MemoryWindow {
+    private async captureMemoryWindow(pc: bigint): Promise<MemoryWindow> {
         const half = BigInt(Math.floor(this.memWinBytes / 2));
         const base = pc - half;
         try {
-            const buf = this.host.memRead(base, this.memWinBytes);
+            const buf = await this.host.memRead(base, this.memWinBytes);
             return { base: hex(base), bytes: buf.toString('hex') };
         } catch (e) {
             this.log(`[oracle-bridge] memory window read failed at ${hex(base)}: ${(e as Error).message}`);
@@ -226,37 +229,37 @@ export class OracleHookBridge {
 
     // ─── DecisionResponse application ─────────────────────────────────────
 
-    private applyDecision(
+    private async applyDecision(
         trigger: RegisteredTrigger,
         logicalPc: bigint,
         resp: DecisionResponse,
-    ): PauseOutcome {
+    ): Promise<PauseOutcome> {
         // Step 1 — Restore the original byte so execution can resume.
-        this.registry.restore(trigger);
+        await this.registry.restore(trigger);
 
         // Step 2 — Rewind internal RIP for PC-backed triggers, so the next
         // emuStart executes the original instruction.
         if (trigger.kind === 'instruction' || trigger.kind === 'api') {
-            this.host.regWrite(this.host.regIds.rip, logicalPc);
+            await this.host.regWrite(this.host.regIds.rip, logicalPc);
         }
 
         // Step 3 — Apply patches.
         if (resp.patches) {
-            for (const p of resp.patches) this.applyPatch(p);
+            for (const p of resp.patches) await this.applyPatch(p);
         }
 
         // Step 4 — Top-level action.
         switch (resp.action) {
             case 'continue':
             case 'patch': {
-                const resumePc = this.host.regRead(this.host.regIds.rip);
+                const resumePc = await this.host.regRead(this.host.regIds.rip);
                 return { kind: 'continue', continueFromPc: resumePc };
             }
             case 'skip':
             case 'patch_and_skip': {
                 const target = this.resolveSkipTarget(logicalPc, resp.skip);
-                const resumePc = target ?? this.host.regRead(this.host.regIds.rip);
-                this.host.regWrite(this.host.regIds.rip, resumePc);
+                const resumePc = target ?? await this.host.regRead(this.host.regIds.rip);
+                await this.host.regWrite(this.host.regIds.rip, resumePc);
                 return { kind: 'continue', continueFromPc: resumePc };
             }
             case 'abort':
@@ -265,7 +268,7 @@ export class OracleHookBridge {
         }
     }
 
-    private applyPatch(p: Patch): void {
+    private async applyPatch(p: Patch): Promise<void> {
         try {
             if (p.target === 'register') {
                 const regId = this.regIdFor(p.location);
@@ -273,16 +276,16 @@ export class OracleHookBridge {
                     this.log(`[oracle-bridge] patch targets unknown register '${p.location}'; ignored`);
                     return;
                 }
-                this.host.regWrite(regId, parseValue(p.value));
+                await this.host.regWrite(regId, parseValue(p.value));
                 this.patchesApplied++;
             } else if (p.target === 'memory') {
                 const addr = parseAddress(p.location);
                 const size = p.size ?? inferSizeFromValue(p.value);
                 const buf = bufferFromValue(p.value, size);
-                this.host.memWrite(addr, buf);
+                await this.host.memWrite(addr, buf);
                 this.patchesApplied++;
             } else if (p.target === 'flag') {
-                this.applyFlagPatch(p.location, parseValue(p.value));
+                await this.applyFlagPatch(p.location, parseValue(p.value));
                 this.patchesApplied++;
             }
         } catch (e) {
@@ -290,7 +293,7 @@ export class OracleHookBridge {
         }
     }
 
-    private applyFlagPatch(flag: string, set: bigint): void {
+    private async applyFlagPatch(flag: string, set: bigint): Promise<void> {
         const flagBits: Record<string, bigint> = {
             cf: 1n << 0n, pf: 1n << 2n, af: 1n << 4n, zf: 1n << 6n, sf: 1n << 7n, of: 1n << 11n,
         };
@@ -299,9 +302,9 @@ export class OracleHookBridge {
             this.log(`[oracle-bridge] unknown flag '${flag}'; ignored`);
             return;
         }
-        const rflags = this.host.regRead(this.host.regIds.rflags);
+        const rflags = await this.host.regRead(this.host.regIds.rflags);
         const newRflags = set ? (rflags | mask) : (rflags & ~mask);
-        this.host.regWrite(this.host.regIds.rflags, newRflags);
+        await this.host.regWrite(this.host.regIds.rflags, newRflags);
     }
 
     private regIdFor(name: string): number | null {

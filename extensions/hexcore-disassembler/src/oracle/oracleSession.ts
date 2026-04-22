@@ -106,8 +106,12 @@ export class OracleSession {
 
         this.transport = new OracleTransport(cfg.transport);
         this.registry = new OracleTriggerRegistry({
-            memRead: cfg.host.memRead.bind(cfg.host),
-            memWrite: cfg.host.memWrite.bind(cfg.host),
+            // Narrow the host's general signature to the trigger registry's
+            // (address: bigint | number, size: number) shape. The bridge host
+            // accepts bigint | number too via the bigint parameter, so this is
+            // a safe widening of the parameter type.
+            memRead: (addr, size) => cfg.host.memRead(typeof addr === 'bigint' ? addr : BigInt(addr), size),
+            memWrite: (addr, data) => cfg.host.memWrite(typeof addr === 'bigint' ? addr : BigInt(addr), data),
         });
         this.bridge = new OracleHookBridge({
             host: cfg.host,
@@ -134,7 +138,7 @@ export class OracleSession {
         return this.peerHandshake;
     }
 
-    registerTrigger(t: Trigger): RegisteredTrigger {
+    async registerTrigger(t: Trigger): Promise<RegisteredTrigger> {
         return this.registry.register(t);
     }
 
@@ -224,7 +228,7 @@ export class OracleSession {
         };
         await this.transport.close(end);
         this.bridge.getSessionStats();
-        this.registry.teardown();
+        await this.registry.teardown();
     }
 
     // ─── Tool resolver ────────────────────────────────────────────────────
@@ -245,7 +249,7 @@ export class OracleSession {
                         return { ...base, ok: false, error: 'read_memory: address and length required' };
                     }
                     const addr = BigInt(args.address);
-                    const buf = this.cfg.host.memRead(addr, args.length);
+                    const buf = await this.cfg.host.memRead(addr, args.length);
                     return {
                         ...base,
                         ok: true,

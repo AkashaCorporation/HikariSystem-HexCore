@@ -156,6 +156,10 @@ function buildHost(args, engine) {
 
     const asBigInt = (v) => (typeof v === 'bigint' ? v : BigInt(v ?? 0));
 
+    // v0.2 (Phase 4): host interface is async. Sync ops on the raw Unicorn
+    // handle are wrapped in Promise.resolve so the bridge/registry await'd
+    // calls work unchanged. When routing through the PE32 worker (which has
+    // native async methods), the wrapper just forwards the promise.
     return {
         sessionId: `cli_${Date.now().toString(36)}`,
         regIds: {
@@ -164,14 +168,13 @@ function buildHost(args, engine) {
             r8:  R.R8,  r9:  R.R9,  r10: R.R10, r11: R.R11,
             r12: R.R12, r13: R.R13, r14: R.R14, r15: R.R15,
             rip: R.RIP, rflags: R.RFLAGS,
-            // Segment bases may not be readable on all Unicorn builds; leave optional.
             gsBase: R.GS_BASE ?? R.GS ?? undefined,
             fsBase: R.FS_BASE ?? R.FS ?? undefined,
         },
-        regRead: (id) => asBigInt(uc.regRead(id)),
-        regWrite: (id, value) => uc.regWrite(id, value),
-        memRead: (addr, size) => uc.memRead(addr, size),
-        memWrite: (addr, data) => uc.memWrite(addr, data),
+        regRead: async (id) => asBigInt(uc.regRead(id)),
+        regWrite: async (id, value) => { uc.regWrite(id, value); },
+        memRead: async (addr, size) => uc.memRead(addr, size),
+        memWrite: async (addr, data) => { uc.memWrite(addr, data); },
     };
 }
 
@@ -242,11 +245,9 @@ async function main() {
                 return { kind: 'completed' };
             } catch (e) {
                 // Unicorn threw — figure out why. If it's an INT3 we injected,
-                // RIP will be 1 byte past the 0xCC (which we already replaced
-                // with the trigger byte if we restored; but on the first hit
-                // the byte IS 0xCC). Check the byte AT rip-1.
+                // RIP will be 1 byte past the 0xCC. Check the byte AT rip-1.
                 let rip = 0n;
-                try { rip = host.regRead(host.regIds.rip); } catch { /* ignore */ }
+                try { rip = await host.regRead(host.regIds.rip); } catch { /* ignore */ }
                 let priorByte = null;
                 try { priorByte = uc.memRead(rip - 1n, 1)[0]; } catch { /* unmapped — likely true exception */ }
 
@@ -289,7 +290,7 @@ async function main() {
     // 4. Register triggers.
     for (const t of args.triggers) {
         try {
-            session.registerTrigger(t);
+            await session.registerTrigger(t);
             logLine(`trigger registered: ${t.kind}:${t.value} (${t.reason || 'no reason'})`);
         } catch (e) {
             logLine(`[WARN] failed to register trigger ${t.kind}:${t.value}: ${e.message}`);

@@ -2809,9 +2809,58 @@ export class UnicornWrapper {
 	 * hookAdd, or memMap on the returned instance — that would collide with
 	 * the wrapper's bookkeeping. Read/write-only.
 	 * Added in v3.9.0-preview.oracle.
+	 *
+	 * NOTE: when the PE32/ARM64/x64-ELF worker is active, this returns the
+	 * IN-PROCESS Unicorn which does NOT see the worker's memory state.
+	 * Use readRegisterById / writeRegisterById for worker-aware routing.
 	 */
 	getRawEngine(): UnicornInstance | undefined {
 		return this.uc;
+	}
+
+	/**
+	 * Read a register by its numeric ID, worker-aware. Routes through the
+	 * PE32 / x64-ELF / ARM64 worker when active, else through the in-process
+	 * Unicorn. Returns bigint (64-bit registers) for consistency.
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	async readRegisterById(regId: number): Promise<bigint> {
+		if (this._arm64Worker) {
+			const v = await this._arm64Worker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (this._x64ElfWorker) {
+			const v = await this._x64ElfWorker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (this._pe32Worker) {
+			const v = await this._pe32Worker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (!this.uc) throw new Error('Unicorn not initialized');
+		const v = this.uc.regRead(regId);
+		return typeof v === 'bigint' ? v : BigInt(v);
+	}
+
+	/**
+	 * Write a register by its numeric ID, worker-aware.
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	async writeRegisterById(regId: number, value: bigint | number): Promise<void> {
+		if (this._arm64Worker) {
+			await this._arm64Worker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (this._x64ElfWorker) {
+			await this._x64ElfWorker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (this._pe32Worker) {
+			await this._pe32Worker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (!this.uc) throw new Error('Unicorn not initialized');
+		this.uc.regWrite(regId, value);
 	}
 
 	/**

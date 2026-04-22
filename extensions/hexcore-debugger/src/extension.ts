@@ -13,6 +13,148 @@ import { DebugEngine } from './debugEngine';
 import { TraceTreeProvider } from './traceView';
 import type { ArchitectureType } from './unicornWrapper';
 
+// ─── Project Pythia Oracle Hook — v3.9.0-preview.oracle ───────────────────
+// Inline type for the `oracle` argument on emulateFullHeadless. Matches
+// hexcore-disassembler's OracleSessionConfig transport + triggers shape.
+// The OracleSession class is loaded lazily via require() to avoid a direct
+// cross-extension import (which would pull hexcore-disassembler into the
+// debugger's dependency graph — see POWER.md hexcore-native-engines rules).
+interface OracleArgShape {
+	pythiaRepoPath: string;
+	pythiaNodeBin?: string;
+	pythiaSpawnArgs?: string[];
+	pauseTimeoutMs?: number;
+	maxBudgetUsd?: number;
+	triggers: Array<{
+		kind: 'instruction' | 'api' | 'exception' | 'timing_check' | 'peb_access' | 'memory_read' | 'memory_write';
+		value: string;
+		reason?: string;
+	}>;
+}
+
+async function runWithOracleSession(
+	engine: DebugEngine,
+	filePath: string,
+	maxInstructions: number,
+	oracleArg: OracleArgShape,
+	outputPath: string | undefined,
+): Promise<{ reason: string; stats: { pauseCount: number; patchesApplied: number; apisResolved: number; instructionsExecuted: number }; totalCostUsd: number; decisions: unknown[] }> {
+	const emulator = engine.getEmulator();
+	if (!emulator) throw new Error('oracle: engine.getEmulator() returned undefined');
+	const unicornModule = emulator.getUnicornModule();
+	if (!unicornModule) throw new Error('oracle: UnicornModule missing');
+	const R = unicornModule.X86_REG;
+	if (!R) throw new Error('oracle: X86_REG missing — non-x86 architectures not supported in v0.1');
+
+	// Dynamic require — resolves at runtime from the sibling extension's
+	// compiled output. TypeScript treats it as any; we cast to the minimum
+	// shape we need.
+	const orclPath = path.resolve(__dirname, '..', '..', 'hexcore-disassembler', 'out', 'oracle', 'oracleSession.js');
+	const oracleModule: any = require(orclPath); // eslint-disable-line @typescript-eslint/no-require-imports
+	const OracleSessionCtor: any = oracleModule.OracleSession;
+	if (!OracleSessionCtor) throw new Error(`oracle: OracleSession export not found at ${orclPath}`);
+
+	const outDir = outputPath ? path.dirname(outputPath) : path.dirname(filePath);
+	const sessionLogPath = path.join(outDir, 'oracle-session.log');
+	const decisionsPath = path.join(outDir, 'oracle-decisions.json');
+	const writeLine = (s: string) => fs.appendFileSync(sessionLogPath, `[${new Date().toISOString()}] ${s}\n`);
+	fs.mkdirSync(outDir, { recursive: true });
+	fs.writeFileSync(sessionLogPath, '');
+
+	const channel = vscode.window.createOutputChannel('HexCore Oracle');
+	channel.show(true);
+	const log = (m: string) => { channel.appendLine(m); writeLine(m); };
+	log(`[oracle] session starting — sample=${filePath} triggers=${oracleArg.triggers.length}`);
+
+	const decisions: unknown[] = [];
+	const host = {
+		sessionId: `emfh_${Date.now().toString(36)}`,
+		regIds: {
+			rax: R.RAX, rbx: R.RBX, rcx: R.RCX, rdx: R.RDX,
+			rsi: R.RSI, rdi: R.RDI, rbp: R.RBP, rsp: R.RSP,
+			r8:  R.R8,  r9:  R.R9,  r10: R.R10, r11: R.R11,
+			r12: R.R12, r13: R.R13, r14: R.R14, r15: R.R15,
+			rip: R.RIP, rflags: R.RFLAGS,
+			gsBase: (R as any).GS_BASE ?? (R as any).GS ?? undefined,
+			fsBase: (R as any).FS_BASE ?? (R as any).FS ?? undefined,
+		},
+		regRead: (id: number) => emulator.readRegisterById(id),
+		regWrite: (id: number, v: bigint) => emulator.writeRegisterById(id, v),
+		memRead: (addr: bigint, size: number) => emulator.readMemory(addr, size),
+		memWrite: (addr: bigint, data: Buffer) => emulator.writeMemory(addr, data),
+	};
+
+	const session: any = new OracleSessionCtor({
+		sessionId: host.sessionId,
+		host,
+		transport: {
+			nodeBin: oracleArg.pythiaNodeBin ?? (process.platform === 'win32' ? 'npx.cmd' : 'npx'),
+			spawnArgs: oracleArg.pythiaSpawnArgs ?? ['tsx', 'test/pythia-server.ts'],
+			cwd: oracleArg.pythiaRepoPath,
+			env: process.env,
+			hexcoreVersion: '3.9.0-preview.oracle',
+			pauseTimeoutMs: oracleArg.pauseTimeoutMs ?? 30_000,
+			handshakeTimeoutMs: 15_000,
+			logger: log,
+		},
+		stepEmulation: async (pc: bigint) => {
+			try {
+				await emulator.runSync(pc, maxInstructions, 0);
+				return { kind: 'completed' };
+			} catch {
+				let rip = 0n;
+				try { rip = await emulator.readRegisterById(R.RIP); } catch { /* ignore */ }
+				let prior = null;
+				try { const buf = await emulator.readMemory(rip - 1n, 1); prior = buf[0]; } catch { /* ignore */ }
+				if (prior === 0xcc) return { kind: 'int3', rip };
+				return { kind: 'exception', intno: 0, rip };
+			}
+		},
+		onPause: (summary: any) => {
+			decisions.push(summary);
+			fs.writeFileSync(
+				decisionsPath,
+				JSON.stringify(decisions, (_k, v) => (typeof v === 'bigint' ? '0x' + v.toString(16) : v), 2),
+			);
+			log(
+				`[oracle] pause#${decisions.length} ${summary.trigger.kind}:${summary.trigger.value} ` +
+				`→ action=${summary.action} cost=$${(summary.costUsd ?? 0).toFixed(4)} elapsed=${summary.elapsedMs}ms`,
+			);
+			if (summary.reasoning) log(`  reasoning: ${summary.reasoning}`);
+		},
+		logger: log,
+	});
+
+	const peer = await session.open();
+	log(`[oracle] handshake ok — peer=${peer.pythiaVersion} caps=[${peer.capabilities.join(',')}]`);
+
+	for (const t of oracleArg.triggers) {
+		try {
+			await session.registerTrigger({ kind: t.kind, value: t.value, reason: t.reason ?? '' });
+			log(`[oracle] trigger registered: ${t.kind}:${t.value}`);
+		} catch (e) {
+			log(`[oracle] WARN trigger ${t.kind}:${t.value} failed: ${(e as Error).message}`);
+		}
+	}
+
+	const entryPc = engine.getEntryPoint();
+	if (!entryPc) throw new Error('oracle: engine.getEntryPoint() undefined — startEmulation did not complete');
+
+	let runSummary: { reason: string; stats: any; totalCostUsd: number };
+	try {
+		runSummary = await session.runLoop(entryPc);
+	} finally {
+		try { await session.close(); } catch { /* best effort */ }
+	}
+
+	log(
+		`[oracle] session done — reason=${runSummary.reason} pauses=${runSummary.stats.pauseCount} ` +
+		`patches=${runSummary.stats.patchesApplied} cost=$${runSummary.totalCostUsd.toFixed(4)}`,
+	);
+
+	return { ...runSummary, decisions };
+}
+
 export function activate(context: vscode.ExtensionContext): void {
 	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
 	if (emulator !== 'debugger' && emulator !== 'both') {
@@ -776,9 +918,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			let crashed = false;
 			let crashError = '';
+			// Project Pythia Oracle Hook v3.9.0-preview.oracle. When the caller
+			// supplies an `oracle` arg, we replace the normal run-to-completion
+			// path with the Oracle session loop. See docs/pythia-oracle-templates/.
+			const oracleArg = arg?.oracle as OracleArgShape | undefined;
+			let oracleRunSummary: { reason: string; stats: { pauseCount: number; patchesApplied: number; apisResolved: number; instructionsExecuted: number }; totalCostUsd: number; decisions: unknown[] } | null = null;
 
 			try {
-				await engine.emulationRunCounted(maxInstructions);
+				if (oracleArg && Array.isArray(oracleArg.triggers) && oracleArg.pythiaRepoPath) {
+					oracleRunSummary = await runWithOracleSession(engine, filePath, maxInstructions, oracleArg, outputOptions?.path);
+				} else {
+					await engine.emulationRunCounted(maxInstructions);
+				}
 			} catch (error: any) {
 				crashed = true;
 				crashError = error.message || String(error);
@@ -864,6 +1015,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				})),
 				generatedAt: new Date().toISOString()
 			};
+
+			// Oracle Hook run summary (Project Pythia v3.9.0-preview.oracle)
+			if (oracleRunSummary) {
+				exportData.oracle = {
+					reason: oracleRunSummary.reason,
+					pauseCount: oracleRunSummary.stats.pauseCount,
+					patchesApplied: oracleRunSummary.stats.patchesApplied,
+					apisResolved: oracleRunSummary.stats.apisResolved,
+					totalCostUsd: oracleRunSummary.totalCostUsd,
+					decisionsCount: oracleRunSummary.decisions.length,
+				};
+			}
 
 			// Include v3.7 data if present
 			if (breakpointSnapshotsData.length > 0) {

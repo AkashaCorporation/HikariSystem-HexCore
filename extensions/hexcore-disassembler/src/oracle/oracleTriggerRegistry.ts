@@ -31,8 +31,11 @@
 import type { Trigger, TriggerKind } from './oracle-protocol';
 
 export interface TriggerRegistryHost {
-    memRead(address: bigint | number, size: number): Buffer;
-    memWrite(address: bigint | number, data: Buffer): void;
+    // Async so implementations that route through a worker process
+    // (hexcore-debugger Pe32WorkerClient) can be plugged in directly.
+    // Synchronous implementations just wrap their return in Promise.resolve().
+    memRead(address: bigint | number, size: number): Promise<Buffer>;
+    memWrite(address: bigint | number, data: Buffer): Promise<void>;
 }
 
 export interface RegisteredTrigger extends Trigger {
@@ -61,7 +64,7 @@ export class OracleTriggerRegistry {
     }
 
     /** Add a trigger. For `instruction`/`api` this injects INT3 immediately. */
-    register(trigger: Trigger): RegisteredTrigger {
+    async register(trigger: Trigger): Promise<RegisteredTrigger> {
         const key = `${trigger.kind}:${trigger.value}`;
         const existing = this.byKey.get(key);
         if (existing) return existing;
@@ -78,13 +81,13 @@ export class OracleTriggerRegistry {
             const pc = parseHexAddress(trigger.value);
             entry.pc = pc;
             // Read & save the original byte, then write 0xCC.
-            const buf = this.host.memRead(pc, 1);
+            const buf = await this.host.memRead(pc, 1);
             if (buf.length !== 1) {
                 throw new Error(`oracle: memRead at ${trigger.value} returned ${buf.length} bytes (expected 1)`);
             }
             entry.originalByte = buf[0];
             if (entry.originalByte !== INT3) {
-                this.host.memWrite(pc, Buffer.from([INT3]));
+                await this.host.memWrite(pc, Buffer.from([INT3]));
                 entry.injected = true;
             }
             this.byPc.set(pcKey(pc), entry);
@@ -113,30 +116,30 @@ export class OracleTriggerRegistry {
      * caller can then step the original instruction, reinject (if it wants
      * to pause again next time), or leave the byte restored forever.
      */
-    restore(trigger: RegisteredTrigger): void {
+    async restore(trigger: RegisteredTrigger): Promise<void> {
         if (!trigger.injected || trigger.pc === undefined || trigger.originalByte === undefined) return;
-        this.host.memWrite(trigger.pc, Buffer.from([trigger.originalByte]));
+        await this.host.memWrite(trigger.pc, Buffer.from([trigger.originalByte]));
         trigger.injected = false;
     }
 
     /** Re-inject INT3 after the original instruction stepped past. */
-    reinject(trigger: RegisteredTrigger): void {
+    async reinject(trigger: RegisteredTrigger): Promise<void> {
         if (trigger.injected || trigger.pc === undefined) return;
-        this.host.memWrite(trigger.pc, Buffer.from([INT3]));
+        await this.host.memWrite(trigger.pc, Buffer.from([INT3]));
         trigger.injected = true;
     }
 
     /** Remove a trigger and restore its original byte. */
-    unregister(trigger: RegisteredTrigger): void {
-        this.restore(trigger);
+    async unregister(trigger: RegisteredTrigger): Promise<void> {
+        await this.restore(trigger);
         if (trigger.pc !== undefined) this.byPc.delete(pcKey(trigger.pc));
         this.byKey.delete(`${trigger.kind}:${trigger.value}`);
     }
 
     /** Teardown — restore ALL injected bytes. Call from session close(). */
-    teardown(): void {
+    async teardown(): Promise<void> {
         for (const t of this.byKey.values()) {
-            if (t.injected) this.restore(t);
+            if (t.injected) await this.restore(t);
         }
         this.byPc.clear();
         this.byKey.clear();
