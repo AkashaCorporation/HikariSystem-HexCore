@@ -241,6 +241,17 @@ process.on('message', async (msg) => {
                 `apiCalls=${apiCallCount}`,
             );
 
+            // Sanitizer: RegisteredTrigger leaks a bigint .pc field, and
+            // Node's IPC structured-clone chokes on bigints inside nested
+            // objects. Replace any bigint we encounter with a 0x-hex string.
+            // Doing it once here keeps the worker-parent payload contract
+            // BigInt-free without touching the Oracle session internals.
+            const bigintSafe = (v) => JSON.parse(
+                JSON.stringify(v, (_k, val) =>
+                    typeof val === 'bigint' ? '0x' + val.toString(16) : val
+                )
+            );
+
             payload = {
                 ok: true,
                 kind: 'oracle',
@@ -255,7 +266,7 @@ process.on('message', async (msg) => {
                     pauseCount: runSummary.stats.pauseCount,
                     patchesApplied: runSummary.stats.patchesApplied,
                     totalCostUsd: runSummary.totalCostUsd,
-                    decisions: decisions.map((d) => ({
+                    decisions: decisions.map((d) => bigintSafe({
                         eventId: d.eventId,
                         trigger: d.trigger,
                         action: d.action,
