@@ -248,12 +248,15 @@ function runInWorker(
 			output.appendLine(`[elixir] spawning worker via system Node: ${systemNode}`);
 		}
 
+		const spawnStart = Date.now();
+		output.appendLine(`[elixir] cp.fork ${workerPath} execPath=${spawnExecPath}`);
 		const worker = cp.fork(workerPath, [], {
 			stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 			execPath: spawnExecPath,
 			env,
 			cwd: path.join(__dirname, '..')
 		});
+		output.appendLine(`[elixir] cp.fork returned pid=${worker.pid ?? 'unknown'} connected=${worker.connected} after ${Date.now() - spawnStart}ms`);
 
 		let result: WorkerResult | null = null;
 		let settled = false;
@@ -305,11 +308,26 @@ function runInWorker(
 			if (settled) return;
 			settled = true;
 			clearTimeout(timer);
-			output.appendLine(`[elixir] worker spawn error: ${err.message}`);
+			output.appendLine(`[elixir] worker spawn error: ${err.message}\n  stack: ${err.stack ?? '(no stack)'}`);
 			reject(err);
 		});
+		worker.on('disconnect', () => {
+			output.appendLine(`[elixir] worker IPC channel DISCONNECTED at ${Date.now() - spawnStart}ms (pid=${worker.pid ?? 'unknown'})`);
+		});
 
-		worker.send({ op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle });
+		// worker.send is async — pass a callback so we can observe the actual
+		// delivery. The 10s timeout in the worker fires if no message lands in
+		// its process.on('message') listener, which can happen when the IPC
+		// channel is silently broken (stale child from prior run, etc.).
+		const sendMessage = { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle };
+		const sendResult = worker.send(sendMessage, undefined, {}, (err) => {
+			if (err) {
+				output.appendLine(`[elixir] worker.send CALLBACK error: ${err.message}`);
+			} else {
+				output.appendLine(`[elixir] worker.send delivered after ${Date.now() - spawnStart}ms (pid=${worker.pid ?? 'unknown'})`);
+			}
+		});
+		output.appendLine(`[elixir] worker.send() synchronous returned=${sendResult} connected=${worker.connected} killed=${worker.killed}`);
 	});
 }
 

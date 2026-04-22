@@ -102,7 +102,13 @@ function preflightPe(data, binaryPath) {
     return machine;
 }
 
+// Worker startup diagnostic — fires immediately on fork so we can tell
+// the difference between "worker never started" vs "worker started but
+// never received IPC message".
+process.stderr.write(`[elixir-worker] booted pid=${process.pid} connected=${!!process.send} send-fn=${typeof process.send} at ${new Date().toISOString()}\n`);
+
 process.on('message', async (msg) => {
+    process.stderr.write(`[elixir-worker] received IPC message op=${msg?.op ?? 'unknown'} at ${new Date().toISOString()}\n`);
     let emu = null;
     try {
         if (!msg || typeof msg !== 'object') {
