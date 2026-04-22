@@ -26,7 +26,7 @@ The **primary interface** is `scripts/pythia-azoth-run.mjs` — a standalone Nod
 ```bash
 node scripts/pythia-azoth-run.mjs \
   --sample <ABSOLUTE\PATH\TO\sample.exe> \
-  --pythia C:\Users\Mazum\Desktop\HexCore-Oracle-Agent \
+  --pythia <ABSOLUTE_PATH_TO_PROJECT_PYTHIA_REPO> \
   --outDir <ABSOLUTE\PATH\TO\reports-dir> \
   --maxInstructions 2000000 \
   --triggers '[{"kind":"instruction","value":"0xADDR","reason":"WHY"}]' \
@@ -169,14 +169,12 @@ Hard rules:
 
 ## Reference artifacts
 
-- Pythia repo (external): `C:\Users\Mazum\Desktop\HexCore-Oracle-Agent` (github.com/AkashaCorporation/Project-Pythia)
-- Elixir engine (external): `C:\Users\Mazum\Desktop\HexCore-Elixir`
+- Pythia repo (external): github.com/AkashaCorporation/Project-Pythia — clone locally, pass the absolute path via `--pythia` or the `PYTHIA_REPO_PATH` env var.
+- Elixir engine (external, only needed if rebuilding the .node): github.com/AkashaCorporation/HexCore-Elixir
 - Azoth runner: `vscode-main/scripts/pythia-azoth-run.mjs`
 - Unicorn runner (legacy, less interesting against v6.1): `vscode-main/scripts/pythia-oracle-run.mjs`
 - Isolation test: `vscode-main/scripts/elixir-bp-isolation-test.mjs`
-- Demo corpus: `C:\Users\Mazum\Desktop\AkashaCorporationMalware\Malware HexCore Defeat\`
-  - Source: `Malware HexCore Defeat.cpp` (9 evasion layers E1-E9)
-  - Binary: `Malware HexCore Defeat.exe` (v6.1 Echo Mirage)
+- Demo corpus: `Malware HexCore Defeat.cpp` + built `.exe` (v6.1 Echo Mirage — 9 evasion layers E1-E9). Kept in a separate private repo per responsible-disclosure norms; analysts supply their own path via `--sample`.
 
 ---
 

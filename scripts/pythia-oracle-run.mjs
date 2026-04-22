@@ -32,7 +32,7 @@
  *   {
  *     "sample": "C:\\path\\to\\binary.exe",
  *     "outDir": "C:\\reports\\oracle-run",
- *     "pythiaRepoPath": "C:\\Users\\Mazum\\Desktop\\HexCore-Oracle-Agent",
+ *     "pythiaRepoPath": "<ABSOLUTE_PATH_TO_PROJECT_PYTHIA_REPO>",
  *     "arch": "x64",                 // optional
  *     "maxInstructions": 5000000,    // optional
  *     "permissiveMemoryMapping": true,

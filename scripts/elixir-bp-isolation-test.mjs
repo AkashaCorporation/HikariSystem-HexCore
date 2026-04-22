@@ -26,8 +26,15 @@ import { readFileSync } from 'fs';
 import path from 'path';
 
 const require = createRequire(import.meta.url);
-const sample = 'C:\\Users\\Mazum\\Desktop\\AkashaCorporationMalware\\Malware HexCore Defeat\\Malware HexCore Defeat.exe';
-const elixirModule = 'C:/Users/Mazum/Desktop/vscode-main/extensions/hexcore-elixir/index.js';
+// Sample to test against — override via ELIXIR_BP_SAMPLE env var.
+// Default relative to this script's parent repo is reasonable for CI.
+const sample = process.env.ELIXIR_BP_SAMPLE
+    || process.argv[2]
+    || 'sample.exe';
+// Elixir binding resolves relative to this repo (scripts/ → extensions/hexcore-elixir).
+// Can be overridden via ELIXIR_MODULE env var for standalone testing.
+const elixirModule = process.env.ELIXIR_MODULE
+    || new URL('../extensions/hexcore-elixir/index.js', import.meta.url).pathname.replace(/^\//, '');
 
 const elixir = require(elixirModule);
 if (!elixir.Emulator) {

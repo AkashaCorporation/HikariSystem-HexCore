@@ -1,7 +1,7 @@
 {
   "$schema": "../../extensions/hexcore-disassembler/schemas/hexcore-job.schema.json",
-  "file": "C:\\Users\\Mazum\\Desktop\\AkashaCorporationMalware\\Malware HexCore Defeat\\Malware HexCore Defeat v5.exe",
-  "outDir": "C:\\reports\\pythia-v5-baseline",
+  "file": "<ABSOLUTE_PATH_TO_SAMPLE.exe>",
+  "outDir": "<ABSOLUTE_PATH_TO_OUTPUT_DIR>",
   "quiet": true,
   "description": "Baseline run — identical to pythia-full-emulation.hexcore_job.json but WITHOUT the oracle block. Use this as the side-by-side comparison for the hackathon demo video. Emulation will trip anti-debug early and exit silently, which is exactly the problem Pythia solves.",
   "steps": [

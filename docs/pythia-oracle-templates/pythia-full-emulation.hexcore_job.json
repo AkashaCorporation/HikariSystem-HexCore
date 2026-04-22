@@ -1,7 +1,7 @@
 {
   "$schema": "../../extensions/hexcore-disassembler/schemas/hexcore-job.schema.json",
-  "file": "C:\\Users\\Mazum\\Desktop\\AkashaCorporationMalware\\Malware HexCore Defeat\\Malware HexCore Defeat v5.exe",
-  "outDir": "C:\\reports\\pythia-v5-full",
+  "file": "<ABSOLUTE_PATH_TO_SAMPLE.exe>",
+  "outDir": "<ABSOLUTE_PATH_TO_OUTPUT_DIR>",
   "quiet": true,
   "description": "Full Oracle-driven emulation on Malware HexCore Defeat v5. Pre-scans statically, then emulates with Pythia intervening at known anti-debug trigger PCs. Baseline for comparison: run the same job with the 'oracle' block REMOVED to see how baseline emulation fails silently vs how Pythia bypasses.",
   "steps": [
