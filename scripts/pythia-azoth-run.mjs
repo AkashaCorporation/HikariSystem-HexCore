@@ -206,6 +206,30 @@ async function main() {
     const apiCallCount = emu.getApiCallCount();
     const apiCalls = emu.getApiCalls() || [];
 
+    // Beacon detection:
+    //   (a) Real API path: LoadLibraryA / ShellExecuteW were invoked by the sample.
+    //   (b) Memory-read path: Pythia extracted a URL via `read_memory` and
+    //       surfaced it in a decision's `reasoning` field. This is the
+    //       Azoth-friendly mode — Azoth's synthetic LDR doesn't resolve
+    //       FNV-hashed imports, so the malware's payload call never dispatches
+    //       through a real stub. Pythia bypasses the hash resolvers and reads
+    //       the decoded URL straight from the stack buffer.
+    const apiBeaconNames = apiCalls
+        .filter(c => c.name === 'LoadLibraryA' || c.name === 'ShellExecuteW')
+        .map(c => c.name);
+    // Strip common trailing punctuation a decoder-buffer or reasoning-sentence
+    // may glue onto the URL (periods, commas, quotes, closing brackets).
+    const urlRe = /(?:https?:\/\/|www\.)[^\s"'`<>]+?(?=[.,;:!?)\]'"`]*(?:\s|$))/i;
+    const memBeaconUrls = [];
+    for (const d of decisions) {
+        const r = d?.reasoning;
+        if (typeof r === 'string') {
+            const m = r.match(urlRe);
+            if (m) memBeaconUrls.push(m[0]);
+        }
+    }
+    const beaconUnlocked = apiBeaconNames.length > 0 || memBeaconUrls.length > 0;
+
     const summaryOut = {
         sample: args.sample,
         entry: '0x' + entry.toString(16),
@@ -221,15 +245,14 @@ async function main() {
             module: c.module,
             returnValue: '0x' + BigInt(c.returnValue ?? 0).toString(16),
         })),
+        beaconUnlocked,
+        beaconApiNames: apiBeaconNames,
+        beaconUrlsFromMemory: memBeaconUrls,
         generatedAt: new Date().toISOString(),
     };
     writeFileSync(join(args.outDir, 'oracle-summary.json'), JSON.stringify(summaryOut, null, 2));
 
-    // Beacon detection — if LoadLibraryA or ShellExecuteW appear, the Oracle
-    // unlocked the payload path.
-    const hasBeaconPath = apiCalls.some(c => c.name === 'LoadLibraryA' || c.name === 'ShellExecuteW');
-
-    console.log(JSON.stringify({ ...summaryOut, beaconUnlocked: hasBeaconPath }, null, 2));
+    console.log(JSON.stringify(summaryOut, null, 2));
 
     try { emu.dispose(); } catch {}
 
