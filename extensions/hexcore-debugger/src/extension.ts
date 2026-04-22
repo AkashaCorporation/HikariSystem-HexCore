@@ -98,17 +98,43 @@ async function runWithOracleSession(
 			logger: log,
 		},
 		stepEmulation: async (pc: bigint) => {
+			// Clear any leftover error from a previous step so our detection
+			// only fires on errors from THIS runSync invocation.
+			emulator.clearLastError();
+
+			let threw = false;
 			try {
 				await emulator.runSync(pc, maxInstructions, 0);
-				return { kind: 'completed' };
 			} catch {
-				let rip = 0n;
-				try { rip = await emulator.readRegisterById(R.RIP); } catch { /* ignore */ }
-				let prior = null;
-				try { const buf = await emulator.readMemory(rip - 1n, 1); prior = buf[0]; } catch { /* ignore */ }
-				if (prior === 0xcc) return { kind: 'int3', rip };
-				return { kind: 'exception', intno: 0, rip };
+				threw = true;
 			}
+
+			// Workers (PE32/ELF/ARM64) do NOT throw on UC_ERR_EXCEPTION.
+			// They record the error to state.lastError and break the batch
+			// loop. So we have to check both paths.
+			const stateAfter = emulator.getState();
+			const hadError = threw || !!stateAfter.lastError;
+
+			if (!hadError) {
+				return { kind: 'completed' };
+			}
+
+			let rip = 0n;
+			try { rip = await emulator.readRegisterById(R.RIP); } catch { /* ignore */ }
+
+			// For an INT3 trap the worker advanced RIP by 1 byte past the
+			// 0xCC. Confirm by reading the byte at rip-1 — if it's still 0xCC,
+			// it's our injection.
+			let prior: number | null = null;
+			try {
+				const buf = await emulator.readMemory(rip - 1n, 1);
+				prior = buf[0] ?? null;
+			} catch { /* unmapped — treat as generic exception */ }
+
+			if (prior === 0xcc) {
+				return { kind: 'int3', rip };
+			}
+			return { kind: 'exception', intno: 0, rip };
 		},
 		onPause: (summary: any) => {
 			decisions.push(summary);

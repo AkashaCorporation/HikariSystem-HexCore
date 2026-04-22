@@ -3576,6 +3576,20 @@ export class UnicornWrapper {
 		return this.lastError;
 	}
 
+	/**
+	 * Clear both lastError tracking slots. Used by the Oracle Hook between
+	 * emulation steps: the PE32/ELF/ARM64 workers do NOT throw on
+	 * UC_ERR_EXCEPTION — they record the error into state.lastError and
+	 * break their batch loop. The Oracle loop has to inspect that slot,
+	 * decide whether it was a deliberate INT3 trap, clear the marker, and
+	 * resume. Added in v3.9.0-preview.oracle.
+	 */
+	clearLastError(): void {
+		this.lastError = undefined;
+		this.state.lastError = undefined;
+		this._lastFaultInfo = undefined;
+	}
+
 	getLastFaultInfo(): Record<string, unknown> | undefined {
 		return this._lastFaultInfo;
 	}
