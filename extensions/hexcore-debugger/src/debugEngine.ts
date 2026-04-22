@@ -63,6 +63,17 @@ export interface EmulationOptions {
 	collectSideChannels?: boolean;
 	memoryDumps?: Array<{ address: string; size: number; trigger: 'breakpoint' | 'end' }>;
 	breakpointConfigs?: Array<{ address: string; autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }>;
+	/**
+	 * Disable PE32 worker process isolation (v3.9.0-preview.oracle).
+	 * By default, x86/x64 PE emulation runs in a separate worker process to
+	 * isolate Unicorn's JIT from the VS Code extension host heap. The worker
+	 * maintains its own Unicorn state, so synchronous memRead/memWrite on
+	 * the host-side instance does NOT propagate — breaking INT3 injection
+	 * from the Project Pythia Oracle Hook. Set this to true when driving
+	 * emulation from a standalone Node process (scripts/pythia-oracle-run.mjs)
+	 * where heap corruption is recoverable via process restart.
+	 */
+	skipPe32Worker?: boolean;
 }
 
 export interface BreakpointSnapshot {
@@ -314,7 +325,8 @@ export class DebugEngine {
 		// Activate PE32 worker mode to isolate emuStart from Extension Host heap.
 		// This prevents STATUS_HEAP_CORRUPTION from Unicorn's JIT backend (TCG).
 		// Follows the same pattern as setElfSyncMode in loadELF.
-		if (this.architecture === 'x64' || this.architecture === 'x86') {
+		// Skip if the caller opts out (e.g. Oracle Hook needs sync memWrite path).
+		if ((this.architecture === 'x64' || this.architecture === 'x86') && !this.emulationOptions?.skipPe32Worker) {
 			const PE_STUB_BASE = 0x70000000n;
 			const PE_STUB_END = PE_STUB_BASE + 0x100000n;
 			// v3.8.0-nightly: synthetic DLL region (setupSyntheticDlls) is
@@ -1903,6 +1915,28 @@ export class DebugEngine {
 			return undefined;
 		}
 		return this.emulator.getLastFaultInfo();
+	}
+
+	/**
+	 * Expose the underlying UnicornWrapper for advanced integrations (Project
+	 * Pythia Oracle Hook). Returns undefined if the engine has not been
+	 * initialized. Callers MUST treat this as read-only and MUST NOT disturb
+	 * the emulator's internal state (deferredMutations, breakpoints, hooks).
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	getEmulator(): UnicornWrapper | undefined {
+		return this.emulator;
+	}
+
+	/**
+	 * Entry point PC as resolved by the loader — PE ImageBase + OptionalHeader
+	 * AddressOfEntryPoint for PE, e_entry for ELF, 0 for raw. Used by the
+	 * Oracle Hook runner to start emulation at the right place after
+	 * startEmulation has completed.
+	 */
+	getEntryPoint(): bigint | undefined {
+		const state = this.emulator?.getState();
+		return state?.currentAddress;
 	}
 
 	/**

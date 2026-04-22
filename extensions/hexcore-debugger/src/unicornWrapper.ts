@@ -31,7 +31,7 @@ if (!SAB_AVAILABLE) {
 export const HEXCORE_SAB_HOOKS_SUPPORTED: boolean = SAB_AVAILABLE;
 
 // Types from hexcore-unicorn
-interface UnicornModule {
+export interface UnicornModule {
 	Unicorn: new (arch: number, mode: number) => UnicornInstance;
 	ARCH: ArchConstants;
 	MODE: ModeConstants;
@@ -42,7 +42,7 @@ interface UnicornModule {
 	version: () => { major: number; minor: number; string: string };
 }
 
-interface UnicornInstance {
+export interface UnicornInstance {
 	arch: number;
 	mode: number;
 	handle: bigint;
@@ -2799,6 +2799,28 @@ export class UnicornWrapper {
 
 		this.state.isPaused = false;
 		await this.start(this.state.currentAddress);
+	}
+
+	/**
+	 * Expose the raw Unicorn engine instance. Used by the Project Pythia
+	 * Oracle Hook for synchronous memRead/memWrite/regRead/regWrite without
+	 * going through the async readMemory/writeMemory wrappers (which would
+	 * add microtask hops inside the emulation loop). DO NOT call emuStart,
+	 * hookAdd, or memMap on the returned instance — that would collide with
+	 * the wrapper's bookkeeping. Read/write-only.
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	getRawEngine(): UnicornInstance | undefined {
+		return this.uc;
+	}
+
+	/**
+	 * Expose the Unicorn module object — gives callers access to architecture
+	 * and register ID constants (X86_REG, HOOK, ARCH, MODE). Same restriction
+	 * as getRawEngine: treat as read-only.
+	 */
+	getUnicornModule(): UnicornModule | undefined {
+		return this.unicornModule;
 	}
 
 	/**
