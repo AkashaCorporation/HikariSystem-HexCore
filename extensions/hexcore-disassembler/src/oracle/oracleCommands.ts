@@ -166,15 +166,26 @@ interface OracleConfig {
 
 function resolveOracleConfig(): OracleConfig {
     const section = vscode.workspace.getConfiguration('hexcore.oracle');
-    const rawPath = section.get<string>('pythiaRepoPath', '').trim();
+    const rawPath = (section.get<string>('pythiaRepoPath') ?? '').trim();
     const resolvedPath = rawPath ? path.normalize(rawPath) : '';
+    // VS Code's section.get(key, default) returns the registered package.json
+    // default when the user hasn't set the value. Since our package.json
+    // contributions have "" as default for pythiaNodeBin (to avoid baking in
+    // a platform-specific binary name), we have to fall back manually when
+    // the resolved value is empty.
+    const nodeBinRaw = section.get<string>('pythiaNodeBin') ?? '';
+    const nodeBin = nodeBinRaw.trim() || (process.platform === 'win32' ? 'npx.cmd' : 'npx');
+    const spawnArgsRaw = section.get<string[]>('pythiaSpawnArgs');
+    const spawnArgs = Array.isArray(spawnArgsRaw) && spawnArgsRaw.length > 0
+        ? spawnArgsRaw
+        : ['tsx', 'test/pythia-server.ts'];
     return {
         enabled: section.get<boolean>('enabled', false),
         defaultTransport: section.get<'sab' | 'stdio'>('defaultTransport', 'stdio'),
         pauseTimeoutMs: section.get<number>('pauseTimeoutMs', 30_000),
         pythiaRepoPath: resolvedPath,
-        pythiaNodeBin: section.get<string>('pythiaNodeBin', process.platform === 'win32' ? 'npx.cmd' : 'npx'),
-        pythiaSpawnArgs: section.get<string[]>('pythiaSpawnArgs', ['tsx', 'test/pythia-server.ts']),
+        pythiaNodeBin: nodeBin,
+        pythiaSpawnArgs: spawnArgs,
         maxBudgetUsd: section.get<number>('maxBudgetUsd', 5.0),
         hexcoreVersion: '3.9.0-preview.oracle',
     };
