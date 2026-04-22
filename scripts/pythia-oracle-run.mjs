@@ -156,10 +156,9 @@ function buildHost(args, engine) {
 
     const asBigInt = (v) => (typeof v === 'bigint' ? v : BigInt(v ?? 0));
 
-    // v0.2 (Phase 4): host interface is async. Sync ops on the raw Unicorn
-    // handle are wrapped in Promise.resolve so the bridge/registry await'd
-    // calls work unchanged. When routing through the PE32 worker (which has
-    // native async methods), the wrapper just forwards the promise.
+    // v0.3 (2026-04-22): host now exposes addBreakpoint/removeBreakpoint/
+    // stepOne. Native Unicorn breakpoints don't modify code bytes -> no TB
+    // cache poisoning after a pause.
     return {
         sessionId: `cli_${Date.now().toString(36)}`,
         regIds: {
@@ -175,6 +174,9 @@ function buildHost(args, engine) {
         regWrite: async (id, value) => { uc.regWrite(id, value); },
         memRead: async (addr, size) => uc.memRead(addr, size),
         memWrite: async (addr, data) => { uc.memWrite(addr, data); },
+        addBreakpoint: async (pc) => { emulator.addBreakpoint(pc); },
+        removeBreakpoint: async (pc) => { emulator.removeBreakpoint(pc); },
+        stepOne: async (pc) => { await emulator.runSync(pc, 1, 0); },
     };
 }
 
@@ -223,6 +225,18 @@ async function main() {
     const decisionsFile = join(args.outDir, 'oracle-decisions.json');
     const decisions = [];
 
+    // Set of trigger PCs (as lowercase hex strings) for O(1) RIP-match in
+    // stepEmulation. Populated when we call session.registerTrigger below.
+    const triggerPcSet = new Set();
+    for (const t of args.triggers) {
+        if (t.kind === 'instruction' || t.kind === 'api') {
+            try {
+                const pc = BigInt(t.value);
+                triggerPcSet.add(pc.toString(16));
+            } catch { /* bad addr — will fail at registerTrigger */ }
+        }
+    }
+
     const session = new OracleSession({
         sessionId: host.sessionId,
         host,
@@ -237,26 +251,37 @@ async function main() {
             logger: verbose,
         },
         stepEmulation: async (pc) => {
-            try {
-                // runSync returns when emulation ends naturally OR errors.
-                // maxInstructions is the hard cap across the whole run — we
-                // divide per-step to give Oracle a chance to catch runaway loops.
-                await emulator.runSync(pc, args.maxInstructions, 0);
-                return { kind: 'completed' };
-            } catch (e) {
-                // Unicorn threw — figure out why. If it's an INT3 we injected,
-                // RIP will be 1 byte past the 0xCC. Check the byte AT rip-1.
-                let rip = 0n;
-                try { rip = await host.regRead(host.regIds.rip); } catch { /* ignore */ }
-                let priorByte = null;
-                try { priorByte = uc.memRead(rip - 1n, 1)[0]; } catch { /* unmapped — likely true exception */ }
+            // Native breakpoints stop emulation cleanly (emuStop()) — runSync
+            // returns WITHOUT throwing when a BP fires. To distinguish from a
+            // natural-completion return, we compare RIP against the registered
+            // trigger set via `session.matchTriggerPc`. Errors still surface
+            // via throw (non-worker path) or state.lastError (worker path,
+            // unused here since Oracle forces skipPe32Worker).
+            emulator.clearLastError?.();
 
-                if (priorByte === 0xcc) {
-                    return { kind: 'int3', rip };
-                }
-                // Not an INT3 we control — treat as generic exception.
+            let threw = false;
+            try {
+                await emulator.runSync(pc, args.maxInstructions, 0);
+            } catch {
+                threw = true;
+            }
+
+            const state = emulator.getState();
+            const hadError = threw || !!state.lastError;
+
+            let rip = 0n;
+            try { rip = await host.regRead(host.regIds.rip); } catch { /* ignore */ }
+
+            if (hadError) {
                 return { kind: 'exception', intno: 0, rip };
             }
+
+            // BP hit? If the current RIP is a registered trigger PC, yes.
+            if (triggerPcSet.has(rip.toString(16))) {
+                return { kind: 'breakpoint', rip };
+            }
+
+            return { kind: 'completed' };
         },
         onPause: (summary) => {
             decisions.push(summary);

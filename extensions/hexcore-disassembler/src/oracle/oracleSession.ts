@@ -75,7 +75,7 @@ export interface OracleSessionConfig {
  */
 export type EmulationStepResult =
     | { kind: 'completed' }
-    | { kind: 'int3'; rip: bigint }
+    | { kind: 'breakpoint'; rip: bigint }  // native Unicorn bp hit (formerly 'int3')
     | { kind: 'exception'; intno: number; rip: bigint }
     | { kind: 'error'; error: Error };
 
@@ -105,13 +105,11 @@ export class OracleSession {
         this.log = cfg.logger ?? ((m) => console.error(m));
 
         this.transport = new OracleTransport(cfg.transport);
+        // Registry uses native Unicorn breakpoints (v0.3), not INT3 byte writes.
+        // Host's addBreakpoint / removeBreakpoint are forwarded directly.
         this.registry = new OracleTriggerRegistry({
-            // Narrow the host's general signature to the trigger registry's
-            // (address: bigint | number, size: number) shape. The bridge host
-            // accepts bigint | number too via the bigint parameter, so this is
-            // a safe widening of the parameter type.
-            memRead: (addr, size) => cfg.host.memRead(typeof addr === 'bigint' ? addr : BigInt(addr), size),
-            memWrite: (addr, data) => cfg.host.memWrite(typeof addr === 'bigint' ? addr : BigInt(addr), data),
+            addBreakpoint: (pc) => cfg.host.addBreakpoint(pc),
+            removeBreakpoint: (pc) => cfg.host.removeBreakpoint(pc),
         });
         this.bridge = new OracleHookBridge({
             host: cfg.host,
@@ -169,11 +167,13 @@ export class OracleSession {
                 break;
             }
 
-            if (step.kind === 'int3') {
-                const logicalPc = step.rip - 1n;
+            if (step.kind === 'breakpoint') {
+                // Native Unicorn breakpoints stop BEFORE the BP'd instruction —
+                // RIP is exactly at the trigger PC, no rewind needed.
+                const logicalPc = step.rip;
                 const trig = this.registry.matchByPc(logicalPc);
                 if (!trig) {
-                    this.log(`[oracle-session] INT3 at ${hex(logicalPc)} unmatched — stopping to avoid corruption`);
+                    this.log(`[oracle-session] breakpoint at ${hex(logicalPc)} unmatched — stopping to avoid corruption`);
                     this.bridge.reportUnmatchedInterrupt(logicalPc, 3);
                     reason = 'error';
                     break;

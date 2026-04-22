@@ -82,7 +82,18 @@ async function runWithOracleSession(
 		regWrite: (id: number, v: bigint) => emulator.writeRegisterById(id, v),
 		memRead: (addr: bigint, size: number) => emulator.readMemory(addr, size),
 		memWrite: (addr: bigint, data: Buffer) => emulator.writeMemory(addr, data),
+		addBreakpoint: async (pc: bigint) => { emulator.addBreakpoint(pc); },
+		removeBreakpoint: async (pc: bigint) => { emulator.removeBreakpoint(pc); },
+		stepOne: async (pc: bigint) => { await emulator.runSync(pc, 1, 0); },
 	};
+
+	// Pre-compute trigger PC set for O(1) RIP-match in stepEmulation.
+	const triggerPcSet = new Set<string>();
+	for (const t of oracleArg.triggers) {
+		if (t.kind === 'instruction' || t.kind === 'api') {
+			try { triggerPcSet.add(BigInt(t.value).toString(16)); } catch { /* ignored */ }
+		}
+	}
 
 	const session: any = new OracleSessionCtor({
 		sessionId: host.sessionId,
@@ -98,8 +109,12 @@ async function runWithOracleSession(
 			logger: log,
 		},
 		stepEmulation: async (pc: bigint) => {
-			// Clear any leftover error from a previous step so our detection
-			// only fires on errors from THIS runSync invocation.
+			// v0.3: native Unicorn breakpoints stop cleanly (emuStop()) so
+			// runSync returns WITHOUT throwing. We distinguish BP-hit from
+			// natural completion by comparing RIP against the trigger PC set.
+			// Genuine emulation errors still surface via throw (in-process
+			// path — Oracle forces skipPe32Worker so there's no worker state
+			// path in play here).
 			emulator.clearLastError();
 
 			let threw = false;
@@ -109,32 +124,21 @@ async function runWithOracleSession(
 				threw = true;
 			}
 
-			// Workers (PE32/ELF/ARM64) do NOT throw on UC_ERR_EXCEPTION.
-			// They record the error to state.lastError and break the batch
-			// loop. So we have to check both paths.
 			const stateAfter = emulator.getState();
 			const hadError = threw || !!stateAfter.lastError;
-
-			if (!hadError) {
-				return { kind: 'completed' };
-			}
 
 			let rip = 0n;
 			try { rip = await emulator.readRegisterById(R.RIP); } catch { /* ignore */ }
 
-			// For an INT3 trap the worker advanced RIP by 1 byte past the
-			// 0xCC. Confirm by reading the byte at rip-1 — if it's still 0xCC,
-			// it's our injection.
-			let prior: number | null = null;
-			try {
-				const buf = await emulator.readMemory(rip - 1n, 1);
-				prior = buf[0] ?? null;
-			} catch { /* unmapped — treat as generic exception */ }
-
-			if (prior === 0xcc) {
-				return { kind: 'int3', rip };
+			if (hadError) {
+				return { kind: 'exception', intno: 0, rip };
 			}
-			return { kind: 'exception', intno: 0, rip };
+
+			if (triggerPcSet.has(rip.toString(16))) {
+				return { kind: 'breakpoint', rip };
+			}
+
+			return { kind: 'completed' };
 		},
 		onPause: (summary: any) => {
 			decisions.push(summary);
@@ -917,12 +921,21 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			console.log('[emulateFullHeadless] starting emulation...');
 			const mySession = ++emulateSessionId;
+			// Oracle Hook v0.3 uses native Unicorn breakpoints which are only
+			// installable on the in-process Unicorn instance (Pe32WorkerClient
+			// has no breakpointAdd/Del IPC in v3.8.0). When args.oracle is
+			// present we force skipPe32Worker so addBreakpoint/removeBreakpoint
+			// reach the live emulator. Post-hackathon work: add BP support to
+			// Pe32WorkerClient and drop this override.
+			const oracleArgPreflight = arg?.oracle as { triggers?: unknown[] } | undefined;
+			const needSkipWorkerForOracle = !!oracleArgPreflight && Array.isArray(oracleArgPreflight.triggers) && oracleArgPreflight.triggers.length > 0;
 			await engine.startEmulation(filePath, arch, {
 				permissiveMemoryMapping,
 				prngMode,
 				collectSideChannels,
 				memoryDumps,
-				breakpointConfigs
+				breakpointConfigs,
+				skipPe32Worker: needSkipWorkerForOracle,
 			});
 
 			if (stdin) {

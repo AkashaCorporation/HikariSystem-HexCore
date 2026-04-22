@@ -61,6 +61,20 @@ export interface OracleHookHost {
     regWrite(regId: number, value: bigint): Promise<void>;
     memRead(address: bigint, size: number): Promise<Buffer>;
     memWrite(address: bigint, data: Buffer): Promise<void>;
+    /**
+     * Install a native Unicorn breakpoint. Emulation will stop BEFORE the
+     * instruction at `pc` executes (state.currentAddress will equal pc).
+     * Does not modify code bytes, so the TB cache stays clean.
+     */
+    addBreakpoint(pc: bigint): Promise<void>;
+    /** Remove a previously installed breakpoint. */
+    removeBreakpoint(pc: bigint): Promise<void>;
+    /**
+     * Run exactly ONE instruction from `pc`. Used after removing a breakpoint
+     * to step past the BP'd instruction before re-installing the BP.
+     * Throws on emulation error.
+     */
+    stepOne(pc: bigint): Promise<void>;
 }
 
 // ─── Bridge ───────────────────────────────────────────────────────────────
@@ -234,36 +248,54 @@ export class OracleHookBridge {
         logicalPc: bigint,
         resp: DecisionResponse,
     ): Promise<PauseOutcome> {
-        // Step 1 — Restore the original byte so execution can resume.
-        await this.registry.restore(trigger);
-
-        // Step 2 — Rewind internal RIP for PC-backed triggers, so the next
-        // emuStart executes the original instruction.
-        if (trigger.kind === 'instruction' || trigger.kind === 'api') {
-            await this.host.regWrite(this.host.regIds.rip, logicalPc);
-        }
-
-        // Step 3 — Apply patches.
+        // Step 1 — Apply patches FIRST (before stepping past the BP so the
+        // patched state is visible to the BP'd instruction when it executes).
         if (resp.patches) {
             for (const p of resp.patches) await this.applyPatch(p);
         }
 
-        // Step 4 — Top-level action.
+        // Step 2 — Top-level action.
         switch (resp.action) {
             case 'continue':
             case 'patch': {
+                // Step-over-breakpoint dance (mirrors unicornWrapper.ts:1656-1666):
+                //   a. Remove the BP so the instruction can execute without re-trap.
+                //   b. Step exactly ONE instruction. The BP'd instruction runs.
+                //   c. Re-add the BP so future passes through this PC trap again.
+                // This works because native breakpoints don't modify memory —
+                // the TB cache stays valid across the step.
+                if (trigger.kind === 'instruction' || trigger.kind === 'api') {
+                    await this.registry.restore(trigger);
+                    try {
+                        await this.host.stepOne(logicalPc);
+                    } catch (e) {
+                        // Single-step threw — return the exception-style outcome.
+                        // The session loop will propagate. Don't re-add BP on error.
+                        this.log(`[oracle-bridge] stepOne past BP at ${hex(logicalPc)} threw: ${(e as Error).message}`);
+                        return { kind: 'continue', continueFromPc: await this.host.regRead(this.host.regIds.rip) };
+                    }
+                    await this.registry.reinject(trigger);
+                }
                 const resumePc = await this.host.regRead(this.host.regIds.rip);
                 return { kind: 'continue', continueFromPc: resumePc };
             }
             case 'skip':
             case 'patch_and_skip': {
+                // No step-over — we skip the BP'd instruction entirely. Remove
+                // the BP (otherwise we'd re-trap if the sample returns here
+                // naturally later), jump to target, re-add only if the skip
+                // target isn't downstream of the BP (rare edge case — we always
+                // re-add for consistency with the demo policy).
+                await this.registry.restore(trigger);
                 const target = this.resolveSkipTarget(logicalPc, resp.skip);
                 const resumePc = target ?? await this.host.regRead(this.host.regIds.rip);
                 await this.host.regWrite(this.host.regIds.rip, resumePc);
+                await this.registry.reinject(trigger);
                 return { kind: 'continue', continueFromPc: resumePc };
             }
             case 'abort':
                 this.log(`[oracle-bridge] Pythia requested abort: ${resp.reasoning ?? '(no reason)'}`);
+                await this.registry.restore(trigger);
                 return { kind: 'abort', continueFromPc: null };
         }
     }
