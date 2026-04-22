@@ -79,8 +79,10 @@ export class Emulator {
 	memRead(address: bigint, size: number): Buffer;
 	memWrite(address: bigint, data: Buffer): void;
 
-	regRead(name: string): bigint;
-	regWrite(name: string, value: bigint): void;
+	// Reg ID is a numeric Unicorn UC_X86_REG_* value (e.g. RIP=41, RAX=35, RSP=44).
+	// Elixir does NOT accept register name strings — pass the integer.
+	regRead(regId: number): bigint;
+	regWrite(regId: number, value: bigint): void;
 
 	getApiCalls(): ApiCall[];
 	getApiCallCount(): number;

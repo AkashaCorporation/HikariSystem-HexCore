@@ -31,20 +31,32 @@ function hex(v) {
     return String(v);
 }
 
-// Map Pythia register names to Elixir register-name strings (the NAPI binding
-// uses name-based regRead/regWrite, not numeric IDs).
-const REG_NAMES = [
-    'rax','rbx','rcx','rdx','rsi','rdi','rbp','rsp',
-    'r8','r9','r10','r11','r12','r13','r14','r15',
-    'rip','rflags',
-];
+// Unicorn x86_64 register IDs. Elixir's regRead/regWrite take numeric IDs,
+// not register name strings — the index.d.ts claim of name-based API is a
+// documentation lie (regRead is `fn reg_read(reg_id: i32)` in the NAPI
+// binding at crates/hexcore-elixir/src/lib.rs:356). Hard-coded here because
+// Elixir doesn't export the constants to JS.
+// Source: unicorn/x86.h (Unicorn 2.0.1); cross-checked against
+// elixir-core/tests/parity_gate_g1.rs which asserts RAX=35, RIP=41, RSP=44.
+const UC_X86_REG = Object.freeze({
+    RAX: 35, RBP: 36, RBX: 37, RCX: 38, RDI: 39, RDX: 40,
+    RIP: 41, RSI: 42, RSP: 44,  // Note: 43 is skipped (IP16?) per parity test
+    R8:  52, R9:  53, R10: 54, R11: 55,
+    R12: 56, R13: 57, R14: 58, R15: 59,
+    RFLAGS: 25,
+    // Segment bases (for gs_base/fs_base anti-debug context)
+    FS_BASE: 60, GS_BASE: 61,
+});
 
-// Shim the OracleHookHost's "regIds" interface — Elixir uses names, not IDs.
-// We stash the name in the "id" slot and use it back in the host methods.
 function buildRegIds() {
-    const ids = {};
-    for (const n of REG_NAMES) ids[n] = n;
-    return ids;
+    return {
+        rax: UC_X86_REG.RAX, rbx: UC_X86_REG.RBX, rcx: UC_X86_REG.RCX, rdx: UC_X86_REG.RDX,
+        rsi: UC_X86_REG.RSI, rdi: UC_X86_REG.RDI, rbp: UC_X86_REG.RBP, rsp: UC_X86_REG.RSP,
+        r8:  UC_X86_REG.R8,  r9:  UC_X86_REG.R9,  r10: UC_X86_REG.R10, r11: UC_X86_REG.R11,
+        r12: UC_X86_REG.R12, r13: UC_X86_REG.R13, r14: UC_X86_REG.R14, r15: UC_X86_REG.R15,
+        rip: UC_X86_REG.RIP, rflags: UC_X86_REG.RFLAGS,
+        gsBase: UC_X86_REG.GS_BASE, fsBase: UC_X86_REG.FS_BASE,
+    };
 }
 
 /**
@@ -54,14 +66,19 @@ function buildHost(emu, sessionId) {
     return {
         sessionId,
         regIds: buildRegIds(),
-        regRead: async (name) => {
-            // Elixir returns BigInt
-            try { return BigInt(emu.regRead(String(name))); }
-            catch { return 0n; }
+        // `id` is the Unicorn numeric register ID (from UC_X86_REG).
+        regRead: async (id) => {
+            try { return BigInt(emu.regRead(Number(id))); }
+            catch (e) {
+                // Best-effort only for optional segment MSRs (GS_BASE may not
+                // be readable on all Unicorn builds). For GPRs, surface the error.
+                if (id === UC_X86_REG.GS_BASE || id === UC_X86_REG.FS_BASE) return 0n;
+                throw new Error(`regRead id=${id}: ${e.message}`);
+            }
         },
-        regWrite: async (name, value) => {
-            try { emu.regWrite(String(name), typeof value === 'bigint' ? value : BigInt(value)); }
-            catch (e) { throw new Error(`regWrite ${name}: ${e.message}`); }
+        regWrite: async (id, value) => {
+            try { emu.regWrite(Number(id), typeof value === 'bigint' ? value : BigInt(value)); }
+            catch (e) { throw new Error(`regWrite id=${id}: ${e.message}`); }
         },
         memRead: async (addr, size) => {
             try { return emu.memRead(typeof addr === 'bigint' ? addr : BigInt(addr), Number(size)); }
@@ -152,11 +169,10 @@ async function runOracle(opts) {
                 return { kind: 'exception', intno: 0, rip: typeof pc === 'bigint' ? pc : BigInt(pc) };
             }
 
-            const rip = (async () => {
-                try { return BigInt(emu.regRead('rip')); }
-                catch { return typeof reason.address === 'bigint' ? reason.address : BigInt(reason.address); }
-            });
-            const currentRip = await rip();
+            // Read RIP via Unicorn numeric ID (41). Elixir's regRead rejects strings.
+            let currentRip;
+            try { currentRip = BigInt(emu.regRead(UC_X86_REG.RIP)); }
+            catch { currentRip = typeof reason.address === 'bigint' ? reason.address : BigInt(reason.address); }
 
             if (reason.kind === 'breakpoint') {
                 return { kind: 'breakpoint', rip: currentRip };
