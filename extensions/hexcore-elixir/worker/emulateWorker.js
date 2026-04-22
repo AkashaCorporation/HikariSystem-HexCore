@@ -107,7 +107,19 @@ function preflightPe(data, binaryPath) {
 // never received IPC message".
 process.stderr.write(`[elixir-worker] booted pid=${process.pid} connected=${!!process.send} send-fn=${typeof process.send} at ${new Date().toISOString()}\n`);
 
+// Deadman-switch timer — armed if the parent fork()'s us but never sends
+// the initial IPC message (channel-stuck case). We cancel it as soon as a
+// message lands so long-running Oracle sessions aren't killed mid-decision.
+let deadmanTimer = null;
+
 process.on('message', async (msg) => {
+    // Cancel the deadman — the parent did send us a message, now the
+    // actual work can take as long as it needs (Oracle decisions routinely
+    // run 10-30s while Pythia reasons through anti-analysis context).
+    if (deadmanTimer) {
+        clearTimeout(deadmanTimer);
+        deadmanTimer = null;
+    }
     process.stderr.write(`[elixir-worker] received IPC message op=${msg?.op ?? 'unknown'} at ${new Date().toISOString()}\n`);
     let emu = null;
     try {
@@ -332,6 +344,9 @@ process.on('message', async (msg) => {
     }
 });
 
-setTimeout(() => {
+// Arm the deadman: 10s to receive the initial IPC message. Cancelled by
+// process.on('message') above once the parent actually sends.
+deadmanTimer = setTimeout(() => {
     fail(new Error('Worker timed out waiting for IPC message from parent (10s)'));
-}, 10000).unref();
+}, 10000);
+deadmanTimer.unref?.();

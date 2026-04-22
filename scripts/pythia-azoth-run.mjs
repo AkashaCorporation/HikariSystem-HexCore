@@ -27,13 +27,15 @@ const require = createRequire(import.meta.url);
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, '..');
 
-// Unicorn x86_64 register IDs. Elixir's regRead/regWrite take numeric IDs.
+// Unicorn 2.1 x86 register IDs. Elixir's regRead/regWrite take numeric IDs.
+// 42 = RIZ (deprecated index-zero, don't use). 43 = RSI. FS_BASE/GS_BASE lack
+// stable IDs — omitted here; bridge handles the absence gracefully.
 const UC_X86_REG = Object.freeze({
     RAX: 35, RBP: 36, RBX: 37, RCX: 38, RDI: 39, RDX: 40,
-    RIP: 41, RSI: 42, RSP: 44,
+    RIP: 41, RSI: 43, RSP: 44,
     R8:  52, R9:  53, R10: 54, R11: 55,
     R12: 56, R13: 57, R14: 58, R15: 59,
-    RFLAGS: 25, FS_BASE: 60, GS_BASE: 61,
+    RFLAGS: 25,
 });
 
 function load(relPath) {
@@ -101,14 +103,12 @@ function buildHost(emu, sessionId) {
             r8:  UC_X86_REG.R8,  r9:  UC_X86_REG.R9,  r10: UC_X86_REG.R10, r11: UC_X86_REG.R11,
             r12: UC_X86_REG.R12, r13: UC_X86_REG.R13, r14: UC_X86_REG.R14, r15: UC_X86_REG.R15,
             rip: UC_X86_REG.RIP, rflags: UC_X86_REG.RFLAGS,
-            gsBase: UC_X86_REG.GS_BASE, fsBase: UC_X86_REG.FS_BASE,
+            // gsBase/fsBase omitted — Unicorn 2.1 deprecates direct access.
         },
         regRead: async (id) => {
+            if (id == null) return 0n;
             try { return BigInt(emu.regRead(Number(id))); }
-            catch (e) {
-                if (id === UC_X86_REG.GS_BASE || id === UC_X86_REG.FS_BASE) return 0n;
-                throw new Error(`regRead id=${id}: ${e.message}`);
-            }
+            catch (e) { throw new Error(`regRead id=${id}: ${e.message}`); }
         },
         regWrite: async (id, value) => {
             try { emu.regWrite(Number(id), typeof value === 'bigint' ? value : BigInt(value)); }

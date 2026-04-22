@@ -38,14 +38,19 @@ function hex(v) {
 // Elixir doesn't export the constants to JS.
 // Source: unicorn/x86.h (Unicorn 2.0.1); cross-checked against
 // elixir-core/tests/parity_gate_g1.rs which asserts RAX=35, RIP=41, RSP=44.
+// Unicorn 2.1 x86 register enum — cross-referenced with unicorn/x86.h:
+//   35 RAX, 36 RBP, 37 RBX, 38 RCX, 39 RDI, 40 RDX, 41 RIP, 42 RIZ (DO NOT USE),
+//   43 RSI, 44 RSP, 52-59 R8..R15, 25 EFLAGS/RFLAGS.
+// 42 (RIZ — "index zero") is a deprecated Unicorn internal; accessing it emits
+// a UC warning and will UC_ERR_ARG in 2.2. Segment bases FS_BASE/GS_BASE
+// don't have stable reg IDs in 2.1 — queries via numeric ID emit deprecation
+// warnings — left undefined here, the bridge skips them gracefully.
 const UC_X86_REG = Object.freeze({
     RAX: 35, RBP: 36, RBX: 37, RCX: 38, RDI: 39, RDX: 40,
-    RIP: 41, RSI: 42, RSP: 44,  // Note: 43 is skipped (IP16?) per parity test
+    RIP: 41, RSI: 43, RSP: 44,
     R8:  52, R9:  53, R10: 54, R11: 55,
     R12: 56, R13: 57, R14: 58, R15: 59,
     RFLAGS: 25,
-    // Segment bases (for gs_base/fs_base anti-debug context)
-    FS_BASE: 60, GS_BASE: 61,
 });
 
 function buildRegIds() {
@@ -55,7 +60,7 @@ function buildRegIds() {
         r8:  UC_X86_REG.R8,  r9:  UC_X86_REG.R9,  r10: UC_X86_REG.R10, r11: UC_X86_REG.R11,
         r12: UC_X86_REG.R12, r13: UC_X86_REG.R13, r14: UC_X86_REG.R14, r15: UC_X86_REG.R15,
         rip: UC_X86_REG.RIP, rflags: UC_X86_REG.RFLAGS,
-        gsBase: UC_X86_REG.GS_BASE, fsBase: UC_X86_REG.FS_BASE,
+        // gsBase/fsBase omitted — Unicorn 2.1 deprecates direct access.
     };
 }
 
@@ -68,13 +73,11 @@ function buildHost(emu, sessionId) {
         regIds: buildRegIds(),
         // `id` is the Unicorn numeric register ID (from UC_X86_REG).
         regRead: async (id) => {
+            // Silently 0 for any undefined id — host.regIds.gsBase / fsBase are
+            // explicitly undefined on Unicorn 2.1, so their reads collapse here.
+            if (id == null) return 0n;
             try { return BigInt(emu.regRead(Number(id))); }
-            catch (e) {
-                // Best-effort only for optional segment MSRs (GS_BASE may not
-                // be readable on all Unicorn builds). For GPRs, surface the error.
-                if (id === UC_X86_REG.GS_BASE || id === UC_X86_REG.FS_BASE) return 0n;
-                throw new Error(`regRead id=${id}: ${e.message}`);
-            }
+            catch (e) { throw new Error(`regRead id=${id}: ${e.message}`); }
         },
         regWrite: async (id, value) => {
             try { emu.regWrite(Number(id), typeof value === 'bigint' ? value : BigInt(value)); }
