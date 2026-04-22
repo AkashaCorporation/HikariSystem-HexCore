@@ -143,6 +143,16 @@ export class OracleHookBridge {
 
         const response = await this.transport.decide(request);
 
+        // DIAGNOSTIC: log the full decision payload so we can see what
+        // Pythia actually emits (in particular, whether skip.untilAddress
+        // is populated or if it's only appearing in the reasoning text).
+        this.log(
+            `[oracle-bridge] response action=${response.action} ` +
+            `patches=${JSON.stringify(response.patches ?? null)} ` +
+            `skip=${JSON.stringify(response.skip ?? null)} ` +
+            `reason="${(response.reasoning ?? '').slice(0, 120)}"`,
+        );
+
         const outcome = await this.applyDecision(trigger, logicalPc, response);
 
         const summary: OraclePauseSummary = {
