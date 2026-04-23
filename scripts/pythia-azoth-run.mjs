@@ -150,17 +150,30 @@ async function main() {
     const decisionsFile = join(args.outDir, 'oracle-decisions.json');
     const decisions = [];
 
+    // Prefer spawning tsx from the Pythia repo's node_modules directly — that's
+    // 7-10x faster than going through npx (no shim resolution, no registry
+    // check) and dodges the occasional Windows Defender scan on npx's first
+    // call in a fresh shell session that can blow past the handshake timeout.
+    // Fall back to npx if the direct binary isn't present.
+    const tsxBin = process.platform === 'win32'
+        ? join(args.pythia, 'node_modules', '.bin', 'tsx.cmd')
+        : join(args.pythia, 'node_modules', '.bin', 'tsx');
+    const useTsxDirect = existsSync(tsxBin);
     const session = new OracleSession({
         sessionId: host.sessionId,
         host,
         transport: {
-            nodeBin: process.platform === 'win32' ? 'npx.cmd' : 'npx',
-            spawnArgs: ['tsx', 'test/pythia-server.ts'],
+            nodeBin: useTsxDirect
+                ? tsxBin
+                : (process.platform === 'win32' ? 'npx.cmd' : 'npx'),
+            spawnArgs: useTsxDirect
+                ? ['test/pythia-server.ts']
+                : ['tsx', 'test/pythia-server.ts'],
             cwd: args.pythia,
             env: process.env,
             hexcoreVersion: '3.9.0-preview.oracle.azoth',
             pauseTimeoutMs: 45_000,
-            handshakeTimeoutMs: 15_000,
+            handshakeTimeoutMs: 45_000,
             logger: verbose,
         },
         stepEmulation: async (pc) => {
