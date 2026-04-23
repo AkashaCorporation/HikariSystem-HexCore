@@ -106,11 +106,18 @@ function buildHost(emu, sessionId) {
             // gsBase/fsBase omitted — Unicorn 2.1 deprecates direct access.
         },
         regRead: async (id) => {
+            // Fail-soft: if a register read throws (Unicorn 2.1 deprecates some
+            // IDs and promotes them to errors when UC_IGNORE_REG_BREAK=1), fall
+            // back to 0n rather than killing the whole session. Pythia's
+            // DecisionRequest still validates — she just sees 0 for that field,
+            // which is the same as reading an uninitialized register.
             if (id == null) return 0n;
             try { return BigInt(emu.regRead(Number(id))); }
-            catch (e) { throw new Error(`regRead id=${id}: ${e.message}`); }
+            catch { return 0n; }
         },
         regWrite: async (id, value) => {
+            // regWrite errors should propagate — if we can't write the patch
+            // Pythia requested, the decision is unsound and we must abort.
             try { emu.regWrite(Number(id), typeof value === 'bigint' ? value : BigInt(value)); }
             catch (e) { throw new Error(`regWrite id=${id}: ${e.message}`); }
         },

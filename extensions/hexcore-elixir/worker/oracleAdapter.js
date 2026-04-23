@@ -75,9 +75,12 @@ function buildHost(emu, sessionId) {
         regRead: async (id) => {
             // Silently 0 for any undefined id — host.regIds.gsBase / fsBase are
             // explicitly undefined on Unicorn 2.1, so their reads collapse here.
+            // Also fail-soft if a regRead throws (Unicorn 2.1 deprecates some
+            // IDs and promotes them to errors when UC_IGNORE_REG_BREAK=1) — we
+            // return 0n rather than killing the whole session.
             if (id == null) return 0n;
             try { return BigInt(emu.regRead(Number(id))); }
-            catch (e) { throw new Error(`regRead id=${id}: ${e.message}`); }
+            catch { return 0n; }
         },
         regWrite: async (id, value) => {
             try { emu.regWrite(Number(id), typeof value === 'bigint' ? value : BigInt(value)); }
