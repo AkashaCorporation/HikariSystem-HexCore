@@ -489,6 +489,18 @@ export class DisassemblerEngine {
 	 *  Maps file offset (in .text) → {symbolName, relocType, addend} */
 	private textRelocations: Map<number, { name: string; type: number; addend: number }> = new Map();
 
+	/** v0.9.1 (G-001): ELF code/data sections keyed by name. Lets us resolve
+	 *  a symbol's bytes when ET_REL has multiple sections all at VA 0
+	 *  (`.text` / `.init.text` / `.text.unlikely` / `.exit.text`). */
+	private elfSectionFileMap: Map<string, { fileOffset: number; size: number; flags: number }> = new Map();
+
+	/** v0.9.1 (G-001): function symbols from .symtab keyed by symbol name.
+	 *  Each entry tells us which section the function lives in and its
+	 *  offset within that section, so we can compute the exact file offset
+	 *  of its bytes. Required for ET_REL where every section starts at
+	 *  VA 0 and `address: "0x0"` alone is ambiguous. */
+	private elfFunctionByName: Map<string, { sectionName: string; offsetInSection: number; size: number }> = new Map();
+
 	// Capstone Engine
 	private capstone: CapstoneWrapper;
 	private capstoneInitialized: boolean = false;
@@ -634,6 +646,9 @@ export class DisassemblerEngine {
 			this.comments.clear();
 			this.xrefs.clear();
 			this.strings.clear();
+			this.textRelocations.clear();
+			this.elfSectionFileMap.clear();
+			this.elfFunctionByName.clear();
 			this._textScanCache = undefined;
 
 			// v3.7.4: Initialize persistent session store
@@ -2811,6 +2826,20 @@ export class DisassemblerEngine {
 					isWritable,
 					isExecutable
 				});
+
+				// v0.9.1 (G-001): index this section by name for the
+				// symbol-name → file-offset lookup used by `liftToIR
+				// symbolName:`. Multiple ELF objects can have name
+				// collisions (e.g. two `.note.*` sections); we keep the
+				// first one — `.text`/`.init.text`/etc. are guaranteed
+				// unique in well-formed objects.
+				if (!this.elfSectionFileMap.has(name)) {
+					this.elfSectionFileMap.set(name, {
+						fileOffset: offset,
+						size,
+						flags,
+					});
+				}
 			}
 		}
 
@@ -2897,6 +2926,28 @@ export class DisassemblerEngine {
 						address: adjustedSymAddr,
 						isForwarder: false
 					});
+				}
+
+				// v0.9.1 (G-001): record every defined function symbol by
+				// name regardless of binding. Local STT_FUNC symbols
+				// (stBind=0, file-scope `static int helper(void)`) are
+				// also tracked because they are equally callable by the
+				// user via `symbolName:`. Skip undefined and non-function
+				// symbols.
+				if (!isUndefined && stType === 2 &&
+				    stShndx > 0 && stShndx < elfSections.length) {
+					const sec = elfSections[stShndx];
+					if (sec && symName.length > 0) {
+						// Section.name was set in the section-table walk
+						// above; both maps share its lifetime.
+						if (!this.elfFunctionByName.has(symName)) {
+							this.elfFunctionByName.set(symName, {
+								sectionName: sec.name,
+								offsetInSection: stValue,
+								size: stSize,
+							});
+						}
+					}
 				}
 			}
 		}
@@ -3998,6 +4049,73 @@ export class DisassemblerEngine {
 	 *  Returns Map<textOffset, {name, type, addend}> */
 	getTextRelocations(): Map<number, { name: string; type: number; addend: number }> {
 		return this.textRelocations;
+	}
+
+	/**
+	 * v0.9.1 (G-001): resolve a function symbol by name and return its
+	 * bytes + addressing context. Designed to close the ET_REL section
+	 * collision where multiple code sections (`.text`, `.init.text`,
+	 * `.text.unlikely`, `.exit.text`) all start at VA 0 and `address:
+	 * "0x0"` is ambiguous — `liftToIR` now accepts `symbolName: "<sym>"`
+	 * which calls this method and feeds the returned bytes directly to
+	 * the lifter, bypassing the address-based function table that can
+	 * only hold one entry per `address`.
+	 *
+	 * Returns `undefined` when:
+	 * - the file is not ELF (only ELF symbol tables are walked here);
+	 * - the symbol is not present in `.symtab` as a defined STT_FUNC;
+	 * - the resolved file offset would read past the buffer end;
+	 * - `st_size` is zero (unsized symbol — caller can use `count` instead).
+	 */
+	findFunctionSymbolByName(name: string): {
+		bytes: Buffer;
+		address: number;
+		section: string;
+		size: number;
+	} | undefined {
+		if (!this.fileBuffer) return undefined;
+		const sym = this.elfFunctionByName.get(name);
+		if (!sym) return undefined;
+		const sec = this.elfSectionFileMap.get(sym.sectionName);
+		if (!sec) return undefined;
+		const fileOff = sec.fileOffset + sym.offsetInSection;
+		const sz = sym.size;
+		if (sz <= 0) return undefined;
+		if (fileOff < 0 || fileOff + sz > this.fileBuffer.length) {
+			return undefined;
+		}
+		return {
+			bytes: this.fileBuffer.subarray(fileOff, fileOff + sz),
+			// For ET_REL, the address Remill stamps into the lifted IR
+			// is the symbol's section-relative offset (`st_value`). This
+			// keeps the lifted `@lifted_<addr>` consistent with the
+			// existing ET_REL convention (every section starts at 0).
+			address: sym.offsetInSection,
+			section: sym.sectionName,
+			size: sz,
+		};
+	}
+
+	/** v0.9.1 (G-001): list every ELF function symbol the engine indexed,
+	 * along with its section. Useful for UI / diagnostics — e.g. when a
+	 * user passes `address: "0x0"` on an ET_REL with collisions, the
+	 * `liftToIR` handler emits this list as a hint of which `symbolName:`
+	 * values disambiguate the request. */
+	getElfFunctionSymbols(): Array<{ name: string; section: string; size: number; offsetInSection: number }> {
+		const out: Array<{ name: string; section: string; size: number; offsetInSection: number }> = [];
+		for (const [name, sym] of this.elfFunctionByName) {
+			out.push({
+				name,
+				section: sym.sectionName,
+				size: sym.size,
+				offsetInSection: sym.offsetInSection,
+			});
+		}
+		return out.sort((a, b) =>
+			a.section === b.section
+				? a.offsetInSection - b.offsetInSection
+				: a.section.localeCompare(b.section)
+		);
 	}
 
 	getFileName(): string {

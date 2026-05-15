@@ -102,7 +102,25 @@ function preflightPe(data, binaryPath) {
     return machine;
 }
 
-process.on('message', (msg) => {
+// Worker startup diagnostic — fires immediately on fork so we can tell
+// the difference between "worker never started" vs "worker started but
+// never received IPC message".
+process.stderr.write(`[elixir-worker] booted pid=${process.pid} connected=${!!process.send} send-fn=${typeof process.send} at ${new Date().toISOString()}\n`);
+
+// Deadman-switch timer — armed if the parent fork()'s us but never sends
+// the initial IPC message (channel-stuck case). We cancel it as soon as a
+// message lands so long-running Oracle sessions aren't killed mid-decision.
+let deadmanTimer = null;
+
+process.on('message', async (msg) => {
+    // Cancel the deadman — the parent did send us a message, now the
+    // actual work can take as long as it needs (Oracle decisions routinely
+    // run 10-30s while Pythia reasons through anti-analysis context).
+    if (deadmanTimer) {
+        clearTimeout(deadmanTimer);
+        deadmanTimer = null;
+    }
+    process.stderr.write(`[elixir-worker] received IPC message op=${msg?.op ?? 'unknown'} at ${new Date().toISOString()}\n`);
     let emu = null;
     try {
         if (!msg || typeof msg !== 'object') {
@@ -110,7 +128,7 @@ process.on('message', (msg) => {
             return;
         }
 
-        const { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir } = msg;
+        const { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle: oracleCfg } = msg;
 
         const elixir = require(path.join(__dirname, '..', 'index.js'));
         if (!elixir || elixir.isAvailable === false || !elixir.Emulator) {
@@ -205,6 +223,81 @@ process.on('message', (msg) => {
                 apiCallsPath,
                 apiCallsTotal: serializedCalls.length
             };
+        } else if (op === 'oracle') {
+            // Project Pythia Oracle Hook (v3.9.0-preview.oracle.azoth).
+            // Requires the new engine/NAPI breakpoint API — built 2026-04-22.
+            if (typeof emu.breakpointAdd !== 'function') {
+                fail(new Error('oracle: this hexcore-elixir.node does not expose breakpointAdd. Rebuild required.'));
+                return;
+            }
+            if (!oracleCfg || !oracleCfg.pythiaRepoPath) {
+                fail(new Error('oracle: oracleCfg.pythiaRepoPath is required'));
+                return;
+            }
+
+            const { runOracle } = require('./oracleAdapter');
+            const log = (m) => process.stderr.write(`[elixir-worker.oracle] ${m}\n`);
+
+            // runOracle drives the session loop (spawn Pythia, register BPs,
+            // stepEmulation→decide→apply→step-over→repeat). Returns a summary.
+            const { runSummary, decisions } = await runOracle({
+                emu,
+                entry,
+                maxInstructions: maxInstructions || 2_000_000,
+                oracle: oracleCfg,
+                verbose: !!verbose,
+                log,
+            });
+
+            const apiCallCount = emu.getApiCallCount();
+            const apiCalls = emu.getApiCalls() || [];
+            const serializedCalls = apiCalls.map(serializeApiCall);
+
+            log(
+                `oracle done — reason=${runSummary.reason} pauses=${runSummary.stats.pauseCount} ` +
+                `patches=${runSummary.stats.patchesApplied} cost=$${runSummary.totalCostUsd.toFixed(4)} ` +
+                `apiCalls=${apiCallCount}`,
+            );
+
+            // Sanitizer: RegisteredTrigger leaks a bigint .pc field, and
+            // Node's IPC structured-clone chokes on bigints inside nested
+            // objects. Replace any bigint we encounter with a 0x-hex string.
+            // Doing it once here keeps the worker-parent payload contract
+            // BigInt-free without touching the Oracle session internals.
+            const bigintSafe = (v) => JSON.parse(
+                JSON.stringify(v, (_k, val) =>
+                    typeof val === 'bigint' ? '0x' + val.toString(16) : val
+                )
+            );
+
+            payload = {
+                ok: true,
+                kind: 'oracle',
+                entry: hex(entry),
+                stopReason: {
+                    kind: runSummary.reason,
+                    address: hex(0n),
+                    instructionsExecuted: runSummary.stats.instructionsExecuted || 0,
+                    message: `Oracle session ${runSummary.reason}`,
+                },
+                oracle: {
+                    pauseCount: runSummary.stats.pauseCount,
+                    patchesApplied: runSummary.stats.patchesApplied,
+                    totalCostUsd: runSummary.totalCostUsd,
+                    decisions: decisions.map((d) => bigintSafe({
+                        eventId: d.eventId,
+                        trigger: d.trigger,
+                        action: d.action,
+                        patchesApplied: d.patchesApplied,
+                        reasoning: d.reasoning,
+                        elapsedMs: d.elapsedMs,
+                        costUsd: d.costUsd,
+                    })),
+                },
+                apiCallCount,
+                apiCalls: serializedCalls.slice(0, 20),
+                apiCallsTotal: serializedCalls.length,
+            };
         } else if (op === 'stalker') {
             emu.stalkerFollow();
             const reason = emu.run(entry, 0n);
@@ -251,6 +344,9 @@ process.on('message', (msg) => {
     }
 });
 
-setTimeout(() => {
+// Arm the deadman: 10s to receive the initial IPC message. Cancelled by
+// process.on('message') above once the parent actually sends.
+deadmanTimer = setTimeout(() => {
     fail(new Error('Worker timed out waiting for IPC message from parent (10s)'));
-}, 10000).unref();
+}, 10000);
+deadmanTimer.unref?.();

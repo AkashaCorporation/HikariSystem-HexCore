@@ -33,6 +33,7 @@ import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions }
 import { runPathfinder, getPdataFunctionCount } from './pathfinder';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
+import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
 import { SouperWrapper } from './souperWrapper';
 import { getStructInfoForFunction, exportStructInfoJson, type StructInfoJson, type StructInfo } from './elfBtfLoader';
 import { auditRefcount, type RefcountAuditReport } from './refcountAuditScanner';
@@ -465,6 +466,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// settings.json to switch between Azoth, legacy debugger, or both.
 	setupEmulatorSwitcher(context);
 
+	// Project Pythia — Oracle Hook (Issue #17). Registers three commands
+	// under `hexcore.oracle.*`. Gated by `hexcore.oracle.enabled` setting
+	// which is false by default, so this is a no-op for regular users.
+	void import('./oracle/oracleCommands').then((m) => m.registerOracleCommands(context));
+
 	// Use Factory to get the initial global engine (or specific if we knew context)
 	const factory = DisassemblerFactory.getInstance();
 	const engine = factory.getEngine(); // Default global engine for now
@@ -503,6 +509,30 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const helixWrapper = new HelixWrapper();
 	context.subscriptions.push({ dispose: () => helixWrapper.dispose() });
+
+	// Cache PE data sections per-binary so the pipeline doesn't re-read the
+	// .exe for every function it decompiles.  Keyed by absolute binary path;
+	// `null` means the file isn't a PE (or we already failed to parse it).
+	const peDataSectionsCache = new Map<string, PeDataSection[] | null>();
+	const getDataSectionsFor = async (
+		binaryPath: string | undefined
+	): Promise<PeDataSection[] | undefined> => {
+		if (!binaryPath) { return undefined; }
+		const key = path.resolve(binaryPath);
+		if (peDataSectionsCache.has(key)) {
+			const cached = peDataSectionsCache.get(key);
+			return cached === null ? undefined : cached;
+		}
+		try {
+			const sections = await readPeDataSections(key);
+			peDataSectionsCache.set(key, sections);
+			return sections === null ? undefined : sections;
+		} catch (err) {
+			console.warn(`[helix] PE parse failed for ${key}:`, err);
+			peDataSectionsCache.set(key, null);
+			return undefined;
+		}
+	};
 
 	const souperWrapper = new SouperWrapper();
 	context.subscriptions.push({ dispose: () => souperWrapper.dispose() });
@@ -1768,6 +1798,76 @@ export function activate(context: vscode.ExtensionContext): void {
 						return undefined;
 					}
 				}
+				// v0.9.1 (G-001): when `symbolName:` is given, resolve via
+				// the ELF `.symtab` to pick the right section's bytes —
+				// every ET_REL code section starts at VA 0, so
+				// `address: "0x0"` alone always picks `.text` (collides
+				// with `init_module` at `.init.text:0x0`). The symbol
+				// lookup returns the exact bytes from the file, which
+				// we feed straight to the lifter; the address-table
+				// lookup below is then skipped.
+				const symbolNameArg = typeof options.symbolName === 'string'
+					? options.symbolName : undefined;
+				if (symbolNameArg) {
+					const sym = engine.findFunctionSymbolByName(symbolNameArg);
+					if (!sym) {
+						const candidates = engine.getElfFunctionSymbols()
+							.map(s => `${s.name} (${s.section}@+0x${s.offsetInSection.toString(16)})`)
+							.slice(0, 20).join(', ');
+						const errorMsg =
+							`Symbol "${symbolNameArg}" not found in ${filePath}'s symbol table. ` +
+							(candidates ? `Candidates: ${candidates}` : 'No function symbols found.');
+						if (quiet) {
+							return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: arch, error: errorMsg };
+						}
+						vscode.window.showErrorMessage(errorMsg);
+						return undefined;
+					}
+					// Lift directly from the symbol's exact bytes,
+					// bypassing the address-based byte resolution.
+					const liftBuf = sym.bytes;
+					const liftAddr = sym.address;
+					functionName = symbolNameArg;
+					console.log(
+						`[HexCore] liftToIR G-001: resolved symbol "${symbolNameArg}" -> ` +
+						`section ${sym.section} @+0x${liftAddr.toString(16)}, ${sym.size} bytes`
+					);
+					try {
+						const liftResult = await remillWrapper.liftBytes(
+							liftBuf, liftAddr, arch, 'linux',
+							{ maxBytes: liftBuf.length },
+						);
+						if (!liftResult.success) {
+							return { success: false, ir: '', address: liftAddr, bytesConsumed: 0, architecture: arch, error: liftResult.error || 'remill lift failed' };
+						}
+						const irHeader = buildIRHeader({
+							fileName: path.basename(filePath),
+							functionName,
+							address: liftAddr,
+							size: sym.size,
+							architecture: arch,
+						});
+						const fullIR = irHeader + liftResult.ir;
+						if (typeof options.output === 'object' && options.output && 'path' in (options.output as any)) {
+							const outPath = (options.output as any).path;
+							const resolved = path.isAbsolute(outPath)
+								? outPath : path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', outPath);
+							fs.writeFileSync(resolved, fullIR, 'utf-8');
+						}
+						return {
+							success: true,
+							ir: fullIR,
+							address: liftAddr,
+							bytesConsumed: liftResult.bytesConsumed ?? sym.size,
+							architecture: arch,
+							functionName,
+							section: sym.section,
+						};
+					} catch (e: any) {
+						return { success: false, ir: '', address: liftAddr, bytesConsumed: 0, architecture: arch, error: `lift threw: ${e?.message ?? e}` };
+					}
+				}
+
 				// FIX (HEXCORE_DEFEAT FAIL 3): use resolveAddressArg so symbolic
 				// keywords like "entry", "first", "main" resolve properly. The
 				// previous parseAddressValue chain returned undefined for "entry"
@@ -3262,6 +3362,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				optimizeIR?: boolean; useCastLayer?: boolean;
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
+				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 			} | undefined =
 				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
 					? {
@@ -3338,6 +3439,20 @@ export function activate(context: vscode.ExtensionContext): void {
 				} else if (souperResult.error) {
 					console.warn(`[souper] Optimization skipped: ${souperResult.error}`);
 				}
+			}
+
+			// v3.9.0: Feed the binary's data sections so Helix's
+			// RecoverSwitchTables pass can read jump-table entries.  Without
+			// this the pass auto-skips and every `switch (...)` in the source
+			// binary collapses to `goto default` in the decompiled output.
+			const binaryForSections = isHeadless && typeof options.file === 'string'
+				? options.file : undefined;
+			const peSections = await getDataSectionsFor(binaryForSections);
+			if (peSections && peSections.length > 0) {
+				helixIROptions = helixIROptions ?? {};
+				helixIROptions.dataSections = peSections.map(s => ({
+					vaStart: s.vaStart, bytes: s.bytes
+				}));
 			}
 
 			const decompileResult = await vscode.window.withProgress(
@@ -3478,6 +3593,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				optimizeIR?: boolean; useCastLayer?: boolean;
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
+				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 			} | undefined =
 				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
 					? {
@@ -3537,6 +3653,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				} else if (souperResult.error) {
 					console.warn(`[souper] Optimization skipped: ${souperResult.error}`);
 				}
+			}
+
+			// v3.9.0: Feed data sections so RecoverSwitchTables can resolve
+			// jump tables in the source binary (see decompileIR command).
+			const peSections2 = await getDataSectionsFor(
+				typeof options.file === 'string' ? options.file : undefined
+			);
+			if (peSections2 && peSections2.length > 0) {
+				helixOptions = helixOptions ?? {};
+				helixOptions.dataSections = peSections2.map(s => ({
+					vaStart: s.vaStart, bytes: s.bytes
+				}));
 			}
 
 			const decompileResult = await vscode.window.withProgress(

@@ -349,6 +349,14 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.pipeline.createPresetJob', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.pipeline.saveJobAsProfile', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.pipeline.doctor', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	// Project Pythia — Oracle Hook commands (v3.9.0-preview.oracle, Issue #17).
+	// Gated by hexcore.oracle.enabled setting; commands return early without
+	// invoking Pythia when disabled. validateOutput is false because the
+	// Oracle commands write to a shared Output Channel + optional files in
+	// outDir, not a canonical per-command output file.
+	['hexcore.oracle.inspectConfig', { headless: true, defaultTimeoutMs: 10000, validateOutput: false }],
+	['hexcore.oracle.listSessions', { headless: true, defaultTimeoutMs: 10000, validateOutput: false }],
+	['hexcore.oracle.demoHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.disasm.buildFormula', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.disasm.checkConstants', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],

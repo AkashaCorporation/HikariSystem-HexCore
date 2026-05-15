@@ -1,0 +1,19 @@
+{
+  "$schema": "../../extensions/hexcore-disassembler/schemas/hexcore-job.schema.json",
+  "file": "C:\\samples\\placeholder.exe",
+  "outDir": "C:\\reports\\pythia-probe",
+  "quiet": true,
+  "description": "Pythia handshake probe — verifies the Oracle Hook transport is healthy WITHOUT running emulation. Use this before the first full Oracle run to confirm Pythia spawns, handshakes, and closes cleanly. Runs in < 3 seconds, zero API burn.",
+  "steps": [
+    {
+      "cmd": "hexcore.oracle.inspectConfig",
+      "continueOnError": false
+    },
+    {
+      "cmd": "hexcore.oracle.demoHeadless",
+      "timeoutMs": 15000,
+      "args": {},
+      "continueOnError": false
+    }
+  ]
+}

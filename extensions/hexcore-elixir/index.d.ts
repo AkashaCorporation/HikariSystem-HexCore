@@ -79,8 +79,10 @@ export class Emulator {
 	memRead(address: bigint, size: number): Buffer;
 	memWrite(address: bigint, data: Buffer): void;
 
-	regRead(name: string): bigint;
-	regWrite(name: string, value: bigint): void;
+	// Reg ID is a numeric Unicorn UC_X86_REG_* value (e.g. RIP=41, RAX=35, RSP=44).
+	// Elixir does NOT accept register name strings — pass the integer.
+	regRead(regId: number): bigint;
+	regWrite(regId: number, value: bigint): void;
 
 	getApiCalls(): ApiCall[];
 	getApiCallCount(): number;
@@ -89,6 +91,23 @@ export class Emulator {
 	interceptorAttach(address: bigint, onEnter: ((state: unknown) => void) | null, onLeave: ((state: unknown) => void) | null): void;
 	interceptorDetach(address: bigint): void;
 	interceptorLogCount(): number;
+
+	// Project Pythia Oracle Hook — native breakpoints (v3.9.0-preview.oracle).
+	// run() returns cleanly when PC matches any registered address; stopReason.kind
+	// becomes "breakpoint". Call run(currentPc, 0n) to resume.
+	breakpointAdd(address: bigint): void;
+	breakpointDel(address: bigint): void;
+	breakpointClear(): void;
+
+	// Single-step N instructions with an explicit cap. Used by the Oracle
+	// bridge to step exactly 1 instruction past a just-removed breakpoint
+	// before re-installing it.
+	runN(start: bigint, end: bigint, maxInsns: bigint): {
+		kind: string;
+		address: bigint;
+		instructionsExecuted: number;
+		message: string;
+	};
 
 	// Stalker bound to this emulator instance
 	stalkerFollow(): void;

@@ -93,6 +93,9 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		};
 
 		// Track visibility to toggle context
+		let disposed = false;
+		webviewPanel.onDidDispose(() => { disposed = true; });
+
 		webviewPanel.onDidChangeViewState(e => {
 			vscode.commands.executeCommand('setContext', 'hexcore:disassemblerActive', e.webviewPanel.active);
 			if (e.webviewPanel.active) {
@@ -107,6 +110,8 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		// Load and analyze file
 		try {
 			await this.engine.loadFile(document.uri.fsPath);
+
+			if (disposed) return;
 
 			// Notify other views
 			this.onDidChangeActiveEditor.fire(document.uri.fsPath);
@@ -124,7 +129,9 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 
 		} catch (error: any) {
 			vscode.window.showErrorMessage(`Failed to open binary: ${error.message}`);
-			webviewPanel.webview.html = this.getErrorHtml(error.message);
+			if (!disposed) {
+				webviewPanel.webview.html = this.getErrorHtml(error.message);
+			}
 		}
 	}
 

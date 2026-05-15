@@ -31,7 +31,7 @@ if (!SAB_AVAILABLE) {
 export const HEXCORE_SAB_HOOKS_SUPPORTED: boolean = SAB_AVAILABLE;
 
 // Types from hexcore-unicorn
-interface UnicornModule {
+export interface UnicornModule {
 	Unicorn: new (arch: number, mode: number) => UnicornInstance;
 	ARCH: ArchConstants;
 	MODE: ModeConstants;
@@ -42,7 +42,7 @@ interface UnicornModule {
 	version: () => { major: number; minor: number; string: string };
 }
 
-interface UnicornInstance {
+export interface UnicornInstance {
 	arch: number;
 	mode: number;
 	handle: bigint;
@@ -2802,6 +2802,77 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Expose the raw Unicorn engine instance. Used by the Project Pythia
+	 * Oracle Hook for synchronous memRead/memWrite/regRead/regWrite without
+	 * going through the async readMemory/writeMemory wrappers (which would
+	 * add microtask hops inside the emulation loop). DO NOT call emuStart,
+	 * hookAdd, or memMap on the returned instance — that would collide with
+	 * the wrapper's bookkeeping. Read/write-only.
+	 * Added in v3.9.0-preview.oracle.
+	 *
+	 * NOTE: when the PE32/ARM64/x64-ELF worker is active, this returns the
+	 * IN-PROCESS Unicorn which does NOT see the worker's memory state.
+	 * Use readRegisterById / writeRegisterById for worker-aware routing.
+	 */
+	getRawEngine(): UnicornInstance | undefined {
+		return this.uc;
+	}
+
+	/**
+	 * Read a register by its numeric ID, worker-aware. Routes through the
+	 * PE32 / x64-ELF / ARM64 worker when active, else through the in-process
+	 * Unicorn. Returns bigint (64-bit registers) for consistency.
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	async readRegisterById(regId: number): Promise<bigint> {
+		if (this._arm64Worker) {
+			const v = await this._arm64Worker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (this._x64ElfWorker) {
+			const v = await this._x64ElfWorker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (this._pe32Worker) {
+			const v = await this._pe32Worker.regRead(regId);
+			return typeof v === 'bigint' ? v : BigInt(v);
+		}
+		if (!this.uc) throw new Error('Unicorn not initialized');
+		const v = this.uc.regRead(regId);
+		return typeof v === 'bigint' ? v : BigInt(v);
+	}
+
+	/**
+	 * Write a register by its numeric ID, worker-aware.
+	 * Added in v3.9.0-preview.oracle.
+	 */
+	async writeRegisterById(regId: number, value: bigint | number): Promise<void> {
+		if (this._arm64Worker) {
+			await this._arm64Worker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (this._x64ElfWorker) {
+			await this._x64ElfWorker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (this._pe32Worker) {
+			await this._pe32Worker.regWrite(regId, typeof value === 'bigint' ? value : BigInt(value));
+			return;
+		}
+		if (!this.uc) throw new Error('Unicorn not initialized');
+		this.uc.regWrite(regId, value);
+	}
+
+	/**
+	 * Expose the Unicorn module object — gives callers access to architecture
+	 * and register ID constants (X86_REG, HOOK, ARCH, MODE). Same restriction
+	 * as getRawEngine: treat as read-only.
+	 */
+	getUnicornModule(): UnicornModule | undefined {
+		return this.unicornModule;
+	}
+
+	/**
 	 * Stop emulation
 	 */
 	stop(): void {
@@ -3503,6 +3574,20 @@ export class UnicornWrapper {
 
 	getLastError(): string | undefined {
 		return this.lastError;
+	}
+
+	/**
+	 * Clear both lastError tracking slots. Used by the Oracle Hook between
+	 * emulation steps: the PE32/ELF/ARM64 workers do NOT throw on
+	 * UC_ERR_EXCEPTION — they record the error into state.lastError and
+	 * break their batch loop. The Oracle loop has to inspect that slot,
+	 * decide whether it was a deliberate INT3 trap, clear the marker, and
+	 * resume. Added in v3.9.0-preview.oracle.
+	 */
+	clearLastError(): void {
+		this.lastError = undefined;
+		this.state.lastError = undefined;
+		this._lastFaultInfo = undefined;
 	}
 
 	getLastFaultInfo(): Record<string, unknown> | undefined {

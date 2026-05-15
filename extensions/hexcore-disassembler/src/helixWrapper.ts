@@ -48,6 +48,13 @@ interface HelixEngineInstance {
 	addVariableRename?(oldName: string, newName: string): void;
 	/** v3.7.5 P3: Clear all variable renames from the engine. */
 	clearVariableRenames?(): void;
+	/** Register raw bytes for a virtual-address range so RecoverSwitchTables
+	 *  can read jump tables / vtables / string literals from the original
+	 *  binary.  Without at least one section, the pass skips itself and
+	 *  every `switch (...)` collapses to `goto default`. */
+	addDataSection?(vaStart: bigint, bytes: Buffer): void;
+	/** Drop all registered data sections. */
+	clearDataSections?(): void;
 }
 
 interface HelixModule {
@@ -210,6 +217,14 @@ export class HelixWrapper {
 		 * Default: enabled with all transformations on.
 		 */
 		cleanup?: boolean | CleanupOptions;
+		/**
+		 * v3.9.0: Raw bytes of the binary's data sections (`.rdata` for PE,
+		 * `.rodata` for ELF), keyed by virtual address.  Required for switch
+		 * table recovery — without it, RecoverSwitchTables skips itself and
+		 * every `switch (...)` in the source binary collapses to
+		 * `goto default` in the decompiled output.
+		 */
+		dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 	}): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
@@ -262,6 +277,24 @@ export class HelixWrapper {
 					}
 				}
 			} catch { /* Native module doesn't support renames yet — fallback to string replace */ }
+		}
+
+		// v3.9.0: Feed the binary's data sections so RecoverSwitchTables can
+		// resolve jump tables.  Without this the pass auto-skips and every
+		// `switch (...)` in the source collapses to `goto default`.
+		const dataSections = options?.dataSections;
+		if (dataSections && dataSections.length > 0) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof engine.addDataSection === 'function') {
+					if (typeof engine.clearDataSections === 'function') {
+						engine.clearDataSections();
+					}
+					for (const { vaStart, bytes } of dataSections) {
+						engine.addDataSection(vaStart, bytes);
+					}
+				}
+			} catch { /* Native module too old — proceed without sections */ }
 		}
 
 		let result: HelixResult;
