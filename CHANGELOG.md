@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.2-nightly] - 2026-05-28 - "Callfuscation — Detection + (Opt-In) Deflattening"
 
-> Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Nightly: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once `-nightly` is dropped and the Helix agent verifies it.
+> Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Nightly: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once `-nightly` is dropped and the Helix agent verifies it. **This nightly also carries a broad "fix-or-cut" audit wave** (emulator, static VM/PRNG detectors, headless pipeline robustness, YARA, job-file discovery, doc-honesty) — see the *Audit-fix wave* section below.
 
 ### Disassembler — analyzeAll no longer drops v3.7 analysis telemetry (`e634e40`)
 
@@ -87,6 +87,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Helix 0.9.2 — comes later.** The matching `hexcore-helix` release that structures the deflattened multi-block chain into clean pseudo-C lands AFTER the `-nightly` suffix is dropped and the separate Helix agent verifies it. Not part of this release.
 
 > Full analysis, artifacts (`before.ll` / `after.ll` / `crackme.deflat2` / `leaders.json`) and the follow-up plan: `Call/hexcore-reports/helix-briefing/HELIX_AGENT_BRIEFING.md`.
+
+---
+
+### Audit-fix wave — "fix-or-cut" sweep of documented features (2026-05-29)
+
+> A second body of work in the same 3.8.2-nightly cycle, driven by one principle: **a documented-but-broken feature is worse than no feature at all.** The Callfuscated investigation surfaced several documented surfaces that were silently no-ops, doc lies, or dropped fields. So each documented capability was *run against a real binary* (the HTB crackme, a `mali_kbase.ko` kernel module) and the result was **fixed, doc-corrected, or cut** — never left to look like it works when it doesn't. Branch `hexcore/3.8.2-audit-fixes` (7 commits + the job-discovery fix below). The emulator decision was **Unicorn-first** (the in-tree Unicorn path was made usable rather than waiting on Azoth's ELF loader). Full evidence tables live in `rag/audit-{analysis,disasm,pipeline,emulator}.md` (local, gitignored).
+
+#### Emulator (Unicorn) — now actually usable for stdin crackmes + faithful PRNG (`3db1078`)
+
+> Validated end-to-end on the real HTB crackme: feeding the correct password via stdin now prints `Correct. Validate the challenge using the flag: HTB{...}` (it always printed `Incorrect` before, because the input buffer stayed all-zero).
+
+- **scanf/stdin propagation to the worker** (`unicornWrapper.ts`) — for x64-ELF/PE32 the guest runs in a **worker child process** and the in-process `uc` is only a stale mirror. `writeMemorySync` (with state not running) wrote ONLY the mirror and never queued into `deferredMemoryWrites`, so the worker run loop never received scanf's bytes and the guest read an all-zero buffer. Fix: when a worker is active, also queue the write into `deferredMemoryWrites` so the existing post-API-hook push-back flushes it to the worker.
+- **Faithful glibc `random()`/`rand()` (`prngMode: "glibc"`, `prng.ts`)** — replaced the 344-entry approximation with a real glibc `random_r.c` **TYPE_3** port (31×int32 state, Schrage seeding, seed-0→1, 310-output warmup, additive feedback). `srand(1337); rand()` now returns `292616681` (`0x1170f9e9`), bit-for-bit vs native glibc across 12 seeds.
+- **`collectSideChannels` no longer the ~300s hang** (`debugEngine.ts`) — it was registered via `onCodeExecute`, forcing a full register+memory IPC sync at every batch boundary (~285k times). Now a passive-observer channel (once per batch in worker mode, excluded from the sync gate) with bigint keys and a 200k distinct-address cap (env-overridable). ~100× faster (1.7s / ~10 MB); `Correct` still prints.
+- **Breakpoints in `emulateFullHeadless`** — were only checked at batch boundaries and never passed to `executeBatch`; now fed as worker terminal addresses so the run halts at the exact address.
+- TS-only (no native rebuild); `tsc` clean; tests green.
+
+#### Disassembler — static detectors that survive obfuscation (`9bc0533`)
+
+> `detectVM`/`detectPRNG` were **no-op-in-practice**: they only iterated `this.functions`, which collapses under callfuscation/flattening (the crackme yields ~7 discovered functions), so they found nothing despite a live 10-opcode stack VM and an `srand(1337)` decoy.
+
+- **Reworked to the obfuscation-resistant byte/linear-scan model** that `detectCallfuscation` already uses, independent of function discovery. New `buildExecScan()`: a two-pass linear sweep over ALL executable sections (Pass 1 forward sweep; Pass 2 leader-seeded recovery decoding a window at every `E8`/`E9` rel32 target, because a plain forward sweep DESYNCS on call-as-jmp chains), deduped by address, bounded to 4 MiB / 64k leaders. On the crackme: 1030 → 12590 recovered instructions.
+- **`detectVM`** gained a stack-machine signature (≥2 distinct operand-stack `[reg+reg*N-disp]` arrays + ≥8 indexed accesses + an indirect dispatch) to catch computed-goto interpreters with no `cmp` ladder; the `cmp`-ladder gate was raised 3→6 to kill a kernel-module false positive.
+- **`detectPRNG`** now byte-scans for `E8 rel32` (direct PLT call) and `FF15 disp32` (`-fno-plt` GOT call) whose target resolves to `srand`/`rand`/`random`/`srandom` via a new authoritative PLT-stub-VA→dynsym-name map, with chain-aware seed recovery (`mov edi, imm32 ; E8/E9 rel32` landing on a srand node).
+- **Bug fixed: `.rela.plt` `rInfo >> 32` on a JS number** coerced to int32 (shift mod 32), so **every** PLT stub resolved to the same wrong symbol (all mapped to `rand`). Use float division for the 64-bit high dword; also fixes import-table PLT addresses (`srand` was left at `0x0`).
+- **Validated:** crackme → `vmDetected=true, vmType='stack-machine', stackArrays=3`; `prngDetected=true, seedValue=1337 (0x539)`. `mali_kbase.ko` → both false (no false positive).
+
+#### Disassembler — other audited gaps (`5b926b6`)
+
+- **`btfData` surfaced on `analyzeELFHeadless`** — the `elfBtfLoader` parser was real and populated internally but the `{version,typeCount,hasBTF,types,strings}` field was dropped from the result (same serializer-drop archetype as the `analyzeAll` vm/prng/junk bug). `types`/`strings` capped at 5000.
+- **`confidenceScore` scale bug (HIGH)** — `symbolResolution` was per-call-site relocation count ÷ distinct-import count (e.g. 44.5), poisoning `overall` to ~13.78 and breaking the documented 0–1 contract. Both terms are now call-site counts and the field is clamped to [0,1]. `mali_kbase.ko`: overall 13.78 → 0.72, symbolResolution 44.54 → 1.0.
+- **`arm64 liftToIR` cut** — `archMapper` advertised `arm64`→`aarch64` but the shipped native remill build fails with "Failed to lift instruction". Removed `arm64` from `ARCH_MAP` so it rejects cleanly upfront; error string now "Supported: x86, x64."
+
+#### Pipeline — BREAKING headless fixes (`db6bc09`, `4d73fba`)
+
+> These are marked BREAKING because a job copied verbatim from the docs previously died at runtime ("not declared in capability map") or silently never branched.
+
+- **Alias map repointed to Helix** — `hexcore.decompile` / `hexcore.decompile.ir` resolved to the **deprecated** `rellic.*` commands; the docs describe them as Helix. Now alias to `hexcore.helix.decompile` / `.decompileIR` (rellic still directly addressable).
+- **Registered the documented-but-missing commands** — `hexcore.disasm.rename` / `.retype` / `.bookmark` / `.sessionPath` were in neither the alias nor capability map, so doc-copied jobs died. Registered as aliases to `renameFunction` / `retypeVariable` / `setBookmark` / `getSessionDbPath`.
+- **`queueJob` accepts `file`** — the handler read only `arg.jobFile` but the docs + orchestrator templates use `args.file` (and the runner stripped `file` for every step). `buildCommandOptions` now forwards a step-level `file`/`jobFile` for orchestration commands as `jobFile`; the Multi-Job Orchestrator templates run headless again.
+- **Loop-cap miscount** — a forward `skip N`/`goto` wrongly incremented the 100-iteration loop counter; only true backward jumps (`nextIndex <= index`) count now.
+- **`onResult` field lookup** — `evaluateOnResult` did a flat `stepOutput[rule.field]` read AND only saw data from a written output file, so the marquee adaptive-triage templates (branching on a nested `summary.maxEntropy` with no output block) **never fired**. New `resolveFieldPath()` supports dotted paths (keeping literal-dot top-level keys working) and the runner now falls back to the command's in-memory return value when a step writes no file.
+- **`validateJob` forward-reference detection** — `createValidationReport` never parsed `$step` tokens, so a forward/out-of-range reference was greenlit and only threw at run time. Added static `collectStepReferences()` + `STEP_REF_FORWARD` / `STEP_REF_OUT_OF_RANGE` / `STEP_REF_INVALID` issues.
+- **Timeout honesty (no fake cancel)** — `tryCancelOnTimeout` is a no-op (no capability wires a `cancelCommand`), so a timed-out native op keeps running. Rather than pretend, the log + recorded step error now state plainly that the step was abandoned and the underlying operation may still be running.
+- **`doctor`: emulator-gated commands report `gated`** (with reason) instead of `degraded`; added a `gatedCommands` count.
+- **Composer `hexcoreVersion`** bumped from the stale `3.5.3` → `3.8.2`.
+
+#### YARA — honor `categories` in headless scans (`a184b6b`)
+
+- The documented headless `yara.scan` **silently ignored** the `categories` arg — only the interactive path loaded DefenderYara categories, so a pipeline scan ran against the ~14 bundled rules regardless of request. Added `categories?: string[]` and `loadEssentials?: boolean`; a new `loadRequestedCategories()` loads them before scanning, mirroring the interactive path.
+- **Honesty contract:** when no DefenderYara catalog is indexed (the 76k+ set is **not** bundled), the requested categories are reported as unavailable and the scan proceeds against bundled rules only, with an explicit log line instead of a silent 14-rule scan. A new `categoryLoad{requested,loaded,unavailable,rulesLoaded,catalogIndexed}` field on `ScanResult` + JSON output lets callers tell "no catalog present" from "scanned and clean".
+
+#### Headless job-file discovery — manual *Run Job* / *Validate Job* now find subfolder jobs
+
+> Reported symptom: every manual run printed *"No .hexcore_job.json file was found."* even with valid job files present. Root cause was a long-standing inconsistency (not introduced this cycle): the `FileSystemWatcher` is recursive (`**/*.hexcore_job.json`) but `resolveJobFilePath` only scanned the **workspace root** — so a job in a subfolder was found by the watcher (on save) yet invisible to the manual *Run Job* command and *Validate Job*.
+
+- **`resolveJobFilePath` is now recursive** — a bounded `findJobFilesRecursive()` (max depth 6, skipping `node_modules`/`.git`/`out`/`dist`/build dirs) plus a deterministic `pickPreferredJobFile()` (canonical `.hexcore_job.json` wins, then shallowest path, then alphabetical) so *Run Job* picks the same file every time, subfolders included.
+- **Startup auto-run (`autoRunExistingJobs`) is intentionally left root-only** — auto-*executing* every job buried in a tree the moment a window opens is a foot-gun; subfolder jobs still run via the recursive watcher (on save) and via the now-recursive manual *Run Job*. Documented in-code so it is not "re-fixed" later.
+
+#### Docs — counts corrected to match reality (`e523b66`)
+
+- `filetype.detect`: "118 signatures" → **43** across 11 categories (the DB has 43; the claim was inflated).
+- `strings.extractAdvanced`: "4 scanners" → the actual **9-scanner** pipeline (it was *undersold*).
+- `ioc.extract`: "5 categories" → the actual **12** (registry keys, file paths, named pipes, mutex/GUID, user-agent, crypto wallet, … — also undersold).
+- `yara.scan`: now states honestly that ~14 rules are bundled and the 76k+ DefenderYara set is **not**; documents the new `categories`/`loadEssentials` args; fixed templates that passed unrecognized args.
+- `buildFormula`: corrected the reverse-wrong "x86/x64 only" doc — it **does** recognize ARM64/ARM32. `rellic`: the "removal in v3.8.0" never happened — re-documented as deprecated-but-present.
+
+#### Tests
+
+- **`vmPrngDetectionBinary.test.ts`** (NEW) — binary-driven regression for the detectors. The existing `vmPrngDetectionProperties.test.ts` only checked result **shape** via fast-check, so the no-op defects were invisible to CI. Synthetic callfuscated srand/rand chain + synthetic stack-VM + the real crackme (skipped if the fixture is absent). General lesson recorded: shape-only tests give false confidence.
+- **`prngProperties.test.ts`** — covers the faithful glibc TYPE_3 port.
+
+### Deferred / tracked (NOT in 3.8.2-nightly)
+
+- **Azoth (`hexcore-elixir`) ELF + stdin + `prngMode`** — Large (new ELF loader + libc hook table in C++23 + SysV ABI + worker IPC); currently PE32+-only, rejects ELF. The Unicorn path above is the usable route in the meantime.
+- **Timeout *cancellation*** — needs a real `CancellationToken`/`cancelCommand` wired through the native ops (the honesty fix above only stops pretending).
+- **`status.json` run-ID race** — two jobs sharing an `outDir` can collide; `queueSnapshot` two-singletons.
+- **Helix `EliminateDeadCodePass`** — intermittent segfault (latent heap bug), tracked in the Helix repo.
+- **Working-tree hygiene** — `helix_dump_*.mlir` / `*.log` / `remill-deps-*.zip` litter should be gitignored.
 
 ## [3.8.1] - 2026-05-17 - "Stability + Helix v0.9.1 + Pythia Oracle Hook"
 
