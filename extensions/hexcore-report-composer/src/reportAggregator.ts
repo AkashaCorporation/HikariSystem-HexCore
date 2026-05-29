@@ -299,7 +299,7 @@ export class ReportAggregator {
 		const report: ComposedReport = {
 			title: 'HexCore Composed Report',
 			generatedAt: new Date().toISOString(),
-			hexcoreVersion: '3.5.3',
+			hexcoreVersion: '3.8.2',
 			sources,
 			sections
 		};

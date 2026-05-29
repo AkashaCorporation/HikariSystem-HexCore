@@ -171,7 +171,11 @@ export interface PipelineDoctorEntry {
 	validateOutput: boolean;
 	defaultTimeoutMs: number;
 	registered: boolean;
-	readiness: 'ready' | 'degraded' | 'missing';
+	// `gated` (v3.8.2): the command's owner emulator is deselected via the
+	// hexcore.emulator setting, so it is intentionally not registered. This is
+	// expected, not a fault — distinct from `degraded` (owner installed but
+	// command failed to register for an unknown reason).
+	readiness: 'ready' | 'degraded' | 'missing' | 'gated';
 	reason?: string;
 	ownerExtensions: PipelineDoctorExtensionState[];
 }
@@ -184,6 +188,7 @@ export interface PipelineDoctorReport {
 	readyCommands: number;
 	degradedCommands: number;
 	missingCommands: number;
+	gatedCommands: number;
 	undeclaredHexcoreCommands: string[];
 	entries: PipelineDoctorEntry[];
 }
@@ -651,14 +656,26 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 		...COMMAND_ALIASES.keys()
 	]);
 
+	// A command whose owner emulator is deselected by the hexcore.emulator
+	// setting is intentionally unregistered — report it as `gated`, not
+	// `degraded`, so a healthy "azoth" or "debugger" config doesn't look broken.
+	const activeEmulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'both');
+
 	const capabilities = listCapabilities();
 	const entries: PipelineDoctorEntry[] = capabilities.map(capability => {
 		const ownerExtensions = getExtensionStates(capability.requiredExtension);
 		const registered = commands.has(capability.command);
 		const hasMissingOwner = ownerExtensions.some(owner => !owner.installed);
+		const requiredEmulator = EMULATOR_GATED_COMMANDS.get(capability.command);
+		const isGated = requiredEmulator !== undefined
+			&& activeEmulator !== 'both'
+			&& activeEmulator !== requiredEmulator;
 		const readiness: PipelineDoctorEntry['readiness'] = hasMissingOwner
 			? 'missing'
-			: (registered ? 'ready' : 'degraded');
+			: (registered ? 'ready' : (isGated ? 'gated' : 'degraded'));
+		const reason = (!registered && isGated && !capability.reason)
+			? `Emulator-gated: hexcore.emulator="${activeEmulator}" deselects this command's engine ("${requiredEmulator}"). This is expected, not a fault.`
+			: capability.reason;
 
 		return {
 			command: capability.command,
@@ -668,7 +685,7 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 			defaultTimeoutMs: capability.defaultTimeoutMs,
 			registered,
 			readiness,
-			reason: capability.reason,
+			reason,
 			ownerExtensions
 		};
 	});
@@ -680,6 +697,7 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 	const readyCommands = entries.filter(entry => entry.readiness === 'ready').length;
 	const degradedCommands = entries.filter(entry => entry.readiness === 'degraded').length;
 	const missingCommands = entries.filter(entry => entry.readiness === 'missing').length;
+	const gatedCommands = entries.filter(entry => entry.readiness === 'gated').length;
 	const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '(no workspace)';
 
 	return {
@@ -690,6 +708,7 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 		readyCommands,
 		degradedCommands,
 		missingCommands,
+		gatedCommands,
 		undeclaredHexcoreCommands,
 		entries
 	};
@@ -697,8 +716,33 @@ export async function runPipelineDoctor(): Promise<PipelineDoctorReport> {
 
 export const MAX_LOOP_ITERATIONS = 100;
 
+/**
+ * Resolves a (possibly dotted) field path against a step's output object.
+ * `"maxEntropy"` reads a top-level field; `"summary.maxEntropy"` walks nested
+ * objects. A flat key that contains a literal dot is tried first so existing
+ * jobs whose field name happens to contain a dot keep working. Returns
+ * `undefined` if any segment is missing or a non-object is traversed.
+ */
+export function resolveFieldPath(stepOutput: Record<string, unknown>, field: string): unknown {
+	// Fast path / backward compat: exact top-level key (covers keys with dots).
+	if (Object.prototype.hasOwnProperty.call(stepOutput, field)) {
+		return stepOutput[field];
+	}
+	if (!field.includes('.')) {
+		return undefined;
+	}
+	let current: unknown = stepOutput;
+	for (const segment of field.split('.')) {
+		if (!isRecord(current) || !Object.prototype.hasOwnProperty.call(current, segment)) {
+			return undefined;
+		}
+		current = current[segment];
+	}
+	return current;
+}
+
 export function evaluateOnResult(rule: OnResultRule, stepOutput: Record<string, unknown>): boolean {
-	const fieldValue = stepOutput[rule.field];
+	const fieldValue = resolveFieldPath(stepOutput, rule.field);
 	if (fieldValue === undefined) {
 		return false;
 	}
@@ -982,13 +1026,17 @@ export class AutomationPipelineRunner {
 			let attemptCount = 0;
 			let executionError: unknown;
 			let completed = false;
+			// Captures the command's return value so onResult / $step[N].result
+			// can read it even when the step defines no `output` file (the marquee
+			// adaptive-triage templates put onResult on a step with no output).
+			let commandReturn: unknown;
 
 			while (attemptCount < maxAttempts) {
 				attemptCount++;
 				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
 
 				try {
-					await withTimeout(
+					commandReturn = await withTimeout(
 						vscode.commands.executeCommand(resolvedCommand, commandOptions),
 						timeoutMs,
 						`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
@@ -1016,9 +1064,14 @@ export class AutomationPipelineRunner {
 					break;
 				} catch (error: unknown) {
 					executionError = error;
-					const errorMessage = normalizeExecutionError(error, resolvedCommand);
+					let errorMessage = normalizeExecutionError(error, resolvedCommand);
 					if (error instanceof TimeoutError) {
-						await tryCancelOnTimeout(capability, logPath, index);
+						const cancelled = await tryCancelOnTimeout(capability, logPath, index);
+						// Be honest in the recorded status: a timed-out step is
+						// only abandoned, not killed, unless a real cancelCommand ran.
+						if (!cancelled) {
+							errorMessage += ' (step abandoned on timeout; the underlying operation may still be running in the Extension Host)';
+						}
 					}
 
 					if (attemptCount < maxAttempts) {
@@ -1055,7 +1108,12 @@ export class AutomationPipelineRunner {
 				break;
 			}
 
-			// Step output capture — read once for both onResult evaluation and $step[N] interpolation.
+			// Step output capture — used for both onResult evaluation and
+			// $step[N] interpolation. Prefer the written output file (it is the
+			// canonical, post-serialization artifact); fall back to the command's
+			// in-memory return value so steps WITHOUT an `output` block can still
+			// feed onResult / $step[N].result (e.g. the adaptive-triage templates
+			// branch on `hexcore.entropy.analyze` with no output file).
 			let stepOutputData: Record<string, unknown> | undefined;
 			if (completed && output?.path) {
 				try {
@@ -1067,6 +1125,9 @@ export class AutomationPipelineRunner {
 				} catch (readErr) {
 					appendLog(logPath, `[Step ${index + 1}] WARNING: Could not read output for step result capture: ${toErrorMessage(readErr)} (path=${output?.path ?? '<none>'})`);
 				}
+			}
+			if (completed && stepOutputData === undefined && isRecord(commandReturn)) {
+				stepOutputData = commandReturn;
 			}
 
 			// Record the completed step result so later steps can reference it via $step[N].
@@ -1245,6 +1306,40 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 				stepIndex: index + 1,
 				command: resolvedCmd
 			});
+		}
+
+		// $step[N] reference validation (static). The runtime resolver throws on
+		// forward/out-of-range references, but validation previously never parsed
+		// the tokens, so a forward-ref job was greenlit. Catch them here.
+		if (step.args) {
+			for (const ref of collectStepReferences(step.args)) {
+				const refIndex = ref.token === 'prev' ? index - 1 : parseInt(ref.token, 10);
+				if (Number.isNaN(refIndex)) {
+					issues.push({
+						level: 'error',
+						code: 'STEP_REF_INVALID',
+						message: `Invalid step reference $step[${ref.token}] in step ${index + 1} (${step.cmd})`,
+						stepIndex: index + 1,
+						command: resolvedCmd
+					});
+				} else if (refIndex < 0) {
+					issues.push({
+						level: 'error',
+						code: 'STEP_REF_OUT_OF_RANGE',
+						message: `$step[${ref.token}] in step ${index + 1} resolves to index ${refIndex}, which is out of bounds (a $step[prev] on step 1 has no predecessor)`,
+						stepIndex: index + 1,
+						command: resolvedCmd
+					});
+				} else if (refIndex >= index) {
+					issues.push({
+						level: 'error',
+						code: 'STEP_REF_FORWARD',
+						message: `Forward reference $step[${ref.token}] in step ${index + 1} (${step.cmd}) targets step ${refIndex + 1}, which has not run yet (references must point to an earlier step)`,
+						stepIndex: index + 1,
+						command: resolvedCmd
+					});
+				}
+			}
 		}
 	}
 
@@ -1507,6 +1602,34 @@ export function resolveStepReferences(
 	currentIndex: number
 ): Record<string, unknown> {
 	return resolveObject(args, stepRecords, currentIndex) as Record<string, unknown>;
+}
+
+/**
+ * Statically extracts every `$step[N]` / `$step[prev]` reference inside an args
+ * object (recursing into nested objects/arrays/strings). Used by validateJob to
+ * reject forward / out-of-range references BEFORE the job runs, instead of only
+ * throwing at the offending step's dispatch time.
+ */
+export function collectStepReferences(value: unknown): Array<{ token: string; accessor: string }> {
+	const found: Array<{ token: string; accessor: string }> = [];
+	const TOKEN_RE = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+	const walk = (v: unknown): void => {
+		if (typeof v === 'string') {
+			let m: RegExpExecArray | null;
+			TOKEN_RE.lastIndex = 0;
+			while ((m = TOKEN_RE.exec(v)) !== null) {
+				const full = m[0];
+				const dotPos = full.indexOf('.', full.indexOf(']'));
+				found.push({ token: m[1], accessor: full.slice(dotPos + 1) });
+			}
+		} else if (Array.isArray(v)) {
+			for (const item of v) { walk(item); }
+		} else if (isRecord(v)) {
+			for (const item of Object.values(v)) { walk(item); }
+		}
+	};
+	walk(value);
+	return found;
 }
 
 function resolveValue(
@@ -1894,16 +2017,31 @@ function delay(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-async function tryCancelOnTimeout(capability: CommandCapability, logPath: string, index: number): Promise<void> {
+/**
+ * Best-effort cancellation when a step exceeds its timeout.
+ *
+ * HONEST BEHAVIOUR: the pipeline cannot interrupt a `vscode.commands.executeCommand`
+ * promise. We only race it against a timer (see {@link withTimeout}); when the
+ * timer wins we ABANDON the command and move on, but the underlying operation
+ * keeps running in the Extension Host until it finishes on its own. The only
+ * real cancellation we can perform is invoking an explicit `cancelCommand` if a
+ * capability declares one (none do today). We do NOT fake a cancel — when none
+ * is configured we say so plainly in the log.
+ *
+ * @returns `true` only if a real cancel command was successfully executed.
+ */
+async function tryCancelOnTimeout(capability: CommandCapability, logPath: string, index: number): Promise<boolean> {
 	if (!capability.cancelCommand) {
-		appendLog(logPath, `[Step ${index + 1}] Timeout: no cancel command configured.`);
-		return;
+		appendLog(logPath, `[Step ${index + 1}] Timeout: no cancel command is wired for this command. The step is abandoned and marked timed-out, but the underlying operation may STILL BE RUNNING in the Extension Host until it completes on its own.`);
+		return false;
 	}
 	try {
 		await vscode.commands.executeCommand(capability.cancelCommand);
 		appendLog(logPath, `[Step ${index + 1}] Timeout: cancellation command executed (${capability.cancelCommand}).`);
+		return true;
 	} catch (error: unknown) {
-		appendLog(logPath, `[Step ${index + 1}] Timeout: cancellation command failed (${capability.cancelCommand}): ${toErrorMessage(error)}`);
+		appendLog(logPath, `[Step ${index + 1}] Timeout: cancellation command failed (${capability.cancelCommand}): ${toErrorMessage(error)}. Underlying operation may still be running.`);
+		return false;
 	}
 }
 

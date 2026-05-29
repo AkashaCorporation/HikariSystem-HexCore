@@ -6017,6 +6017,7 @@ function showDoctorReportInOutputChannel(report: PipelineDoctorReport): void {
 	outputChannel.appendLine(`Ready:                ${report.readyCommands}`);
 	outputChannel.appendLine(`Degraded:             ${report.degradedCommands}`);
 	outputChannel.appendLine(`Missing:              ${report.missingCommands}`);
+	outputChannel.appendLine(`Gated (emulator):     ${report.gatedCommands}`);
 	outputChannel.appendLine(`Registered hexcore.*: ${report.registeredHexcoreCommands}`);
 	outputChannel.appendLine('');
 
