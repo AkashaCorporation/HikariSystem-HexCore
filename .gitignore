@@ -80,3 +80,6 @@ extensions/hexcore-llvm-mc/prebuilds/
 
 # Wiki (managed separately by GitHub)
 wiki/
+
+# HexCore agent RAG / decision knowledge base (local only, do not publish)
+rag/
