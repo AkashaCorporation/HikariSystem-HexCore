@@ -678,6 +678,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	};
 
 	const autoRunExistingJobs = (): void => {
+		// Intentionally ROOT-ONLY (not recursive). Auto-executing every job buried
+		// in a workspace the moment a window opens is a foot-gun; startup auto-run
+		// is therefore limited to jobs the user placed at the workspace root.
+		// Subfolder jobs still run via the recursive FileSystemWatcher (on save)
+		// and via the manual "Run Job" command (resolveJobFilePath is recursive).
 		const folders = vscode.workspace.workspaceFolders ?? [];
 		for (const folder of folders) {
 			// Primary: check for .hexcore_job.json (the canonical name)
@@ -5891,6 +5896,71 @@ function resolveOptionalOutputPath(output?: string | { path?: string }): string 
 	return undefined;
 }
 
+const JOB_FILE_SUFFIX = '.hexcore_job.json';
+const JOB_FILE_CANONICAL = '.hexcore_job.json';
+// Directories never worth walking when hunting for job files: build output,
+// dependency trees and VCS metadata. Keeps the recursive scan bounded.
+const JOB_SCAN_SKIP_DIRS = new Set([
+	'node_modules', '.git', '.hg', '.svn', 'out', 'dist', 'build',
+	'target', 'bin', 'obj', '.vscode-test', 'coverage', '__pycache__'
+]);
+const JOB_SCAN_MAX_DEPTH = 6;
+
+// Recursively collect every *.hexcore_job.json under `rootDir`, bounded by
+// JOB_SCAN_MAX_DEPTH and skipping heavy/irrelevant directories. This mirrors
+// the recursive FileSystemWatcher glob (**/*.hexcore_job.json) so that the
+// manual "Run Job"/"Validate Job" commands find jobs in subfolders too,
+// instead of only at the workspace root.
+function findJobFilesRecursive(rootDir: string): string[] {
+	const found: string[] = [];
+	const walk = (dir: string, depth: number): void => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return; // unreadable dir is non-fatal
+		}
+		for (const entry of entries) {
+			if (entry.isFile() && entry.name.endsWith(JOB_FILE_SUFFIX)) {
+				found.push(path.join(dir, entry.name));
+			}
+		}
+		if (depth >= JOB_SCAN_MAX_DEPTH) {
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory() && !JOB_SCAN_SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
+				walk(path.join(dir, entry.name), depth + 1);
+			}
+		}
+	};
+	walk(rootDir, 0);
+	return found;
+}
+
+// Deterministic preference among job-file candidates: the canonical
+// `.hexcore_job.json` wins, then shallower paths, then alphabetical. This makes
+// "run the default job" pick the same file every time regardless of fs order.
+function pickPreferredJobFile(candidates: string[], rootDir: string): string | undefined {
+	if (candidates.length === 0) {
+		return undefined;
+	}
+	const depthOf = (p: string): number => path.relative(rootDir, p).split(path.sep).length;
+	return [...candidates].sort((a, b) => {
+		const aCanon = path.basename(a) === JOB_FILE_CANONICAL ? 0 : 1;
+		const bCanon = path.basename(b) === JOB_FILE_CANONICAL ? 0 : 1;
+		if (aCanon !== bCanon) {
+			return aCanon - bCanon;
+		}
+		const aDepth = depthOf(a);
+		const bDepth = depthOf(b);
+		if (aDepth !== bDepth) {
+			return aDepth - bDepth;
+		}
+		return a.localeCompare(b);
+	})[0];
+}
+
 function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | undefined, explicitPath?: string): string | undefined {
 	if (typeof explicitPath === 'string' && explicitPath.length > 0) {
 		return path.resolve(explicitPath);
@@ -5906,20 +5976,17 @@ function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | un
 
 	const folders = vscode.workspace.workspaceFolders ?? [];
 	for (const folder of folders) {
-		// Primary: canonical .hexcore_job.json
-		const candidate = path.join(folder.uri.fsPath, '.hexcore_job.json');
+		const rootDir = folder.uri.fsPath;
+		// Primary: canonical .hexcore_job.json at the workspace root.
+		const candidate = path.join(rootDir, JOB_FILE_CANONICAL);
 		if (fs.existsSync(candidate)) {
 			return candidate;
 		}
-		// Fallback: first *.hexcore_job.json in workspace root
-		try {
-			const files = fs.readdirSync(folder.uri.fsPath);
-			const namedJob = files.find(f => f.endsWith('.hexcore_job.json'));
-			if (namedJob) {
-				return path.join(folder.uri.fsPath, namedJob);
-			}
-		} catch {
-			// Non-fatal
+		// Fallback: recursively find the best *.hexcore_job.json anywhere under
+		// the workspace root (subfolders included), matching the watcher's reach.
+		const preferred = pickPreferredJobFile(findJobFilesRecursive(rootDir), rootDir);
+		if (preferred) {
+			return preferred;
 		}
 	}
 
