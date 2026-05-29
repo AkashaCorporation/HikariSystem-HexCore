@@ -231,19 +231,19 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
-| `hexcore.filetype.detect` | 60s | Magic-byte file type detection (118 signatures) | All |
+| `hexcore.filetype.detect` | 60s | Magic-byte file type detection (43 signatures across 11 categories) | All |
 | `hexcore.hashcalc.calculate` | 90s | MD5, SHA1, SHA256, SHA512 hashes | All |
 | `hexcore.entropy.analyze` | 90s | Shannon entropy analysis, packing detection | All |
 | `hexcore.strings.extract` | 120s | ASCII/Unicode string extraction with categorization | All |
-| `hexcore.strings.extractAdvanced` | 180s | XOR deobfuscation (1-byte + multi-byte keys, rolling, increment) + stack string detection | All |
+| `hexcore.strings.extractAdvanced` | 180s | 9-scanner deobfuscation: single-byte XOR, multi-byte/rolling/increment XOR, known-plaintext, composite cipher (ADD/SUB/ROT), wide-string (UTF-16LE) XOR, positional (counter/block-rotate) XOR, rolling-ext XOR, layered XOR, and stack-string detection. Confidence-scored, deduped, PE section-attributed. | All |
 | `hexcore.peanalyzer.analyze` | 120s | PE header, sections, entropy, packer detection, security mitigations (legacy) | PE only |
 | `hexcore.disasm.analyzePEHeadless` | 120s | **Deep PE analysis**: typed imports (180+ API signatures), exports, sections, TLS/Debug/CLR/DelayImport, security indicators, category summary | PE only |
 | `hexcore.elfanalyzer.analyze` | 120s | ELF header, sections, segments, symbols, security mitigations (RELRO, NX, PIE, Canary) (legacy) | ELF only |
 | `hexcore.disasm.analyzeELFHeadless` | 120s | **Deep ELF analysis**: program headers, full symtab/dynsym, all relocations, dynamic entries, .ko modinfo, symbol stats | ELF only |
 | `hexcore.base64.decodeHeadless` | 90s | Detect and decode Base64 strings with **confidence scoring** (entropy, context filters, categories) | All |
-| `hexcore.yara.scan` | 180s | YARA rule scanning with threat scoring | All |
+| `hexcore.yara.scan` | 180s | YARA rule scanning with threat scoring. Scans the bundled rule set by default (7 built-in + 7 AntiAnalysis `.yar` = ~14 rules). The 76k+ DefenderYara rule set is **not bundled**; supply it (see note below) and pass `categories`/`loadEssentials` to scan against it headlessly. | All |
 | `hexcore.yara.updateRules` | 60s | Reload YARA rule files | N/A |
-| `hexcore.ioc.extract` | 120s | IOC extraction (IPs, URLs, hashes, emails, domains) | All |
+| `hexcore.ioc.extract` | 120s | IOC extraction across 12 categories: URL, email, IPv4, IPv6, domain, registry key, file path, named pipe, mutex/GUID, hash (MD5/SHA1/SHA256), user-agent, crypto wallet. Binary-aware noise reduction, dedup, optional SQLite backend (auto at >=64MB or >=20k matches). | All |
 
 ### Disassembly & Analysis
 
@@ -1192,6 +1192,41 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 > **Tip:** Use an absolute path for `irPath` when `outDir` is absolute — this avoids any workspace-root resolution ambiguity.
 
 ---
+
+### `hexcore.yara.scan`
+
+```json
+{
+  "cmd": "hexcore.yara.scan",
+  "args": { "categories": ["Trojan", "Backdoor"], "loadEssentials": false }
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `categories` | `string[]` | — | DefenderYara categories to load into the active rule set before scanning (e.g. `["Trojan", "Ransom"]`). Effective **only when a DefenderYara catalog is indexed**. |
+| `loadEssentials` | `boolean` | `false` | Load the DefenderYara "essentials" bundle (Trojan/Backdoor/Ransom/Exploit/PWS/...) before scanning. Effective **only when a DefenderYara catalog is indexed**. |
+
+**What ships vs. what you must provide:**
+
+- **Bundled (always scanned):** 7 built-in rules (packers, suspicious APIs, shellcode, reverse-shell) + 7 AntiAnalysis `.yar` files (anti-debug, anti-VM, API hashing, obfuscation). ~14 rules total, zero configuration.
+- **DefenderYara (76k+ rules) is NOT bundled.** To scan against it, place a `DefenderYara-main` folder in `~/Desktop`, `~/Downloads`, or `C:\` (auto-detected at activation), or set the `hexcore.yara.defenderYaraPath` setting. HexCore *indexes* the catalog on activation; categories are **loaded on demand** when you pass `categories`/`loadEssentials`.
+
+**Honest reporting:** when `categories`/`loadEssentials` is requested, the result JSON includes a `categoryLoad` object:
+
+```json
+{
+  "categoryLoad": {
+    "requested": ["Trojan", "drivers"],
+    "loaded": ["Trojan"],
+    "unavailable": ["drivers"],
+    "rulesLoaded": 482,
+    "catalogIndexed": 76219
+  }
+}
+```
+
+If no DefenderYara catalog is indexed, `catalogIndexed` is `0`, every requested category appears in `unavailable`, and the scan runs against the bundled rules only — the command **never silently claims** to have loaded the 76k set. Use `activeRules` + `ruleLoadDiagnostics` in the same output to confirm exactly how many rules were active.
 
 ### `hexcore.strings.extract`
 ```json

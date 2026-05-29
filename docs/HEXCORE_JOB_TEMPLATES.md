@@ -1131,7 +1131,7 @@ Full kernel module reverse engineering with BTF type information from vmlinux fo
       "output": { "path": "security-api-xrefs.json" },
       "timeoutMs": 120000
     },
-    { "cmd": "hexcore.yara.scan", "args": { "categories": ["drivers"] }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.yara.scan", "args": { "categories": ["HackTool", "Exploit"] }, "timeoutMs": 180000 },
     {
       "cmd": "hexcore.pipeline.composeReport",
       "output": { "path": "BTF_ENHANCED_REPORT.md", "format": "md" },
@@ -1147,6 +1147,7 @@ Full kernel module reverse engineering with BTF type information from vmlinux fo
 - `analyzeELFHeadless` output includes `btfData` when BTF is available, plus `confidenceScore` with bonus for BTF/DWARF presence.
 - BTF is standard in modern Linux kernels (5.2+, Ubuntu 20.04+, Fedora 31+). For older kernels, DWARF fallback is planned.
 - Combine with section-aware lifting for complete `.init.text`/`.exit.text` coverage.
+- `yara.scan` `categories` are DefenderYara top-level categories (`Trojan`, `Backdoor`, `Exploit`, `HackTool`, ...) and only load when a DefenderYara catalog is indexed — the 76k+ set is **not bundled** (see `hexcore.yara.scan` in `docs/HEXCORE_AUTOMATION.md`). Without it, the scan runs against the bundled rules and the `categoryLoad.unavailable` field reports the miss; the bundled AntiAnalysis rules still cover anti-debug/anti-VM/API-hashing for kernel modules.
 
 ---
 
@@ -1482,7 +1483,7 @@ Writes a run-level `summary` (okCount/errorCount/skippedCount/totalDurationMs
     { "cmd": "hexcore.strings.extractAdvanced", "args": { "minLength": 6 } },
     { "cmd": "hexcore.base64.decodeHeadless" },
     { "cmd": "hexcore.peanalyzer.analyze" },
-    { "cmd": "hexcore.yara.scan", "args": { "useDefaultRules": true }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
     { "cmd": "hexcore.ioc.extract" },
     {
       "cmd": "hexcore.elixir.emulateHeadless",
@@ -1564,7 +1565,7 @@ crypto rules. Demonstrates the full `onResult` operator set (gt/regex/goto).
       "output": { "path": "aob-crypto-loops.json" },
       "continueOnError": true
     },
-    { "cmd": "hexcore.yara.scan", "args": { "category": "crypto", "useDefaultRules": true } },
+    { "cmd": "hexcore.yara.scan" },
     { "cmd": "hexcore.ioc.extract" },
     {
       "cmd": "hexcore.pipeline.composeReport",
