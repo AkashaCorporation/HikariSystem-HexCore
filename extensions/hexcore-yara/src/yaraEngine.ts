@@ -52,6 +52,20 @@ export interface ScanResult {
 	activeRules?: number;
 	/** Which rule directories the engine tried, and which succeeded. */
 	ruleLoadDiagnostics?: { triedPaths: string[]; loadedFrom: string | null };
+	/**
+	 * Result of an on-demand DefenderYara category load triggered by the scan
+	 * `categories` / `loadEssentials` options. Present only when such a load
+	 * was requested. `unavailable` lists categories the catalog did not have
+	 * (or all of them, when no catalog is indexed), so callers can tell apart
+	 * "no DefenderYara present" from "scanned and clean".
+	 */
+	categoryLoad?: {
+		requested: string[];
+		loaded: string[];
+		unavailable: string[];
+		rulesLoaded: number;
+		catalogIndexed: number;
+	};
 }
 
 export interface RuleCatalogEntry {

@@ -24,6 +24,22 @@ interface YaraScanCommandOptions {
 	file?: string;
 	output?: CommandOutputOptions;
 	quiet?: boolean;
+	/**
+	 * DefenderYara categories to load into the active rule set before scanning
+	 * (e.g. ["Trojan", "Backdoor"]). Only effective when a DefenderYara catalog
+	 * has been indexed (auto-detected at activation, or via the configured
+	 * hexcore.yara.defenderYaraPath setting). If the catalog is not present,
+	 * the requested categories are reported as unavailable and the scan runs
+	 * against the bundled rules only. The headless path never silently claims
+	 * to have loaded rules it did not.
+	 */
+	categories?: string[];
+	/**
+	 * Load DefenderYara "essentials" (Trojan/Backdoor/Ransom/Exploit/PWS/...)
+	 * into the active rule set before scanning. Mutually compatible with
+	 * `categories`. Only effective when a DefenderYara catalog is indexed.
+	 */
+	loadEssentials?: boolean;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -52,6 +68,77 @@ export function activate(context: vscode.ExtensionContext): void {
 		} finally {
 			defenderIndexTask = undefined;
 		}
+	};
+
+	/**
+	 * Headless catalog loader. Honors the `categories` / `loadEssentials`
+	 * scan options by loading the requested DefenderYara categories into the
+	 * active rule set, mirroring the interactive loadCategory / quickScan paths.
+	 *
+	 * Honesty contract: this NEVER claims to load rules it cannot. If no
+	 * DefenderYara catalog is indexed (the 76k+ set is not bundled and must be
+	 * provided by the user), the requested categories are reported as
+	 * unavailable and the scan proceeds against the bundled rules only.
+	 */
+	const loadRequestedCategories = async (
+		categories: string[] | undefined,
+		loadEssentials: boolean | undefined
+	): Promise<{ requested: string[]; loaded: string[]; unavailable: string[]; rulesLoaded: number; catalogIndexed: number }> => {
+		const requested = Array.isArray(categories) ? categories.filter(c => typeof c === 'string' && c.length > 0) : [];
+		const report = { requested, loaded: [] as string[], unavailable: [] as string[], rulesLoaded: 0, catalogIndexed: 0 };
+
+		if (requested.length === 0 && !loadEssentials) {
+			return report;
+		}
+
+		// Wait for any in-flight indexing kicked off at activation so the
+		// catalog stats are accurate before we decide what is available.
+		if (defenderIndexTask) {
+			try { await defenderIndexTask; } catch { /* index failure is logged elsewhere */ }
+		}
+
+		const stats = engine.getCatalogStats();
+		report.catalogIndexed = stats.total;
+
+		if (stats.total === 0) {
+			if (requested.length > 0) { report.unavailable.push(...requested); }
+			if (loadEssentials) { report.unavailable.push('(essentials)'); }
+			outputChannel.appendLine(
+				`[YARA] categories requested (${[...requested, ...(loadEssentials ? ['essentials'] : [])].join(', ') || 'none'}) ` +
+				`but no DefenderYara catalog is indexed. The 76k+ DefenderYara rule set is NOT bundled with HexCore; ` +
+				`place a DefenderYara-main folder on the Desktop/Downloads or set hexcore.yara.defenderYaraPath. ` +
+				`Scanning against bundled rules only (${engine.getAllRules().length} active).`
+			);
+			return report;
+		}
+
+		for (const cat of requested) {
+			if (!Object.prototype.hasOwnProperty.call(stats.categories, cat)) {
+				report.unavailable.push(cat);
+				outputChannel.appendLine(`[YARA] requested category not in catalog: ${cat}`);
+				continue;
+			}
+			const count = engine.loadDefenderCategory(cat);
+			report.rulesLoaded += count;
+			report.loaded.push(cat);
+		}
+
+		if (loadEssentials) {
+			const before = engine.getAllRules().length;
+			const count = engine.loadDefenderEssentials();
+			report.rulesLoaded += count;
+			if (count > 0 || engine.getAllRules().length > before) { report.loaded.push('(essentials)'); }
+		}
+
+		if (report.loaded.length > 0) {
+			rulesProvider.updateFromEngine(engine);
+			outputChannel.appendLine(
+				`[YARA] headless category load: ${report.rulesLoaded} rules from [${report.loaded.join(', ')}] ` +
+				`(active total now ${engine.getAllRules().length})`
+			);
+		}
+
+		return report;
 	};
 
 	// Wire progress to output channel
@@ -179,7 +266,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			const executeScan = async (): Promise<ScanResult> => {
+				// Honor `categories` / `loadEssentials` in the headless path
+				// (previously these were silently ignored — see 3.8.2 audit).
+				const catLoad = await loadRequestedCategories(options.categories, options.loadEssentials);
 				const result = await engine.scanFileWithResult(uri.fsPath);
+				// Surface what the catalog load actually did so pipelines can
+				// distinguish "no DefenderYara present" from "scanned and clean".
+				if (catLoad.requested.length > 0 || options.loadEssentials) {
+					result.categoryLoad = catLoad;
+				}
 				resultsProvider.setScanResult(result);
 				if (options.output) {
 					writeScanOutput(result, options.output);
@@ -512,6 +607,12 @@ function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void
 				// exactly why a scan came back empty without diving into
 				// the Output panel.
 				ruleLoadDiagnostics: result.ruleLoadDiagnostics,
+				// 3.8.2: result of an on-demand DefenderYara category load
+				// requested via the scan `categories` / `loadEssentials` args.
+				// Present only when such a load was requested. Tells callers
+				// apart "no DefenderYara catalog present" (unavailable populated,
+				// catalogIndexed 0) from a real scan against loaded categories.
+				categoryLoad: result.categoryLoad,
 				generatedAt: new Date().toISOString()
 			},
 			null,
