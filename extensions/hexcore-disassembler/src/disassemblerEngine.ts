@@ -525,6 +525,20 @@ export class DisassemblerEngine {
 	// v3.7.1: VM detection results from last analyzeAll() with detectVM: true
 	private _vmDetectionResults?: Map<number, { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number }>;
 
+	// v3.8.2: linear-sweep instruction stream over ALL executable sections, built on
+	// demand by analyzeAll when detectVM/detectPRNG/filterJunk is requested. This is
+	// the obfuscation-resistant detection source: prologue-based function discovery
+	// collapses under callfuscation/flattening (~7 functions found), so detectVM/
+	// detectPRNG that only walked this.functions found nothing despite a real VM +
+	// srand. The linear sweep does not depend on function discovery (same model as
+	// detectCallfuscation's byte scan). x86/x64 only.
+	private _execScan?: Instruction[];
+
+	// v3.8.2: PLT-stub VA -> dynamic-symbol name (from .rela.plt + .dynsym). Used by
+	// detectPRNG to resolve `call <pltStub>` to srand/rand/etc. even when the import
+	// table left an entry at 0x0. Populated during ELF PLT parsing.
+	private _pltSymbolMap: Map<number, string> = new Map();
+
 	// v3.7.4: Persistent session store (renames, retypes, comments, bookmarks, analyze cache)
 	private sessionStore?: SessionStore;
 
@@ -654,6 +668,8 @@ export class DisassemblerEngine {
 			this.elfSectionFileMap.clear();
 			this.elfFunctionByName.clear();
 			this._textScanCache = undefined;
+			this._execScan = undefined;
+			this._pltSymbolMap.clear();
 
 			// v3.7.4: Initialize persistent session store
 			try {
@@ -723,7 +739,7 @@ export class DisassemblerEngine {
 	/**
 	 * Full analysis: entry point + exports + prolog scan + re-analyze empty functions
 	 */
-	async analyzeAll(options?: { filterJunk?: boolean; detectVM?: boolean }): Promise<number> {
+	async analyzeAll(options?: { filterJunk?: boolean; detectVM?: boolean; detectPRNG?: boolean }): Promise<number> {
 		if (!this.fileBuffer) {
 			return 0;
 		}
@@ -767,6 +783,14 @@ export class DisassemblerEngine {
 
 		// Build string cross-references
 		this.buildStringXrefs();
+
+		// v3.8.2: Build the obfuscation-resistant linear instruction sweep ONCE when
+		// any of the v3.7 detection passes is requested. detectVM/detectPRNG read it
+		// directly so they work even when prologue discovery collapses under
+		// callfuscation/flattening. Cost is bounded and only paid when requested.
+		if (options?.detectVM || options?.detectPRNG || options?.filterJunk) {
+			await this.buildExecScan();
+		}
 
 		// v3.7.1: Apply junk instruction filtering to all analyzed functions
 		if (options?.filterJunk) {
@@ -3030,8 +3054,13 @@ export class DisassemblerEngine {
 					const rOffset = is64Bit ? Number(readU64(relOff)) : readU32(relOff);
 					const rInfo = is64Bit ? Number(readU64(relOff + 8)) : readU32(relOff + 4);
 
-					// Extract symbol index from r_info
-					const symIdx = is64Bit ? (rInfo >> 32) : (rInfo >> 8);
+					// Extract symbol index from r_info.
+					// BUG (pre-v3.8.2): `rInfo >> 32` on a JS number coerces to int32 first
+					// (shift count is mod 32), so it was effectively `>> 0` -> ALL .rela.plt
+					// entries resolved to the SAME wrong symbol (observed: every PLT stub
+					// mapped to "rand"). For 64-bit, the symbol index is the high dword:
+					// use float division, not the bitwise shift.
+					const symIdx = is64Bit ? Math.floor(rInfo / 0x100000000) : (rInfo >> 8);
 
 					// Read symbol name from .dynsym
 					const symEntSize = is64Bit ? 24 : 16;
@@ -3058,6 +3087,12 @@ export class DisassemblerEngine {
 					// Adjust for PIE
 					const adjustedPltAddr = (isPIE && pltAddr > 0 && pltAddr < this.baseAddress) ? pltAddr + this.baseAddress : pltAddr;
 					const adjustedGotAddr = (isPIE && rOffset > 0 && rOffset < this.baseAddress) ? rOffset + this.baseAddress : rOffset;
+
+					// v3.8.2: authoritative PLT-stub-VA -> dynsym-name map. The import-table
+					// update below only sets the FIRST matching import's address and can
+					// leave some imports at 0x0 (observed: srand). This map is complete and
+					// is what detectPRNG uses to resolve `call <pltStub>` -> symbol name.
+					this._pltSymbolMap.set(adjustedPltAddr, symName);
 
 					// Update import entries with PLT addresses
 					for (const lib of this.imports) {
@@ -4910,15 +4945,112 @@ export class DisassemblerEngine {
 		};
 	}
 
+	// ============ v3.8.2: obfuscation-resistant linear instruction sweep ============
+
+	/**
+	 * Linearly disassemble EVERY executable section into a flat instruction stream,
+	 * independent of function discovery. Cached in `_execScan`. This is the detection
+	 * source for detectVM/detectPRNG on obfuscated binaries where prologue-based
+	 * discovery finds almost nothing. x86/x64 only (the detection heuristics that
+	 * consume it are x86-specific; other arches just get an empty scan).
+	 *
+	 * A pure linear sweep over packed x86 will desync at embedded data, but VM
+	 * dispatchers / srand call sites are dense real code, so a single forward sweep
+	 * recovers them reliably enough for a boolean "is this a VM? / does it seed a
+	 * PRNG?" signal. Bounded to keep cost predictable on huge binaries.
+	 */
+	private async buildExecScan(): Promise<Instruction[]> {
+		if (this._execScan) { return this._execScan; }
+		const out: Instruction[] = [];
+		if (!this.fileBuffer) { this._execScan = out; return out; }
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') {
+			this._execScan = out; return out;
+		}
+
+		// Cap total decoded bytes so a pathological binary can't stall analyzeAll.
+		const MAX_SCAN_BYTES = 4 * 1024 * 1024; // 4 MiB of code
+		const buf = this.fileBuffer;
+		const byAddr = new Map<number, Instruction>();
+		let scanned = 0;
+		const execSections = this.sections.filter(s => s.isCode || (s as { isExecutable?: boolean }).isExecutable);
+
+		// Pass 1: forward linear sweep of each executable section.
+		for (const section of execSections) {
+			const rawStart = (section as { rawAddress?: number }).rawAddress ?? -1;
+			if (rawStart < 0) { continue; }
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+			const sectionBytes = rawEnd - rawStart;
+			if (sectionBytes <= 0) { continue; }
+			const startVA = this.sectionOffsetToAddress(rawStart, section);
+			const budget = Math.min(sectionBytes, MAX_SCAN_BYTES - scanned);
+			if (budget <= 0) { break; }
+			try {
+				const instrs = await this.disassembleRange(startVA, budget);
+				for (const inst of instrs) { byAddr.set(inst.address, inst); }
+			} catch {
+				// Section decode failed (Capstone hiccup) — skip; per-function path
+				// still works as a fallback.
+			}
+			scanned += budget;
+			if (scanned >= MAX_SCAN_BYTES) { break; }
+		}
+
+		// Pass 2: leader-seeded recovery. A plain forward sweep DESYNCS on callfuscation
+		// (call-as-jmp chains chop the real stream into thousands of tiny nodes), so the
+		// VM dispatcher / operand-stack code is never seen by Pass 1. Byte-scan for
+		// E8(call)/E9(jmp) rel32 branch targets and decode a short window at each target;
+		// this re-anchors the decoder on the real chain nodes. Deduped by address so the
+		// stream stays consistent and bounded. x86-specific.
+		const WINDOW = 40;
+		const MAX_LEADERS = 65536;
+		const leaders = new Set<number>();
+		for (const section of execSections) {
+			const rawStart = (section as { rawAddress?: number }).rawAddress ?? -1;
+			if (rawStart < 0) { continue; }
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+			for (let i = rawStart; i + 5 <= rawEnd; i++) {
+				const b = buf[i];
+				if (b !== 0xe8 && b !== 0xe9) { continue; } // call/jmp rel32
+				const rel = buf.readInt32LE(i + 1);
+				const instrVA = this.sectionOffsetToAddress(i, section);
+				const targetVA = instrVA + 5 + rel;
+				if (!byAddr.has(targetVA)) { leaders.add(targetVA); }
+				if (leaders.size >= MAX_LEADERS) { break; }
+			}
+			if (leaders.size >= MAX_LEADERS) { break; }
+		}
+		for (const va of leaders) {
+			try {
+				const instrs = await this.disassembleRange(va, WINDOW);
+				for (const inst of instrs) {
+					if (!byAddr.has(inst.address)) { byAddr.set(inst.address, inst); }
+				}
+			} catch {
+				// skip unresolvable leader
+			}
+		}
+
+		for (const inst of byAddr.values()) { out.push(inst); }
+		out.sort((a, b) => a.address - b.address);
+		this._execScan = out;
+		return out;
+	}
+
 	// ============ v3.7: VM Detection & Analysis ============
 
 	/**
-	 * Detect VM-based obfuscation patterns in a function's instructions.
+	 * Detect VM-based obfuscation patterns.
+	 *
 	 * Heuristics:
 	 *  - Dispatcher: 3+ sequential cmp reg,imm followed by conditional jumps
 	 *  - Operand stacks: [rbp+rax*4-offset] memory patterns
 	 *  - Handler tables: indirect jumps via [reg*scale+base]
 	 *  - Junk ratio: high % of junk instructions
+	 *
+	 * Source selection (v3.8.2): when an explicit `funcAddress` is given, scan that
+	 * function. Otherwise prefer the linear executable sweep (`_execScan`, built by
+	 * analyzeAll) so detection survives obfuscation that defeats function discovery;
+	 * fall back to the largest discovered function only when no sweep is available.
 	 */
 	detectVM(funcAddress?: number): {
 		vmDetected: boolean;
@@ -4928,13 +5060,17 @@ export class DisassemblerEngine {
 		stackArrays: Array<{ base: string; type: string }>;
 		junkRatio: number;
 	} {
-		// Get instructions for the target function (or all if not specified)
+		// Get instructions for the target function (or the whole image if not specified)
 		let instrs: Instruction[] = [];
 		if (funcAddress !== undefined) {
 			const func = this.functions.get(funcAddress);
 			if (func) { instrs = func.instructions; }
+		} else if (this._execScan && this._execScan.length > 0) {
+			// v3.8.2: prefer the linear executable sweep so VM dispatchers in
+			// un-discovered (obfuscated) code are still seen.
+			instrs = this._execScan;
 		} else {
-			// Analyze largest function
+			// Fallback: largest discovered function (legacy behavior).
 			let largest: Function | undefined;
 			for (const f of this.functions.values()) {
 				if (!largest || f.instructions.length > largest.instructions.length) {
@@ -4979,14 +5115,25 @@ export class DisassemblerEngine {
 			}
 		}
 
-		// Operand stack detection: look for [reg+reg*4-offset] patterns
+		// Operand stack detection: look for indexed [reg+reg*N-offset] accesses --
+		// the hallmark of a stack-VM operand stack / VM-program array, e.g.
+		// `mov eax, dword ptr [rbp + rax*4 - 0x950]`. Accept *4 and *8 scales.
 		const stackArrays: Array<{ base: string; type: string }> = [];
-		const stackPatternRegex = /\[(\w+)[+-]\w+\*4[+-](0x[\da-f]+|\d+)\]/i;
+		// Tolerate Capstone's spaced operand syntax: `[rbp + rax*4 - 0x950]`.
+		const stackPatternRegex = /\[(\w+)\s*[+-]\s*\w+\*[48]\s*[+-]\s*(0x[\da-f]+|\d+)\]/i;
 		const seenStacks = new Set<string>();
+		let operandStackAccesses = 0; // total (not distinct) indexed accesses
+
+		// Indirect dispatch: `jmp reg`, `jmp [mem]`, `call reg`, `call [mem]` -- the
+		// computed-goto / handler-table dispatch a VM interpreter uses instead of (or
+		// alongside) a cmp ladder.
+		let indirectDispatch = 0;
+		let firstIndirectDispatchAddr: string | null = null;
 
 		for (const inst of instrs) {
 			const match = inst.opStr.match(stackPatternRegex);
 			if (match) {
+				operandStackAccesses++;
 				const key = `${match[1]}-${match[2]}`;
 				if (!seenStacks.has(key)) {
 					seenStacks.add(key);
@@ -4996,18 +5143,51 @@ export class DisassemblerEngine {
 					});
 				}
 			}
+			const mn = inst.mnemonic.toLowerCase();
+			if (mn === 'jmp' || mn === 'call') {
+				const op = inst.opStr.trim();
+				// indirect = not a plain `0x...` direct target
+				if (op.length > 0 && !/^0x[\da-f]+$/i.test(op)) {
+					indirectDispatch++;
+					if (!firstIndirectDispatchAddr) {
+						firstIndirectDispatchAddr = '0x' + inst.address.toString(16);
+					}
+				}
+			}
 		}
 
-		const vmDetected = maxOpcodeCount >= 3 || (junkRatio > 0.4 && stackArrays.length > 0);
+		// VM verdict (v3.8.2): a LONG cmp-ladder dispatcher OR a stack-VM signature
+		// (multiple distinct operand-stack arrays with repeated indexed accesses AND an
+		// indirect dispatch).
+		//
+		// The cmp-ladder threshold is 6 (not 3): when scanning the WHOLE image, short
+		// 3-cmp runs occur constantly in ordinary code (kernel modules tripped the old
+		// >=3 gate as a false positive). A genuine bytecode dispatcher compares the
+		// opcode against many handler ids. The stack-VM path is what HTB callfuscated/
+		// stack-VM samples exhibit -- a computed-goto interpreter with no cmp ladder.
+		const LADDER_MIN = 6;
+		const stackVmSignature = stackArrays.length >= 2
+			&& operandStackAccesses >= 8
+			&& indirectDispatch >= 1;
+		const ladderDispatch = maxOpcodeCount >= LADDER_MIN;
+		const vmDetected = ladderDispatch
+			|| stackVmSignature
+			|| (junkRatio > 0.4 && stackArrays.length > 0);
 		const vmType = vmDetected
-			? (maxOpcodeCount >= 3 ? 'bytecode-interpreter' : 'obfuscated-vm')
+			? (ladderDispatch ? 'bytecode-interpreter'
+				: stackVmSignature ? 'stack-machine'
+					: 'obfuscated-vm')
 			: 'none';
 
 		return {
 			vmDetected,
 			vmType,
-			dispatcher: dispatcherAddr,
-			opcodeCount: maxOpcodeCount,
+			// Report the cmp-ladder address when that's the trigger; otherwise the
+			// first indirect dispatch site for a stack VM.
+			dispatcher: ladderDispatch ? dispatcherAddr : (stackVmSignature ? firstIndirectDispatchAddr : null),
+			// For a stack-VM with no cmp ladder, report the distinct operand-stack
+			// array count as the "opcode" proxy so consumers get a non-zero signal.
+			opcodeCount: ladderDispatch ? maxOpcodeCount : (stackVmSignature ? stackArrays.length : 0),
 			stackArrays,
 			junkRatio
 		};
@@ -5016,8 +5196,54 @@ export class DisassemblerEngine {
 	// ============ v3.7: PRNG Analysis Helper ============
 
 	/**
+	 * Map a call target VA to a PRNG symbol name (srand/rand/random/srandom), if any.
+	 * Resolves through: (1) the authoritative .rela.plt-derived PLT map, (2) the
+	 * import table, (3) the discovered-function table. Returns the lowercase symbol
+	 * stem or null.
+	 */
+	private resolvePrngTargetName(targetVA: number): string | null {
+		const prng = ['srandom', 'srand', 'random', 'rand']; // longest-first to avoid 'rand' eating 'srand'
+		const tryName = (raw: string | undefined): string | null => {
+			if (!raw) { return null; }
+			const n = raw.toLowerCase();
+			for (const p of prng) {
+				if (n === p || n === `${p}@plt` || n === `_${p}`) { return p; }
+			}
+			return null;
+		};
+		// 1. PLT map (authoritative, complete)
+		const m1 = tryName(this._pltSymbolMap.get(targetVA));
+		if (m1) { return m1; }
+		// 2. import table (PLT-stub addresses assigned during parse)
+		for (const lib of this.imports) {
+			for (const f of lib.functions) {
+				if (f.address === targetVA) {
+					const m = tryName(f.name);
+					if (m) { return m; }
+				}
+			}
+		}
+		// 3. discovered function table
+		const m3 = tryName(this.functions.get(targetVA)?.name);
+		if (m3) { return m3; }
+		return null;
+	}
+
+	/**
 	 * Detect PRNG usage patterns in the analyzed binary.
-	 * Scans for PLT calls to srand/rand/random/srandom, identifies seed sources.
+	 *
+	 * v3.8.2 rework: this is a BYTE SCAN over executable sections (the same
+	 * obfuscation-resistant model as detectCallfuscation), NOT a walk of discovered
+	 * functions. Prologue-based discovery collapses under callfuscation/flattening,
+	 * so the previous function-walking version found nothing on real obfuscated CTF
+	 * binaries despite a live srand/rand. It also resolves PLT/GOT call targets to
+	 * symbol names (the import table can leave entries at 0x0) and extracts the srand
+	 * seed immediate from the preceding `mov edi/rdi, imm` (SysV first arg).
+	 *
+	 * Handles:
+	 *  - E8 rel32         direct call to a PLT stub
+	 *  - FF 15 disp32     call qword ptr [rip+disp] -> GOT slot (-fno-plt / PIC)
+	 * x86/x64 only.
 	 */
 	detectPRNG(): {
 		prngDetected: boolean;
@@ -5026,61 +5252,131 @@ export class DisassemblerEngine {
 		randCallCount: number;
 		callSites: Array<{ address: string; function: string; context: string }>;
 	} {
+		const empty = { prngDetected: false, seedSource: null, seedValue: null, randCallCount: 0, callSites: [] as Array<{ address: string; function: string; context: string }> };
+		if (!this.fileBuffer) { return empty; }
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return empty; }
+		const buf = this.fileBuffer;
+
 		const callSites: Array<{ address: string; function: string; context: string }> = [];
 		let seedSource: string | null = null;
 		let seedValue: number | null = null;
 		let randCallCount = 0;
-		const prngFunctions = ['srand', 'rand', 'random', 'srandom'];
 
-		for (const func of this.functions.values()) {
-			for (let i = 0; i < func.instructions.length; i++) {
-				const inst = func.instructions[i];
-				if (!inst.isCall) { continue; }
+		const seen = new Set<number>();
+		const srandCallVAs: number[] = []; // for chain-aware seed recovery below
 
-				// Check if this call targets a known PRNG function
-				const targetFunc = this.functions.get(inst.targetAddress ?? 0);
-				const targetName = targetFunc?.name?.toLowerCase() ?? '';
+		const execSections = this.sections.filter(s => s.isCode || (s as { isExecutable?: boolean }).isExecutable);
+		for (const section of execSections) {
+			const rawStart = (section as { rawAddress?: number }).rawAddress ?? -1;
+			if (rawStart < 0) { continue; }
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
 
-				// Also check if the opStr references a PRNG name (PLT calls often show the symbol)
-				const opLower = inst.opStr.toLowerCase();
-				const matchedPrng = prngFunctions.find(fn => targetName.includes(fn) || opLower.includes(fn));
+			for (let i = rawStart; i + 5 <= rawEnd; i++) {
+				let targetVA: number | null = null;
 
-				if (!matchedPrng) { continue; }
+				if (buf[i] === 0xe8) {
+					// E8 rel32 : direct call. target = nextInstrVA + rel32
+					const rel = buf.readInt32LE(i + 1);
+					const instrVA = this.sectionOffsetToAddress(i, section);
+					targetVA = instrVA + 5 + rel;
+				} else if (buf[i] === 0xff && i + 6 <= rawEnd && buf[i + 1] === 0x15) {
+					// FF 15 disp32 : call qword ptr [rip + disp32] -> GOT slot VA
+					const disp = buf.readInt32LE(i + 2);
+					const instrVA = this.sectionOffsetToAddress(i, section);
+					targetVA = instrVA + 6 + disp; // GOT slot VA
+				} else {
+					continue;
+				}
 
-				if (matchedPrng === 'rand' || matchedPrng === 'random') {
+				if (targetVA === null) { continue; }
+				const matched = this.resolvePrngTargetName(targetVA);
+				if (!matched) { continue; }
+
+				const callVA = this.sectionOffsetToAddress(i, section);
+				if (seen.has(callVA)) { continue; }
+				seen.add(callVA);
+
+				if (matched === 'rand' || matched === 'random') {
 					randCallCount++;
 				}
 
-				// For srand/srandom, look back for the seed value (mov edi, imm before call)
-				let context = matchedPrng;
-				if (matchedPrng === 'srand' || matchedPrng === 'srandom') {
-					// Look back up to 5 instructions for the seed loading
-					for (let j = Math.max(0, i - 5); j < i; j++) {
-						const prev = func.instructions[j];
-						const prevMn = prev.mnemonic.toLowerCase();
-						const prevOp = prev.opStr.toLowerCase();
-
-						// mov edi, <imm> or mov rdi, <imm> (System V ABI, first arg)
-						if (prevMn === 'mov' && (prevOp.startsWith('edi,') || prevOp.startsWith('rdi,'))) {
-							const parts = prevOp.split(',');
-							if (parts.length === 2) {
-								const valStr = parts[1].trim();
-								const parsed = parseInt(valStr, valStr.startsWith('0x') ? 16 : 10);
-								if (!isNaN(parsed)) {
-									seedValue = parsed;
-									seedSource = `immediate(${valStr})`;
-									context = `srand(${valStr})`;
-								}
-							}
+				let context = matched;
+				if (matched === 'srand' || matched === 'srandom') {
+					srandCallVAs.push(callVA);
+					// Contiguous fast path: `mov edi/rdi, imm` directly before the call
+					// (non-obfuscated layout). The chain-aware scan below covers the
+					// callfuscated layout where the seed load lives in a different node.
+					const lookbackStart = Math.max(rawStart, i - 24);
+					for (let k = i - 1; k >= lookbackStart; k--) {
+						if (buf[k] === 0xbf && k + 5 <= rawEnd) { // mov edi, imm32
+							const imm = buf.readUInt32LE(k + 1);
+							seedValue = imm;
+							seedSource = `immediate(0x${imm.toString(16)})`;
+							context = `srand(0x${imm.toString(16)})`;
+							break;
+						}
+						if (buf[k] === 0x48 && k + 7 <= rawEnd && buf[k + 1] === 0xc7 && buf[k + 2] === 0xc7) { // mov rdi, imm32
+							const imm = buf.readInt32LE(k + 3);
+							seedValue = imm;
+							seedSource = `immediate(0x${(imm >>> 0).toString(16)})`;
+							context = `srand(0x${(imm >>> 0).toString(16)})`;
+							break;
 						}
 					}
 				}
 
 				callSites.push({
-					address: '0x' + inst.address.toString(16),
-					function: matchedPrng,
+					address: '0x' + callVA.toString(16),
+					function: matched,
 					context
 				});
+			}
+		}
+
+		// Chain-aware seed recovery (v3.8.2): under callfuscation the seed load and the
+		// srand call live in DIFFERENT chain nodes, linked by a call-as-jmp. The seed
+		// node looks like `mov edi, imm32 ; E8 rel32` where the E8 target lands at (or a
+		// few bytes before, past the pop-discard) a srand call node. Byte-scan the whole
+		// executable region for that signature when the contiguous fast path failed.
+		if (seedValue === null && srandCallVAs.length > 0) {
+			const SEED_LINK_WINDOW = 8; // pop-discard prefix (1-2 bytes) tolerance
+			const isNearSrandNode = (targetVA: number): boolean =>
+				srandCallVAs.some(sv => targetVA >= sv - SEED_LINK_WINDOW && targetVA <= sv + SEED_LINK_WINDOW);
+			outer:
+			for (const section of execSections) {
+				const rawStart = (section as { rawAddress?: number }).rawAddress ?? -1;
+				if (rawStart < 0) { continue; }
+				const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+				for (let i = rawStart; i + 10 <= rawEnd; i++) {
+					let immVal: number | null = null;
+					let afterMov = -1;
+					if (buf[i] === 0xbf) { // mov edi, imm32 ; <5 bytes>
+						immVal = buf.readUInt32LE(i + 1);
+						afterMov = i + 5;
+					} else if (buf[i] === 0x48 && buf[i + 1] === 0xc7 && buf[i + 2] === 0xc7) { // mov rdi, imm32
+						immVal = buf.readInt32LE(i + 3) >>> 0;
+						afterMov = i + 7;
+					} else {
+						continue;
+					}
+					// must be immediately followed by E8/E9 rel32 (the chain link)
+					if (afterMov + 5 > rawEnd) { continue; }
+					const op = buf[afterMov];
+					if (op !== 0xe8 && op !== 0xe9) { continue; }
+					const rel = buf.readInt32LE(afterMov + 1);
+					const linkVA = this.sectionOffsetToAddress(afterMov, section) + 5 + rel;
+					if (isNearSrandNode(linkVA)) {
+						seedValue = immVal;
+						seedSource = `immediate(0x${immVal.toString(16)})`;
+						// annotate the srand call site context
+						for (const cs of callSites) {
+							if (cs.function === 'srand' || cs.function === 'srandom') {
+								cs.context = `srand(0x${immVal.toString(16)})`;
+							}
+						}
+						break outer;
+					}
+				}
 			}
 		}
 
