@@ -646,7 +646,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<PipelineRunStatus | undefined> => {
 		const options = normalizeRunJobCommandOptions(arg);
 		const quiet = options.quiet ?? false;
-		const jobFilePath = resolveJobFilePath(arg, options.jobFile);
+		const jobFilePath = await resolveJobFilePath(arg, options.jobFile, { interactive: !quiet });
 		if (!jobFilePath) {
 			if (!quiet) {
 				vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
@@ -681,8 +681,9 @@ export function activate(context: vscode.ExtensionContext): void {
 		// Intentionally ROOT-ONLY (not recursive). Auto-executing every job buried
 		// in a workspace the moment a window opens is a foot-gun; startup auto-run
 		// is therefore limited to jobs the user placed at the workspace root.
-		// Subfolder jobs run via the recursive FileSystemWatcher (on save) or by
-		// running a specific job file explicitly (see resolveJobFilePath).
+		// Subfolder jobs run via the recursive FileSystemWatcher (on save), or
+		// interactively via "Run Job" (resolveJobFilePath offers a picker when the
+		// jobs live only in subfolders).
 		const folders = vscode.workspace.workspaceFolders ?? [];
 		for (const folder of folders) {
 			// Primary: check for .hexcore_job.json (the canonical name)
@@ -765,7 +766,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('hexcore.pipeline.validateJob', async (arg?: vscode.Uri | string | ValidateJobCommandOptions) => {
 			const options = normalizeValidateJobCommandOptions(arg);
 			const quiet = options.quiet ?? false;
-			const jobFilePath = resolveJobFilePath(arg, options.jobFile);
+			const jobFilePath = await resolveJobFilePath(arg, options.jobFile, { interactive: !quiet });
 			if (!jobFilePath) {
 				if (!quiet) {
 					vscode.window.showWarningMessage('No .hexcore_job.json file was found.');
@@ -5896,44 +5897,122 @@ function resolveOptionalOutputPath(output?: string | { path?: string }): string 
 	return undefined;
 }
 
-// Implicit (no-arg) job discovery is INTENTIONALLY workspace-root-only.
-// A recursive scan was tried (v3.8.2) and reverted: when a workspace has many
-// named *.hexcore_job.json files in subfolders (and no canonical root job), any
-// auto-pick is a guess — it silently runs an arbitrary job (alphabetically
-// first) and reports it "completed", which reads as a false positive. An honest
-// "no .hexcore_job.json found" is better than running the wrong job. To run a
-// specific job, pass its path / right-click it (handled by the `arg` branches
-// above) or open the workspace at the folder that contains it. Subfolder jobs
-// still auto-run via the recursive FileSystemWatcher on save.
-function resolveJobFilePath(arg: vscode.Uri | string | RunJobCommandOptions | undefined, explicitPath?: string): string | undefined {
+const JOB_FILE_SUFFIX = '.hexcore_job.json';
+// Directories not worth walking when hunting for job files. Keeps the bounded
+// recursive scan (used ONLY to populate the interactive picker) fast.
+const JOB_SCAN_SKIP_DIRS = new Set([
+	'node_modules', '.git', '.hg', '.svn', 'out', 'dist', 'build',
+	'target', 'bin', 'obj', '.vscode-test', 'coverage', '__pycache__'
+]);
+const JOB_SCAN_MAX_DEPTH = 6;
+
+// Recursively collect *.hexcore_job.json under rootDir, bounded by depth and
+// skipping heavy dirs. Used to build the interactive job picker — NEVER to
+// silently auto-pick a job (see resolveJobFilePath).
+function findJobFilesRecursive(rootDir: string): string[] {
+	const found: string[] = [];
+	const walk = (dir: string, depth: number): void => {
+		let entries: fs.Dirent[];
+		try {
+			entries = fs.readdirSync(dir, { withFileTypes: true });
+		} catch {
+			return; // unreadable dir is non-fatal
+		}
+		for (const entry of entries) {
+			if (entry.isFile() && entry.name.endsWith(JOB_FILE_SUFFIX)) {
+				found.push(path.join(dir, entry.name));
+			}
+		}
+		if (depth >= JOB_SCAN_MAX_DEPTH) {
+			return;
+		}
+		for (const entry of entries) {
+			if (entry.isDirectory() && !JOB_SCAN_SKIP_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
+				walk(path.join(dir, entry.name), depth + 1);
+			}
+		}
+	};
+	walk(rootDir, 0);
+	return found;
+}
+
+// Resolve which job file a manual Run Job / Validate Job command should act on.
+// Order of intent (strongest first); it NEVER silently guesses among several jobs:
+//   1. an explicit path / URI / string arg (right-click, programmatic);
+//   2. the *.hexcore_job.json open in the active editor ("run the one I'm viewing");
+//   3. the canonical .hexcore_job.json (then the first named job) at a workspace root;
+//   4. interactive only: if jobs exist solely in subfolders, ONE is used directly,
+//      but SEVERAL trigger a QuickPick so the user chooses — no auto-pick.
+// Non-interactive (quiet) callers never prompt; they get undefined and the caller
+// reports an honest "not found". The recursive FileSystemWatcher (on save) is a
+// separate path (executePipelineJob with an explicit path) and is unaffected.
+async function resolveJobFilePath(
+	arg: vscode.Uri | string | RunJobCommandOptions | undefined,
+	explicitPath?: string,
+	options?: { interactive?: boolean }
+): Promise<string | undefined> {
 	if (typeof explicitPath === 'string' && explicitPath.length > 0) {
 		return path.resolve(explicitPath);
 	}
-
 	if (arg instanceof vscode.Uri) {
 		return arg.fsPath;
 	}
-
 	if (typeof arg === 'string' && arg.length > 0) {
 		return path.resolve(arg);
 	}
 
+	// The job file currently open in the editor wins — "run the job I'm viewing".
+	const activeDoc = vscode.window.activeTextEditor?.document;
+	if (activeDoc && !activeDoc.isUntitled && activeDoc.uri.scheme === 'file'
+		&& activeDoc.uri.fsPath.endsWith(JOB_FILE_SUFFIX)) {
+		return activeDoc.uri.fsPath;
+	}
+
 	const folders = vscode.workspace.workspaceFolders ?? [];
 	for (const folder of folders) {
-		// Primary: canonical .hexcore_job.json
-		const candidate = path.join(folder.uri.fsPath, '.hexcore_job.json');
+		// Canonical .hexcore_job.json at the workspace root.
+		const candidate = path.join(folder.uri.fsPath, JOB_FILE_SUFFIX);
 		if (fs.existsSync(candidate)) {
 			return candidate;
 		}
-		// Fallback: first *.hexcore_job.json in workspace root
+		// First *.hexcore_job.json directly in the workspace root.
 		try {
 			const files = fs.readdirSync(folder.uri.fsPath);
-			const namedJob = files.find(f => f.endsWith('.hexcore_job.json'));
+			const namedJob = files.find(f => f.endsWith(JOB_FILE_SUFFIX));
 			if (namedJob) {
 				return path.join(folder.uri.fsPath, namedJob);
 			}
 		} catch {
 			// Non-fatal
+		}
+	}
+
+	// Nothing at any workspace root. Only an INTERACTIVE command may look into
+	// subfolders, and only by asking the user when there is more than one match.
+	if (options?.interactive) {
+		const candidates: string[] = [];
+		for (const folder of folders) {
+			candidates.push(...findJobFilesRecursive(folder.uri.fsPath));
+		}
+		const unique = Array.from(new Set(candidates)).sort((a, b) => a.localeCompare(b));
+		if (unique.length === 1) {
+			return unique[0];
+		}
+		if (unique.length > 1) {
+			const root = folders[0]?.uri.fsPath;
+			const picked = await vscode.window.showQuickPick(
+				unique.map(p => ({
+					label: path.basename(p),
+					description: root ? path.relative(root, p) : p,
+					jobPath: p
+				})),
+				{
+					title: 'HexCore: select a job to run',
+					placeHolder: `${unique.length} .hexcore_job.json files found (none at the workspace root)`,
+					matchOnDescription: true
+				}
+			);
+			return picked?.jobPath;
 		}
 	}
 
