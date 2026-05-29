@@ -2168,6 +2168,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				bytes = patchedBytes;
 			}
 
+			// Note: callfuscation deflattening (call-as-jmp) is applied centrally in
+			// RemillWrapper.liftBytes() so every lift path (liftToIR, helix.decompile,
+			// rellic) benefits uniformly. See deflattenCallfuscation() in pathfinder.ts.
+
 			// FIX-011: Pass external symbol map to Remill C++ Phase 5.6
 			if (symbolMap && symbolMap.size > 0) {
 				remillWrapper.setExternalSymbols(symbolMap);

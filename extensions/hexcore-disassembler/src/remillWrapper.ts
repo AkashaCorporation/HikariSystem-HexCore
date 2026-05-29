@@ -7,6 +7,7 @@ import * as path from 'path';
 import { loadNativeModule } from 'hexcore-common';
 import type { ArchitectureConfig } from './capstoneWrapper';
 import { mapCapstoneToRemill, isArchSupported } from './archMapper';
+import { deflattenCallfuscation } from './pathfinder';
 
 // ---------------------------------------------------------------------------
 // Interfaces do módulo nativo hexcore-remill
@@ -239,6 +240,24 @@ export class RemillWrapper {
 		}
 
 		try {
+			// v3.8.1: Deflatten "callfuscation" (call-as-jmp) BEFORE lifting. The
+			// obfuscator wires the linear instruction stream together with `call`s
+			// used as jumps (each target begins with a `pop` discarding the pushed
+			// return address); a lifter otherwise models thousands of bogus calls
+			// and never follows the chain (Helix truncates at the first ret). This
+			// rewrites E8->E9 (call->jmp, same operand) and NOPs the dead pop
+			// discards, in a copy of the buffer. Central chokepoint so every lift
+			// path (liftToIR / helix.decompile / rellic) benefits uniformly.
+			// Self-gating (>=16 links) and x86/x64-only, so ordinary code is untouched.
+			if (arch === 'x64' || arch === 'x86') {
+				const df = deflattenCallfuscation(Buffer.from(buffer), address);
+				if (df.applied) {
+					buffer = df.patched;
+					console.log(`[remill] deflattened callfuscation: ${df.linkCount} call->jmp, ` +
+						`${df.popsNeutralized} pop discards neutralized`);
+				}
+			}
+
 			const lifter = this.ensureLifter(arch, targetOs);
 
 			// Build the native options object if provided

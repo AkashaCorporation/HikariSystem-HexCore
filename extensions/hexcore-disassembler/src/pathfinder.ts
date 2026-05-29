@@ -1220,3 +1220,114 @@ function emptyHints(): CFGHints {
 		unresolvedIndirects: 0,
 	};
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Callfuscation deflattening (call-as-jmp) — pre-lift byte transform
+// ═══════════════════════════════════════════════════════════════════════
+
+export interface DeflattenResult {
+	/** The (possibly) rewritten buffer. Same length as the input. */
+	patched: Buffer;
+	/** Number of `call`->`jmp` links rewritten (E8 -> E9). */
+	linkCount: number;
+	/** Number of `pop` discards neutralized to NOP. */
+	popsNeutralized: number;
+	/** Whether the transform was applied (gated by minLinks). */
+	applied: boolean;
+}
+
+/** True if a 1-byte (0x58-0x5F) or REX.B 2-byte (0x41 0x58-0x5F) `pop` sits at off. */
+function popDiscardLen(buf: Buffer, off: number): 0 | 1 | 2 {
+	if (off < 0 || off >= buf.length) { return 0; }
+	const b = buf[off];
+	if (b >= 0x58 && b <= 0x5f) { return 1; }
+	if (b === 0x41 && off + 1 < buf.length) {
+		const b2 = buf[off + 1];
+		if (b2 >= 0x58 && b2 <= 0x5f) { return 2; }
+	}
+	return 0;
+}
+
+/**
+ * Deflatten "callfuscation" control-flow obfuscation in a lift buffer.
+ *
+ * The obfuscator wires the real linear instruction stream together with
+ * `call <next>` used as an obfuscated `jmp`: each target begins with a `pop`
+ * that discards the just-pushed return address (the call never returns). To a
+ * lifter this looks like thousands of function calls, so the decompiler models
+ * call/return semantics and never follows the chain (Helix truncates at the
+ * first `ret`; the real body is scattered behind the calls).
+ *
+ * This transform rewrites each such link in place (the buffer is the lift
+ * range, so target-in-buffer offset = callOffset + 5 + rel32):
+ *
+ *   E8 rel32   (call target)  ->  E9 rel32   (jmp target)   [same length/operand]
+ *   target: 58..5F / 41 58..5F (pop discard) -> NOP          [length preserving]
+ *
+ * After this the lifter sees a normal unconditional-jump chain and follows it
+ * linearly, and the now-dead pop discards (their pushed return address is gone)
+ * do not drift the modeled stack. The `pop` register is a scratch discard that
+ * the original code never reads, so neutralizing it is safe for decompilation.
+ *
+ * Mirrors the precedent set by liftToIR's FIX-011 relocation patcher: copy,
+ * patch, lift. Gated on `minLinks` so ordinary binaries with the occasional
+ * `call $+5; pop` (PIC idiom) are never rewritten.
+ *
+ * @param bytes        Lift buffer (NOT mutated; a copy is returned when applied)
+ * @param baseAddress  Virtual address of bytes[0] (only used for diagnostics)
+ * @param opts.minLinks         Minimum links to trigger (default 16)
+ * @param opts.neutralizePops   NOP out the pop discards (default true)
+ */
+export function deflattenCallfuscation(
+	bytes: Buffer,
+	baseAddress: number,
+	opts?: { minLinks?: number; neutralizePops?: boolean },
+): DeflattenResult {
+	const minLinks = opts?.minLinks ?? 16;
+	const neutralizePops = opts?.neutralizePops ?? true;
+	const len = bytes.length;
+
+	// Pass 1: find every callfuscation link (call whose in-buffer target is a pop discard).
+	const linkOffsets: number[] = [];
+	const popTargets = new Set<number>();
+	for (let o = 0; o + 5 <= len; o++) {
+		if (bytes[o] !== 0xe8) { continue; }           // call rel32
+		const rel = bytes.readInt32LE(o + 1);
+		const targetOff = o + 5 + rel;                 // target relative to buffer start
+		if (popDiscardLen(bytes, targetOff) > 0) {
+			linkOffsets.push(o);
+			popTargets.add(targetOff);
+		}
+	}
+
+	if (linkOffsets.length < minLinks) {
+		return { patched: bytes, linkCount: 0, popsNeutralized: 0, applied: false };
+	}
+
+	// Pass 2: rewrite on a copy.
+	const patched = Buffer.from(bytes);
+	for (const o of linkOffsets) {
+		patched[o] = 0xe9;                             // call -> jmp (operand unchanged)
+	}
+	let popsNeutralized = 0;
+	if (neutralizePops) {
+		for (const t of popTargets) {
+			const plen = popDiscardLen(bytes, t);
+			if (plen === 1) {
+				patched[t] = 0x90;                     // nop
+				popsNeutralized++;
+			} else if (plen === 2) {
+				patched[t] = 0x66;                     // 66 90 = 2-byte nop (operand-size nop)
+				patched[t + 1] = 0x90;
+				popsNeutralized++;
+			}
+		}
+	}
+
+	console.log(
+		`[pathfinder deflatten] callfuscation: rewrote ${linkOffsets.length} call->jmp links, ` +
+		`neutralized ${popsNeutralized} pop discards in ${len}-byte buffer @0x${baseAddress.toString(16)}`,
+	);
+
+	return { patched, linkCount: linkOffsets.length, popsNeutralized, applied: true };
+}
