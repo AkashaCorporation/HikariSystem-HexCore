@@ -1007,9 +1007,15 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			return report;
 		}),
-		vscode.commands.registerCommand('hexcore.pipeline.queueJob', async (arg?: { jobFile?: string; priority?: JobPriority; quiet?: boolean }) => {
-			const jobFilePath = arg?.jobFile
-				? path.resolve(arg.jobFile)
+		vscode.commands.registerCommand('hexcore.pipeline.queueJob', async (arg?: { jobFile?: string; file?: string; priority?: JobPriority; quiet?: boolean }) => {
+			// Accept both `jobFile` (original) and `file` (documented in
+			// HEXCORE_AUTOMATION.md + the orchestrator templates). When run as a
+			// pipeline step, the runner forwards the step-level `file`/`jobFile`
+			// job-path as `jobFile` (it sets `file` to the target binary), so
+			// `jobFile` takes precedence here.
+			const jobPathArg = arg?.jobFile ?? arg?.file;
+			const jobFilePath = jobPathArg
+				? path.resolve(jobPathArg)
 				: await pickJobFile();
 			if (!jobFilePath) {
 				if (!arg?.quiet) {

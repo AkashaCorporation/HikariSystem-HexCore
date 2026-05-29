@@ -241,8 +241,12 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hex.search', 'hexcore.hexview.searchHeadless'],
 	['hexcore.debug.emulate.full', 'hexcore.debug.emulateFullHeadless'],
 	['hexcore.debug.run', 'hexcore.debug.emulateFullHeadless'],
-	['hexcore.decompile', 'hexcore.rellic.decompile'],
-	['hexcore.decompile.ir', 'hexcore.rellic.decompileIR'],
+	// v3.8.2: repoint to Helix. Rellic is deprecated (superseded by the Helix
+	// MLIR pipeline in v3.7.0); the docs already describe these aliases as
+	// resolving to Helix, so the map was the lie. The rellic.* commands remain
+	// directly addressable for backward compatibility.
+	['hexcore.decompile', 'hexcore.helix.decompile'],
+	['hexcore.decompile.ir', 'hexcore.helix.decompileIR'],
 	['hexcore.liftir', 'hexcore.disasm.liftToIR'],
 	['hexcore.souper', 'hexcore.souper.optimize'],
 	['hexcore.optimize', 'hexcore.souper.optimize'],
@@ -257,6 +261,13 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.unicorn.searchMemoryHeadless', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.struct', 'hexcore.extractStructInfo'],
 	['hexcore.structInfo', 'hexcore.extractStructInfo'],
+	// v3.8.2: session-annotation aliases documented in HEXCORE_AUTOMATION.md
+	// but previously absent from the map AND the capability map, so a job
+	// copied from the docs died with "not declared in capability map".
+	['hexcore.disasm.rename', 'hexcore.disasm.renameFunction'],
+	['hexcore.disasm.retype', 'hexcore.disasm.retypeVariable'],
+	['hexcore.disasm.bookmark', 'hexcore.disasm.setBookmark'],
+	['hexcore.disasm.sessionPath', 'hexcore.disasm.getSessionDbPath'],
 ]);
 
 /**
@@ -943,7 +954,7 @@ export class AutomationPipelineRunner {
 
 			let commandOptions: PipelineCommandOptions;
 			try {
-				commandOptions = buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index);
+				commandOptions = buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index, resolvedCommand);
 			} catch (error: unknown) {
 				const errorMessage = `Step arg interpolation failed: ${toErrorMessage(error)}`;
 				const stepStatus = createStepStatus(
@@ -1070,7 +1081,12 @@ export class AutomationPipelineRunner {
 						failed = true;
 						break;
 					}
-					if (nextIndex !== index + 1) {
+					// Only BACKWARD jumps form a loop. A forward `skip N` or a
+					// forward `goto` advances the pipeline and must NOT consume
+					// the loop budget (previously `nextIndex !== index + 1` also
+					// counted forward skips, so a pipeline with many skips could
+					// falsely trip the 100-iteration cap).
+					if (nextIndex <= index) {
 						loopCounter++;
 						if (loopCounter > MAX_LOOP_ITERATIONS) {
 							appendLog(logPath, `[Step ${index + 1}] ERROR: Maximum loop iterations (${MAX_LOOP_ITERATIONS}) exceeded`);
@@ -1625,19 +1641,39 @@ function resolveToken(
 	return record.result[fieldName];
 }
 
+// Orchestration commands whose `file` arg is a *job file path*, not the
+// pipeline target binary. For these, a step-level `file` must survive instead
+// of being overwritten with `job.file`. We forward it as `jobFile` (the name
+// the queue handler reads), so both `args.file` (documented) and `args.jobFile`
+// work from a pipeline step.
+const JOB_FILE_ARG_COMMANDS = new Set<string>([
+	'hexcore.pipeline.queueJob'
+]);
+
 function buildCommandOptions(
 	filePath: string,
 	step: PipelineStep,
 	output: StepOutputPath | undefined,
 	quietMode: boolean,
 	stepRecords: StepRecord[],
-	currentIndex: number
+	currentIndex: number,
+	resolvedCommand?: string
 ): PipelineCommandOptions {
 	const merged: PipelineCommandOptions = {};
+	const usesJobFileArg = resolvedCommand !== undefined && JOB_FILE_ARG_COMMANDS.has(resolvedCommand);
 	if (step.args) {
 		// Resolve $step[N] references before spreading args into the command options.
 		const resolvedArgs = resolveStepReferences(step.args, stepRecords, currentIndex);
 		for (const [key, value] of Object.entries(resolvedArgs)) {
+			// For orchestration commands, preserve the documented `file`/`jobFile`
+			// job-path arg by forwarding it as `jobFile` (it would otherwise be
+			// clobbered by the pipeline target binary below).
+			if (usesJobFileArg && (key === 'file' || key === 'jobFile')) {
+				if (merged.jobFile === undefined && typeof value === 'string') {
+					merged.jobFile = value;
+				}
+				continue;
+			}
 			// Pipeline controls these fields to guarantee consistent headless behavior.
 			if (key === 'file' || key === 'quiet' || key === 'output') {
 				continue;
