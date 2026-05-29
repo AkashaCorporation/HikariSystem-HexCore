@@ -213,6 +213,13 @@ export class UnicornWrapper {
 		instructionsExecuted: 0
 	};
 	private codeHooks: Map<number, CodeHookCallback> = new Map();
+	// Passive observers (side-channel counters, tracers) that NEVER redirect
+	// execution and need no register/memory sync. Kept separate from codeHooks so
+	// that registering one does NOT force the expensive per-batch worker state
+	// sync — that conflation made `collectSideChannels` stall x64-ELF emulation
+	// for ~180s (HTB Callfuscated). In worker mode these are fired once per batch
+	// (not per instruction) with the batch's PC and instruction delta.
+	private passiveCodeObservers: Map<number, CodeHookCallback> = new Map();
 	private memoryHooks: Map<number, MemoryHookCallback> = new Map();
 	private breakpoints: Set<bigint> = new Set();
 	private savedContext?: UnicornContext;
@@ -2083,13 +2090,38 @@ export class UnicornWrapper {
 				const remaining = maxInstructions - totalExecuted;
 				const thisBatch = Math.min(batchSize, remaining);
 
+				// Breakpoints: the worker's executeBatch stops BEFORE executing any
+				// address in its terminal set, so feed breakpoint addresses as
+				// terminals. Without this, a breakpoint that falls INSIDE a batch
+				// (e.g. 0x40c172) is never observed — the host only sees PC at batch
+				// boundaries / API stubs (HTB Callfuscated: BP silently ignored).
+				// We drop the current PC on the first instruction so a continue from
+				// a breakpoint doesn't immediately re-trigger on the same address.
+				let batchTerminals = terminalAddresses;
+				if (this.breakpoints.size > 0) {
+					batchTerminals = terminalAddresses.slice();
+					for (const bp of this.breakpoints) {
+						if (isFirstInstruction && bp === currentPc) { continue; }
+						batchTerminals.push(bp);
+					}
+				}
+
 				const result = await this._x64ElfWorker.executeBatch(
-					currentPc, thisBatch, terminalAddresses, terminalRanges
+					currentPc, thisBatch, batchTerminals, terminalRanges
 				);
 
 				totalExecuted += result.instructionsExecuted;
 				this.state.instructionsExecuted += result.instructionsExecuted;
 				this.state.currentAddress = result.pc;
+
+				// Fire passive observers (side-channel counters) once per batch.
+				// We pass the batch-start PC and the executed-instruction count via
+				// the size argument so the observer can keep an accurate total
+				// without a per-instruction IPC round-trip. This is the bound that
+				// keeps collectSideChannels from stalling worker-mode emulation.
+				if (this.passiveCodeObservers.size > 0 && result.instructionsExecuted > 0) {
+					this.passiveCodeObservers.forEach(cb => cb(currentPc, result.instructionsExecuted));
+				}
 
 				if (result.error) {
 					this.state.lastError = result.error;
@@ -2110,6 +2142,14 @@ export class UnicornWrapper {
 						// We stopped because we entered an API stub region.
 						// Continue so the next loop iteration fires the API host hook.
 						continue;
+					}
+					// Breakpoint stop: the worker halted BEFORE executing an address
+					// in the breakpoint set. Pause here (do not break/terminate) so a
+					// subsequent continue() resumes from this PC.
+					if (this.breakpoints.has(result.pc)) {
+						this.state.currentAddress = result.pc;
+						this.state.isPaused = true;
+						return;
 					}
 					// Terminal address reached (e.g. program exit)
 					break;
@@ -2985,6 +3025,20 @@ export class UnicornWrapper {
 	/**
 	 * Write memory synchronously (for in-process x86/x64 hook callbacks only).
 	 * Must NOT be called when using the ARM64 worker.
+	 *
+	 * WORKER-MODE COHERENCE (x64 ELF / PE32):
+	 * When an x64 ELF / PE32 worker is active, the live machine state lives in the
+	 * worker process; the in-process `uc` is only a stale mirror used so the
+	 * synchronous API-hook handlers (scanf, strcpy, etc.) can read/write registers
+	 * and memory without async IPC.  A write performed by an API hook (e.g. scanf
+	 * filling its destination buffer at 0x40f080) MUST be propagated to the worker
+	 * or the program never sees its own input.  Previously these writes went only
+	 * to the in-process mirror and were silently lost (HTB Callfuscated: scanf
+	 * returned 1 but the buffer stayed all-zero → "Incorrect" for the right flag).
+	 * We therefore (a) apply the write to the in-process mirror so subsequent
+	 * in-hook reads are coherent, AND (b) queue it in deferredMemoryWrites so the
+	 * worker run loop (startX64ElfWorker / startPe32Worker) flushes it back to the
+	 * worker after the hook completes.
 	 */
 	writeMemorySync(address: bigint, data: Buffer): void {
 		if (this._arm64Worker) {
@@ -2999,7 +3053,14 @@ export class UnicornWrapper {
 			return;
 		}
 
+		// Mirror to the in-process Unicorn (keeps in-hook reads coherent).
 		this.uc.memWrite(address, data);
+
+		// In x64-ELF / PE32 worker mode the in-process write above is only a
+		// mirror — queue it so the worker run loop pushes it to the real engine.
+		if (this._x64ElfWorker || this._pe32Worker) {
+			this.deferredMemoryWrites.push({ address, data: Buffer.from(data) });
+		}
 	}
 
 	/**
@@ -3524,6 +3585,26 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Add a PASSIVE code observer (side-channel counter / tracer).
+	 *
+	 * Unlike onCodeExecute, a passive observer:
+	 *  - is guaranteed never to redirect execution or mutate state, so it does
+	 *    NOT trigger the heavy per-batch worker register/memory sync; and
+	 *  - in worker mode (x64-ELF/PE32) is invoked once per executed BATCH with
+	 *    (batchStartPc, instructionsInBatch) rather than per instruction — the
+	 *    host cannot observe individual guest PCs inside a worker batch without
+	 *    a prohibitively slow per-instruction IPC round-trip.
+	 *
+	 * Use this for collectSideChannels-style accounting that must never stall or
+	 * blow up emulation. In-process paths still fire it per instruction.
+	 */
+	onCodeExecutePassive(callback: CodeHookCallback): number {
+		const id = Date.now() + Math.floor(Math.random() * 1000);
+		this.passiveCodeObservers.set(id, callback);
+		return id;
+	}
+
+	/**
 	 * Register a code hook at a specific guest address.
 	 * On SAB path, this address becomes a watchAddress so the hook fires
 	 * efficiently only when execution reaches it (no per-instruction overhead).
@@ -3670,6 +3751,7 @@ export class UnicornWrapper {
 		this.initialized = false;
 		this.state.isReady = false;
 		this.codeHooks.clear();
+		this.passiveCodeObservers.clear();
 		this.memoryHooks.clear();
 		this.breakpoints.clear();
 		this.memoryFaultHandler = undefined;

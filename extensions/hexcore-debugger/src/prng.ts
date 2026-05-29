@@ -12,28 +12,40 @@ export interface PRNG {
 }
 
 /**
- * glibc TYPE_3 random() implementation.
+ * glibc TYPE_3 random() / rand() implementation.
  *
- * Uses a 31-element state array with additive feedback (trinomial LFSR).
- * This matches the behavior of glibc's random()/rand() with default
- * TYPE_3 state (initstate not called, or called with statesize >= 32).
+ * Bit-for-bit faithful port of glibc's __srandom_r / __random_r
+ * (glibc/stdlib/random_r.c) for the default TYPE_3 generator that rand()
+ * uses when initstate is not called: an additive feedback (lagged-Fibonacci)
+ * generator with DEG_3 = 31 state words and SEP_3 = 3.
  *
- * Algorithm:
- *   state[0] = seed
- *   state[i] = (16807 * state[i-1]) % 2147483647   for i in [1..30]
- *   state[i] = state[i - 31]                         for i in [31..33]  (warmup)
- *   state[i] = state[i - 31] + state[i - 3]          for i in [34..343] (warmup)
+ * Verified against native glibc (gcc, WSL):
+ *   srand(1337); rand() → 292616681 (0x1170f9e9), then
+ *   1638893262, 255706927, 995816787, 588263094, 1540293802, ...
  *
- *   rand():
- *     if idx >= 344 → regenerate all 344 entries
- *     result = state[idx++]
- *     return (result >>> 1) & 0x7FFFFFFF
+ * Algorithm (random_r.c):
+ *   1. __srandom_r: r[0] = seed (seed 0 is forced to 1). Then for i in [1..30]
+ *      r[i] = (16807 * r[i-1]) mod 2147483647, computed via Schrage's method
+ *      (hi/lo split, add 2^31-1 when negative) exactly as glibc does so the
+ *      sign/overflow behavior matches int32_t arithmetic.
+ *   2. fptr = &r[SEP_3] (3), rptr = &r[0]. Discard 10*DEG_3 = 310 outputs
+ *      (the warmup loop in __srandom_r).
+ *   3. __random_r: *fptr += *rptr (uint32 wraparound); result = (*fptr >> 1)
+ *      & 0x7fffffff; advance fptr and rptr cyclically (mod 31).
  *
- * Reference: glibc/stdlib/random_r.c (TYPE_3, DEG=31, SEP=3)
+ * The previous 344-entry flat-array "approximation" did NOT match glibc for
+ * any seed (it returned 0x0fa2e13e for seed 1337). This port is exact.
+ *
+ * Reference: https://sourceware.org/git/?p=glibc.git;a=blob;f=stdlib/random_r.c
+ *   (TYPE_3: DEG_3 = 31, SEP_3 = 3; __random_r additive feedback).
  */
 export class GlibcPRNG implements PRNG {
-	private state: number[] = new Array(344);
-	private idx: number = 344;
+	private static readonly DEG = 31;
+	private static readonly SEP = 3;
+	// int32_t state words (glibc stores them as int32_t; arithmetic wraps in 32 bits).
+	private state: Int32Array = new Int32Array(GlibcPRNG.DEG);
+	private fptr: number = GlibcPRNG.SEP;
+	private rptr: number = 0;
 
 	constructor(initialSeed?: number) {
 		if (initialSeed !== undefined) {
@@ -42,41 +54,58 @@ export class GlibcPRNG implements PRNG {
 	}
 
 	seed(s: number): void {
-		// Ensure 32-bit unsigned
-		s = s >>> 0;
+		const { DEG, SEP } = GlibcPRNG;
 
-		this.state[0] = s;
-
-		// Initialize first 31 elements with LCG (matching glibc __srandom_r)
-		for (let i = 1; i < 31; i++) {
-			// glibc: state[i] = (16807 * state[i-1]) % 2147483647
-			// Use BigInt to avoid overflow in JS
-			const prev = BigInt(this.state[i - 1]);
-			this.state[i] = Number((16807n * prev) % 2147483647n);
+		// glibc: "if (seed == 0) seed = 1;" — a 0 seed is mapped to 1 so the
+		// generator never degenerates to all-zero state.
+		let seed = s | 0;
+		if (seed === 0) {
+			seed = 1;
 		}
 
-		// Warmup: extend state with trinomial feedback
-		for (let i = 31; i < 34; i++) {
-			this.state[i] = this.state[i - 31];
-		}
-		for (let i = 34; i < 344; i++) {
-			this.state[i] = (this.state[i - 31] + this.state[i - 3]) | 0;
+		this.state[0] = seed;
+
+		// r[i] = (16807 * r[i-1]) % 2147483647 via Schrage's method, matching
+		// glibc __srandom_r's int32_t computation (handles the negative branch).
+		for (let i = 1; i < DEG; i++) {
+			const word = BigInt(this.state[i - 1]);
+			const hi = word / 127773n;
+			const lo = word % 127773n;
+			let v = 16807n * lo - 2836n * hi;
+			if (v < 0n) {
+				v += 2147483647n;
+			}
+			this.state[i] = Number(v) | 0;
 		}
 
-		this.idx = 344;
+		this.fptr = SEP;
+		this.rptr = 0;
+
+		// Warmup: glibc discards the first 10 * DEG_3 outputs after seeding.
+		for (let i = 0; i < 10 * DEG; i++) {
+			this.next();
+		}
+	}
+
+	/**
+	 * One step of __random_r: *fptr += *rptr; result = (*fptr >> 1) & 0x7fffffff.
+	 * The addition wraps as uint32 (glibc uses uint32_t accumulation), and the
+	 * stored value is reinterpreted as int32_t. We keep the >> 1 on the unsigned
+	 * value to match glibc's "(uint32_t)*fptr >> 1".
+	 */
+	private next(): number {
+		const { DEG } = GlibcPRNG;
+		// uint32 wraparound addition; Int32Array store reinterprets as int32_t.
+		const sum = ((this.state[this.fptr] >>> 0) + (this.state[this.rptr] >>> 0)) >>> 0;
+		this.state[this.fptr] = sum | 0;
+		const result = (sum >>> 1) & 0x7fffffff;
+		this.fptr = (this.fptr + 1) % DEG;
+		this.rptr = (this.rptr + 1) % DEG;
+		return result;
 	}
 
 	rand(): number {
-		if (this.idx >= 344) {
-			// Regenerate state array
-			for (let i = 0; i < 344; i++) {
-				this.state[i] = (this.state[(i + 31) % 344] + this.state[(i + 3) % 344]) | 0;
-			}
-			this.idx = 0;
-		}
-
-		const result = this.state[this.idx++];
-		return (result >>> 1) & 0x7FFFFFFF;
+		return this.next();
 	}
 }
 

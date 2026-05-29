@@ -89,6 +89,16 @@ export interface SideChannelData {
 	memoryAccesses: Array<{ address: string; size: number; type: 'read' | 'write'; pc: string }>;
 	branchStats: Array<{ address: string; taken: number; notTaken: number }>;
 	totalInstructions: number;
+	/**
+	 * True when address tracking was capped (distinct-address budget exhausted).
+	 * totalInstructions stays exact; basicBlockCounts is the bounded top set.
+	 * Set for obfuscated/callfuscated binaries that visit millions of distinct
+	 * addresses — prevents the unbounded Map growth that previously caused a
+	 * 300s timeout / memory blowup (HTB Callfuscated).
+	 */
+	truncated?: boolean;
+	/** Number of distinct addresses seen before the cap (informational). */
+	distinctAddresses?: number;
 }
 
 export class DebugEngine {
@@ -106,8 +116,20 @@ export class DebugEngine {
 	};
 	// Side-channel tracking state
 	private _scLastBBAddr: bigint = 0n;
-	private _scBBCountMap: Map<string, number> = new Map();
+	// Keyed by bigint address (NOT a per-instruction-allocated hex string) to keep
+	// the hot path allocation-free. Bounded by _SC_MAX_ADDRS to prevent the
+	// unbounded growth that caused the HTB Callfuscated 300s timeout / OOM.
+	private _scBBCountMap: Map<bigint, number> = new Map();
 	private _scBranchMap: Map<string, { taken: number; notTaken: number }> = new Map();
+	private _scTruncated: boolean = false;
+	// Cap on distinct tracked addresses. 200k × (8B key + count) is a few MB —
+	// bounded, while still covering any sane non-obfuscated program. Once full,
+	// existing addresses keep counting but new ones are dropped (totalInstructions
+	// stays exact). Override via HEXCORE_SC_MAX_ADDRS for large legitimate traces.
+	private readonly _SC_MAX_ADDRS: number = (() => {
+		const env = Number(process.env.HEXCORE_SC_MAX_ADDRS);
+		return Number.isFinite(env) && env > 0 ? env : 200_000;
+	})();
 
 	// Emulation components
 	private emulator?: UnicornWrapper;
@@ -174,6 +196,7 @@ export class DebugEngine {
 		this._scLastBBAddr = 0n;
 		this._scBBCountMap.clear();
 		this._scBranchMap.clear();
+		this._scTruncated = false;
 
 		// Reset ARM64 state for fresh emulation
 		this._arm64ExitRequested = false;
@@ -2095,10 +2118,26 @@ export class DebugEngine {
 	 * Get side-channel analysis data
 	 */
 	getSideChannelData(): SideChannelData {
-		// Finalize: convert maps to arrays
+		// Finalize: convert maps to arrays. Hex-string formatting happens ONCE
+		// here (not per instruction). Emit only the hottest addresses so the
+		// JSON payload stays bounded even when _SC_MAX_ADDRS distinct addresses
+		// were tracked (cap matches the tracking budget; tune via env).
+		const TOP_N = this._SC_MAX_ADDRS;
+		// Authoritative instruction total from the emulator (exact in both
+		// in-process and worker modes — the passive observer fires per-batch in
+		// worker mode, so we must not derive the total from observer fire count).
+		try {
+			const execState = this.emulator?.getState();
+			if (execState && typeof execState.instructionsExecuted === 'number') {
+				this.sideChannelData.totalInstructions = execState.instructionsExecuted;
+			}
+		} catch { /* keep whatever was accumulated */ }
+		this.sideChannelData.distinctAddresses = this._scBBCountMap.size;
+		this.sideChannelData.truncated = this._scTruncated;
 		this.sideChannelData.basicBlockCounts = Array.from(this._scBBCountMap.entries())
-			.map(([address, count]) => ({ address, count }))
-			.sort((a, b) => b.count - a.count);
+			.map(([address, count]) => ({ address: '0x' + address.toString(16), count }))
+			.sort((a, b) => b.count - a.count)
+			.slice(0, TOP_N);
 		this.sideChannelData.branchStats = Array.from(this._scBranchMap.entries())
 			.map(([address, stats]) => ({ address, ...stats }));
 		return this.sideChannelData;
@@ -2112,11 +2151,40 @@ export class DebugEngine {
 	installSideChannelHooks(): void {
 		if (!this.emulator || !this.emulationOptions.collectSideChannels) { return; }
 
-		// Track instruction execution counts per address via code hook
-		this.emulator.onCodeExecute((address, _size) => {
-			const addrStr = '0x' + address.toString(16);
-			this._scBBCountMap.set(addrStr, (this._scBBCountMap.get(addrStr) ?? 0) + 1);
-			this.sideChannelData.totalInstructions++;
+		// Track execution-block counts via a PASSIVE observer.
+		//
+		// CRITICAL (HTB Callfuscated): use onCodeExecutePassive — NOT onCodeExecute.
+		// A side-channel counter never redirects execution, so it must not force
+		// the worker's per-batch register/memory state sync. Registering it as a
+		// regular code hook previously made `collectSideChannels` stall x64-ELF
+		// emulation for ~180s (every batch boundary paid a full readAllRegisters +
+		// arg-pointer memReads IPC cost). As a passive observer it is fired:
+		//   - per instruction in the in-process paths (size = insn byte size), or
+		//   - ONCE PER BATCH in worker mode (size = #instructions in the batch).
+		//
+		// HOT PATH — keep allocation-free and bounded:
+		//  - bigint key (no per-instruction hex string allocation);
+		//  - distinct-address tracking is capped at _SC_MAX_ADDRS so an obfuscated
+		//    binary visiting millions of addresses (callfuscation) cannot blow up
+		//    memory or stall serialization. Once the cap is hit we only increment
+		//    addresses already in the map and flag truncation.
+		//
+		// The authoritative instruction total is read from the emulator at
+		// finalize time (getSideChannelData), so it stays exact in both modes
+		// regardless of how often this observer fires.
+		this.emulator.onCodeExecutePassive((address, sizeOrCount) => {
+			// In worker mode `sizeOrCount` is the batch instruction count; we only
+			// observe the batch's start PC there (per-instruction PCs inside a
+			// worker batch are not visible to the host without slow per-insn IPC).
+			const existing = this._scBBCountMap.get(address);
+			if (existing !== undefined) {
+				this._scBBCountMap.set(address, existing + 1);
+			} else if (this._scBBCountMap.size < this._SC_MAX_ADDRS) {
+				this._scBBCountMap.set(address, 1);
+			} else {
+				this._scTruncated = true;
+			}
+			void sizeOrCount;
 		});
 	}
 
