@@ -5,6 +5,60 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.2-nightly] - 2026-05-28 - "Callfuscation — Detection + (Opt-In) Deflattening"
+
+> Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Nightly: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once `-nightly` is dropped and the Helix agent verifies it.
+
+### Disassembler — analyzeAll no longer drops v3.7 analysis telemetry (`e634e40`)
+
+> Root cause of the long-standing "detectVM/detectPRNG/filterJunk are no-ops" symptom seen by headless pipeline consumers.
+
+- **Fix the headless JSON serializer dropping v3.7 analysis fields** — `createAnalyzeAllResult()` correctly populated `junkAnalysis`, `vmDetection`, and `prngDetection` on the result object when the corresponding flags were set, but `writeAnalyzeAllOutput()` serialized a hardcoded field whitelist that omitted all three. The data was computed and then silently discarded before being written to the pipeline output file, so every `detectVM`/`detectPRNG`/`filterJunk` run produced output byte-identical to a run without the flags.
+- **Fix**: `writeAnalyzeAllOutput()` now builds the payload explicitly and includes `junkAnalysis` / `vmDetection` / `prngDetection` whenever they are present, while still keeping the (large) `reportMarkdown` blob out of the JSON.
+
+### Disassembler — Callfuscation detection (call-as-jmp control-flow obfuscation) (`e634e40`) — NEW
+
+> The "Callfuscated" obfuscator shatters the real linear instruction stream into thousands of tiny nodes wired together by `call <next>` used as an obfuscated `jmp`: each call target begins with a `pop` that immediately discards the just-pushed return address (the call never returns). This defeats prologue-based function discovery, so every `analyzeAll` pass that iterates `engine.getFunctions()` operates on almost nothing and reports nothing.
+
+- **New `DisassemblerEngine.detectCallfuscation()`** — a pure byte scan over executable sections for the defining signature:
+
+  ```
+  E8 rel32              ; call <target>
+  <target>: 58..5F      ; pop rax..rdi (1-byte)
+        or  41 58..5F   ; pop r8..r15  (REX.B 2-byte)
+  ```
+
+  It resolves each call target to a file offset, confirms it begins with a `pop` discard, and reports `{ detected, gadgetCount, callCount, ratio, discardRegisters }`. Because it is a byte scan, it is independent of function discovery — so it remains the one reliable obfuscation signal when discovery finds nothing. Detection gates on `gadgetCount >= 16` and `ratio >= 0.5` so the occasional legitimate `call $+5; pop` (PIC idiom) does not trip it.
+- **analyzeAll** now always runs `detectCallfuscation` (cheap, arch-gated to x86/x64) and emits a `callfuscation` field in both the result object and the headless JSON.
+- **Validated** against the Callfuscated crackme: `callCount=4612`, `gadgetCount=4102`, `ratio=0.889`, `detected=true`, `discardRegisters=[r8, rax, rdi]`.
+- **Tests**: `callfuscationDetectProperties.test.ts` adds 5 property/unit tests for the gadget-scan logic (exact counting, REX.B `pop` recognition, no false positives without call opcodes, call-to-non-pop is a call but not a gadget, and the ratio gate). Follows the existing self-contained property-test convention. All pass; neighboring `junkFilter` / `vmPrngDetection` suites remain green.
+
+### Disassembler — Callfuscation deflattening (`87ca360`, gated by `1a839ce`) — EXPERIMENTAL, OPT-IN, DEFAULT OFF
+
+> Detection (above) reports *that* a binary is callfuscated; this is the transform that aims to *defeat* it before lifting. **It is experimental and disabled by default** — the current byte-scan implementation has false positives and the lifter does not yet follow the resulting jmp chain (see "Known limitations" / "Upcoming" below). Do not enable in production.
+
+- **New `pathfinder.deflattenCallfuscation()`** — a length-preserving byte transform over the lift buffer:
+
+  ```
+  E8 rel32   (call target)            ->  E9 rel32   (jmp target)   [same operand]
+  target: 58..5F / 41 58..5F (pop)    ->  NOP (90 / 66 90)          [length kept]
+  ```
+
+  A call is treated as a link only when its in-buffer target begins with a `pop` discard, so real calls (PLT stubs, MBA helpers — targets start with `endbr64` / `push rbp`) are not matched. Operates on a copy and leaves the caller's buffer intact (mirrors the existing FIX-011 relocation-patcher pattern).
+- **Gated behind `liftOptions.deflattenCallfuscation` (new field, default `false`)** in `RemillWrapper.liftBytes()`. Production lifts are never rewritten. `deflattenCallfuscation()` is doc-commented as EXPERIMENTAL.
+- **Why it is opt-in (the `1a839ce` gate)** — end-to-end validation surfaced two problems:
+  1. **The byte scan has false positives.** It rewrites any `0xE8` byte whose `+5` rel32 lands on a `pop`, including `0xE8` operand/data bytes. On the Callfuscated sample: 4102 byte-scan "links" vs 3214 real `call` instructions (~888 false positives). Patching those corrupts real instructions; the byte-scan-patched binary no longer validates the flag, whereas an instruction-aware patch keeps it semantically intact. Since the transform was auto-applied on every x86/x64 lift with `>=16` links, it would corrupt exactly the callfuscated lifts it was meant to help.
+  2. **Even with a correct deflattening, it is not sufficient.** Remill lifts a single trace and stops at the first unconditional `jmp` (writes `NEXT_PC` and returns) instead of following the chain — so the deflattened lift has 0 `br` and Helix collapses `main` to `sub_40b663(); return`. The lifter must follow the jmp chain as one multi-block function (`additionalLeaders` + tail-call suppression), which is a separate, in-progress change.
+- **Tests**: `callfuscationDeflattenProperties.test.ts` exercises the real exported function (rewrite + NOP above threshold, copy semantics / input unmutated, no-op below threshold, configurable `minLinks`, REX.B `pop` → `66 90`, ordinary non-pop-target calls left untouched). All pass; detection + junk + vmPrng suites remain green (16 passing total).
+
+### Known limitations / Upcoming (NOT in this release)
+
+- **Remill lift chain-following — under development.** Deflattening (call→jmp) is necessary but not sufficient: the lift must continue across the deflattened chain and emit it as one multi-block function (br to the jmp target, honoring `additionalLeaders`, suppressing tail-call classification for in-buffer leader targets) instead of single-trace-and-return. This is the active blocker (likely a C++ change in `extensions/hexcore-remill/src/remill_wrapper.cpp`) and is being worked on concurrently — **it is not shipped here**.
+- **Instruction-aware deflattening — planned.** Replacing the raw byte scan with a decoder-driven pass that patches only genuine `call` opcodes (riding on `runPathfinder`'s existing x86 batch decode) removes the false positives. Tracked as a follow-up.
+- **Helix 0.9.2 — comes later.** The matching `hexcore-helix` release that structures the deflattened multi-block chain into clean pseudo-C lands AFTER the `-nightly` suffix is dropped and the separate Helix agent verifies it. Not part of this release.
+
+> Full analysis, artifacts (`before.ll` / `after.ll` / `crackme.deflat2` / `leaders.json`) and the follow-up plan: `Call/hexcore-reports/helix-briefing/HELIX_AGENT_BRIEFING.md`.
+
 ## [3.8.0] - 2026-04-20 - "Souper Era + Pathfinder + Project Azoth + DWARF Type Pipeline"
 
 ### Pathfinder — DWARF + PDB + ET_REL metadata feeder (2026-04-19)

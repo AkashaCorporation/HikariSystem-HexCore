@@ -70,6 +70,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **Junk Filtering** — Detect and remove obfuscation junk (callfuscation, nop sleds, identity ops)
 - **VM Detection** — Automatic detection of VM-based obfuscation (dispatchers, handler tables, operand stacks)
 - **PRNG Detection** — Static detection of srand/rand patterns with seed extraction
+- **Callfuscation Detection** (v3.8.2-nightly) — Byte-scan detection of call-as-jmp control-flow obfuscation (`call <next>` where the target begins with a `pop` that discards the pushed return address). Independent of function discovery, so it remains reliable even when prologue-based discovery is defeated. `analyzeAll` emits a `callfuscation` field (`detected`, `gadgetCount`, `callCount`, `ratio`, `discardRegisters`). An experimental, opt-in deflattening transform (call→jmp + NOP pop-discards, `liftOptions.deflattenCallfuscation`, default OFF) exists in the lift path; full Remill chain-following is upcoming (see CHANGELOG)
 - **Function Boundary Detection** — Native C++ prologue scanner for accurate function start/end identification with auto-backtrack
 - **Memory Pattern Search** — AOB byte pattern scan and RTTI class discovery during live emulation (`searchMemoryHeadless`, `searchBytesHeadless`, `rttiScanHeadless`)
 - **Trampoline Following** — Automatic detection and follow-through of unconditional JMP trampolines to real function bodies
@@ -83,7 +84,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 | Extension | Version | Description |
 |-----------|---------|-------------|
 | **Debugger** | 2.2.0 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation, PRNG modes, side-channel analysis |
-| **Disassembler** | 1.5.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting, junk filtering, VM detection |
+| **Disassembler** | 1.5.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting, junk filtering, VM detection, callfuscation detection |
 | **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
 | **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
