@@ -69,6 +69,8 @@
 #include <vector>
 #include <filesystem>
 #include <mutex>
+#include <variant>
+#include <algorithm>
 
 // FIX-024: Intel XED Instruction Length Decoder for x86 desync recovery.
 // When Remill's arch_->DecodeInstruction fails on exotic x86 instructions
@@ -163,6 +165,82 @@ static llvm::AllocaInst* FindNamedAlloca(llvm::Function* func, llvm::StringRef n
 	return nullptr;
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// FIX-052b: Recover a direct-jump target from the DECODED instruction.
+// ═══════════════════════════════════════════════════════════════════════
+// In the LLVM-18 / Remill build we link against, a relative unconditional
+// `jmp rel8/rel32` is lifted as a `JMPI` semantic-helper CALL and the decoder
+// reports `inst.branch_taken_pc == 0` — the real target survives only as the
+// helper's i64 immediate (and in the decode-time flow info). Relying on
+// `branch_taken_pc` alone therefore drops EVERY unconditional-jump edge, so the
+// callfuscation jmp-chain collapses into one block. This helper recovers the
+// target from, in priority order:
+//   1. inst.branch_taken_pc                       (set for cond branches / some builds)
+//   2. the DirectJump flow's known_target          (decoder's authoritative target)
+//   3. a kTypeAddress / kControlFlowTarget operand  (displacement = absolute target)
+//   4. (caller-side fallback) the lifted JMPI call's i64 arg — see ReadJmpiTarget.
+// Returns 0 when no decode-time target is available (caller then tries the
+// post-lift JMPI scan).
+static uint64_t ResolveDirectJumpTargetFromDecode(const remill::Instruction& inst) {
+	if (inst.branch_taken_pc) {
+		return inst.branch_taken_pc;
+	}
+
+	// Decoder flow info: DirectJump.taken_flow.known_target.
+	if (auto* dj = std::get_if<remill::Instruction::DirectJump>(&inst.flows)) {
+		if (dj->taken_flow.known_target) {
+			return dj->taken_flow.known_target;
+		}
+	}
+	// Conditional direct branch keeps the taken target the same way.
+	if (auto* ci = std::get_if<remill::Instruction::ConditionalInstruction>(&inst.flows)) {
+		if (auto* dj = std::get_if<remill::Instruction::DirectJump>(&ci->taken_branch)) {
+			if (dj->taken_flow.known_target) {
+				return dj->taken_flow.known_target;
+			}
+		}
+	}
+
+	// Operand scan: a control-flow target address operand carries the absolute
+	// destination in `displacement` for x86 relative jumps.
+	for (const auto& op : inst.operands) {
+		if (op.type == remill::Operand::kTypeAddress &&
+		    op.addr.kind == remill::Operand::Address::kControlFlowTarget) {
+			return static_cast<uint64_t>(op.addr.displacement);
+		}
+	}
+
+	return 0;
+}
+
+// Post-lift fallback: read the i64 target argument from the JMPI helper call
+// most recently emitted into `block`. The JMPI signature is
+//   JMPI(ptr %memory, ptr %state, i64 <target>, ptr %NEXT_PC)
+// so the target is the first i64 ConstantInt argument. Returns 0 if not found.
+static uint64_t ReadJmpiTargetFromBlock(llvm::BasicBlock* block) {
+	if (!block) {
+		return 0;
+	}
+	for (auto it = block->rbegin(); it != block->rend(); ++it) {
+		auto* CI = llvm::dyn_cast<llvm::CallInst>(&*it);
+		if (!CI) {
+			continue;
+		}
+		auto* callee = CI->getCalledFunction();
+		if (!callee || !callee->getName().contains("JMPI")) {
+			continue;
+		}
+		for (unsigned a = 0; a < CI->arg_size(); ++a) {
+			if (auto* c = llvm::dyn_cast<llvm::ConstantInt>(CI->getArgOperand(a))) {
+				if (c->getType()->isIntegerTy(64)) {
+					return c->getZExtValue();
+				}
+			}
+		}
+	}
+	return 0;
+}
+
 static LiftOptions ParseLiftOptions(const Napi::Value& value) {
 	LiftOptions options;
 
@@ -183,6 +261,9 @@ static LiftOptions ParseLiftOptions(const Napi::Value& value) {
 		options.optimizeIR = opts.Get("optimizeIR").As<Napi::Boolean>().Value();
 	if (opts.Has("inlineSemantics") && opts.Get("inlineSemantics").IsBoolean())
 		options.inlineSemantics = opts.Get("inlineSemantics").As<Napi::Boolean>().Value();
+	// FIX-052b: opt-in CFG-preserving optimization pipeline (deflatten path only).
+	if (opts.Has("preserveCfgTopology") && opts.Get("preserveCfgTopology").IsBoolean())
+		options.preserveCfgTopology = opts.Get("preserveCfgTopology").As<Napi::Boolean>().Value();
 
 	// --- Item 2: additionalLeaders ---
 	if (opts.Has("additionalLeaders") && opts.Get("additionalLeaders").IsArray()) {
@@ -774,10 +855,13 @@ LiftResult RemillLifter::DoLift(
 			// Remill categorizes instructions — check for jumps
 			switch (scanInst.category) {
 			case remill::Instruction::kCategoryDirectJump: {
-				// FIX-019: Check if jump target is a kernel return thunk
-				// (retpoline: `jmp __x86_return_thunk` replaces `ret` in Spectre-mitigated kernels)
-				if (scanInst.branch_taken_pc) {
-					auto thunkIt = externalSymbols_.find(scanInst.branch_taken_pc);
+				// FIX-052b: Recover the target from the decoded instruction —
+				// `branch_taken_pc` is 0 for `jmp rel` in this Remill build.
+				uint64_t jumpTarget = ResolveDirectJumpTargetFromDecode(scanInst);
+				if (jumpTarget) {
+					// FIX-019: Check if jump target is a kernel return thunk
+					// (retpoline: `jmp __x86_return_thunk` replaces `ret` in Spectre-mitigated kernels)
+					auto thunkIt = externalSymbols_.find(jumpTarget);
 					if (thunkIt != externalSymbols_.end()) {
 						const auto& symName = thunkIt->second;
 						if (symName == "__x86_return_thunk" ||
@@ -794,10 +878,10 @@ LiftResult RemillLifter::DoLift(
 					// target falls outside our function range, record it as
 					// an external call target rather than a BB leader.
 					if (options.mode == LiftMode::PE64) {
-						bool outOfRange = scanInst.branch_taken_pc < address ||
-						                  scanInst.branch_taken_pc >= endAddr;
+						bool outOfRange = jumpTarget < address ||
+						                  jumpTarget >= endAddr;
 						if (outOfRange) {
-							result.callTargets.push_back(scanInst.branch_taken_pc);
+							result.callTargets.push_back(jumpTarget);
 							break;  // Don't add as leader
 						}
 					}
@@ -806,16 +890,20 @@ LiftResult RemillLifter::DoLift(
 					// Don't follow branches to addresses outside the provided
 					// buffer (they point to other sections or modules).
 					if (options.mode == LiftMode::ElfRelocatable) {
-						bool outOfRange = scanInst.branch_taken_pc < address ||
-						                  scanInst.branch_taken_pc >= endAddr;
+						bool outOfRange = jumpTarget < address ||
+						                  jumpTarget >= endAddr;
 						if (outOfRange) {
-							result.callTargets.push_back(scanInst.branch_taken_pc);
+							result.callTargets.push_back(jumpTarget);
 							break;
 						}
 					}
 
-					// Normal unconditional jump: target is a leader
-					leaders.insert(scanInst.branch_taken_pc);
+					// Normal unconditional jump: target is a leader (only when
+					// in-buffer; an out-of-buffer Generic-mode jmp is a tail call
+					// and is handled at wire time, not made a leader here).
+					if (jumpTarget >= address && jumpTarget < endAddr) {
+						leaders.insert(jumpTarget);
+					}
 				}
 				break;
 			}
@@ -964,6 +1052,26 @@ LiftResult RemillLifter::DoLift(
 	// for every direct function call Remill decodes with a known branch_taken_pc.
 	std::map<llvm::CallInst*, uint64_t> calliTargets;
 
+	// FIX-052: Direct-jump targets that are inside the lift buffer but were not
+	// pre-registered as leaders in Phase 1 (e.g. the linear scan was truncated
+	// before reaching them, or they landed mid-instruction relative to the
+	// linear sweep). We must NOT classify these as tail calls / drop them: the
+	// jump is INTRA-function, so the edge has to be preserved. We collect them
+	// here and the Phase 3.4 / post-gap rewire connect the br once the target
+	// block exists.
+	//
+	// FIX-052b review fix: the in-function window is the ACTUAL decoded extent,
+	// not the raw buffer length. `length` can span past the executable region
+	// into RO data (Phase 1 stops at maxBytes / desync); using the raw length
+	// would mark an unscanned tail as "in-buffer". Clamp to maxBytes.
+	uint64_t bufEndAddr = address + std::min<size_t>(length, options.maxBytes);
+	std::set<uint64_t> pendingJumpTargets;
+
+	// FIX-052b: jump PC → recovered direct-jump target (decode-time or post-lift
+	// JMPI immediate). Lets the Phase 3.4 rewire connect edges without re-deriving
+	// the target, since `branch_taken_pc` is 0 for `jmp rel` in this build.
+	std::map<uint64_t, uint64_t> directJumpTargets;
+
 	for (size_t i = 0; i < decoded.size(); i++) {
 		auto& di = decoded[i];
 
@@ -993,6 +1101,21 @@ LiftResult RemillLifter::DoLift(
 				totalOffset += di.size;
 				continue;
 			}
+		}
+
+		// FIX-052b: If this instruction's owning block ALREADY has a terminator,
+		// the instruction is dead space after an in-block branch — typically a
+		// mid-instruction jump target, where a `jmp` inside this leader-range
+		// already closed the block, and the bytes here overlap the previous
+		// instruction. Lifting it would append a body AFTER the terminator,
+		// producing a MALFORMED double-terminator block (caught by the LLVM
+		// verifier / can crash later passes on adversarial/obfuscated input).
+		// Skip it: its real, instruction-aligned copy lives in its own leader
+		// block (created from the recovered jump target). Just advance the byte
+		// counter so boundary accounting stays correct.
+		if (currentBlock->getTerminator()) {
+			totalOffset += di.size;
+			continue;
 		}
 
 		// Lift the instruction into its block
@@ -1034,9 +1157,20 @@ LiftResult RemillLifter::DoLift(
 
 		switch (di.inst.category) {
 		case remill::Instruction::kCategoryDirectJump: {
+			// FIX-052b: Recover the target. `branch_taken_pc` is 0 for `jmp rel`
+			// in this Remill build; fall back to decode-time flow/operands, then
+			// to the i64 immediate of the JMPI helper we just lifted.
+			uint64_t jumpTarget = ResolveDirectJumpTargetFromDecode(di.inst);
+			if (!jumpTarget) {
+				jumpTarget = ReadJmpiTargetFromBlock(currentBlock);
+			}
+			if (jumpTarget) {
+				directJumpTargets[di.pc] = jumpTarget;
+			}
+
 			// FIX-019: If jump target is a return thunk, emit ret instead of br
-			if (di.inst.branch_taken_pc) {
-				auto thunkIt = externalSymbols_.find(di.inst.branch_taken_pc);
+			if (jumpTarget) {
+				auto thunkIt = externalSymbols_.find(jumpTarget);
 				if (thunkIt != externalSymbols_.end()) {
 					const auto& symName = thunkIt->second;
 					if (symName == "__x86_return_thunk" ||
@@ -1049,11 +1183,29 @@ LiftResult RemillLifter::DoLift(
 					}
 				}
 			}
+
 			// Normal unconditional jump: br label %target_bb
-			if (di.inst.branch_taken_pc && bbMap.count(di.inst.branch_taken_pc)) {
-				llvm::IRBuilder<> builder(currentBlock);
-				builder.CreateBr(bbMap[di.inst.branch_taken_pc]);
+			if (jumpTarget && bbMap.count(jumpTarget)) {
+				if (!currentBlock->getTerminator()) {
+					llvm::IRBuilder<> builder(currentBlock);
+					builder.CreateBr(bbMap[jumpTarget]);
+				}
+			} else if (jumpTarget &&
+			           jumpTarget >= address &&
+			           jumpTarget < bufEndAddr) {
+				// FIX-052: In-buffer jump target with no block YET. This is an
+				// intra-function jump (very common after callfuscation
+				// deflattening, where the whole body is a chain of unconditional
+				// jmps). It must NOT be treated as a tail call / dropped. Record
+				// it so Phase 3.4 / the post-gap-scan rewire connect the `br` once
+				// the target block exists (it normally does, since Phase 1 lists
+				// every in-buffer direct-jump target as a leader; this guards the
+				// rare out-of-order / gap-materialized case). currentBlock is left
+				// open here on purpose.
+				pendingJumpTargets.insert(jumpTarget);
 			}
+			// else: out-of-buffer target = tail call; leave the block open so
+			// Phase 4 finalizes it as `ret` (FIX-052b beacon caveat in Phase 4).
 			break;
 		}
 
@@ -1176,6 +1328,48 @@ LiftResult RemillLifter::DoLift(
 	result.bytesConsumed = totalOffset;
 
 	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 3.4: Re-wire in-buffer direct jumps whose edge was dropped
+	// ═══════════════════════════════════════════════════════════════════════
+	// FIX-052: A deflattened callfuscation body is one long chain of
+	// unconditional `jmp`s. If a direct jump's in-buffer target acquired its
+	// block only AFTER Phase 3 lifted the jump (e.g. the target block is
+	// materialized by the Phase 3.5 gap scan below, or two leaders were
+	// discovered out of linear order), the `br` edge would never be emitted and
+	// Phase 4 would slap a bogus `ret` on the source block — collapsing the
+	// function toward its entry (the `sub_40b663(); return;` symptom).
+	//
+	// This pass does NOT create or re-lift any blocks (that would double-emit
+	// instructions, since Phase 3 already lifted every decoded instruction into
+	// its owning block). It only connects the edge: for each decoded direct jump
+	// whose target now has a block and whose SOURCE block is still open, emit the
+	// missing `br`. The source block is the one whose leader is the greatest
+	// leader <= jump PC — the same ownership lookup Phase 3 uses. We run this
+	// before AND after the gap scan so freshly gap-created targets are wired too.
+	auto rewireDroppedJumpEdges = [&]() {
+		for (size_t i = 0; i < decoded.size(); i++) {
+			auto& di = decoded[i];
+			if (di.inst.category != remill::Instruction::kCategoryDirectJump)
+				continue;
+			// FIX-052b: use the recovered target (branch_taken_pc is 0 here).
+			auto tgtIt = directJumpTargets.find(di.pc);
+			uint64_t jt = (tgtIt != directJumpTargets.end()) ? tgtIt->second : 0;
+			if (!jt || jt < address || jt >= bufEndAddr) continue;  // not in-buffer
+			if (!bbMap.count(jt)) continue;                          // no target block
+
+			llvm::BasicBlock* src = nullptr;
+			auto it = bbMap.upper_bound(di.pc);
+			if (it != bbMap.begin()) { --it; src = it->second; }
+			if (!src || src->getTerminator()) continue;              // already wired
+
+			llvm::IRBuilder<> builder(src);
+			builder.CreateBr(bbMap[jt]);
+		}
+	};
+	if (!pendingJumpTargets.empty()) {
+		rewireDroppedJumpEdges();
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 3.5: Gap scan — discover unreached decoded instructions
 	// ═══════════════════════════════════════════════════════════════════════
 	// After Phase 3, some decoded instructions may not belong to any basic
@@ -1266,10 +1460,14 @@ LiftResult RemillLifter::DoLift(
 								builder.CreateBr(bbMap[nextPC]);
 							}
 						} else if (di.inst.category == remill::Instruction::kCategoryDirectJump) {
-							if (di.inst.branch_taken_pc && bbMap.count(di.inst.branch_taken_pc)) {
+							// FIX-052b: recover the target (branch_taken_pc is 0 for jmp rel).
+							uint64_t gj = ResolveDirectJumpTargetFromDecode(di.inst);
+							if (!gj) gj = ReadJmpiTargetFromBlock(bb);
+							if (gj) directJumpTargets[di.pc] = gj;
+							if (gj && bbMap.count(gj)) {
 								if (!bb->getTerminator()) {
 									llvm::IRBuilder<> builder(bb);
-									builder.CreateBr(bbMap[di.inst.branch_taken_pc]);
+									builder.CreateBr(bbMap[gj]);
 								}
 							}
 							break;
@@ -1287,17 +1485,89 @@ LiftResult RemillLifter::DoLift(
 		}
 	}
 
+	// FIX-052: Re-run the dropped-edge rewire AFTER the gap scan. The gap scan
+	// can materialize a direct jump's target block; connect any source block
+	// whose `br` was deferred because the target didn't exist during Phase 3.
+	rewireDroppedJumpEdges();
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 4: Ensure every basic block has a terminator
 	// ═══════════════════════════════════════════════════════════════════════
 	// Remill's LiftIntoBlock leaves blocks "open" (no ret/br).
 	// Add terminators to any blocks that still lack them.
+	//
+	// FIX-052b (review): for a block whose final decoded instruction is an
+	// in-buffer direct jump we could NOT resolve to a block, emit `unreachable`
+	// — a visible "lost edge" beacon — instead of a semantically-wrong `ret`.
+	// A `ret` where the binary has a `jmp` is a hard CFG miscompile that DCE then
+	// uses to silently drop everything downstream. `unreachable` makes the loss
+	// explicit to the decompiler / reviewer and keeps the verifier happy.
+	//
+	// Collect the set of PCs that begin a block, and the source block of every
+	// unresolved in-buffer direct jump.
+	std::set<llvm::BasicBlock*> lostEdgeBlocks;
+	for (const auto& [jumpPC, tgt] : directJumpTargets) {
+		if (tgt < address || tgt >= bufEndAddr) continue;  // tail call -> ret is fine
+		if (bbMap.count(tgt)) continue;                    // resolved -> already br'd
+		// Unresolved in-buffer target: find the source block (greatest leader <= jumpPC).
+		auto it = bbMap.upper_bound(jumpPC);
+		if (it != bbMap.begin()) {
+			--it;
+			lostEdgeBlocks.insert(it->second);
+		}
+	}
 
 	for (auto &BB : *func) {
 		if (!BB.getTerminator()) {
 			llvm::IRBuilder<> builder(&BB);
-			// Return the memory pointer (3rd argument) to match Remill convention.
-			builder.CreateRet(func->getArg(2));
+			if (lostEdgeBlocks.count(&BB)) {
+				// Lost in-buffer jump edge — beacon, do not fake a return.
+				builder.CreateUnreachable();
+			} else {
+				// Return the memory pointer (3rd argument) to match Remill convention.
+				builder.CreateRet(func->getArg(2));
+			}
+		}
+	}
+
+	// ═══════════════════════════════════════════════════════════════════════
+	// Phase 4.2: Entry-block split for back-edges to the function entry
+	// ═══════════════════════════════════════════════════════════════════════
+	// FIX-052b: A back-edge that targets the entry address (e.g. `jmp` back to
+	// the function start — common in deflattened VM dispatch loops) makes the
+	// LLVM function ENTRY block a branch target. The entry block holds the
+	// `alloca`s (NEXT_PC, BRANCH_TAKEN); SROA/mem2reg ASSERT/segfault when the
+	// alloca-bearing entry block has a predecessor (the entry block is required
+	// to have no predecessors for promotion). Micro-test proof: a back-edge to a
+	// NON-entry block lifts fine (br=2), but `jmp` to the entry block segfaults.
+	//
+	// Fix (standard LLVM idiom): insert a fresh entry block `E0` BEFORE the old
+	// entry, move the `alloca`s into `E0`, and have `E0` unconditionally branch
+	// to the old entry. `E0` (now the entry) has no predecessors and owns the
+	// allocas, satisfying mem2reg; the old entry becomes an ordinary block that
+	// any back-edge may target. Only done when the entry actually has a
+	// predecessor, so normal functions are untouched.
+	{
+		llvm::BasicBlock* oldEntry = &func->getEntryBlock();
+		if (oldEntry->hasNPredecessorsOrMore(1)) {
+			auto& ctx = liftModule->getContext();
+			auto* newEntry = llvm::BasicBlock::Create(ctx, "entry_preheader", func, oldEntry);
+
+			// Move all alloca instructions from the old entry into the new entry.
+			std::vector<llvm::AllocaInst*> allocas;
+			for (auto& I : *oldEntry) {
+				if (auto* AI = llvm::dyn_cast<llvm::AllocaInst>(&I)) {
+					allocas.push_back(AI);
+				}
+			}
+			for (auto* AI : allocas) {
+				AI->removeFromParent();
+				AI->insertInto(newEntry, newEntry->end());
+			}
+
+			// New entry falls through to the old entry block.
+			llvm::IRBuilder<> builder(newEntry);
+			builder.CreateBr(oldEntry);
 		}
 	}
 
@@ -1781,25 +2051,59 @@ LiftResult RemillLifter::DoLift(
 		PB.registerLoopAnalyses(LAM);
 		PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
 
-		// Build function pass pipeline
+		// Build function pass pipeline.
+		//
+		// FIX-052b: TWO pipelines, selected by options.preserveCfgTopology.
+		//
+		// DEFAULT (preserveCfgTopology == false) — UNCHANGED from before this fix,
+		// byte-for-byte. Full cleanup including SimplifyCFG + SROA(ModifyCFG).
+		// This is what every NORMAL helix.decompile / liftToIR uses, so ordinary
+		// decompiles keep their existing CFG cleanup and readable pseudo-C.
+		//   SROA(ModifyCFG) → mem2reg → EarlyCSE → InstCombine → SimplifyCFG → DCE
+		//   → ADCE → DSE → InstCombine → SimplifyCFG → InstCombine → SimplifyCFG
+		//   → ADCE   (the double SimplifyCFG round matters; see Quality Gates).
+		//
+		// CFG-PRESERVING (preserveCfgTopology == true) — set ONLY by the
+		// disassembler for the callfuscation-deflattened / high-block path. Drops
+		// SimplifyCFG (its MergeBlockIntoPredecessor collapses the deflattened
+		// single-pred/single-succ jmp-chain into ONE straight-line block —
+		// verified even with real back-edges: 980/978 → 1/0) and runs SROA in
+		// PreserveCFG mode. Value passes (mem2reg/EarlyCSE/InstCombine/DCE/ADCE/
+		// DSE) still clean State-struct noise without touching CFG topology, so
+		// the recovered multi-block structure survives to Helix.
 		llvm::FunctionPassManager FPM;
-		FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
-		FPM.addPass(llvm::PromotePass());            // mem2reg
-		FPM.addPass(llvm::EarlyCSEPass());            // common subexpression elimination
-		FPM.addPass(llvm::InstCombinePass());          // instruction combining
-		FPM.addPass(llvm::SimplifyCFGPass());          // simplify control flow graph
-		FPM.addPass(llvm::DCEPass());                  // dead code elimination
-		FPM.addPass(llvm::ADCEPass());                 // aggressive dead code elimination
-		FPM.addPass(llvm::DSEPass());                  // dead store elimination
+		const bool preserveCfg = options.preserveCfgTopology;
 
-		// Second round: instcombine + simplifycfg after DSE may expose more
-		FPM.addPass(llvm::InstCombinePass());
-		FPM.addPass(llvm::SimplifyCFGPass());
+		if (preserveCfg) {
+			FPM.addPass(llvm::SROAPass(llvm::SROAOptions::PreserveCFG));
+			FPM.addPass(llvm::PromotePass());            // mem2reg
+			FPM.addPass(llvm::EarlyCSEPass());
+			FPM.addPass(llvm::InstCombinePass());
+			FPM.addPass(llvm::DCEPass());
+			FPM.addPass(llvm::ADCEPass());
+			FPM.addPass(llvm::DSEPass());
+			FPM.addPass(llvm::InstCombinePass());
+			FPM.addPass(llvm::InstCombinePass());
+			FPM.addPass(llvm::ADCEPass());
+		} else {
+			FPM.addPass(llvm::SROAPass(llvm::SROAOptions::ModifyCFG));
+			FPM.addPass(llvm::PromotePass());            // mem2reg
+			FPM.addPass(llvm::EarlyCSEPass());            // common subexpression elimination
+			FPM.addPass(llvm::InstCombinePass());          // instruction combining
+			FPM.addPass(llvm::SimplifyCFGPass());          // simplify control flow graph
+			FPM.addPass(llvm::DCEPass());                  // dead code elimination
+			FPM.addPass(llvm::ADCEPass());                 // aggressive dead code elimination
+			FPM.addPass(llvm::DSEPass());                  // dead store elimination
 
-		// Third round: catch remaining dead branches + constant conditions
-		FPM.addPass(llvm::InstCombinePass());
-		FPM.addPass(llvm::SimplifyCFGPass());
-		FPM.addPass(llvm::ADCEPass());
+			// Second round: instcombine + simplifycfg after DSE may expose more
+			FPM.addPass(llvm::InstCombinePass());
+			FPM.addPass(llvm::SimplifyCFGPass());
+
+			// Third round: catch remaining dead branches + constant conditions
+			FPM.addPass(llvm::InstCombinePass());
+			FPM.addPass(llvm::SimplifyCFGPass());
+			FPM.addPass(llvm::ADCEPass());
+		}
 
 		// Run on all functions in the module (primarily the lifted function)
 		llvm::ModulePassManager MPM;

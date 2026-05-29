@@ -2249,6 +2249,32 @@ export function activate(context: vscode.ExtensionContext): void {
 				console.warn('[pathfinder] CFG analysis failed, continuing without hints:', pfErr);
 			}
 
+			// FIX-052: Adaptive lift caps so large intra-function chains lift
+			// whole. The native defaults (maxInstructions=2000, maxBasicBlocks=500,
+			// maxBytes=32768) silently truncate callfuscation-deflattened bodies
+			// (e.g. the Callfuscated `main`: ~2832 instrs / ~937 leaders), which
+			// drops the tail of the function and starves Helix. When the caller
+			// has not pinned these explicitly, size them to the actual buffer and
+			// the number of leaders Pathfinder discovered.
+			{
+				const leaderCount = liftOpts.additionalLeaders?.length ?? 0;
+				if (liftOpts.maxBytes === undefined) {
+					// Cover the whole provided buffer (cap at 8 MiB for safety).
+					liftOpts.maxBytes = Math.min(Math.max(bytes.length, 32768), 4 * 1024 * 1024);
+				}
+				if (liftOpts.maxInstructions === undefined) {
+					// ~1 instr / 2 bytes worst case, plus headroom; floor at 2000.
+					const est = Math.ceil(bytes.length / 2) + leaderCount;
+					liftOpts.maxInstructions = Math.min(Math.max(est, 2000), 256_000);
+				}
+				if (liftOpts.maxBasicBlocks === undefined) {
+					// Allow one block per leader plus generous headroom; floor 500.
+					const est = Math.max(Math.ceil(leaderCount * 1.5) + 512,
+					                     Math.ceil(bytes.length / 8));
+					liftOpts.maxBasicBlocks = Math.min(Math.max(est, 2048), 64_000);
+				}
+			}
+
 			// Perform lifting with progress indicator
 			const liftResult = await vscode.window.withProgress(
 				{
@@ -2741,6 +2767,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			} catch {
 				// Non-fatal
+			}
+
+			// FIX-052: Adaptive lift caps (mirror of the liftToIR path) so the
+			// decompile path also lifts large intra-function chains whole and
+			// does not truncate callfuscation-deflattened bodies.
+			{
+				const leaderCount = decompLiftOpts.additionalLeaders?.length ?? 0;
+				if (decompLiftOpts.maxBytes === undefined) {
+					decompLiftOpts.maxBytes = Math.min(Math.max(bytes.length, 32768), 4 * 1024 * 1024);
+				}
+				if (decompLiftOpts.maxInstructions === undefined) {
+					const est = Math.ceil(bytes.length / 2) + leaderCount;
+					decompLiftOpts.maxInstructions = Math.min(Math.max(est, 2000), 256_000);
+				}
+				if (decompLiftOpts.maxBasicBlocks === undefined) {
+					const est = Math.max(Math.ceil(leaderCount * 1.5) + 512,
+					                     Math.ceil(bytes.length / 8));
+					decompLiftOpts.maxBasicBlocks = Math.min(Math.max(est, 2048), 64_000);
+				}
 			}
 
 			const liftResult = await vscode.window.withProgress(

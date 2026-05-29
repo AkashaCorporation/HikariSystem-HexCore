@@ -64,6 +64,14 @@ export interface RemillLiftOptions {
 	 * deflattenCallfuscation() in pathfinder.ts and HELIX_AGENT_BRIEFING.md.
 	 */
 	deflattenCallfuscation?: boolean;
+	/**
+	 * FIX-052b — opt-in CFG-preserving optimization pipeline. When true, the native
+	 * lifter drops SimplifyCFG (whose block merging collapses a deflattened jmp-chain
+	 * into a single straight-line block) and runs SROA in PreserveCFG mode, so the
+	 * recovered multi-block CFG survives to Helix. Default off — NORMAL lifts keep the
+	 * full SimplifyCFG + SROA(ModifyCFG) cleanup. Set only on the deflattened path.
+	 */
+	preserveCfgTopology?: boolean;
 }
 
 /**
@@ -264,6 +272,13 @@ export class RemillWrapper {
 					buffer = df.patched;
 					console.log(`[remill] (experimental) deflattened callfuscation: ${df.linkCount} call->jmp, ` +
 						`${df.popsNeutralized} pop discards neutralized`);
+					// FIX-052b: the deflattened body is a long jmp-chain whose recovered
+					// multi-block CFG must survive to Helix. SimplifyCFG would merge the
+					// single-pred/single-succ spine into one block, so request the
+					// native CFG-preserving optimization pipeline for THIS lift only.
+					// Normal (non-deflattened) lifts never set this and keep the full
+					// SimplifyCFG + SROA(ModifyCFG) cleanup.
+					liftOptions = { ...liftOptions, preserveCfgTopology: true };
 				}
 			}
 
@@ -304,6 +319,7 @@ export class RemillWrapper {
 		if (opts.splitAtCalls !== undefined) { native.splitAtCalls = opts.splitAtCalls; }
 		if (opts.optimizeIR !== undefined) { native.optimizeIR = opts.optimizeIR; }
 		if (opts.inlineSemantics !== undefined) { native.inlineSemantics = opts.inlineSemantics; }
+		if (opts.preserveCfgTopology !== undefined) { native.preserveCfgTopology = opts.preserveCfgTopology; }
 		if (opts.additionalLeaders?.length) { native.additionalLeaders = opts.additionalLeaders; }
 		if (opts.liftMode) { native.liftMode = opts.liftMode; }
 		if (opts.knownFunctionEnds?.length) { native.knownFunctionEnds = opts.knownFunctionEnds; }

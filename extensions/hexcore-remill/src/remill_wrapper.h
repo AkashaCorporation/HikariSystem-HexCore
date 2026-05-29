@@ -49,6 +49,15 @@ struct LiftOptions {
 	bool   optimizeIR      = true;    // Run LLVM passes (mem2reg, instcombine, simplifycfg, dce)
 	bool   inlineSemantics = false;   // Preserve named semantic calls by default for downstream decompilers
 
+	// FIX-052b: When true, the optimization pipeline (Phase 5.5) PRESERVES CFG
+	// topology — it drops SimplifyCFG (whose block merging collapses a
+	// deflattened jmp-chain into one straight-line block) and runs SROA in
+	// PreserveCFG mode. Default FALSE so every NORMAL lift keeps the full
+	// SimplifyCFG + SROA(ModifyCFG) cleanup pipeline byte-for-byte. The
+	// disassembler sets this ONLY for the callfuscation-deflattened / high-block
+	// lift path where the recovered multi-block CFG must survive to Helix.
+	bool   preserveCfgTopology = false;
+
 	// --- Item 2: Additional BB leaders from external analysis ---
 	// Extra basic block entry points discovered by TypeScript (jump table targets,
 	// .pdata function boundaries, ELF symtab addresses within range).

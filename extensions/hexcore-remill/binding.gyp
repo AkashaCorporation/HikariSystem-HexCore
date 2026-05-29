@@ -209,6 +209,7 @@
                 ]
               },
               "VCLinkerTool": {
+                "GenerateDebugInformation": "false",
                 "AdditionalDependencies": [
                   "Advapi32.lib",
                   "Shell32.lib",
