@@ -124,7 +124,7 @@ Focused on disassembly, formula extraction, constant checking, string references
 }
 ```
 
-**Note:** `buildFormula` only works with x86/x64 binaries. For ARM/ARM64/MIPS challenges, omit it or replace with `checkConstants`.
+**Note:** `buildFormula` supports x86, x64, ARM, and ARM64 instruction chains (ARM64 `x`/`w` registers, `sp`/`lr`/`fp`, and ARM mnemonics like `movz`/`movk` plus 3-operand `add`/`sub` are recognized). MIPS register tracking is not implemented; for MIPS, replace with `checkConstants`.
 
 ---
 

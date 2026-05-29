@@ -18,13 +18,19 @@ export interface ArchMapResult {
 }
 
 /**
- * Mapeamento estático Capstone → Remill.
+ * Mapeamento estático Capstone -> Remill.
  * Apenas arquiteturas com suporte completo no Remill são incluídas.
+ *
+ * NOTE (v3.8.2): 'arm64' -> 'aarch64' was REMOVED. The mapping advertised arm64
+ * support, but the shipped native remill build has no working aarch64 semantics:
+ * liftBytes() on a trivial `mov x0,#1; ret` returns "Failed to lift instruction".
+ * Advertising a path that fails at the native layer produces a confusing
+ * mid-pipeline error instead of an upfront "unsupported architecture" reject.
+ * Re-add only when the native build ships working aarch64 semantics.
  */
 const ARCH_MAP: Record<string, string> = {
 	'x86': 'x86',
 	'x64': 'amd64',
-	'arm64': 'aarch64',
 };
 
 /**

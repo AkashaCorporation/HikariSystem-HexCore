@@ -250,7 +250,7 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
 | `hexcore.disasm.analyzeAll` | 180s | Deep analysis: prolog scan, function discovery, xrefs | x86, x64, ARM, ARM64, MIPS |
-| `hexcore.disasm.buildFormula` | 90s | Symbolic expression extraction from instruction chains | **x86, x64 only** |
+| `hexcore.disasm.buildFormula` | 90s | Symbolic expression extraction from instruction chains | x86, x64, ARM, ARM64 |
 | `hexcore.disasm.checkConstants` | 90s | Validate numeric annotations against instruction immediates | All |
 | `hexcore.disasm.searchStringHeadless` | 120s | Search string references (headless variant) | All |
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
@@ -815,13 +815,13 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 
 - **Arch-agnostic commands** (filetype, hash, entropy, strings, YARA, IOC, base64) operate on raw bytes — no architecture dependency.
 - **Disassembler** auto-detects architecture from ELF `e_machine` and PE `Machine` headers. Defaults to x64 for raw files.
-- **buildFormula** uses x86/x64 register regex — ARM64 registers (x0-x30, sp, lr) are **not recognized**.
+- **buildFormula** recognizes x86/x64 registers AND ARM64 (`x0`-`x30`, `w0`-`w30`, `sp`, `lr`, `fp`, `xzr`, `wzr`) and ARM32 (`r0`-`r15`) registers, plus ARM mnemonics (`movz`/`movk`/`movn`, 3-operand `add`/`sub`). It is NOT x86/x64-only.
 - **checkConstants** is architecture-neutral — it only compares numeric literals.
 - **PE Analyzer** is PE-format only. Use `hexcore.elfanalyzer.analyze` for ELF binaries.
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
-- **Rellic Decompiler** **(DEPRECATED — removal in v3.8.0)** — Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. Remains functional for backward compatibility. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook for v3.8 preparation.
+- **Rellic Decompiler** **(DEPRECATED -- still present as of v3.8.2; removal deferred)** -- Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. The `hexcore.rellic.decompile` / `hexcore.rellic.decompileIR` commands remain registered and functional for backward compatibility (the planned v3.8.0 removal did not happen). Use `hexcore.helix.decompile` / `hexcore.helix.decompileIR` instead. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook.
 - **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step). Pass `optimizeIR: false` to skip MLIR optimization passes when debugging pass pipeline issues.
 - **Auto-backtrack** (v3.7.3+) — `disassembleAtHeadless`, `helix.decompile`, and `liftToIR` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. v3.7.4 adds `forceProbe` mode, Capstone backward disassembly, ftrace preamble skip, and `endbr64` recognition. Disable with `autoBacktrack: false`.
 - **Section-filtered strings** (v3.7.4) — `hexcore.disasm.extractStrings` accepts `sections: [".rdata", ".data"]` to scan only specific PE/ELF sections. Eliminates noise from `.text`.

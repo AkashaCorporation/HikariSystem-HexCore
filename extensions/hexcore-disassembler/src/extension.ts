@@ -1769,7 +1769,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const arch = engine.getArchitecture();
 			const mapping = mapCapstoneToRemill(arch);
 			if (!mapping.supported) {
-				const errorMsg = `Architecture '${arch}' is not supported by Remill. Supported: x86, x64, arm64.`;
+				const errorMsg = `Architecture '${arch}' is not supported by Remill. Supported: x86, x64.`;
 				if (quiet) {
 					return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: arch, error: errorMsg };
 				}
@@ -5038,6 +5038,21 @@ export function activate(context: vscode.ExtensionContext): void {
 						externalCallCoverage: confidenceScore.externalCallCoverage,
 						symtabCompleteness: confidenceScore.symtabCompleteness,
 						detectedPatterns: confidenceScore.detectedPatterns,
+					}
+				} : {}),
+				// v3.8.2: surface parsed BTF type data. The parser (elfBtfLoader) is
+				// real and is populated by ensureDebugInfoLoaded() (called above via
+				// computeELFConfidenceScore) when a .BTF section is present. Previously
+				// dropped from the result even though docs promise the btfData field
+				// (same serializer-drop archetype as the analyzeAll vm/prng/junk bug).
+				// The internal shape uses Maps; serialize types to a plain array.
+				...(elfData.btfData ? {
+					btfData: {
+						version: elfData.btfData.version,
+						typeCount: elfData.btfData.typeCount,
+						hasBTF: true,
+						types: Array.from(elfData.btfData.types.values()).slice(0, 5000),
+						strings: elfData.btfData.strings.slice(0, 5000),
 					}
 				} : {}),
 				generatedAt: new Date().toISOString(),

@@ -249,8 +249,12 @@ function calculateConfidenceScore(params: {
 	const symbolNames = symbols.map(s => s.name);
 	const importNames = symbols.filter(s => s.isImport).map(s => s.name);
 
-	// a) symbolResolution (weight 0.30): resolvedExternalCalls / totalExternalCalls
-	const symbolResolution = totalExternalCalls > 0 ? resolvedExternalCalls / totalExternalCalls : 1.0;
+	// a) symbolResolution (weight 0.30): resolvedExternalCalls / totalExternalCalls.
+	// Clamp to [0,1] defensively: callers must feed commensurate units (both
+	// call-site counts), but a stray mismatch must never break the 0-1 contract.
+	const symbolResolution = totalExternalCalls > 0
+		? Math.min(1.0, resolvedExternalCalls / totalExternalCalls)
+		: 1.0;
 
 	// b) cfgComplexity (weight 0.20): Normalize totalBasicBlocks / totalFunctions ratio
 	// Target ratio ~5-10 BBs/func is ideal (score 1.0). Below 2 = score 0.3. Above 20 = score 0.7.
@@ -2545,9 +2549,18 @@ export class DisassemblerEngine {
 		// Load BTF / DWARF debug info (idempotent — safe if already loaded).
 		await this.ensureDebugInfoLoaded();
 
-		// Count external calls from text relocations
-		const resolvedExternalCalls = this.textRelocations.size;
-		const totalExternalCalls = this.elfAnalysis.symbols.filter(s => s.isImport).length;
+		// External-call resolution as a real 0-1 ratio.
+		// BUG (v3.8.1): resolvedExternalCalls was textRelocations.size (one entry per
+		// CALL SITE, e.g. 15233) and totalExternalCalls was the distinct-import count
+		// (e.g. 342) -> ratio 44.5, poisoning `overall` to ~13.78 and breaking the
+		// documented 0-1 contract. Both terms must be the same UNIT. Each
+		// textRelocations entry is an external call/jump site; it is "resolved" when it
+		// carries a symbol name. So the honest metric is resolvedCallSites/totalCallSites.
+		let resolvedExternalCalls = 0;
+		const totalExternalCalls = this.textRelocations.size;
+		for (const r of this.textRelocations.values()) {
+			if (r.name && r.name.length > 0) { resolvedExternalCalls++; }
+		}
 
 		// Count total basic blocks across all functions
 		let totalBasicBlocks = 0;
