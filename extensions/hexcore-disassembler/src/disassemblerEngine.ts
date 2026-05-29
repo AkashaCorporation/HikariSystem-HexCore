@@ -5080,6 +5080,89 @@ export class DisassemblerEngine {
 		};
 	}
 
+	/**
+	 * Detect "callfuscation" control-flow obfuscation (HTB "Callfuscated" family).
+	 *
+	 * The obfuscator chops the real linear instruction stream into thousands of
+	 * tiny nodes connected by `call <next>` used as an obfuscated `jmp`: the target
+	 * of each such call begins with a `pop` that immediately DISCARDS the just-pushed
+	 * return address. The defining byte signature is:
+	 *
+	 *     E8 rel32              ; call <target>
+	 *     <target>: 58..5F      ; pop r{a..d}{x}/rsi/rdi/rbp/rsp  (1-byte)
+	 *           or  41 58..5F   ; pop r8..r15                      (REX.B 2-byte)
+	 *
+	 * This shatters prologue-based function discovery (no node has a real prologue)
+	 * and starves every downstream pass (VM/PRNG/junk detection) that only inspects
+	 * discovered functions. This detector is a pure byte scan over executable
+	 * sections, so it works even when function discovery finds nothing — giving
+	 * pipeline consumers an honest "this binary is callfuscated" signal plus the
+	 * gadget count needed to drive a deflattening pass.
+	 *
+	 * x86/x64 only (the gadget encoding is x86-specific).
+	 */
+	detectCallfuscation(): {
+		detected: boolean;
+		gadgetCount: number;
+		callCount: number;
+		ratio: number;
+		discardRegisters: string[];
+	} {
+		const empty = { detected: false, gadgetCount: 0, callCount: 0, ratio: 0, discardRegisters: [] as string[] };
+		if (!this.fileBuffer) { return empty; }
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return empty; }
+		const buf = this.fileBuffer;
+
+		const REG1 = ['rax', 'rcx', 'rdx', 'rbx', 'rsp', 'rbp', 'rsi', 'rdi']; // 0x58..0x5F
+		const REG2 = ['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15'];  // 41 0x58..0x5F
+		const isPopAt = (off: number): string | null => {
+			if (off < 0 || off >= buf.length) { return null; }
+			const b = buf[off];
+			if (b >= 0x58 && b <= 0x5f) { return REG1[b - 0x58]; }
+			if (b === 0x41 && off + 1 < buf.length) {
+				const b2 = buf[off + 1];
+				if (b2 >= 0x58 && b2 <= 0x5f) { return REG2[b2 - 0x58]; }
+			}
+			return null;
+		};
+
+		let gadgetCount = 0;
+		let callCount = 0;
+		const discardCounts = new Map<string, number>();
+
+		const execSections = this.sections.filter(s => s.isCode || (s as { isExecutable?: boolean }).isExecutable);
+		for (const section of execSections) {
+			const rawStart = (section as { rawAddress?: number }).rawAddress ?? -1;
+			if (rawStart < 0) { continue; }
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+			for (let i = rawStart; i + 5 <= rawEnd; i++) {
+				if (buf[i] !== 0xe8) { continue; } // call rel32
+				callCount++;
+				const rel = buf.readInt32LE(i + 1);
+				const instrVA = this.sectionOffsetToAddress(i, section);
+				const targetVA = instrVA + 5 + rel;
+				// Resolve the call target to a file offset and check it starts with a pop discard.
+				let targetOff = -1;
+				try { targetOff = this.addressToOffset(targetVA); } catch { targetOff = -1; }
+				const reg = isPopAt(targetOff);
+				if (reg) {
+					gadgetCount++;
+					discardCounts.set(reg, (discardCounts.get(reg) ?? 0) + 1);
+				}
+			}
+		}
+
+		const ratio = callCount > 0 ? gadgetCount / callCount : 0;
+		// Heuristic: callfuscation produces thousands of these and dominates the call
+		// population. A handful of legitimate `call $+5; pop` (PIC idioms) won't trip this.
+		const detected = gadgetCount >= 16 && ratio >= 0.5;
+		const discardRegisters = [...discardCounts.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.map(([r]) => r);
+
+		return { detected, gadgetCount, callCount, ratio, discardRegisters };
+	}
+
 	dispose(): void {
 		this.capstone.dispose();
 		this.capstoneInitialized = false;

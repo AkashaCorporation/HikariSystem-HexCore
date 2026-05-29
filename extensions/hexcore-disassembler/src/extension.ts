@@ -132,6 +132,10 @@ interface AnalyzeAllResult {
 	junkAnalysis?: { totalInstructions: number; junkCount: number; junkRatio: number };
 	vmDetection?: { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number };
 	prngDetection?: { prngDetected: boolean; seedSource: string | null; seedValue: number | null; randCallCount: number; callSites: Array<{ address: string; function: string; context: string }> };
+	// v3.8.1: callfuscation (call-as-jmp control-flow obfuscation) detection.
+	// Pure byte scan — independent of function discovery, so it reports the
+	// obfuscation even when prologue-based discovery finds nothing.
+	callfuscation?: { detected: boolean; gadgetCount: number; callCount: number; ratio: number; discardRegisters: string[] };
 }
 
 interface BuildFormulaResult {
@@ -6056,6 +6060,14 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		result.prngDetection = engine.detectPRNG();
 	}
 
+	// v3.8.1: callfuscation detection — always run. It is a cheap byte scan and,
+	// unlike the passes above, does NOT depend on function discovery (which the
+	// obfuscation defeats), so it is the one reliable obfuscation signal here.
+	const cf = engine.detectCallfuscation();
+	if (cf.callCount > 0) {
+		result.callfuscation = cf;
+	}
+
 	result.reportMarkdown = generateAnalyzeAllReport(result);
 	return result;
 }
@@ -6118,28 +6130,32 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		return;
 	}
 
-	fs.writeFileSync(
-		output.path,
-		JSON.stringify(
-			{
-				filePath: result.filePath,
-				fileName: result.fileName,
-				newFunctions: result.newFunctions,
-				totalFunctions: result.totalFunctions,
-				totalStrings: result.totalStrings,
-				architecture: result.architecture,
-				baseAddress: result.baseAddress,
-				sections: result.sections,
-				imports: result.imports,
-				exports: result.exports,
-				functions: result.functions,
-				generatedAt: new Date().toISOString()
-			},
-			null,
-			2
-		),
-		'utf8'
-	);
+	// NOTE: Build the headless payload explicitly (not the whole result) to keep
+	// the reportMarkdown blob out of the JSON. The v3.7 analysis fields
+	// (junkAnalysis / vmDetection / prngDetection) are OPTIONAL and only present
+	// when the caller passed filterJunk / detectVM / detectPRNG. They were
+	// previously dropped here even when populated — callfuscation/VM/PRNG
+	// telemetry never reached pipeline consumers. Include them when present.
+	const payload: Record<string, unknown> = {
+		filePath: result.filePath,
+		fileName: result.fileName,
+		newFunctions: result.newFunctions,
+		totalFunctions: result.totalFunctions,
+		totalStrings: result.totalStrings,
+		architecture: result.architecture,
+		baseAddress: result.baseAddress,
+		sections: result.sections,
+		imports: result.imports,
+		exports: result.exports,
+		functions: result.functions,
+		generatedAt: new Date().toISOString()
+	};
+	if (result.junkAnalysis) { payload.junkAnalysis = result.junkAnalysis; }
+	if (result.vmDetection) { payload.vmDetection = result.vmDetection; }
+	if (result.prngDetection) { payload.prngDetection = result.prngDetection; }
+	if (result.callfuscation) { payload.callfuscation = result.callfuscation; }
+
+	fs.writeFileSync(output.path, JSON.stringify(payload, null, 2), 'utf8');
 }
 
 async function resolveFormulaInstructions(
