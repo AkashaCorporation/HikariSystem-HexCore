@@ -88,6 +88,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > Full analysis, artifacts (`before.ll` / `after.ll` / `crackme.deflat2` / `leaders.json`) and the follow-up plan: `Call/hexcore-reports/helix-briefing/HELIX_AGENT_BRIEFING.md`.
 
+## [3.8.1] - 2026-05-17 - "Stability + Helix v0.9.1 + Pythia Oracle Hook"
+
+> Patch release restoring the v3.8.0 build that was pulled for a high crash rate — most of it cascading from the final **Azoth**/**Souper** implementation phases where our usual stability patterns weren't replicated. The crash class was almost entirely TypeScript + extension-host wiring, so **no native engine was rebuilt for the crash fix itself**. Additive engine work this cycle: the Helix **v0.9.1** lift-path improvements and the **Pythia Oracle Hook**. (Released 2026-05-17; GitHub tag `v3.8.1`.)
+
+### Crash fixes (the v3.8.0 → v3.8.1 reason)
+
+- **Webview disposed race condition** (`hexcore-disassembler`) — the disassembly editor wrote `webview.html = getErrorHtml(...)` on a webview that had been closed during `engine.loadFile(...)` (close the tab mid-load on a large file → crash on return). Now tracked via `onDidDispose` and guarded at the post-`await` continuation and in the catch branch.
+- **Extension-host stability tweaks** — smaller `.ts` corrections to the Azoth/Souper wiring paths surfaced during the v3.8.0 incident triage. None required a native rebuild.
+
+### Helix decompiler — v0.9.1
+
+PE/Win64 lift-path correctness + honest confidence reporting:
+
+- **LEA write-back to any destination register** (not just RCX) — closes the silent loss of struct-field offset computation in functions like `kbase_jit_allocate`.
+- **SETcc lowers to real booleans** instead of a zero placeholder constant (the `-6510615558205997056` garbage in Echo Mirage output is gone).
+- **BT / BTS / BTR / BTC** use the proper `1 << (off & 63)` mask rather than the raw bit offset, so bit-test idioms decompile to the C operator they correspond to.
+- **Win64 entry-point detection** — `start`/`hc_entry`-shaped functions no longer emit four phantom `param_1..4` parameters inherited from RCX/RDX/R8/R9 spills.
+- **AddressSpace structural recovery** — `GS`/`FS` segment access no longer collapses to address 0; reads/writes emit the `__readgsqword` / `__readfsqword` / `__writegs*` intrinsics.
+- **Switch-table data-section feed** — `addDataSection` wired C++ → Rust FFI → NAPI, with a stdlib-only PE parser on the extension side shipping `.rdata` bytes to `RecoverSwitchTables`, closing the auto-skip that previously collapsed every `switch (...)` to `goto default`.
+
+### Helix output cleanup — closes G-001 / G-002 / G-015
+
+- **G-001 (ET_REL section resolution)** — `liftToIR` accepts a `symbolName: "<sym>"` argument that resolves through `.symtab` to the symbol's exact bytes, fixing a `.ko` with `.text:0x0` (`hook_syslog`) / `.init.text:0x0` (`init_module`) silently picking the wrong function on `address: "0x0"`.
+- **G-002 (lift placeholder cascade)** — two new C-AST passes: `removeNullDerefPlaceholderStores` (drops `*v = …` where `v` is a placeholder declared `= 0` and never reassigned) and `removeUnreachableAfterFirstReturn`.
+- **G-015 (confidence honesty)** — theorem-grounded penalty terms for unreachable-after-return, null-deref of zero-init placeholders, suspicious self-references (`x op= … x …`), and identity ops.
+
+### Pythia Oracle Hook (`feature/oracle-hook-hackathon`)
+
+- Project Pythia integration — transport, triggers, bridge, session — scaffolded and wired into the `hexcore-elixir` (Project Azoth) emulation path.
+- v0.3: native breakpoints replace INT3 injection; dual-mode beacon detection in `pythia-azoth-run`; async refactor + `emulateFullHeadless` integration; Oracle commands declared in the pipeline capability map; fail-soft on register read/write errors (numeric Unicorn IDs, bigint-sanitized IPC).
+
 ## [3.8.0] - 2026-04-20 - "Souper Era + Pathfinder + Project Azoth + DWARF Type Pipeline"
 
 ### Pathfinder — DWARF + PDB + ET_REL metadata feeder (2026-04-19)
