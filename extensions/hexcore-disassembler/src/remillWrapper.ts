@@ -57,6 +57,13 @@ export interface RemillLiftOptions {
 	liftMode?: LiftMode;
 	/** PE64: function end addresses from .pdata */
 	knownFunctionEnds?: number[];
+	/**
+	 * EXPERIMENTAL — opt-in callfuscation deflattening (call-as-jmp rewrite) before
+	 * lifting. Default off. The current implementation is a raw byte scan with false
+	 * positives; do not enable in production until it is instruction-aware. See
+	 * deflattenCallfuscation() in pathfinder.ts and HELIX_AGENT_BRIEFING.md.
+	 */
+	deflattenCallfuscation?: boolean;
 }
 
 /**
@@ -240,20 +247,22 @@ export class RemillWrapper {
 		}
 
 		try {
-			// v3.8.1: Deflatten "callfuscation" (call-as-jmp) BEFORE lifting. The
-			// obfuscator wires the linear instruction stream together with `call`s
-			// used as jumps (each target begins with a `pop` discarding the pushed
-			// return address); a lifter otherwise models thousands of bogus calls
-			// and never follows the chain (Helix truncates at the first ret). This
-			// rewrites E8->E9 (call->jmp, same operand) and NOPs the dead pop
-			// discards, in a copy of the buffer. Central chokepoint so every lift
-			// path (liftToIR / helix.decompile / rellic) benefits uniformly.
-			// Self-gating (>=16 links) and x86/x64-only, so ordinary code is untouched.
-			if (arch === 'x64' || arch === 'x86') {
+			// v3.8.1: Callfuscation deflattening (call-as-jmp) hook.
+			// NOTE: auto-application is DISABLED. deflattenCallfuscation() is currently
+			// a raw byte scan that flags some 0xE8 operand/data bytes as `call`s (~888
+			// false positives measured on the Callfuscated sample: 4102 byte-scan hits
+			// vs 3214 real calls), which would CORRUPT the lift of exactly the
+			// callfuscated binaries it targets. It must be made instruction-aware
+			// (decode the chain, patch only genuine call opcodes — see
+			// make_deflat_aware.py / HELIX_AGENT_BRIEFING.md) before being re-enabled,
+			// and the lifter must also follow the resulting jmp chain as one
+			// multi-block function (it currently single-traces and stops at the first
+			// jmp). Opt in explicitly only for experiments:
+			if ((arch === 'x64' || arch === 'x86') && liftOptions?.deflattenCallfuscation === true) {
 				const df = deflattenCallfuscation(Buffer.from(buffer), address);
 				if (df.applied) {
 					buffer = df.patched;
-					console.log(`[remill] deflattened callfuscation: ${df.linkCount} call->jmp, ` +
+					console.log(`[remill] (experimental) deflattened callfuscation: ${df.linkCount} call->jmp, ` +
 						`${df.popsNeutralized} pop discards neutralized`);
 				}
 			}

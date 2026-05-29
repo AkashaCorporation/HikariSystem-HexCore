@@ -1251,6 +1251,15 @@ function popDiscardLen(buf: Buffer, off: number): 0 | 1 | 2 {
 /**
  * Deflatten "callfuscation" control-flow obfuscation in a lift buffer.
  *
+ * EXPERIMENTAL / NOT WIRED BY DEFAULT. This is a raw BYTE SCAN: it treats any
+ * 0xE8 byte as a `call`, so it flags 0xE8 operand/data bytes too (~888 false
+ * positives on the Callfuscated sample: 4102 vs 3214 real calls), which corrupts
+ * the binary. Make it INSTRUCTION-AWARE (decode the chain, patch only genuine
+ * call opcodes — see make_deflat_aware.py) before enabling. Even when correct,
+ * the lifter must additionally follow the resulting jmp chain as one multi-block
+ * function (today it single-traces and stops at the first jmp). See
+ * HELIX_AGENT_BRIEFING.md.
+ *
  * The obfuscator wires the real linear instruction stream together with
  * `call <next>` used as an obfuscated `jmp`: each target begins with a `pop`
  * that discards the just-pushed return address (the call never returns). To a
