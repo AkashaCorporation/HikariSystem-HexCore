@@ -331,6 +331,43 @@ export class JobQueueManager {
 	}
 
 	/**
+	 * Returns the active (queued or running) job for a given file path, if any.
+	 * Used by the auto-run / FileSystemWatcher submission layer to avoid
+	 * enqueueing a job whose path is already in-flight (debounce/dedup).
+	 * Paths are compared after path.resolve() normalization, matching the
+	 * normalization queueJob() applies on enqueue.
+	 * @param filePath Path to the .hexcore_job.json file
+	 * @returns The in-flight QueuedJob for the path, or undefined
+	 */
+	getActiveJobForPath(filePath: string): QueuedJob | undefined {
+		const normalized = path.resolve(filePath);
+		for (const job of this.jobs.values()) {
+			if (job.filePath === normalized && (job.status === 'queued' || job.status === 'running')) {
+				return job;
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Queues a job for a path only if no job for that path is already queued or
+	 * running. This is the de-duplicated submission entry point used by the
+	 * startup auto-run and the FileSystemWatcher, which can fire repeatedly for
+	 * the same file (rapid saves) and must not stack duplicate runs.
+	 * @param filePath Path to the .hexcore_job.json file
+	 * @param priority Job priority (default: 'normal')
+	 * @returns The new job ID, or the existing in-flight job ID if a duplicate
+	 *          was suppressed, or undefined if it could not be queued
+	 */
+	queueJobIfAbsent(filePath: string, priority: JobPriority = 'normal'): { jobId: string; deduped: boolean } {
+		const existing = this.getActiveJobForPath(filePath);
+		if (existing) {
+			return { jobId: existing.jobId, deduped: true };
+		}
+		return { jobId: this.queueJob(filePath, priority), deduped: false };
+	}
+
+	/**
 	 * Cancels a job by its ID.
 	 * If the job is queued, it's removed from the queue.
 	 * If the job is running, the abort controller is signaled.

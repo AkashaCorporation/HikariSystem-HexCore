@@ -657,22 +657,38 @@ export function activate(context: vscode.ExtensionContext): void {
 		return executePipelineJob(jobFilePath, quiet, false);
 	};
 
+	// Auto-run + FileSystemWatcher submissions go through the SAME JobQueueManager
+	// as the `hexcore.pipeline.queueJob` command, so concurrency is bounded by the
+	// pool size (default 2) instead of firing every root job at once (issue #27).
+	//
+	// Two layers of dedup are preserved here:
+	//   1. The 350ms debounce (pendingJobRuns) coalesces rapid save events for the
+	//      same path BEFORE anything reaches the queue.
+	//   2. queueJobIfAbsent() refuses to enqueue a path that already has a queued
+	//      or running job in the manager, covering saves that arrive after the
+	//      debounce window while the prior run is still in-flight.
+	// Auto/watcher jobs are submitted at LOW priority so they never starve
+	// user-submitted (normal/high) jobs from the queueJob command.
 	const scheduleJobRun = (jobFilePath: string): void => {
 		const normalizedPath = path.resolve(jobFilePath);
 		const existing = pendingJobRuns.get(normalizedPath);
 		if (existing) {
 			clearTimeout(existing);
 		}
-		if (activeJobRuns.has(normalizedPath)) {
-			queuedAutoRuns.add(normalizedPath);
-			return;
-		}
 
 		const timeoutHandle = setTimeout(() => {
 			pendingJobRuns.delete(normalizedPath);
-			executePipelineJob(normalizedPath, true, true).catch(error => {
-				console.error('HexCore pipeline auto-run failed:', error);
-			});
+			try {
+				const manager = getJobQueueManagerInstance();
+				const { jobId, deduped } = manager.queueJobIfAbsent(normalizedPath, 'low');
+				if (deduped) {
+					console.log(`[HexCore][autoRun] already queued/running, skipped: ${normalizedPath} (job ${jobId})`);
+				} else {
+					console.log(`[HexCore][autoRun] enqueued (low priority) job ${jobId}: ${normalizedPath}`);
+				}
+			} catch (error) {
+				console.error('[HexCore][autoRun] failed to enqueue job:', error);
+			}
 		}, 350);
 		pendingJobRuns.set(normalizedPath, timeoutHandle);
 	};
@@ -685,25 +701,32 @@ export function activate(context: vscode.ExtensionContext): void {
 		// interactively via "Run Job" (resolveJobFilePath offers a picker when the
 		// jobs live only in subfolders).
 		const folders = vscode.workspace.workspaceFolders ?? [];
+		// DIAGNOSTIC (3.8.2): the startup retry-all was reported as not firing.
+		// Log what this pass actually sees so a reload reveals the cause.
+		console.log(`[HexCore][autoRun] workspaceFolders=${folders.length}`);
+		let scheduledCount = 0;
 		for (const folder of folders) {
 			// Primary: check for .hexcore_job.json (the canonical name)
 			const jobFilePath = path.join(folder.uri.fsPath, '.hexcore_job.json');
 			if (fs.existsSync(jobFilePath)) {
 				scheduleJobRun(jobFilePath);
+				scheduledCount++;
 			}
 			// Also scan for named jobs (*.hexcore_job.json) in workspace root
 			try {
 				const files = fs.readdirSync(folder.uri.fsPath);
-				for (const file of files) {
-					if (file.endsWith('.hexcore_job.json') && file !== '.hexcore_job.json') {
-						const namedJobPath = path.join(folder.uri.fsPath, file);
-						scheduleJobRun(namedJobPath);
-					}
+				const named = files.filter(f => f.endsWith('.hexcore_job.json') && f !== '.hexcore_job.json');
+				console.log(`[HexCore][autoRun] ${folder.uri.fsPath} -> ${named.length} named job(s): ${named.join(', ') || '(none)'}`);
+				for (const file of named) {
+					const namedJobPath = path.join(folder.uri.fsPath, file);
+					scheduleJobRun(namedJobPath);
+					scheduledCount++;
 				}
-			} catch {
-				// Non-fatal
+			} catch (err) {
+				console.error(`[HexCore][autoRun] readdir failed for ${folder.uri.fsPath}:`, err);
 			}
 		}
+		console.log(`[HexCore][autoRun] scheduled ${scheduledCount} job(s)`);
 	};
 
 	// Sync tree views when editor changes
