@@ -2106,7 +2106,15 @@ let jobQueueManagerInstance: JobQueueManager | undefined;
  */
 export function getJobQueueManagerInstance(concurrencyLimit?: number): JobQueueManager {
 	if (!jobQueueManagerInstance) {
-		jobQueueManagerInstance = getJobQueueManager(concurrencyLimit);
+		// Default to SEQUENTIAL (1). The emulation engine (DebugEngine) is a
+		// process-wide singleton holding ONE shared x64-ELF worker, so two jobs
+		// that each run emulation/debug steps corrupt each other's session even
+		// with the per-session SessionLock: a sibling job's opening
+		// disposeHeadless / readMemory touches the shared engine OUTSIDE the lock
+		// and tears down the in-flight worker (SIGTERM "worker disposed"). The
+		// only command-level-safe model until per-session worker isolation (#26)
+		// is one job at a time. Callers may still pass an explicit limit.
+		jobQueueManagerInstance = getJobQueueManager(concurrencyLimit ?? 1);
 		// Configure the job executor to use the AutomationPipelineRunner
 		jobQueueManagerInstance.setJobExecutor(async (filePath: string, abortSignal: AbortSignal) => {
 			const runner = new AutomationPipelineRunner();
