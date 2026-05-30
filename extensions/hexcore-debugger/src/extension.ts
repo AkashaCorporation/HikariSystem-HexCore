@@ -11,6 +11,7 @@ import { RegisterTreeProvider } from './registerTree';
 import { MemoryTreeProvider } from './memoryTree';
 import { DebugEngine } from './debugEngine';
 import { TraceTreeProvider } from './traceView';
+import { SessionLock, type SessionLockHandle } from './sessionLock';
 import type { ArchitectureType } from './unicornWrapper';
 
 // ─── Project Pythia Oracle Hook — v3.9.0-preview.oracle ───────────────────
@@ -207,6 +208,27 @@ export function activate(context: vscode.ExtensionContext): void {
 	}
 
 	const engine = new DebugEngine();
+
+	// ── Emulation session serialization (GitHub issue #28) ────────────────────
+	// The single `engine` above is shared by ALL headless command handlers and
+	// owns ONE x64-ELF worker child process. Concurrent emulation jobs would
+	// otherwise SIGTERM each other's worker because startEmulation() disposes the
+	// existing one. The lock makes an emulation SESSION (start -> ... -> dispose)
+	// exclusive: a second emulate call AWAITS the first's disposeHeadless instead
+	// of stomping its worker. See sessionLock.ts for the full rationale.
+	//
+	// Safety hold = a generous multiple of the default per-run budget. If a
+	// caller crashes/abandons a session without disposing, the lock force-releases
+	// after this so future emulations are never deadlocked.
+	const SESSION_LOCK_MAX_HOLD_MS = 5 * 60 * 1000; // 5 minutes
+	const sessionLock = new SessionLock(SESSION_LOCK_MAX_HOLD_MS, (m) => console.log(m));
+
+	// Token held by the CURRENT multi-step keepAlive session (emulateHeadless ...
+	// disposeHeadless across separate command invocations). undefined when no
+	// keepAlive session holds the lock. Self-contained emulateFullHeadless runs
+	// keep their handle local and never touch this.
+	let keepAliveLockHandle: SessionLockHandle | undefined;
+
 	const debuggerView = new DebuggerViewProvider(context.extensionUri, engine);
 	const registerProvider = new RegisterTreeProvider(engine);
 	const memoryProvider = new MemoryTreeProvider(engine);
@@ -465,7 +487,30 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			await engine.startEmulation(filePath, arch, { permissiveMemoryMapping });
+			// ── issue #28: serialize emulation sessions on the shared engine ──
+			// emulateHeadless starts a MULTI-STEP keepAlive session whose lock is
+			// held across separate command invocations until disposeHeadless.
+			// acquire() blocks here until any in-flight session releases, so a
+			// concurrent job can no longer SIGTERM this session's x64-ELF worker.
+			if (keepAliveLockHandle) {
+				// A prior keepAlive session was never disposed. Drop its (by now
+				// stale or about-to-be-stomped) handle before acquiring fresh.
+				console.warn('[emulateHeadless] previous keepAlive session was not disposed; releasing its stale lock handle');
+				sessionLock.release(keepAliveLockHandle);
+				keepAliveLockHandle = undefined;
+			}
+			const lockHandle = await sessionLock.acquire();
+
+			try {
+				await engine.startEmulation(filePath, arch, { permissiveMemoryMapping });
+			} catch (error) {
+				// startEmulation threw before a live session exists — release the
+				// lock so the next emulate is not blocked forever.
+				sessionLock.release(lockHandle);
+				throw error;
+			}
+			// Session is live; hold the lock until disposeHeadless releases it.
+			keepAliveLockHandle = lockHandle;
 
 			if (stdin) {
 				engine.setStdinBuffer(stdin);
@@ -919,6 +964,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 
+			// ── issue #28: serialize emulation sessions on the shared engine ──
+			// emulateFullHeadless is normally self-contained (load -> run ->
+			// collect -> dispose in ONE call), so it acquires the lock here and
+			// releases it in the finally below. When keepAlive=true the session
+			// outlives this call, so we TRANSFER the handle to keepAliveLockHandle
+			// (released later by disposeHeadless) and clear `fullRunHandle` so the
+			// finally does not release a still-live session.
+			let fullRunHandle: SessionLockHandle | undefined = await sessionLock.acquire();
+			try {
 			console.log('[emulateFullHeadless] starting emulation...');
 			const mySession = ++emulateSessionId;
 			// Oracle Hook v0.3 uses native Unicorn breakpoints which are only
@@ -1020,6 +1074,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!keepAlive && mySession === emulateSessionId) {
 				engine.disposeEmulation();
+			} else if (keepAlive && mySession === emulateSessionId) {
+				// issue #28: this session lives on past the current call. Transfer
+				// the lock to the keepAlive holder so a later disposeHeadless
+				// releases it, and clear fullRunHandle so the finally below leaves
+				// the lock held.
+				if (keepAliveLockHandle) {
+					sessionLock.release(keepAliveLockHandle);
+				}
+				keepAliveLockHandle = fullRunHandle;
+				fullRunHandle = undefined;
 			}
 
 			const exportData: Record<string, any> = {
@@ -1104,6 +1168,23 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			return exportData;
+			} finally {
+				// issue #28: release the session lock unless this was a keepAlive
+				// run that transferred its handle to keepAliveLockHandle (in which
+				// case fullRunHandle was cleared above). This finally also covers
+				// the throw paths: if startEmulation / run / collect throws, the
+				// self-contained session must not leak the lock. We also dispose
+				// the engine on an unexpected throw so the next session starts clean.
+				if (fullRunHandle) {
+					try {
+						engine.disposeEmulation();
+					} catch (disposeErr) {
+						console.warn(`[emulateFullHeadless] disposeEmulation during lock release failed: ${disposeErr}`);
+					}
+					sessionLock.release(fullRunHandle);
+					fullRunHandle = undefined;
+				}
+			}
 		})
 	);
 
@@ -1284,7 +1365,22 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			engine.disposeEmulation();
+			try {
+				engine.disposeEmulation();
+			} finally {
+				// ── issue #28: release the keepAlive session lock ──
+				// disposeHeadless is the release point for the multi-step
+				// keepAlive session opened by emulateHeadless. Release in a
+				// finally so a throwing disposeEmulation still frees the lock
+				// (and thus does not deadlock future emulations). Releasing with
+				// undefined is a safe no-op when no keepAlive session was held
+				// (e.g. dispose called twice, or after a self-contained
+				// emulateFullHeadless that managed its own handle).
+				if (keepAliveLockHandle) {
+					sessionLock.release(keepAliveLockHandle);
+					keepAliveLockHandle = undefined;
+				}
+			}
 
 			const exportData = {
 				disposed: true as const,
