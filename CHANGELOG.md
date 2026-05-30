@@ -5,9 +5,11 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.2-nightly] - 2026-05-28 - "Callfuscation — Detection + (Opt-In) Deflattening"
+## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
-> Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Nightly: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once `-nightly` is dropped and the Helix agent verifies it. **This nightly also carries a broad "fix-or-cut" audit wave** (emulator, static VM/PRNG detectors, headless pipeline robustness, YARA, doc-honesty) — see the *Audit-fix wave* section below.
+> **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.
+
+> Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Still unreleased: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once 3.8.2 actually ships and the Helix agent verifies it. **This release also carries a broad "fix-or-cut" audit wave** (emulator, static VM/PRNG detectors, headless pipeline robustness, YARA, doc-honesty) — see the *Audit-fix wave* section below.
 
 ### Disassembler — analyzeAll no longer drops v3.7 analysis telemetry (`e634e40`)
 
@@ -92,7 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Audit-fix wave — "fix-or-cut" sweep of documented features (2026-05-29)
 
-> A second body of work in the same 3.8.2-nightly cycle, driven by one principle: **a documented-but-broken feature is worse than no feature at all.** The Callfuscated investigation surfaced several documented surfaces that were silently no-ops, doc lies, or dropped fields. So each documented capability was *run against a real binary* (the HTB crackme, a `mali_kbase.ko` kernel module) and the result was **fixed, doc-corrected, or cut** — never left to look like it works when it doesn't. Branch `hexcore/3.8.2-audit-fixes` (7 commits + the job-discovery fix below). The emulator decision was **Unicorn-first** (the in-tree Unicorn path was made usable rather than waiting on Azoth's ELF loader). Full evidence tables live in `rag/audit-{analysis,disasm,pipeline,emulator}.md` (local, gitignored).
+> A second body of work in the same 3.8.2 cycle, driven by one principle: **a documented-but-broken feature is worse than no feature at all.** The Callfuscated investigation surfaced several documented surfaces that were silently no-ops, doc lies, or dropped fields. So each documented capability was *run against a real binary* (the HTB crackme, a `mali_kbase.ko` kernel module) and the result was **fixed, doc-corrected, or cut** — never left to look like it works when it doesn't. Branch `hexcore/3.8.2-audit-fixes` (7 commits + the job-discovery fix below). The emulator decision was **Unicorn-first** (the in-tree Unicorn path was made usable rather than waiting on Azoth's ELF loader). Full evidence tables live in `rag/audit-{analysis,disasm,pipeline,emulator}.md` (local, gitignored).
 
 #### Emulator (Unicorn) — now actually usable for stdin crackmes + faithful PRNG (`3db1078`)
 
@@ -148,6 +150,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Quiet/headless callers never prompt** — they get an honest "not found" instead of a guess. Startup auto-run stays root-only (auto-executing buried jobs on window-open is a foot-gun), and the recursive `FileSystemWatcher` (auto-run on save) is unchanged.
 - Explicit path / right-click (URI) and a canonical root `.hexcore_job.json` resolve exactly as before — **no behavior change for existing single-job-at-root users.**
 
+#### Job Queue — auto-run/watcher routed through the pool + emulation serialized (#27, #28; `9da7d55`, `a381343`, `ecf142d`)
+
+> Two bugs surfaced when a workspace's auto-run fired many jobs at once. Validated against a real 12-job auto-run batch.
+
+- **#27 — auto-run + watcher bypassed the `JobQueueManager`.** `autoRunExistingJobs` and the `FileSystemWatcher` dispatched jobs straight to `runJobFile()`, ignoring the worker pool (shipped in v3.8.0, #19). Opening a folder with N root `.hexcore_job.json` ran all N concurrently with no `poolSize` cap. They now submit via a new `queueJobIfAbsent(path, 'low')` — bounded by the pool, low-priority (never starves user `queueJob` submissions), with queue-level dedup on top of the existing 350ms debounce.
+- **#28 — concurrent emulation jobs SIGTERM'd each other.** `DebugEngine` is a process-wide singleton holding ONE shared x64-ELF worker; a sibling job's emulate (or its opening `disposeHeadless`) tore down the in-flight worker (`worker exited before ready` / `worker disposed` / a TypeError on a reset emulator). Added a token-based FIFO `SessionLock` (TS-only) so an emulation session holds the engine exclusively, **and** defaulted the job queue to **sequential (concurrency 1)** — command-level locking cannot enforce whole-job engine exclusivity (a job is independent command invocations; its opening dispose runs outside the lock), so one-job-at-a-time is the safe model until per-session worker isolation (#26). Result on the 12-job batch: previously-SIGTERM `emu-*` jobs all went green; only an Azoth-on-ELF job stays `partial` (separate PE-only limitation, not this fix).
+- **Follow-up:** emulation-aware scheduling (non-emulation jobs parallel, emulation jobs exclusive) to restore throughput.
+
 #### Docs — counts corrected to match reality (`e523b66`)
 
 - `filetype.detect`: "118 signatures" → **43** across 11 categories (the DB has 43; the claim was inflated).
@@ -161,7 +171,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`vmPrngDetectionBinary.test.ts`** (NEW) — binary-driven regression for the detectors. The existing `vmPrngDetectionProperties.test.ts` only checked result **shape** via fast-check, so the no-op defects were invisible to CI. Synthetic callfuscated srand/rand chain + synthetic stack-VM + the real crackme (skipped if the fixture is absent). General lesson recorded: shape-only tests give false confidence.
 - **`prngProperties.test.ts`** — covers the faithful glibc TYPE_3 port.
 
-### Deferred / tracked (NOT in 3.8.2-nightly)
+### Deferred / tracked (NOT in 3.8.2)
 
 - **Azoth (`hexcore-elixir`) ELF + stdin + `prngMode`** — Large (new ELF loader + libc hook table in C++23 + SysV ABI + worker IPC); currently PE32+-only, rejects ELF. The Unicorn path above is the usable route in the meantime.
 - **Timeout *cancellation*** — needs a real `CancellationToken`/`cancelCommand` wired through the native ops (the honesty fix above only stops pretending).
