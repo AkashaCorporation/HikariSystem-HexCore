@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
 - **Known limitation**: UPX-packed ELF (exatlon) is not flagged here; ELF packer detection needs a strings/entropy correlation rather than PE section names (tracked as a follow-up). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
 
+### Disassembler - call graph now records tail-call / trampoline edges
+
+> An unconditional jmp/B to another function's entry (a tail call, thunk, or trampoline) is a real call-graph edge, but only `call` edges were wired -- so e.g. poly's ARM64 `entry_point: b main` left entry_point.callees and main.callers empty, disconnecting the graph at the root.
+
+- **New post-pass `addTailCallEdges()`** in analyzeAll (runs after the .pdata reconcile): for each function, an unconditional jmp/B whose target is another function's ENTRY adds a callee/caller edge. Additive and deduped (existing call edges untouched); intra-function loop jumps are excluded (their targets are not function entries).
+- **Validated** (engine-direct harness): poly (ARM64) entry_point.callees 0 -> [0x400000c0] and sub_400000C0.callers 0 -> [0x400000b4]; 49/72 functions now have >= 1 callee. partialencryption.exe unchanged (45 funcs, 0 overlaps, 0 dangling call edges) -- additive, no regression.
+
 ### Disassembler - vmDetection no longer false-positives or emits fake operand-stack arrays
 
 > The static VM detector flagged plain code as a stack machine and emitted bogus `stackArrays` even when it judged no VM, and those offsets were consumed downstream as fabricated struct fields (degrading Helix decompiles -- a no-op detector actively making output worse).

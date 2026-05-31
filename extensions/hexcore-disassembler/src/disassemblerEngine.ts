@@ -785,6 +785,11 @@ export class DisassemblerEngine {
 		// boundaries (no-op when .pdata is absent: ELF/x86/ARM64 stay byte-identical).
 		await this.reconcileFunctionsWithPdata();
 
+		// v3.8.3 Gap-K: add tail-call / trampoline edges (unconditional jmp/B to another
+		// function entry) that prologue-time wiring missed. Additive; runs after reconcile
+		// so the rebuilt (call-only) PE64 graph also gains its tail edges.
+		this.addTailCallEdges();
+
 		// Build string cross-references
 		this.buildStringXrefs();
 
@@ -4036,6 +4041,40 @@ export class DisassemblerEngine {
 			}
 		}
 		return firstGreater < beginsArr.length && beginsArr[firstGreater] < end;
+	}
+
+	/**
+	 * v3.8.3 Gap-K: add tail-call / trampoline edges to the call graph. An unconditional
+	 * jmp/B whose target is ANOTHER function's entry is a real call-graph edge (tail call,
+	 * thunk, trampoline), but analyzeFunction wired only `call` edges -- so e.g. an ELF/ARM64
+	 * `entry: b main` left entry.callees and main.callers empty, disconnecting the graph at
+	 * the root. Additive and deduped: existing edges are untouched; only missing
+	 * jump-to-function-entry edges are added. Intra-function jumps (loops) are excluded
+	 * because their targets are not function entries in the table.
+	 */
+	private addTailCallEdges(): void {
+		for (const fn of this.functions.values()) {
+			for (const inst of fn.instructions) {
+				if (!inst.isJump || inst.isConditional || inst.targetAddress === undefined) {
+					continue;
+				}
+				const t = typeof inst.targetAddress === 'bigint' ? Number(inst.targetAddress) : inst.targetAddress;
+				if (t === fn.address) {
+					continue;
+				}
+				const target = this.functions.get(t);
+				if (!target) {
+					continue;
+				}
+				if (!fn.callees.includes(t)) {
+					fn.callees.push(t);
+				}
+				const site = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				if (!target.callers.includes(site)) {
+					target.callers.push(site);
+				}
+			}
+		}
 	}
 
 	private async scanForFunctionPrologs(): Promise<void> {
