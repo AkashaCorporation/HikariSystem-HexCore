@@ -790,6 +790,11 @@ export class DisassemblerEngine {
 		// so the rebuilt (call-only) PE64 graph also gains its tail edges.
 		this.addTailCallEdges();
 
+		// v3.8.3: relabel ELF PLT-stub functions (auto-named sub_*) with their resolved
+		// import name from the .rela.plt/.dynsym map (e.g. sub_555555555030 -> puts@plt),
+		// so calls through the PLT are readable instead of anonymous.
+		this.applyPltStubNames();
+
 		// Build string cross-references
 		this.buildStringXrefs();
 
@@ -4073,6 +4078,25 @@ export class DisassemblerEngine {
 				if (!target.callers.includes(site)) {
 					target.callers.push(site);
 				}
+			}
+		}
+	}
+
+	/**
+	 * v3.8.3: relabel ELF PLT-stub functions with their resolved import name. The
+	 * `.rela.plt`/`.dynsym`-derived `_pltSymbolMap` (PLT-stub VA -> symbol) was only used by
+	 * detectPRNG; discovered PLT thunks stayed `sub_<addr>`. This names them `<symbol>@plt`
+	 * (e.g. `puts@plt`) so calls through the PLT are readable. Only the auto-generated
+	 * `sub_*` name is replaced, preserving any user / session rename. No-op for non-ELF.
+	 */
+	private applyPltStubNames(): void {
+		if (this._pltSymbolMap.size === 0) {
+			return;
+		}
+		for (const fn of this.functions.values()) {
+			const sym = this._pltSymbolMap.get(fn.address);
+			if (sym && /^sub_[0-9a-fA-F]+$/i.test(fn.name)) {
+				fn.name = `${sym}@plt`;
 			}
 		}
 	}

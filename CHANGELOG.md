@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
 - **`packed`** is detected from packer section names (UPX0/Themida/VMProtect/...) OR a section that is virtual-only, OR packer signature strings ("This file is packed with the UPX...", "UPX!") -- the string path catches UPX-packed ELF like exatlon, which has no PE-style packer section names (validated: exatlon -> [packed]). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
 
+### Disassembler - ELF PLT-stub functions are named by their import (no longer sub_*)
+
+> The `.rela.plt`/`.dynsym`-derived PLT-stub map (VA -> symbol) was only used by detectPRNG; discovered PLT thunks stayed anonymous `sub_<addr>`, so an ELF call through the PLT read as `call sub_555555555050` instead of `call puts`.
+
+- **New post-pass `applyPltStubNames()`** in analyzeAll: a function whose address is a known PLT stub is relabelled `<symbol>@plt` (e.g. `puts@plt`). Only the auto-generated `sub_*` name is replaced (user / session renames preserved); no-op for non-ELF.
+- **Validated** (engine-direct harness) on Funkynator: 17 PLT thunks now read `free@plt` / `toupper@plt` / `puts@plt` / `printf@plt` / `malloc@plt` / `__isoc99_scanf@plt` / ... instead of `sub_*`.
+
 ### Strings - advanced XOR scanner no longer floods low-diversity false positives
 
 > The advanced XOR scanners scored runs of 1-2 distinct printable bytes (e.g. an XOR key over near-constant padding decoding to "hhhhhg") at ~0.99 confidence, producing thousands of false positives that buried the real payload (ffmodule's key-0x72 shellcode strings socket/connect/VirtualAlloc/PR_Write were missed).
