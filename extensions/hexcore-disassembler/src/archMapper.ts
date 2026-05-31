@@ -21,16 +21,29 @@ export interface ArchMapResult {
  * Mapeamento estático Capstone -> Remill.
  * Apenas arquiteturas com suporte completo no Remill são incluídas.
  *
- * NOTE (v3.8.2): 'arm64' -> 'aarch64' was REMOVED. The mapping advertised arm64
- * support, but the shipped native remill build has no working aarch64 semantics:
- * liftBytes() on a trivial `mov x0,#1; ret` returns "Failed to lift instruction".
- * Advertising a path that fails at the native layer produces a confusing
- * mid-pipeline error instead of an upfront "unsupported architecture" reject.
- * Re-add only when the native build ships working aarch64 semantics.
+ * NOTE (v3.8.2): 'arm64' -> 'aarch64' was REMOVED because the shipped native
+ * remill build returned "Failed to lift instruction" on a trivial
+ * `mov x0,#1; ret`.
+ *
+ * NOTE (FIX-053): 'arm64' -> 'aarch64' is RE-ENABLED. The native failure was
+ * NOT missing aarch64 semantics (those ship and decode fine) -- it was two bugs
+ * in the wrapper's multi-instruction path:
+ *   1. Phase-1 handed the WHOLE remaining buffer to Remill's AArch64
+ *      DecodeInstruction, which has a hard `size == 4` gate and rejects any
+ *      buffer that isn't exactly one instruction wide.
+ *   2. The reused `remill::Instruction` was not Reset() between decodes, so the
+ *      AArch64 decoder (which appends operands) gave every instruction after the
+ *      first too many operands -> kLiftedMismatchedISEL -> lift stopped after one
+ *      instruction.
+ * Both are fixed in remill_wrapper.cpp. `mov x0,#1; ret`, a full
+ * stp/mov/add/ldp/ret prologue, and a bl+cbz+ret function now lift to complete,
+ * valid aarch64 LLVM IR. (Helix structuring of ARM64 IR is a separate downstream
+ * concern and may still stub.)
  */
 const ARCH_MAP: Record<string, string> = {
 	'x86': 'x86',
 	'x64': 'amd64',
+	'arm64': 'aarch64',
 };
 
 /**

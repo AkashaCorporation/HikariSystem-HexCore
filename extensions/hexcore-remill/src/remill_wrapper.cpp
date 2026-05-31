@@ -694,6 +694,33 @@ LiftResult RemillLifter::DoLift(
 		size_t scanOffset = 0;
 		auto scanContext = arch_->CreateInitialContext();
 
+		// FIX-053: AArch64 (and other fixed-width RISC ISAs) decode failure on
+		// multi-instruction buffers.
+		//
+		// Remill's AArch64 ArchDecodeInstruction has a HARD length gate:
+		//     if (kInstructionSize != inst_bytes.size()) {
+		//         inst.category = Instruction::kCategoryInvalid; return false;
+		//     }
+		// i.e. it requires EXACTLY 4 bytes -- not "at least 4". The x86/amd64
+		// decoder, by contrast, wants the whole remaining stream (variable-length
+		// + idiom fusing). This wrapper historically handed `length - scanOffset`
+		// (the ENTIRE remaining buffer) to DecodeInstruction, which is correct for
+		// x86 but makes EVERY AArch64 instruction except a lone 4-byte tail fail
+		// the length gate. The failed decode then fell through to the FIX-024 XED
+		// path and became a kCategoryNoOp stub, so the lift produced no real IR
+		// (observed: `mov x0,#1; ret` -> "Failed to lift instruction").
+		//
+		// Arch.h's own note prescribes the fix: pass at most MaxInstructionSize()
+		// bytes. For FIXED-WIDTH arches (Min == Max, e.g. AArch64 = 4) we clamp
+		// the decode window to exactly that width. For VARIABLE-WIDTH arches
+		// (x86/amd64) we keep the full-buffer behavior BYTE-FOR-BYTE so no x86
+		// lift changes (idiom fusing + the FIX-052b jmp handling are untouched).
+		const uint64_t minInsnSize = arch_->MinInstructionSize(scanContext);
+		const uint64_t maxInsnSize =
+			arch_->MaxInstructionSize(scanContext, /*permit_fuse_idioms=*/false);
+		const bool fixedWidthIsa =
+			(minInsnSize == maxInsnSize) && (maxInsnSize > 0);
+
 		while (scanOffset < length) {
 			// ─── PE64 mode: stop at known function end ──────────────────
 			if (options.mode == LiftMode::PE64 && functionEndSet.count(scanPC)) {
@@ -717,8 +744,32 @@ LiftResult RemillLifter::DoLift(
 				}
 			}
 
+			// FIX-053: For fixed-width ISAs (AArch64), clamp the decode window to
+			// exactly one instruction width so Remill's strict length gate accepts
+			// it. For variable-width ISAs (x86/amd64), hand the whole remaining
+			// buffer exactly as before.
+			size_t decodeWindow = length - scanOffset;
+			if (fixedWidthIsa &&
+				static_cast<uint64_t>(decodeWindow) > maxInsnSize) {
+				decodeWindow = static_cast<size_t>(maxInsnSize);
+			}
 			std::string_view instrBytes(
-				reinterpret_cast<const char*>(bytes + scanOffset), length - scanOffset);
+				reinterpret_cast<const char*>(bytes + scanOffset), decodeWindow);
+
+			// FIX-053: Reset the reused Instruction before every decode.
+			//
+			// `scanInst` is reused across the whole Phase-1 sweep. Remill's x86
+			// decoder clears prior decode state internally, but the AArch64
+			// decoder APPENDS operands onto whatever is already in `inst.operands`
+			// without first clearing them. So the 2nd (and every later) AArch64
+			// instruction inherited the previous instruction's operands, ending up
+			// with MORE operands than its semantics ISEL function has parameters,
+			// InstructionLifter then bails with kLiftedMismatchedISEL and the lift
+			// stops after a single instruction (observed: every AArch64 function
+			// lifted only its first instruction). Resetting first makes each decode
+			// start from a clean Instruction, exactly like Remill's own TraceLifter
+			// uses a fresh Instruction per address. No-op cost for x86.
+			scanInst.Reset();
 
 			if (!arch_->DecodeInstruction(scanPC, instrBytes, scanInst, scanContext)) {
 				fix024_decodeFailures++;

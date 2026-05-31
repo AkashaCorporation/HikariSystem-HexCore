@@ -5,6 +5,25 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.4] - Unreleased - "AArch64 lifting + obfuscated-binary discovery"
+
+> **STATUS: UNRELEASED.** Working-tree fixes; not a published release.
+
+### Remill - AArch64 lifting now works (FIX-053, issue #29)
+
+> HexCore decompilation was effectively x86/x64-only: `liftBytes` on a trivial AArch64 sequence returned "Failed to lift instruction", so `arm64 -> aarch64` had been removed from the arch map.
+
+- **Root cause (the earlier "XED-only front-end" diagnosis was WRONG):** the AArch64 `remill::Arch` was selected correctly and single instructions lifted fine all along; XED is only a fallback length decoder. The multi-instruction path had two wrapper bugs: (1) Phase-1 handed the WHOLE remaining buffer to Remill's AArch64 `DecodeInstruction`, which has a hard `size == 4` gate and rejects anything wider than one instruction; (2) the reused `remill::Instruction` was not `Reset()` between decodes, so the AArch64 decoder (which appends operands) gave every instruction after the first too many operands -> `kLiftedMismatchedISEL` -> the lift stopped after one instruction.
+- **Fix** (`hexcore-remill/src/remill_wrapper.cpp`): clamp the decode window to one instruction width for fixed-width ISAs (4 bytes for AArch64; x86/amd64 path byte-for-byte unchanged), and `scanInst.Reset()` before every `DecodeInstruction` (matching Remill's own TraceLifter). Re-enabled `arm64 -> aarch64` in `archMapper.ts`.
+- **Validated** (golden harness `rag/_validate_arm64_lift.cjs`, real native module): `mov x0,#1; ret` -> success, irLen 3732, consumed 8; a 5-instruction STP/LDP prologue lifts fully (consumed 20); `bl + cbz + ret` lifts with br=2 (conditional branch wired into the LLVM CFG). NO x86 regression: the crackme @0x409002 still lifts to 980 blocks / 978 br. (Helix MLIR structuring of AArch64 IR is a separate downstream concern and may still stub.)
+
+### Disassembler - function discovery materializes obfuscated .pdata functions (issue #34)
+
+> On a heavily-obfuscated PE the prologue scanner over-produces ghosts that exhaust the maxFunctions budget before the real functions are reached, AND analyzeFunction fails to disassemble VM-protected bodies. On Vanguard's vgk.sys (10296 .pdata RUNTIME_FUNCTION entries) analyzeAll discovered only 504 functions.
+
+- **Reordered `reconcileFunctionsWithPdata`**: sweep prologue-scan ghosts FIRST (freeing the maxFunctions budget), THEN ensure a function at every .pdata begin, THEN clamp, THEN sweep again (to clear ghosts the ensure pass re-introduced). The "ensure" step now disassembles the begin's body with `disassembleRange` (NON-recursive) instead of `analyzeFunction` (whose recursive call/jump following explodes into thousands of ghosts on obfuscated code and re-exhausts the budget); the call graph is rebuilt from instructions afterwards. A begin whose body cannot be disassembled becomes a `.pdata`-bounded stub so it still exists in the table (navigable, countable, a valid decompile target).
+- **Validated** (engine-direct harness): vgk.sys 504 -> 11613 functions, 9261 of 10296 .pdata begins present (the remaining ~1000 are maxFunctions-cap-limited at 12000, not lost - a higher cap recovers them). No regression on clean binaries: partialencryption 45/0/0, ffmodule 340/0, Funkynator 39 unchanged. Full disassembler test suite still 205 passing (the 3 failures are pre-existing, in untouched code).
+
 ## [3.8.3] - Unreleased - "Function-discovery .pdata anchoring (Gap A)"
 
 > **STATUS: UNRELEASED.** Working-tree fix from an HTB reverse-engineering hardening pass; not a published release. The version, tag, and installers are not cut.
