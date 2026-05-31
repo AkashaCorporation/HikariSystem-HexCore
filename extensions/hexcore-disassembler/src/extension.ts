@@ -6224,6 +6224,20 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 	if (has('cryptacquirecontext', 'cryptencrypt', 'cryptdecrypt', 'cryptderivekey', 'bcryptencrypt', 'bcryptdecrypt') >= 1) {
 		caps.push('crypto-api');
 	}
+	// Gap J: crypto via AES/SHA hardware opcodes. partialencryption's custom cipher was
+	// built from AESKEYGENASSIST + AESDECLAST; surfacing the opcode usage points the analyst
+	// straight at the crypto without reading every function. Scan the decoded stream.
+	const cryptoOpcode = /^(aes|sha1|sha256|sha1rnds|sha256rnds|vaes|pclmulqdq)/;
+	let hasCryptoNi = false;
+	for (const fn of engine.getFunctions()) {
+		for (const inst of fn.instructions) {
+			if (cryptoOpcode.test(inst.mnemonic.toLowerCase())) { hasCryptoNi = true; break; }
+		}
+		if (hasCryptoNi) { break; }
+	}
+	if (hasCryptoNi) {
+		caps.push('crypto-aes-sha-ni');
+	}
 	if (has('isdebuggerpresent', 'checkremotedebuggerpresent', 'ntqueryinformationprocess', 'outputdebugstring') >= 1) {
 		caps.push('anti-debug-or-debugstring');
 	}
