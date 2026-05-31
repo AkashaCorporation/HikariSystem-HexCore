@@ -5300,17 +5300,27 @@ export class DisassemblerEngine {
 		let indirectDispatch = 0;
 		let firstIndirectDispatchAddr: string | null = null;
 
+		// A real VM operand stack / program array lives in a SMALL frame displacement
+		// (the crackme stack-VM used `-0x950`). Indexed accesses with a huge displacement
+		// (e.g. `[r11 + rax*4 - 0xf21d0]`, ~991 KB) are global/section accesses in ordinary
+		// code (D appender, biguint, CRT) and were the source of vmDetection FALSE POSITIVES
+		// and the fake "stackArrays" that polluted downstream type inference. Gate on a sane
+		// stack-frame bound so only plausible operand-stack accesses count.
+		const MAX_STACK_DISP = 0x10000;
 		for (const inst of instrs) {
 			const match = inst.opStr.match(stackPatternRegex);
 			if (match) {
-				operandStackAccesses++;
-				const key = `${match[1]}-${match[2]}`;
-				if (!seenStacks.has(key)) {
-					seenStacks.add(key);
-					stackArrays.push({
-						base: `${match[1]}-${match[2]}`,
-						type: stackArrays.length === 0 ? 'operand-stack' : 'vm-program'
-					});
+				const disp = Number(match[2]);
+				if (Number.isFinite(disp) && disp <= MAX_STACK_DISP) {
+					operandStackAccesses++;
+					const key = `${match[1]}-${match[2]}`;
+					if (!seenStacks.has(key)) {
+						seenStacks.add(key);
+						stackArrays.push({
+							base: `${match[1]}-${match[2]}`,
+							type: stackArrays.length === 0 ? 'operand-stack' : 'vm-program'
+						});
+					}
 				}
 			}
 			const mn = inst.mnemonic.toLowerCase();
@@ -5336,8 +5346,15 @@ export class DisassemblerEngine {
 		// opcode against many handler ids. The stack-VM path is what HTB callfuscated/
 		// stack-VM samples exhibit -- a computed-goto interpreter with no cmp ladder.
 		const LADDER_MIN = 6;
+		// Density gate: a real VM operand stack is a FEW arrays hit MANY times (the hot
+		// interpreter loop). Ordinary array-heavy code (e.g. D BigInt/appender) produces
+		// MANY distinct indexed bases each touched only a few times -- high array count, low
+		// density. Requiring >=4 accesses per distinct array rejects that false positive
+		// (dudidudida: 11 scattered arrays) while keeping a genuine stack VM (few dense
+		// operand stacks).
 		const stackVmSignature = stackArrays.length >= 2
 			&& operandStackAccesses >= 8
+			&& operandStackAccesses >= stackArrays.length * 4
 			&& indirectDispatch >= 1;
 		const ladderDispatch = maxOpcodeCount >= LADDER_MIN;
 		const vmDetected = ladderDispatch
@@ -5358,7 +5375,11 @@ export class DisassemblerEngine {
 			// For a stack-VM with no cmp ladder, report the distinct operand-stack
 			// array count as the "opcode" proxy so consumers get a non-zero signal.
 			opcodeCount: ladderDispatch ? maxOpcodeCount : (stackVmSignature ? stackArrays.length : 0),
-			stackArrays,
+			// Only surface stackArrays when this is actually judged a VM. When vmDetected is
+			// false they are incidental indexed accesses (not a VM operand stack) and were
+			// being consumed downstream as fake struct fields -- a no-op detector must not
+			// emit signal that degrades other passes.
+			stackArrays: vmDetected ? stackArrays : [],
 			junkRatio
 		};
 	}

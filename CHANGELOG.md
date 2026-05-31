@@ -40,6 +40,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
 - **Known limitation**: UPX-packed ELF (exatlon) is not flagged here; ELF packer detection needs a strings/entropy correlation rather than PE section names (tracked as a follow-up). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
 
+### Disassembler - vmDetection no longer false-positives or emits fake operand-stack arrays
+
+> The static VM detector flagged plain code as a stack machine and emitted bogus `stackArrays` even when it judged no VM, and those offsets were consumed downstream as fabricated struct fields (degrading Helix decompiles -- a no-op detector actively making output worse).
+
+- **Plausibility gate**: indexed `[reg+reg*N-disp]` accesses with a huge displacement (e.g. 0xf21d0 ~ 991 KB -- a global/section access in D/CRT code) no longer count as VM operand stacks; only sane stack-frame displacements (<= 0x10000) do.
+- **Density gate**: a real stack VM is a FEW operand-stack arrays hit MANY times (the hot interpreter loop); requiring >= 4 accesses per distinct array rejects array-heavy ordinary code (many scattered bases, few hits each).
+- **stackArrays are only surfaced when `vmDetected` is true**, so a "no VM" verdict cannot leak fake arrays into downstream type inference.
+- **Validated** (engine-direct harness): ffmodule.exe vmDetected=false with stackArrays 6 -> 0; dudidudida.exe (plain D) flips from a false `stack-machine` verdict to vmDetected=false. Real stack VMs (few dense small-displacement operand stacks) are preserved by construction; the callfuscated crackme is detected via the separate callfuscation byte scan.
+
 ## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.
