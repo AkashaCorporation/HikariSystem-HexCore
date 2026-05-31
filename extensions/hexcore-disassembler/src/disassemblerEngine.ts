@@ -795,6 +795,18 @@ export class DisassemblerEngine {
 		// so calls through the PLT are readable instead of anonymous.
 		this.applyPltStubNames();
 
+		// v3.8.3: drop mid-function prologue ghost functions on ELF (no .pdata). Runs AFTER
+		// addTailCallEdges so callers are fully populated; only an interior function with NO
+		// callers (a ghost - a real function is reached by a call/tail-jump) is removed.
+		this.dropInteriorGhostFunctions();
+
+		// v3.8.3: scrub dangling callees across ALL binaries. analyzeFunction wires a callee
+		// for any call to executable bytes even when the target is not a discovered function
+		// (PLT-less externals, filtered/data code), leaving call-graph edges that point at
+		// nothing. The PE64 path was cleaned by reconcileFunctionsWithPdata's rebuild; this
+		// makes the ELF / no-.pdata call graph consistent too (e.g. mali had ~1600 dangling).
+		this.scrubDanglingCallees();
+
 		// Build string cross-references
 		this.buildStringXrefs();
 
@@ -4097,6 +4109,59 @@ export class DisassemblerEngine {
 			const sym = this._pltSymbolMap.get(fn.address);
 			if (sym && /^sub_[0-9a-fA-F]+$/i.test(fn.name)) {
 				fn.name = `${sym}@plt`;
+			}
+		}
+	}
+
+	/**
+	 * v3.8.3: drop mid-function prologue ghost functions on ELF without .pdata. The prologue
+	 * scanner registers extra "functions" a few bytes into a real one (e.g. sub_159D@0x159d
+	 * plus ghosts at 0x15a1/0x15b8, each disassembling to the same end). Like the PE64 overlap
+	 * sweep, but without .pdata ground truth, so it is guarded:
+	 *  - only when .pdata is absent (PE64 uses reconcileFunctionsWithPdata),
+	 *  - NOT for ET_REL (.ko): its symtab st_value is section-relative, defeating symbol
+	 *    cross-checks; skipping it keeps the mali tripwire byte-identical,
+	 *  - only an interior function with ZERO callers is dropped. A real function never nests
+	 *    inside another AND is reached by a call/tail-jump (callers populated by then), so the
+	 *    "interior + no callers" pair is a ghost; a real function with callers is never touched.
+	 */
+	private dropInteriorGhostFunctions(): void {
+		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable) {
+			return;
+		}
+		const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
+		let maxEnd = Number.NEGATIVE_INFINITY;
+		const dropped = new Set<number>();
+		for (const fn of sorted) {
+			if (fn.address < maxEnd && fn.callers.length === 0) {
+				this.functions.delete(fn.address);
+				dropped.add(fn.address);
+				continue;
+			}
+			if (fn.endAddress > maxEnd) {
+				maxEnd = fn.endAddress;
+			}
+		}
+		// Scrub callee references to the removed ghosts so no call-graph edge dangles.
+		if (dropped.size > 0) {
+			for (const fn of this.functions.values()) {
+				if (fn.callees.some(c => dropped.has(c))) {
+					fn.callees = fn.callees.filter(c => !dropped.has(c));
+				}
+			}
+		}
+	}
+
+	/**
+	 * v3.8.3: remove call-graph edges that point at addresses which are not functions.
+	 * analyzeFunction pushes a callee for any `call <code>` even when the target was never
+	 * promoted to a function; those dangling edges break the call graph. Idempotent and safe
+	 * (only non-function callee entries are removed); no-op once the table is consistent.
+	 */
+	private scrubDanglingCallees(): void {
+		for (const fn of this.functions.values()) {
+			if (fn.callees.some(c => !this.functions.has(c))) {
+				fn.callees = fn.callees.filter(c => this.functions.has(c));
 			}
 		}
 	}

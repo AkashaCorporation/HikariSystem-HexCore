@@ -40,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
 - **`packed`** is detected from packer section names (UPX0/Themida/VMProtect/...) OR a section that is virtual-only, OR packer signature strings ("This file is packed with the UPX...", "UPX!") -- the string path catches UPX-packed ELF like exatlon, which has no PE-style packer section names (validated: exatlon -> [packed]). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
 
+### Disassembler - ELF call-graph hardening: drop zero-caller interior ghosts + scrub dangling callees
+
+> On ELF (no .pdata ground truth) the prologue scanner registers mid-function ghost "functions" a few bytes into a real one (e.g. sub_159D@0x159d plus ghosts at 0x15a1/0x15b8), and analyzeFunction wired a callee edge to any called code even when it was never promoted to a function (mali_kbase.ko carried ~1600 dangling callees).
+
+- **`dropInteriorGhostFunctions()`**: on non-ET_REL ELF without .pdata, an interior function with ZERO callers is removed (a real function is reached by a call/tail-jump after addTailCallEdges; a mid-function ghost is not). Guarded so it is safe without ground truth: PE64 uses the .pdata sweep; ET_REL (.ko) is skipped (its symtab st_value is section-relative, so the mali tripwire stays byte-identical). Validated: Funkynator 50 -> 39 functions with ALL real functions preserved (main / funkify / sub_159D / ... present; ghost 0x15a1 dropped), poly 72 -> 68; partialencryption (PE) unchanged.
+- **`scrubDanglingCallees()`**: removes call-graph edges that point at non-functions, for ALL binaries. Validated: mali_kbase.ko dangling callees ~1600 -> 0 with its function set unchanged; PE already consistent (no-op).
+- Known limitation: ELF ghosts that have (spurious) callers, and ET_REL overlaps, are conservatively kept rather than risk dropping a real function without symbol ground truth.
+
 ### Disassembler - ELF PLT-stub functions are named by their import (no longer sub_*)
 
 > The `.rela.plt`/`.dynsym`-derived PLT-stub map (VA -> symbol) was only used by detectPRNG; discovered PLT thunks stayed anonymous `sub_<addr>`, so an ELF call through the PLT read as `call sub_555555555050` instead of `call puts`.
