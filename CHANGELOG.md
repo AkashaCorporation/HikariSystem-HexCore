@@ -32,6 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`createAnalyzeAllResult` / `writeAnalyzeAllOutput`** now also emit `sectionDetails` (name, VA, sizes, permissions, isCode), `importDetails` (per-DLL function lists with names + IAT addresses), and `exportDetails`. The integer `sections`/`imports`/`exports` counts are kept for backward compatibility. The data was already present in the engine (`getSections`/`getImports`/`getExports`); only the serializer dropped it.
 - **Validated** (engine-direct harness) on ffmodule.exe: 6 sections and `KERNEL32.dll => 77 funcs` (CreateRemoteThread/OpenProcess/VirtualAllocEx visible) are now exported, instead of `"imports": 1`.
 
+### Disassembler - analyzeAll now emits high-signal capability tags
+
+> The function map carried no behavior summary, so an injector's fingerprint (CreateRemoteThread + OpenProcess + VirtualAllocEx), a self-decrypting binary's RWX usage, or a .NET assembly all had to be inferred by hand.
+
+- **New `capabilities` array** in the analyzeAll result/output, derived from the import table, section flags, and CLR header: `managed-dotnet`, `process-injection`, `self-modifying-or-rwx`, `packed`, `networking`, `crypto-api`, `anti-debug-or-debugstring`, `process-enumeration`, `persistence-api`. Best-effort and import/section based.
+- **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
+- **Known limitation**: UPX-packed ELF (exatlon) is not flagged here; ELF packer detection needs a strings/entropy correlation rather than PE section names (tracked as a follow-up). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
+
 ## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.

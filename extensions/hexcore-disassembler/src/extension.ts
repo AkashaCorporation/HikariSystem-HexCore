@@ -132,6 +132,10 @@ interface AnalyzeAllResult {
 	sectionDetails?: Array<{ name: string; virtualAddress: string; virtualSize: number; rawSize: number; permissions: string; isCode: boolean }>;
 	importDetails?: Array<{ dll: string; functionCount: number; functions: Array<{ name: string; address: string; ordinal?: number }> }>;
 	exportDetails?: Array<{ name: string; address: string; ordinal: number; isForwarder: boolean }>;
+	// v3.8.3: high-signal capability tags derived from imports / sections / CLR header,
+	// so the orchestrator/analyst gets a behavior summary (injector, self-modifying, .NET,
+	// ...) instead of having to hand-read the import table. Best-effort, import/section based.
+	capabilities?: string[];
 	functions: AnalyzeAllFunctionSummary[];
 	strings?: AnalyzeAllStringEntry[];
 	reportMarkdown: string;
@@ -6180,6 +6184,58 @@ function showDoctorReportInOutputChannel(report: PipelineDoctorReport): void {
 	outputChannel.show();
 }
 
+/**
+ * v3.8.3: derive high-signal capability tags from the import table, section flags, and CLR
+ * header. Best-effort and import/section based (dynamically-resolved APIs via PEB-walk/CRC32
+ * are intentionally not covered here). Gives the orchestrator a behavior summary the raw
+ * function map lacked (e.g. an injector's CreateRemoteThread set was previously invisible).
+ */
+function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
+	const caps: string[] = [];
+	const apiNames = new Set<string>();
+	for (const lib of engine.getImports()) {
+		for (const fn of lib.functions) {
+			const n = fn.name.toLowerCase();
+			apiNames.add(n);
+			apiNames.add(n.replace(/[aw]$/, '')); // also index without an A/W suffix
+		}
+	}
+	const has = (...names: string[]): number => names.filter(n => apiNames.has(n.toLowerCase())).length;
+
+	if (engine.getPEDataDirectories().clr) {
+		caps.push('managed-dotnet (native decompile N/A; use IL tooling)');
+	}
+	if (has('openprocess', 'virtualallocex', 'writeprocessmemory', 'createremotethread', 'ntcreatethreadex', 'queueuserapc', 'setthreadcontext', 'ntmapviewofsection') >= 2) {
+		caps.push('process-injection');
+	}
+	const rwxSection = engine.getSections().some(s => s.permissions.includes('w') && s.permissions.includes('x'));
+	if (rwxSection || (has('virtualprotect') >= 1 && has('virtualalloc') >= 1)) {
+		caps.push('self-modifying-or-rwx');
+	}
+	const packerSection = engine.getSections().some(s =>
+		/upx|\.themida|\.vmp|\.enigma|\.aspack|\.petite|\.mpress|\.nsp/i.test(s.name) ||
+		(s.isCode && s.rawSize === 0 && s.virtualSize > 0));
+	if (packerSection) {
+		caps.push('packed');
+	}
+	if (has('socket', 'connect', 'wsastartup', 'internetopen', 'internetconnect', 'winhttpopen', 'httpsendrequest', 'urldownloadtofile', 'send', 'recv') >= 1) {
+		caps.push('networking');
+	}
+	if (has('cryptacquirecontext', 'cryptencrypt', 'cryptdecrypt', 'cryptderivekey', 'bcryptencrypt', 'bcryptdecrypt') >= 1) {
+		caps.push('crypto-api');
+	}
+	if (has('isdebuggerpresent', 'checkremotedebuggerpresent', 'ntqueryinformationprocess', 'outputdebugstring') >= 1) {
+		caps.push('anti-debug-or-debugstring');
+	}
+	if (has('createtoolhelp32snapshot', 'process32first', 'process32next') >= 2) {
+		caps.push('process-enumeration');
+	}
+	if (has('regsetvalueex', 'regcreatekeyex', 'createservice', 'schtasks') >= 1) {
+		caps.push('persistence-api');
+	}
+	return caps;
+}
+
 function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false, v37Options?: { filterJunk?: boolean; detectVM?: boolean; detectPRNG?: boolean }): AnalyzeAllResult {
 	const functions = engine.getFunctions();
 	const MAX_INSTRUCTIONS_PER_FUNCTION = 200;
@@ -6238,6 +6294,7 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 			ordinal: e.ordinal,
 			isForwarder: e.isForwarder
 		})),
+		capabilities: computeAnalyzeAllCapabilities(engine),
 		functions: functionSummaries,
 		reportMarkdown: ''
 	};
@@ -6368,6 +6425,7 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		importDetails: result.importDetails,
 		exports: result.exports,
 		exportDetails: result.exportDetails,
+		capabilities: result.capabilities,
 		functions: result.functions,
 		generatedAt: new Date().toISOString()
 	};
