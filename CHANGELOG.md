@@ -5,6 +5,19 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.3] - Unreleased - "Function-discovery .pdata anchoring (Gap A)"
+
+> **STATUS: UNRELEASED.** Working-tree fix from an HTB reverse-engineering hardening pass; not a published release. The version, tag, and installers are not cut.
+
+### Disassembler - analyzeAll anchors PE64 function discovery to .pdata, removing ghost/overlapping functions
+
+> Prologue scanning plus call/jump following over-produced overlapping "ghost" functions from mid-function byte patterns (e.g. a CRT exception-data region decoded as dozens of fake sub_* whose sizes decrease by a fixed stride), and sometimes missed functions reachable only by indirection. Observed across several HTB targets: partialencryption.exe reported 104 functions vs 31 real (.pdata ground truth); ffmodule.exe 811.
+
+- **New `DisassemblerEngine.reconcileFunctionsWithPdata()`**, called from `analyzeAll()`. On x64 (AMD64) PE with a .pdata exception directory -- whose RUNTIME_FUNCTION table gives authoritative [begin,end) for every real function -- it: (1) dedupes continuation / chained-unwind records, (2) ensures a function exists at each top-level .pdata begin, (3) clamps over-long functions to their .pdata end, (4) sweeps out any non-begin function that nests inside another function or spans a real begin (the ghosts), then rebuilds callers/callees over the survivors so no call-graph edge dangles at a removed ghost.
+- **Restricted to x64 PE.** ELF, x86, and ARM64 (including ARM64 PE, whose RUNTIME_FUNCTION second DWORD is packed UnwindData, not an EndAddress) are a no-op and byte-identical to before.
+- **Validated** via an engine-direct headless harness (loads the compiled engine under plain Node; capstone is N-API, so no IDE is needed): partialencryption 104 -> 45 functions with interior overlaps 69 -> 0 and zero dangling call edges; ffmodule 811 -> 343, overlaps -> 0; ROTTR.exe (27 MB, 71280 .pdata entries) overlaps -> 0, no crash; exatlon / poly / mali_kbase.ko (ELF) byte-identical. No real function is removed (only non-begin nesting/spanning ghosts; .pdata begins are never dropped), so finding scores cannot regress.
+- **Known limitation**: on binaries already at the `maxFunctions` cap the pass cannot backfill every real .pdata begin (the function-cap limit is tracked separately). ELF / ARM64 ghost overlaps, which have no .pdata ground truth, are not addressed here and need a heuristic non-overlap pass.
+
 ## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.

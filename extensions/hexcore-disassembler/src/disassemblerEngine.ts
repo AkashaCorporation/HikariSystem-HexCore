@@ -781,6 +781,10 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// v3.8.3 Gap-A: anchor the function table to authoritative PE64 .pdata
+		// boundaries (no-op when .pdata is absent: ELF/x86/ARM64 stay byte-identical).
+		await this.reconcileFunctionsWithPdata();
+
 		// Build string cross-references
 		this.buildStringXrefs();
 
@@ -3868,6 +3872,172 @@ export class DisassemblerEngine {
 	 * Scan code sections for function prologs.
 	 * Supports x86/x64 and ARM64/ARM32 prolog patterns.
 	 */
+	/**
+	 * v3.8.3 Gap-A: Reconcile the discovered function table against the authoritative
+	 * PE64 .pdata (exception directory) RUNTIME_FUNCTION boundaries.
+	 *
+	 * Prologue scanning + call/jump following over-produce overlapping "ghost" functions
+	 * from mid-function byte patterns (e.g. a CRT exception-data cascade decoded as dozens
+	 * of fake sub_* with sizes decreasing by a fixed stride), and occasionally miss real
+	 * functions reached only by indirection. When .pdata is present (MSVC x64) every real
+	 * function has an exact [begin,end) range, so this pass:
+	 *   (1) ensures a function exists at each .pdata begin,
+	 *   (2) drops any function whose start is interior to a .pdata range but is not itself
+	 *       a begin (the ghosts),
+	 *   (3) clamps over-long functions (disassembly ran past the real end into a neighbour)
+	 *       to their authoritative .pdata extent, then
+	 *   (4) rebuilds callers/callees over the survivors so no call-graph edge dangles at a
+	 *       removed ghost.
+	 *
+	 * Restricted to x64 (AMD64) PE. ARM64 PE is also is64 and carries a .pdata, but its
+	 * RUNTIME_FUNCTION second DWORD is packed UnwindData, not an EndAddress, so the ranges
+	 * would be garbage; ELF / x86 have no .pdata. All of those are byte-identical to before.
+	 * Leaf functions MSVC omits from .pdata are preserved (they neither nest in nor span
+	 * another function's range).
+	 */
+	private async reconcileFunctionsWithPdata(): Promise<void> {
+		// .pdata begin/end is the AMD64 RUNTIME_FUNCTION layout only (see header note).
+		if (this.architecture !== 'x64') {
+			return;
+		}
+		const pdata = this.getPdataEntries();
+		if (pdata.length === 0 || !this.fileBuffer) {
+			return;
+		}
+		const base = this.baseAddress;
+		const rawRanges = pdata
+			.map(p => ({ begin: p.beginAddress + base, end: p.endAddress + base }))
+			.filter(r => r.end > r.begin)
+			.sort((a, b) => a.begin - b.begin);
+		if (rawRanges.length === 0) {
+			return;
+		}
+		// Drop .pdata continuation / chained-unwind records: a RUNTIME_FUNCTION FULLY nested
+		// inside an earlier entry's range (end <= coverEnd) describes an unwind sub-region of
+		// the SAME function, not a new function start. A record that only PARTIALLY overlaps
+		// (begin inside, end beyond) is kept as a top-level begin so its tail stays anchored
+		// (matters only for non-conformant / forged PEs; real MSVC .pdata never partially
+		// overlaps). Keep top-level ranges.
+		const ranges: { begin: number; end: number }[] = [];
+		let coverEnd = Number.NEGATIVE_INFINITY;
+		for (const r of rawRanges) {
+			if (r.end <= coverEnd) {
+				continue;
+			}
+			ranges.push(r);
+			coverEnd = r.end; // r.end > coverEnd here, so this always advances
+		}
+		const begins = new Set<number>(ranges.map(r => r.begin));
+		const beginsArr = ranges.map(r => r.begin); // sorted ascending (rawRanges was sorted)
+
+		// (1) Ensure a function exists at every authoritative .pdata begin.
+		for (const r of ranges) {
+			if (!this.functions.has(r.begin) && this.functions.size < this.maxFunctions) {
+				try {
+					await this.analyzeFunction(r.begin);
+				} catch {
+					// best-effort; a missing begin beats a wrong/ghost one
+				}
+			}
+		}
+
+		// (2) Clamp over-long authoritative functions (disassembly ran past the real end
+		// into a neighbour) to their .pdata extent, so their boundaries are trustworthy
+		// before the overlap sweep below.
+		for (const r of ranges) {
+			const fn = this.functions.get(r.begin);
+			if (!fn || fn.endAddress <= r.end) {
+				continue;
+			}
+			fn.instructions = fn.instructions.filter(inst => {
+				const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				return a < r.end;
+			});
+			const last = fn.instructions[fn.instructions.length - 1];
+			if (last) {
+				const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
+				const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
+				fn.endAddress = Math.min(r.end, la + ls);
+			} else {
+				fn.endAddress = r.end;
+			}
+			fn.size = fn.endAddress - fn.address;
+		}
+
+		// (3) Overlap sweep: no function may start strictly inside another. Walking the
+		// functions by address while tracking the furthest end seen, any NON-begin whose
+		// start is already covered by an earlier function is an overlap ghost (a
+		// mid-function prologue match, or the size-decreasing sub_* cascades the prologue
+		// scanner produces inside CRT exception data / jump tables) and is removed.
+		// Authoritative .pdata begins are never dropped; their boundaries were fixed above.
+		const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
+		let maxEnd = Number.NEGATIVE_INFINITY;
+		for (const fn of sorted) {
+			if (!begins.has(fn.address)) {
+				// Ghost if its start is already covered by an earlier function, or if its
+				// extent winds across a real .pdata function start (a sweep artifact that
+				// straddles genuine functions, e.g. an over-long start in a data gap).
+				if (fn.address < maxEnd || this.spansAnyBegin(fn.address, fn.endAddress, beginsArr)) {
+					this.functions.delete(fn.address);
+					continue;
+				}
+			}
+			if (fn.endAddress > maxEnd) {
+				maxEnd = fn.endAddress;
+			}
+		}
+
+		// (4) Rebuild callers/callees over the survivors. The sweep deleted ghost functions
+		// whose addresses would otherwise dangle in other functions' callees, and whose own
+		// call-sites would dangle in surviving functions' callers. Reconstruct the call-only
+		// edges from the surviving instruction streams (matching analyzeFunction's wiring),
+		// so the call graph stays consistent with the function table.
+		for (const fn of this.functions.values()) {
+			fn.callees = [];
+			fn.callers = [];
+		}
+		for (const fn of this.functions.values()) {
+			const seen = new Set<number>();
+			for (const inst of fn.instructions) {
+				if (!inst.isCall || inst.targetAddress === undefined) {
+					continue;
+				}
+				const t = typeof inst.targetAddress === 'bigint' ? Number(inst.targetAddress) : inst.targetAddress;
+				const target = this.functions.get(t);
+				if (!target) {
+					continue;
+				}
+				if (!seen.has(t)) {
+					seen.add(t);
+					fn.callees.push(t);
+				}
+				const callSite = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				target.callers.push(callSite);
+			}
+		}
+	}
+
+	/**
+	 * True when (start,end) strictly contains any authoritative .pdata begin from the
+	 * ascending beginsArr (the function winds across a real function start, so it is a
+	 * sweep ghost rather than a real function). Binary search for the first begin > start.
+	 */
+	private spansAnyBegin(start: number, end: number, beginsArr: number[]): boolean {
+		let lo = 0;
+		let hi = beginsArr.length - 1;
+		let firstGreater = beginsArr.length;
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1;
+			if (beginsArr[mid] > start) {
+				firstGreater = mid;
+				hi = mid - 1;
+			} else {
+				lo = mid + 1;
+			}
+		}
+		return firstGreater < beginsArr.length && beginsArr[firstGreater] < end;
+	}
+
 	private async scanForFunctionPrologs(): Promise<void> {
 		if (!this.fileBuffer) {
 			return;
