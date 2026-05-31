@@ -3926,7 +3926,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				try {
 					progress?.report({ message: 'Scanning for function prologs and references...' });
-					return engine.analyzeAll({ filterJunk: options.filterJunk, detectVM: options.detectVM });
+					// MUST await: analyzeAll is async, so a bare `return engine.analyzeAll(...)`
+					// returns the pending promise and lets the finally reset the limits BEFORE
+					// the async scan actually runs -> the override (e.g. maxFunctions=8000) was
+					// silently discarded and the scan used the default 5000. Awaiting keeps the
+					// override in effect for the whole analysis.
+					return await engine.analyzeAll({ filterJunk: options.filterJunk, detectVM: options.detectVM, detectPRNG: options.detectPRNG });
 				} finally {
 					if (hasOverride) {
 						engine.setAnalysisLimits(defaultLimits.maxFunctions, defaultLimits.maxFunctionSize);

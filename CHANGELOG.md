@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** via an engine-direct headless harness (loads the compiled engine under plain Node; capstone is N-API, so no IDE is needed): partialencryption 104 -> 45 functions with interior overlaps 69 -> 0 and zero dangling call edges; ffmodule 811 -> 343, overlaps -> 0; ROTTR.exe (27 MB, 71280 .pdata entries) overlaps -> 0, no crash; exatlon / poly / mali_kbase.ko (ELF) byte-identical. No real function is removed (only non-begin nesting/spanning ghosts; .pdata begins are never dropped), so finding scores cannot regress.
 - **Known limitation**: on binaries already at the `maxFunctions` cap the pass cannot backfill every real .pdata begin (the function-cap limit is tracked separately). ELF / ARM64 ghost overlaps, which have no .pdata ground truth, are not addressed here and need a heuristic non-overlap pass.
 
+### Disassembler - headless analyzeAll now honors the requested maxFunctions override
+
+> A job requesting `maxFunctions: 8000` was silently capped at the default 5000.
+
+- **Root cause**: the headless `analyzeAll` handler did `return engine.analyzeAll(...)` (no `await`) inside a `try/finally` that resets the analysis limits. Because `analyzeAll` is async, the bare return handed back a pending promise and the `finally` reset the limit back to the default BEFORE the async prologue scan ran, so the override was discarded. Fixed by awaiting the call so the override stays in effect for the whole analysis. The same line now also forwards `detectPRNG` (it was being dropped at this call site).
+- **Validated** (engine-direct harness replicating the handler ordering) on dudidudida.exe: honoring `maxFunctions=8000` recovers 1750 functions vs 1026 when the limit is reset before the scan. Jobs without an override are unaffected (the finally reset only runs when an override is applied).
+
 ## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.
