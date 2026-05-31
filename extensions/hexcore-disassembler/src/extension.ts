@@ -6215,7 +6215,11 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 	const packerSection = engine.getSections().some(s =>
 		/upx|\.themida|\.vmp|\.enigma|\.aspack|\.petite|\.mpress|\.nsp/i.test(s.name) ||
 		(s.isCode && s.rawSize === 0 && s.virtualSize > 0));
-	if (packerSection) {
+	// String-based packer signal: catches UPX-packed ELF (no PE-style packer section names)
+	// e.g. exatlon, whose strings carry "This file is packed with the UPX..." and "UPX!".
+	const packerString = engine.getStrings().some(s =>
+		/UPX!|packed with the UPX|\bthemida\b|vmprotect|\baspack\b|enigma protector|\bmpress\b/i.test(s.string || ''));
+	if (packerSection || packerString) {
 		caps.push('packed');
 	}
 	if (has('socket', 'connect', 'wsastartup', 'internetopen', 'internetconnect', 'winhttpopen', 'httpsendrequest', 'urldownloadtofile', 'send', 'recv') >= 1) {
