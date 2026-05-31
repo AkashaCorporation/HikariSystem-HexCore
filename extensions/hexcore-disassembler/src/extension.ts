@@ -124,6 +124,10 @@ interface AnalyzeAllResult {
 	baseAddress: string;
 	sections: number;
 	imports: number;
+	/** v3.8.3: total imported FUNCTION count (the `imports` field is the library count;
+	 *  for ELF an "imports: 2" of [external(22 funcs), libc.so.6(0)] read as 2 vs the ELF
+	 *  analyzer's 22 -- this disambiguates by also giving the function total). */
+	importedFunctions?: number;
 	exports: number;
 	// v3.8.3: detailed section/import/export arrays (the counts above are kept for
 	// backward compatibility). Previously analyzeAll exported only the integer counts,
@@ -6301,6 +6305,7 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		baseAddress: toHexAddress(engine.getBaseAddress()),
 		sections: engine.getSections().length,
 		imports: engine.getImports().length,
+		importedFunctions: engine.getImports().reduce((n, lib) => n + lib.functions.length, 0),
 		exports: engine.getExports().length,
 		sectionDetails: engine.getSections().map(s => ({
 			name: s.name,
@@ -6449,6 +6454,7 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		sections: result.sections,
 		sectionDetails: result.sectionDetails,
 		imports: result.imports,
+		importedFunctions: result.importedFunctions,
 		importDetails: result.importDetails,
 		exports: result.exports,
 		exportDetails: result.exportDetails,
