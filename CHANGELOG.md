@@ -40,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Validated** (engine-direct harness): Bypass.exe -> [managed-dotnet]; partialencryption.exe -> [self-modifying-or-rwx, anti-debug-or-debugstring]; ffmodule.exe -> [process-injection, anti-debug-or-debugstring, process-enumeration].
 - **Known limitation**: UPX-packed ELF (exatlon) is not flagged here; ELF packer detection needs a strings/entropy correlation rather than PE section names (tracked as a follow-up). Dynamically-resolved APIs (PEB-walk + CRC32, as in ffmodule's injected shellcode) are by design not import-visible.
 
+### Strings - advanced XOR scanner no longer floods low-diversity false positives
+
+> The advanced XOR scanners scored runs of 1-2 distinct printable bytes (e.g. an XOR key over near-constant padding decoding to "hhhhhg") at ~0.99 confidence, producing thousands of false positives that buried the real payload (ffmodule's key-0x72 shellcode strings socket/connect/VirtualAlloc/PR_Write were missed).
+
+- **scoringEngine low-diversity penalty**: `scoreStringDetailed` now counts distinct printable bytes and penalizes runs dominated by very few (<=2 distinct at length>=4 -> 0.2x; <=4 distinct at length>=8 -> 0.5x), on top of the existing all-same-char penalty. A real string has varied characters and is unaffected.
+- **Validated**: "hhhhh"/"hhhhhg"/"ababab"/"aaaaaaaaab" drop from ~0.99 to <0.15 (below the 0.6 inclusion threshold -> filtered); real strings keep high scores (socket 0.65, connect 0.85, VirtualAlloc 0.77, "Running Firefox..." 0.81, PR_Write 0.70). Full hexcore-strings suite green (49 passing); P17's mocha timeout was raised since fewer false positives make the result cap slower to exercise.
+
 ### Disassembler - call graph now records tail-call / trampoline edges
 
 > An unconditional jmp/B to another function's entry (a tail call, thunk, or trampoline) is a real call-graph edge, but only `call` edges were wired -- so e.g. poly's ARM64 `entry_point: b main` left entry_point.callees and main.callers empty, disconnecting the graph at the root.

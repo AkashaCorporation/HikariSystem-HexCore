@@ -159,6 +159,7 @@ export function scoreStringDetailed(decoded: Buffer, start: number, length: numb
 	let nullCount = 0;
 	let firstByte = -1;
 	let allSameChar = true;
+	const distinctBytes = new Set<number>();
 
 	for (let i = start; i < start + length; i++) {
 		const byte = decoded[i];
@@ -175,7 +176,7 @@ export function scoreStringDetailed(decoded: Buffer, start: number, length: numb
 			allSameChar = false;
 		}
 
-		if (isPrintable(byte)) { printableCount++; }
+		if (isPrintable(byte)) { printableCount++; distinctBytes.add(byte); }
 		if (ENGLISH_FREQ.has(byte)) { frequentCount++; }
 		if (byte === 0x20) { spaceCount++; }
 		if (byte >= 0x30 && byte <= 0x39) { digitCount++; }
@@ -242,8 +243,17 @@ export function scoreStringDetailed(decoded: Buffer, start: number, length: numb
 		breakdown.registryBonus = 0.10;
 	}
 
-	// Repetition penalty: all same character
+	// Repetition / low-diversity penalty. A real string has VARIED characters; runs
+	// dominated by 1-2 distinct printable bytes (all-same, "ababab", or an XOR key applied
+	// over near-constant padding that decodes to "hhhhhg") are the dominant advanced-scanner
+	// false positive -- NOT strings -- and previously scored ~0.99 because they are 100%
+	// printable. Penalize by distinct-character count, not just the exact all-same case.
+	const distinct = distinctBytes.size;
 	if (allSameChar && effectiveLength > 1) {
+		breakdown.repetitionPenalty = 0.5;
+	} else if (effectiveLength >= 4 && distinct <= 2) {
+		breakdown.repetitionPenalty = 0.2;
+	} else if (effectiveLength >= 8 && distinct <= 4) {
 		breakdown.repetitionPenalty = 0.5;
 	}
 

@@ -58,7 +58,11 @@ suite('Scanner Invariant Properties', () => {
 	 * doesn't return > 5000. We test individual scanners directly since
 	 * the orchestrator requires file I/O.
 	 */
-	test('P17: Individual scanners respect MAX_TOTAL_RESULTS (2000) cap', () => {
+	test('P17: Individual scanners respect MAX_TOTAL_RESULTS (2000) cap', function () {
+		// Property/stress test over random buffers; the v3.8.3 low-diversity scoring gate
+		// leaves fewer false-positive candidates, so the scanner walks more data before the
+		// cap is exercised. Runtime is ~2.3s (just over mocha's 2s default), so raise it.
+		this.timeout(15000);
 		fc.assert(fc.property(
 			fc.uint8Array({ minLength: 64, maxLength: 1024 }),
 			(bufArr) => {
