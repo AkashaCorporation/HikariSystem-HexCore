@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Root cause**: the headless `analyzeAll` handler did `return engine.analyzeAll(...)` (no `await`) inside a `try/finally` that resets the analysis limits. Because `analyzeAll` is async, the bare return handed back a pending promise and the `finally` reset the limit back to the default BEFORE the async prologue scan ran, so the override was discarded. Fixed by awaiting the call so the override stays in effect for the whole analysis. The same line now also forwards `detectPRNG` (it was being dropped at this call site).
 - **Validated** (engine-direct harness replicating the handler ordering) on dudidudida.exe: honoring `maxFunctions=8000` recovers 1750 functions vs 1026 when the limit is reset before the scan. Jobs without an override are unaffected (the finally reset only runs when an override is applied).
 
+### Disassembler - analyzeAll headless output now includes section/import/export detail (not just counts)
+
+> The headless `analyzeAll` JSON exported `sections`/`imports`/`exports` as integer COUNTS only, so the import table -- the strongest capability/IOC signal -- was absent from the "function map" output. On an injector like ffmodule.exe the KERNEL32 set (CreateRemoteThread, OpenProcess, VirtualAllocEx, WriteProcessMemory, Process32Next, ...) had to be recovered by hand-parsing the PE.
+
+- **`createAnalyzeAllResult` / `writeAnalyzeAllOutput`** now also emit `sectionDetails` (name, VA, sizes, permissions, isCode), `importDetails` (per-DLL function lists with names + IAT addresses), and `exportDetails`. The integer `sections`/`imports`/`exports` counts are kept for backward compatibility. The data was already present in the engine (`getSections`/`getImports`/`getExports`); only the serializer dropped it.
+- **Validated** (engine-direct harness) on ffmodule.exe: 6 sections and `KERNEL32.dll => 77 funcs` (CreateRemoteThread/OpenProcess/VirtualAllocEx visible) are now exported, instead of `"imports": 1`.
+
 ## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.

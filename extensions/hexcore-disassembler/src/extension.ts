@@ -125,6 +125,13 @@ interface AnalyzeAllResult {
 	sections: number;
 	imports: number;
 	exports: number;
+	// v3.8.3: detailed section/import/export arrays (the counts above are kept for
+	// backward compatibility). Previously analyzeAll exported only the integer counts,
+	// so the import table (the strongest capability/IOC signal, e.g. an injector's
+	// CreateRemoteThread/WriteProcessMemory set) was absent from the function-map output.
+	sectionDetails?: Array<{ name: string; virtualAddress: string; virtualSize: number; rawSize: number; permissions: string; isCode: boolean }>;
+	importDetails?: Array<{ dll: string; functionCount: number; functions: Array<{ name: string; address: string; ordinal?: number }> }>;
+	exportDetails?: Array<{ name: string; address: string; ordinal: number; isForwarder: boolean }>;
 	functions: AnalyzeAllFunctionSummary[];
 	strings?: AnalyzeAllStringEntry[];
 	reportMarkdown: string;
@@ -6212,6 +6219,25 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		sections: engine.getSections().length,
 		imports: engine.getImports().length,
 		exports: engine.getExports().length,
+		sectionDetails: engine.getSections().map(s => ({
+			name: s.name,
+			virtualAddress: toHexAddress(s.virtualAddress),
+			virtualSize: s.virtualSize,
+			rawSize: s.rawSize,
+			permissions: s.permissions,
+			isCode: s.isCode
+		})),
+		importDetails: engine.getImports().map(lib => ({
+			dll: lib.name,
+			functionCount: lib.functions.length,
+			functions: lib.functions.map(fn => ({ name: fn.name, address: toHexAddress(fn.address), ordinal: fn.ordinal }))
+		})),
+		exportDetails: engine.getExports().map(e => ({
+			name: e.name,
+			address: toHexAddress(e.address),
+			ordinal: e.ordinal,
+			isForwarder: e.isForwarder
+		})),
 		functions: functionSummaries,
 		reportMarkdown: ''
 	};
@@ -6337,8 +6363,11 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		architecture: result.architecture,
 		baseAddress: result.baseAddress,
 		sections: result.sections,
+		sectionDetails: result.sectionDetails,
 		imports: result.imports,
+		importDetails: result.importDetails,
 		exports: result.exports,
+		exportDetails: result.exportDetails,
 		functions: result.functions,
 		generatedAt: new Date().toISOString()
 	};
