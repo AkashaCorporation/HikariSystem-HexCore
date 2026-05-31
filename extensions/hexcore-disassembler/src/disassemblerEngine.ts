@@ -3952,20 +3952,82 @@ export class DisassemblerEngine {
 		const begins = new Set<number>(ranges.map(r => r.begin));
 		const beginsArr = ranges.map(r => r.begin); // sorted ascending (rawRanges was sorted)
 
-		// (1) Ensure a function exists at every authoritative .pdata begin.
-		for (const r of ranges) {
-			if (!this.functions.has(r.begin) && this.functions.size < this.maxFunctions) {
-				try {
-					await this.analyzeFunction(r.begin);
-				} catch {
-					// best-effort; a missing begin beats a wrong/ghost one
+		// Overlap sweep helper: no function may start strictly inside another. Any NON-begin
+		// whose start is already covered by an earlier function, or whose extent winds across
+		// a real .pdata begin, is a ghost (mid-function prologue match, size-decreasing sub_*
+		// cascades in exception data / jump tables) and is removed. Authoritative .pdata
+		// begins are never dropped.
+		const sweepOverlaps = () => {
+			const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
+			let maxEnd = Number.NEGATIVE_INFINITY;
+			for (const fn of sorted) {
+				if (!begins.has(fn.address)) {
+					if (fn.address < maxEnd || this.spansAnyBegin(fn.address, fn.endAddress, beginsArr)) {
+						this.functions.delete(fn.address);
+						continue;
+					}
+				}
+				if (fn.endAddress > maxEnd) {
+					maxEnd = fn.endAddress;
 				}
 			}
+		};
+
+		// (1) Sweep prologue-scan ghosts FIRST, so the maxFunctions budget is free for the
+		// real .pdata begins. On heavily-obfuscated binaries the prologue scan over-produces
+		// massively (Vanguard vgk.sys: ~10600 functions before reconcile, ~75% ghosts) and
+		// would otherwise fill the cap before step (2) can ensure the begins.
+		sweepOverlaps();
+
+		// (2) Ensure a function exists at every authoritative .pdata begin. When the body
+		// cannot be linearly disassembled (obfuscated / VM-protected, e.g. Vanguard), register
+		// a STUB at the authoritative [begin,end) so the function still exists in the table
+		// (navigable, countable, a valid decompile/lift target) even though its instructions
+		// could not be recovered. Clean binaries are unaffected -- the stub branch only fires
+		// when discovery actually failed (empty body / 0 size).
+		for (const r of ranges) {
+			if (this.functions.size >= this.maxFunctions) {
+				break;
+			}
+			if (this.functions.has(r.begin)) {
+				continue; // already discovered by the prologue scan / call graph; keep it
+			}
+			// Disassemble the begin's body WITHOUT recursion. analyzeFunction follows
+			// call/jump children, which on obfuscated code explodes into thousands of ghosts
+			// and exhausts the maxFunctions budget before the real begins are reached. The
+			// call graph is rebuilt from instructions afterwards (step 5). If the body cannot
+			// be disassembled, the empty instruction list yields a .pdata-bounded stub so the
+			// function still exists in the table.
+			let insns: Instruction[] = [];
+			try {
+				const rawInsns = await this.disassembleRange(r.begin, Math.min(r.end - r.begin, this.maxFunctionSize));
+				insns = rawInsns.filter(inst => {
+					const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+					return a < r.end;
+				});
+			} catch {
+				insns = [];
+			}
+			let endAddr = r.end;
+			const last = insns[insns.length - 1];
+			if (last) {
+				const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
+				const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
+				endAddr = Math.min(r.end, la + ls);
+			}
+			this.functions.set(r.begin, {
+				address: r.begin,
+				name: `sub_${r.begin.toString(16).toUpperCase()}`,
+				size: endAddr - r.begin,
+				endAddress: endAddr,
+				instructions: insns,
+				callers: [],
+				callees: []
+			});
 		}
 
-		// (2) Clamp over-long authoritative functions (disassembly ran past the real end
-		// into a neighbour) to their .pdata extent, so their boundaries are trustworthy
-		// before the overlap sweep below.
+		// (3) Clamp over-long authoritative functions (disassembly ran past the real end into
+		// a neighbour) to their .pdata extent.
 		for (const r of ranges) {
 			const fn = this.functions.get(r.begin);
 			if (!fn || fn.endAddress <= r.end) {
@@ -3986,28 +4048,9 @@ export class DisassemblerEngine {
 			fn.size = fn.endAddress - fn.address;
 		}
 
-		// (3) Overlap sweep: no function may start strictly inside another. Walking the
-		// functions by address while tracking the furthest end seen, any NON-begin whose
-		// start is already covered by an earlier function is an overlap ghost (a
-		// mid-function prologue match, or the size-decreasing sub_* cascades the prologue
-		// scanner produces inside CRT exception data / jump tables) and is removed.
-		// Authoritative .pdata begins are never dropped; their boundaries were fixed above.
-		const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
-		let maxEnd = Number.NEGATIVE_INFINITY;
-		for (const fn of sorted) {
-			if (!begins.has(fn.address)) {
-				// Ghost if its start is already covered by an earlier function, or if its
-				// extent winds across a real .pdata function start (a sweep artifact that
-				// straddles genuine functions, e.g. an over-long start in a data gap).
-				if (fn.address < maxEnd || this.spansAnyBegin(fn.address, fn.endAddress, beginsArr)) {
-					this.functions.delete(fn.address);
-					continue;
-				}
-			}
-			if (fn.endAddress > maxEnd) {
-				maxEnd = fn.endAddress;
-			}
-		}
+		// (4) Sweep again: step (2)'s analyzeFunction recursion may have re-introduced ghost
+		// children. Remove them now that all begins exist.
+		sweepOverlaps();
 
 		// (4) Rebuild callers/callees over the survivors. The sweep deleted ghost functions
 		// whose addresses would otherwise dangle in other functions' callees, and whose own
