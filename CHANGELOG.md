@@ -5,9 +5,9 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.4] - Unreleased - "AArch64 lifting + obfuscated-binary discovery"
+## [3.8.2] - Unreleased - "Callfuscation + Deflattening + Audit-Fix Wave + AArch64 lifting + obfuscated-binary discovery"
 
-> **STATUS: UNRELEASED.** Working-tree fixes; not a published release.
+> **STATUS: UNRELEASED.** 3.8.2 has not shipped; the version, GitHub tag, and installers are not cut. This single Unreleased bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions are cut. Waves are ordered newest-first below.
 
 ### Remill - AArch64 lifting now works (FIX-053, issue #29)
 
@@ -24,9 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Reordered `reconcileFunctionsWithPdata`**: sweep prologue-scan ghosts FIRST (freeing the maxFunctions budget), THEN ensure a function at every .pdata begin, THEN clamp, THEN sweep again (to clear ghosts the ensure pass re-introduced). The "ensure" step now disassembles the begin's body with `disassembleRange` (NON-recursive) instead of `analyzeFunction` (whose recursive call/jump following explodes into thousands of ghosts on obfuscated code and re-exhausts the budget); the call graph is rebuilt from instructions afterwards. A begin whose body cannot be disassembled becomes a `.pdata`-bounded stub so it still exists in the table (navigable, countable, a valid decompile target).
 - **Validated** (engine-direct harness): vgk.sys 504 -> 11613 functions, 9261 of 10296 .pdata begins present (the remaining ~1000 are maxFunctions-cap-limited at 12000, not lost - a higher cap recovers them). No regression on clean binaries: partialencryption 45/0/0, ffmodule 340/0, Funkynator 39 unchanged. Full disassembler test suite still 205 passing (the 3 failures are pre-existing, in untouched code).
 
-## [3.8.3] - Unreleased - "Function-discovery .pdata anchoring (Gap A)"
-
-> **STATUS: UNRELEASED.** Working-tree fix from an HTB reverse-engineering hardening pass; not a published release. The version, tag, and installers are not cut.
+> _Wave -- Function-discovery .pdata anchoring (Gap A): an HTB reverse-engineering hardening pass. Folded under 3.8.2 (no 3.8.3 version is cut)._
 
 ### Disassembler - analyzeAll anchors PE64 function discovery to .pdata, removing ghost/overlapping functions
 
@@ -97,9 +95,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **stackArrays are only surfaced when `vmDetected` is true**, so a "no VM" verdict cannot leak fake arrays into downstream type inference.
 - **Validated** (engine-direct harness): ffmodule.exe vmDetected=false with stackArrays 6 -> 0; dudidudida.exe (plain D) flips from a false `stack-machine` verdict to vmDetected=false. Real stack VMs (few dense small-displacement operand stacks) are preserved by construction; the callfuscated crackme is detected via the separate callfuscation byte scan.
 
-## [3.8.2] - Unreleased - "Callfuscation Detection, Deflattening + Audit-Fix Wave"
-
-> **STATUS: UNRELEASED.** 3.8.2 has not shipped yet. The work below is merged to `main` for integration but is not a published release; the version, GitHub tag, and installers are not cut. Do not treat this as available.
+> _Wave -- Callfuscation Detection, Deflattening + Audit-Fix: motivated by the HTB Insane "Callfuscated" crackme. Folded under 3.8.2._
 
 > Branch `hexcore/callfuscation-deflatten` (commits `e634e40`, `87ca360`, `1a839ce`). Motivated by a full-engine run against the HTB Insane "Callfuscated" crackme, where `analyzeAll` reported only 7 functions and emitted none of the documented obfuscation telemetry despite `filterJunk`/`detectVM`/`detectPRNG` being requested. This release **fixes the dropped-telemetry serializer bug, ships callfuscation detection, and lands an experimental (opt-in, default OFF) callfuscation deflattening transform**. Full Remill chain-following — so the deflattened chain decompiles as a single function — is still under development and is **not** in this release. Still unreleased: the `hexcore-helix` 0.9.2 release that pairs with this work comes LATER, once 3.8.2 actually ships and the Helix agent verifies it. **This release also carries a broad "fix-or-cut" audit wave** (emulator, static VM/PRNG detectors, headless pipeline robustness, YARA, doc-honesty) — see the *Audit-fix wave* section below.
 
