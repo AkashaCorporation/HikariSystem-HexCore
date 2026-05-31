@@ -6247,6 +6247,15 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 	if (has('regsetvalueex', 'regcreatekeyex', 'createservice', 'schtasks') >= 1) {
 		caps.push('persistence-api');
 	}
+	// Gap H: toolchain/runtime fingerprint from section names (reliable, no string scan).
+	// Knowing the language up front (e.g. D + std BigInt, or Go) is often the whole triage.
+	const secNames = new Set(engine.getSections().map(s => s.name.toLowerCase()));
+	if (secNames.has('.minfo') || secNames.has('._deh') || secNames.has('.dp') || secNames.has('.fptable') || secNames.has('.tp')) {
+		caps.push('lang-dlang');
+	}
+	if (secNames.has('.gopclntab') || secNames.has('.go.buildinfo') || secNames.has('.gosymtab')) {
+		caps.push('lang-go');
+	}
 	return caps;
 }
 
