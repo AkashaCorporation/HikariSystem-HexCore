@@ -800,6 +800,13 @@ export class DisassemblerEngine {
 		// callers (a ghost - a real function is reached by a call/tail-jump) is removed.
 		this.dropInteriorGhostFunctions();
 
+		// v3.8.3 Gap-A follow-on: drop interior ghosts on PE binaries WITHOUT usable .pdata
+		// even when they carry (spurious) caller edges. Closes the 32-bit-PE / no-.pdata-x64-PE
+		// case (debugme: 284, maze: 1124) that neither reconcileFunctionsWithPdata (needs
+		// .pdata) nor dropInteriorGhostFunctions (zero-caller only) reaches. PE-only,
+		// .pdata-absent, non-ET_REL gated; ELF and x64-PE-with-.pdata are byte-identical.
+		this.dropInteriorGhostFunctionsPE();
+
 		// v3.8.3: scrub dangling callees across ALL binaries. analyzeFunction wires a callee
 		// for any call to executable bytes even when the target is not a discovered function
 		// (PLT-less externals, filtered/data code), leaving call-graph edges that point at
@@ -4190,6 +4197,186 @@ export class DisassemblerEngine {
 			for (const fn of this.functions.values()) {
 				if (fn.callees.some(c => dropped.has(c))) {
 					fn.callees = fn.callees.filter(c => !dropped.has(c));
+				}
+			}
+		}
+	}
+
+	/**
+	 * v3.8.3 Gap-A follow-on: drop interior ghost functions on PE binaries that have NO
+	 * usable .pdata ground truth -- EVEN WHEN they carry (spurious) caller edges. This is the
+	 * case `dropInteriorGhostFunctions` (zero-caller only) and `reconcileFunctionsWithPdata`
+	 * (needs .pdata) both leave alone:
+	 *   - 32-bit PE has no .pdata directory at all (RUNTIME_FUNCTION is x64-only), so the
+	 *     prologue scan + unconditional-jump-following over-produce in-body labels as fake
+	 *     sub_* with non-empty callers (e.g. debugme.exe: 284 interior ghosts), and
+	 *   - some x64 PEs ship without a usable exception directory (e.g. maze.exe: .pdata absent,
+	 *     1124 interior ghosts), so reconcile never runs.
+	 *
+	 * Ground truth is unavailable here, so the drop predicate is conservative and edge-based.
+	 * Field measurement on both targets: EVERY interior ghost's entry is a real instruction
+	 * boundary of its container (mid-instruction byte-pattern ghosts do not occur here), and
+	 * every caller edge into the drop set originates either inside the container itself or
+	 * inside another interior ghost -- i.e. they are intra-function CFG labels (unconditional
+	 * `jmp` targets that analyzeFunction promoted to functions) plus over-extended containers
+	 * that swallowed a genuinely-shared inner routine. The two are separated by ONE signal:
+	 *
+	 *   An interior function is KEPT iff some CALL targets it from a site that is BOTH
+	 *   (a) outside its containing function's [start,end) range AND
+	 *   (b) inside a function that is itself NOT interior (a top-level survivor).
+	 *   Otherwise it is DROPPED.
+	 *
+	 * (a)+(b) is the signature of a genuinely-shared callee (a real function the container's
+	 * decode merely ran past): it is reached by a `call` from elsewhere in the program, not by
+	 * the container's own control flow. An in-body jump label has only intra-container jumps /
+	 * calls-from-other-ghosts and is removed. This preserves the 6 (debugme) / 44 (maze) real
+	 * shared inner routines while dropping 278 / 1080 ghosts, and -- verified on the targets --
+	 * never drops a function reached by a CALL from a top-level survivor (zero such edges exist
+	 * in the drop set). The entry point and exported functions are top-level and never interior.
+	 *
+	 * Strictly gated: PE only (format starts with "PE"), .pdata ABSENT (x64-PE-with-.pdata uses
+	 * reconcileFunctionsWithPdata), and never ET_REL. ELF keeps its own dropInteriorGhost pass.
+	 * After deletion the call graph is rebuilt over survivors (call + tail-jump edges, mirroring
+	 * analyzeFunction/addTailCallEdges) so no edge dangles at a removed ghost (the Gap-A
+	 * dangling-callees regression), then scrubDanglingCallees finishes the cleanup.
+	 */
+	private dropInteriorGhostFunctionsPE(): void {
+		// PE only, .pdata absent, not relocatable. ELF / x64-PE-with-.pdata are handled elsewhere.
+		if (!this.fileInfo || !this.fileInfo.format.startsWith('PE')) {
+			return;
+		}
+		if (this.getPdataEntries().length > 0 || this.fileInfo.isRelocatable) {
+			return;
+		}
+
+		const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
+		if (sorted.length === 0) {
+			return;
+		}
+
+		// Protected roots: the entry point and every export are reached by the OS loader or by
+		// name, NOT by a `call` from another function, so they would fail the "genuine external
+		// call" test and be wrongly dropped if discovery placed them just inside a spurious
+		// container start (observed on maze.exe: EP 0x14000b680 nests in a prologue-scan false
+		// start at 0x14000b659). Never drop a protected root regardless of interior status.
+		const protectedRoots = new Set<number>();
+		const ep = this.detectEntryPoint();
+		if (ep !== undefined) {
+			protectedRoots.add(typeof ep === 'bigint' ? Number(ep) : ep);
+		}
+		for (const exp of this.exports) {
+			if (!exp.isForwarder && exp.address > 0) {
+				protectedRoots.add(exp.address);
+			}
+		}
+
+		// (1) Determine each function's nearest enclosing container (the function whose
+		// [address,endAddress) strictly contains its start) and thus which functions are
+		// interior. A single ascending sweep with a stack of open ranges yields the nearest
+		// container in O(n log n)-ish time without an O(n^2) scan.
+		const containerOf = new Map<number, Function>();
+		const open: Function[] = []; // stack of enclosing functions, by increasing end
+		for (const fn of sorted) {
+			// Pop ranges that have ended at or before this start (no longer enclosing).
+			while (open.length > 0 && open[open.length - 1].endAddress <= fn.address) {
+				open.pop();
+			}
+			if (open.length > 0) {
+				// The deepest still-open range strictly contains fn.address (start is inside it,
+				// and start > that range's address since we are ascending). It is the container.
+				const c = open[open.length - 1];
+				if (fn.address > c.address && fn.address < c.endAddress) {
+					containerOf.set(fn.address, c);
+				}
+			}
+			open.push(fn);
+		}
+		const isInterior = (addr: number): boolean => containerOf.has(addr);
+
+		// (2) Index every instruction address to its owning function so a caller site can be
+		// classified (CALL vs jump) and attributed to a function (interior vs top-level).
+		const ownerByInsn = new Map<number, { isCall: boolean; ownerAddr: number }>();
+		for (const fn of sorted) {
+			for (const inst of fn.instructions) {
+				const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				ownerByInsn.set(a, { isCall: inst.isCall, ownerAddr: fn.address });
+			}
+		}
+
+		// (3) Decide the drop set. KEEP an interior function iff some CALL into it comes from a
+		// site OUTSIDE its container AND inside a NON-interior (top-level) function.
+		const dropped = new Set<number>();
+		for (const fn of sorted) {
+			const container = containerOf.get(fn.address);
+			if (!container) {
+				continue; // not interior -> never dropped here
+			}
+			if (protectedRoots.has(fn.address)) {
+				continue; // entry point / export -> a real root, never a ghost
+			}
+			let hasGenuineExternalCall = false;
+			for (const site of fn.callers) {
+				const s = typeof site === 'bigint' ? Number(site) : site;
+				const rec = ownerByInsn.get(s);
+				if (!rec || !rec.isCall) {
+					continue; // jump/branch edge, or unknown site -> not a genuine call signal
+				}
+				const siteInsideContainer = s >= container.address && s < container.endAddress;
+				if (siteInsideContainer) {
+					continue; // call from within the container -> intra-function, not external
+				}
+				if (isInterior(rec.ownerAddr)) {
+					continue; // call from another interior ghost -> edge vanishes with that ghost
+				}
+				hasGenuineExternalCall = true;
+				break;
+			}
+			if (!hasGenuineExternalCall) {
+				dropped.add(fn.address);
+			}
+		}
+
+		if (dropped.size === 0) {
+			return;
+		}
+
+		// (4) Delete the drop set.
+		for (const addr of dropped) {
+			this.functions.delete(addr);
+		}
+
+		// (5) Rebuild callers/callees over the survivors so no edge dangles at a removed ghost
+		// (the Gap-A dangling-callees regression: deleting functions without rebuilding left
+		// stale edges and silently zeroed call graphs). Reconstruct call edges (matching
+		// analyzeFunction) plus unconditional-jump-to-entry tail edges (matching
+		// addTailCallEdges) from the surviving instruction streams only.
+		for (const fn of this.functions.values()) {
+			fn.callers = [];
+			fn.callees = [];
+		}
+		for (const fn of this.functions.values()) {
+			const seenCallees = new Set<number>();
+			for (const inst of fn.instructions) {
+				if (inst.targetAddress === undefined) {
+					continue;
+				}
+				const t = typeof inst.targetAddress === 'bigint' ? Number(inst.targetAddress) : inst.targetAddress;
+				const target = this.functions.get(t);
+				if (!target) {
+					continue;
+				}
+				const isCallEdge = inst.isCall;
+				const isTailEdge = inst.isJump && !inst.isConditional && t !== fn.address;
+				if (!isCallEdge && !isTailEdge) {
+					continue;
+				}
+				if (!seenCallees.has(t)) {
+					seenCallees.add(t);
+					fn.callees.push(t);
+				}
+				const site = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				if (!target.callers.includes(site)) {
+					target.callers.push(site);
 				}
 			}
 		}
