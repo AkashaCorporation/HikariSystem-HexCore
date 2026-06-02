@@ -539,6 +539,21 @@ export class DisassemblerEngine {
 	// table left an entry at 0x0. Populated during ELF PLT parsing.
 	private _pltSymbolMap: Map<number, string> = new Map();
 
+	// v3.8.5: GOT-slot VA -> dynamic-symbol name (from .rela.plt r_offset + .dynsym). Lets a
+	// `.plt.sec`/`.plt.got` stub (CET/IBT: endbr64 ; bnd jmp *GOT[n](%rip)) be resolved to its
+	// import by reading its rip-relative GOT reference, which _pltSymbolMap (keyed by the legacy
+	// `.plt` VA) cannot do on IBT binaries that call the `.plt.sec` thunk instead.
+	private _gotSymbolMap: Map<number, string> = new Map();
+
+	// v3.8.5: trap-handler gate. True when the binary installs a SIGILL/SIGTRAP/SIGSEGV
+	// signal handler (sigaction/signal) and the handler ADVANCES past the faulting
+	// instruction (the "behind the scenes" anti-disassembly idiom). When set, analyzeFunction
+	// treats ud2/int3/hlt as NON-terminating and keeps sweeping past them, because the handler
+	// resumes execution at trap_addr + trap_size. Strictly gated so that binaries which use
+	// ud2/int3 as GENUINE terminators (__builtin_trap, unreachable) -- and install no trap
+	// handler -- are byte-identical. Computed once in loadFile, before any analyzeFunction call.
+	private trapHandlerGate: boolean = false;
+
 	// v3.7.4: Persistent session store (renames, retypes, comments, bookmarks, analyze cache)
 	private sessionStore?: SessionStore;
 
@@ -670,6 +685,8 @@ export class DisassemblerEngine {
 			this._textScanCache = undefined;
 			this._execScan = undefined;
 			this._pltSymbolMap.clear();
+			this._gotSymbolMap.clear();
+			this.trapHandlerGate = false;
 
 			// v3.7.4: Initialize persistent session store
 			try {
@@ -699,6 +716,10 @@ export class DisassemblerEngine {
 			}
 
 			await this.ensureCapstoneInitialized();
+
+			// v3.8.5: decide the trap-handler gate BEFORE any function discovery runs, so
+			// analyzeFunction can sweep past ud2/int3/hlt on trap-handler binaries.
+			this.detectTrapHandlerGate();
 
 			// Initial analysis from entry point
 			const entryPoint = this.detectEntryPoint();
@@ -3127,6 +3148,14 @@ export class DisassemblerEngine {
 					// is what detectPRNG uses to resolve `call <pltStub>` -> symbol name.
 					this._pltSymbolMap.set(adjustedPltAddr, symName);
 
+					// v3.8.5: also key by the GOT slot VA. On CET/IBT binaries the call site
+					// targets the `.plt.sec` thunk (endbr64 ; bnd jmp *GOT[n](%rip)), whose VA is
+					// NOT adjustedPltAddr; resolving it requires reading its GOT reference and
+					// matching it here. (Used by the trap-handler gate and PLT-stub naming.)
+					if (adjustedGotAddr > 0) {
+						this._gotSymbolMap.set(adjustedGotAddr, symName);
+					}
+
 					// Update import entries with PLT addresses
 					for (const lib of this.imports) {
 						const func = lib.functions.find(f => f.name === symName);
@@ -3668,6 +3697,171 @@ export class DisassemblerEngine {
 	// Function Analysis
 	// ============================================================================
 
+	/**
+	 * v3.8.5: Resolve a PLT-family stub VA (`.plt`, `.plt.sec`, `.plt.got`) to its import
+	 * symbol name, or undefined if it is not a stub. Two paths:
+	 *   (1) direct hit in _pltSymbolMap (legacy `.plt` VA, keyed during .rela.plt parse), or
+	 *   (2) the IBT/CET `.plt.sec` thunk: endbr64 (F3 0F 1E FA) ; bnd jmp *off(%rip)
+	 *       (F2 FF 25 disp32) -- decode the rip-relative GOT slot and look it up in
+	 *       _gotSymbolMap. (Also handles the non-bnd `FF 25 disp32` form.)
+	 * x86/x64 only; returns undefined on other arches.
+	 */
+	private resolveStubSymbol(stubVA: number): string | undefined {
+		const direct = this._pltSymbolMap.get(stubVA);
+		if (direct) { return direct.split('@')[0]; }
+		if (!this.fileBuffer) { return undefined; }
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return undefined; }
+
+		const off = this.addressToOffset(stubVA);
+		if (off < 0 || off + 16 > this.fileBuffer.length) { return undefined; }
+		const buf = this.fileBuffer;
+
+		// Skip an optional endbr64 (F3 0F 1E FA) prefix.
+		let p = off;
+		if (buf[p] === 0xF3 && buf[p + 1] === 0x0F && buf[p + 2] === 0x1E && buf[p + 3] === 0xFA) {
+			p += 4;
+		}
+		// Optional bnd prefix (F2) before the indirect jmp.
+		let insVA = stubVA + (p - off);
+		if (buf[p] === 0xF2) { p += 1; insVA += 1; }
+		// jmp [rip + disp32]  ->  FF 25 disp32  (6 bytes incl. the FF 25)
+		if (buf[p] === 0xFF && buf[p + 1] === 0x25 && p + 6 <= this.fileBuffer.length) {
+			const disp32 = buf.readInt32LE(p + 2);
+			const gotVA = insVA + 6 + disp32; // rip points past the 6-byte instruction
+			const sym = this._gotSymbolMap.get(gotVA);
+			return sym ? sym.split('@')[0] : undefined;
+		}
+		return undefined;
+	}
+
+	/**
+	 * v3.8.5: Is this instruction an x86 trap/undefined opcode that a SIGILL/SIGTRAP
+	 * handler can skip over? ud2 (0F 0B, 2 bytes), int3 (CC, 1 byte), hlt (F4, 1 byte).
+	 * Used only when trapHandlerGate is active.
+	 */
+	private isTrapMnemonic(mnemonic: string): boolean {
+		const m = mnemonic.toLowerCase();
+		return m === 'ud2' || m === 'ud2a' || m === 'ud2b' || m === 'int3' || m === 'hlt';
+	}
+
+	/**
+	 * v3.8.5: Decide whether to treat ud2/int3/hlt as NON-terminating during discovery.
+	 *
+	 * The "behind the scenes" anti-disassembly idiom installs a SIGILL/SIGTRAP/SIGSEGV
+	 * handler (via sigaction/signal) whose body reads ucontext->uc_mcontext.gregs[REG_RIP],
+	 * adds the trap-instruction length, and writes it back -- so after every ud2 the program
+	 * RESUMES at trap_addr + 2. The real function body is interleaved between ud2 separators.
+	 * A linear/CFG sweep that treats ud2 as a return (HexCore classifies ud2 as isRet so the
+	 * CFG ends cleanly on __builtin_trap) truncates the function at the FIRST ud2 and leaves
+	 * the entire body in a discovery hole.
+	 *
+	 * The gate is deliberately TIGHT so binaries that use ud2/int3 as GENUINE terminators and
+	 * install NO trap handler stay byte-identical:
+	 *   (1) a handler-installer symbol (sigaction/signal/...) must be linked via the PLT, AND
+	 *   (2) there must be a real `call` to that PLT stub in an executable section, AND
+	 *   (3) where recoverable, the System V first argument (signum, in EDI) at that call site
+	 *       must be a trap-class signal (SIGILL=4 / SIGTRAP=5 / SIGSEGV=11 / SIGBUS=7 / SIGFPE=8).
+	 * If the signum cannot be recovered but a handler-installer is genuinely called, the gate
+	 * still trips (conservative "imported AND used"): the only behavioural change is at trap
+	 * instructions, which a non-trap-idiom binary would not place inside live code anyway.
+	 *
+	 * x86/x64 ELF/PIE only (the idiom is x86-specific: it depends on REG_RIP advancement and
+	 * the 0F 0B / CC / F4 encodings). Other arches: gate stays off, byte-identical.
+	 */
+	private detectTrapHandlerGate(): void {
+		this.trapHandlerGate = false;
+		if (!this.fileBuffer) { return; }
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return; }
+
+		// Handler-installer symbols. Installing a handler for SIGILL/SIGTRAP/SIGSEGV is what
+		// makes a trap resumable; sigaction/signal/sigaction64 and the BSD/SysV aliases.
+		const installerNames = new Set([
+			'sigaction', '__sigaction', '__sigaction_internal', 'sigaction64',
+			'signal', '__signal', 'bsd_signal', 'sysv_signal', '__sysv_signal',
+			'__libc_sigaction', 'sigvec'
+		]);
+
+		// Fast reject: a handler installer must at least be linked (PLT/GOT or import table).
+		let installerLinked = false;
+		for (const sym of this._pltSymbolMap.values()) {
+			if (installerNames.has(sym.split('@')[0])) { installerLinked = true; break; }
+		}
+		if (!installerLinked) {
+			for (const sym of this._gotSymbolMap.values()) {
+				if (installerNames.has(sym.split('@')[0])) { installerLinked = true; break; }
+			}
+		}
+		if (!installerLinked) {
+			for (const lib of this.imports) {
+				if (lib.functions.some(f => installerNames.has(f.name.split('@')[0]))) {
+					installerLinked = true; break;
+				}
+			}
+		}
+		if (!installerLinked) { return; }
+
+		// SysV/x86: signum is the 1st integer arg -> EDI. Trap-class signals only.
+		const TRAP_SIGNALS = new Set([4 /*SIGILL*/, 5 /*SIGTRAP*/, 7 /*SIGBUS*/, 8 /*SIGFPE*/, 11 /*SIGSEGV*/]);
+
+		const buf = this.fileBuffer;
+		const execSections = this.sections.filter(s => s.isCode || s.isExecutable);
+		let calledInstaller = false;
+		let trapSignumSeen = false;
+
+		for (const section of execSections) {
+			const rawStart = section.rawAddress;
+			const rawEnd = Math.min(rawStart + section.rawSize, buf.length);
+			if (rawStart >= buf.length || rawEnd <= rawStart) { continue; }
+
+			// Scan for direct near calls: E8 rel32 (and E9 rel32 tail-jumps into the stub).
+			// Resolve the target through any PLT-family stub (.plt / .plt.sec / .plt.got) so
+			// IBT/CET binaries that call the `.plt.sec` thunk are detected too.
+			for (let i = rawStart; i + 5 <= rawEnd; i++) {
+				const op = buf[i];
+				if (op !== 0xE8 && op !== 0xE9) { continue; }
+				const rel32 = buf.readInt32LE(i + 1);
+				const instrVA = this.sectionOffsetToAddress(i, section);
+				const targetVA = instrVA + 5 + rel32;
+				const tgtSym = this.resolveStubSymbol(targetVA);
+				if (!tgtSym || !installerNames.has(tgtSym)) { continue; }
+				calledInstaller = true;
+
+				// Look back up to 64 bytes for the most recent `mov edi, imm32` (BF id) or
+				// `mov dil/edi/rdi` setup that fixes the signum. EDI is the SysV 1st arg.
+				const lookback = Math.max(rawStart, i - 64);
+				let foundImm: number | undefined;
+				for (let j = i - 1; j >= lookback; j--) {
+					// mov edi, imm32  ->  BF id   (5 bytes)
+					if (buf[j] === 0xBF && j + 5 <= rawEnd) {
+						foundImm = buf.readUInt32LE(j + 1) | 0;
+						break;
+					}
+					// mov edi, imm32 via REX (48/40 BF) is non-canonical; xor edi,edi -> 0.
+					// xor edi, edi -> 31 FF  (signum 0; never a trap signal, ignore)
+					if (buf[j] === 0x31 && j + 1 < rawEnd && buf[j + 1] === 0xFF) {
+						foundImm = 0;
+						break;
+					}
+				}
+				if (foundImm !== undefined && TRAP_SIGNALS.has(foundImm >>> 0)) {
+					trapSignumSeen = true;
+				}
+			}
+		}
+
+		// Gate ON when: a trap-class signum was set at a handler-installer call site, OR a
+		// handler installer is genuinely called but no signum could be recovered (conservative).
+		this.trapHandlerGate = trapSignumSeen || calledInstaller;
+		if (this.trapHandlerGate) {
+			console.log(`[HexCore] trap-handler gate ON (installer called=${calledInstaller}, trap-signum=${trapSignumSeen}); ud2/int3/hlt treated as non-terminating.`);
+		}
+	}
+
+	/** v3.8.5: external read of the trap-handler gate (tests/harness). */
+	public isTrapHandlerGateActive(): boolean {
+		return this.trapHandlerGate;
+	}
+
 	async analyzeFunction(address: number, name?: string): Promise<Function> {
 		// Safety: coerce BigInt from Capstone prebuilds to number
 		if (typeof address === 'bigint') { address = Number(address); }
@@ -3716,6 +3910,22 @@ export class DisassemblerEngine {
 		let endIdx = instructions.length;
 		let lastRetIdx = -1;
 		for (let i = 0; i < instructions.length; i++) {
+			// v3.8.5: trap-handler idiom. When the binary installs a SIGILL/SIGTRAP/SIGSEGV
+			// handler that advances RIP past the faulting instruction, ud2/int3/hlt are NOT
+			// function terminators -- execution resumes at trap_addr + trap_size. Skip the
+			// termination handling so the sweep continues through the real body that follows
+			// the trap. Bounded by maxFunctionSize (disassembleRange already capped the input)
+			// so a runaway sweep cannot explode. Note ud2 is classified isRet by the wrapper
+			// (for __builtin_trap CFG cleanliness); this guard runs BEFORE the isRet branch so
+			// it is the gate, not the classifier, that decides termination here.
+			if (this.trapHandlerGate && this.isTrapMnemonic(instructions[i].mnemonic) &&
+				(instructions[i].address - address) < this.maxFunctionSize) {
+				if (!this.comments.has(instructions[i].address)) {
+					this.comments.set(instructions[i].address, 'trap skipped by signal handler (RIP advanced)');
+					instructions[i].comment = 'trap skipped by signal handler (RIP advanced)';
+				}
+				continue;
+			}
 			if (instructions[i].isRet) {
 				lastRetIdx = i;
 				// Check if next instruction is padding or unreachable
@@ -3860,9 +4070,22 @@ export class DisassemblerEngine {
 				// (trampolines, tail calls, thunks) — treat target as a new function
 				// ONLY when the target is actually in a code section. Otherwise a tail
 				// jmp into an import thunk / absolute data pointer becomes sub_XX ghost.
+				//
+				// v3.8.5: when the trap-handler gate extended this function PAST trap
+				// separators, the body now contains many interior `jmp <join>` edges (the
+				// success/failure landing pads that converge on the epilogue). Those targets
+				// lie INSIDE [address, endAddress) and are intra-function CFG joins, not tail
+				// calls -- following them would mint interior ghost functions (e.g. a fake
+				// sub_<join> at main's stack-canary epilogue). Suppress targets interior to
+				// the just-swept body. Gated on trapHandlerGate so non-trap binaries, whose
+				// interior-ghost cleanup is handled post-hoc by dropInteriorGhostFunctions*,
+				// stay byte-identical.
+				const interiorToSelf = this.trapHandlerGate &&
+					inst.targetAddress > addrNum && inst.targetAddress < func.endAddress;
 				if (jumpTargetIsCode &&
 					!inst.isConditional &&
 					inst.targetAddress !== address &&
+					!interiorToSelf &&
 					!this.functions.has(inst.targetAddress) &&
 					this.functions.size < this.maxFunctions) {
 					childTargets.push(inst.targetAddress);
