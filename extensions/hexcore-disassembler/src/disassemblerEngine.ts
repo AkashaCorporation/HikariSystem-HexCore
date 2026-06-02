@@ -816,6 +816,13 @@ export class DisassemblerEngine {
 		// so calls through the PLT are readable instead of anonymous.
 		this.applyPltStubNames();
 
+		// v3.8.5: PE analog of @plt naming. The engine resolves the IAT (parsePEImports records
+		// each import's slot VA) but never wired it onto the call sites, so PE disassembly showed
+		// `call dword ptr [0x402000]` instead of `call ReadFile`. Stamp instruction.comment with
+		// the import name on every direct call/jmp through an IAT slot (PE32 abs + PE64 rip-rel).
+		// PE-gated and additive (only fills an empty comment); ELF/string-xref/PLT logic untouched.
+		this.applyIatCallNames();
+
 		// v3.8.3: drop mid-function prologue ghost functions on ELF (no .pdata). Runs AFTER
 		// addTailCallEdges so callers are fully populated; only an interior function with NO
 		// callers (a ghost - a real function is reached by a call/tail-jump) is removed.
@@ -4450,6 +4457,111 @@ export class DisassemblerEngine {
 				fn.name = `${sym}@plt`;
 			}
 		}
+	}
+
+	/**
+	 * v3.8.5: annotate PE indirect call/jmp sites that go through the Import Address Table (IAT)
+	 * with the imported API name, so PE disassembly reads `call ReadFile` instead of the opaque
+	 * `call dword ptr [0x402000]`. This is the PE analog of the ELF `<symbol>@plt` naming done by
+	 * applyPltStubNames: the engine already RESOLVES the imports (parsePEImports records each
+	 * import function's IAT-slot VA in ImportFunction.address) but never wired them onto the call
+	 * sites, so a reverse engineer saw the raw IAT address.
+	 *
+	 * Mechanism: builds a Map<iatVA, "<dll>!<api>"> from getImports() (each import function's
+	 * `.address` IS its IAT slot VA), then walks every instruction and, for each direct `call`/`jmp`
+	 * through the IAT, stamps `instruction.comment` with the import name (same stamping mechanism
+	 * the trap-handler skip used). Handles BOTH addressing forms:
+	 *   - PE32: `call/jmp dword ptr [<abs32>]`     -> iatVA is the absolute operand.
+	 *   - PE64: `call/jmp qword ptr [rip + <disp>]` -> iatVA = (addr of NEXT instruction) + disp.
+	 *
+	 * Gated PE-only (fileInfo.format starts with "PE"); ELF keeps the `@plt` path (no-op here, the
+	 * IAT map is empty for ELF anyway). Only the indirect call/jmp through a KNOWN IAT slot is
+	 * touched -- an indirect call/jmp to a non-IAT pointer (vtable, jump table, local function
+	 * pointer) is left untouched -- and an existing comment is preserved (we only fill an empty
+	 * one), so this never disturbs string-xref / PLT logic and only ADDS comments.
+	 */
+	private applyIatCallNames(): void {
+		// PE only. ELF's import-through-PLT path is named by applyPltStubNames; for ELF getImports()
+		// carries no IAT-slot addresses, so this would be a no-op regardless -- but gate explicitly.
+		if (!this.fileInfo || !this.fileInfo.format.startsWith('PE')) {
+			return;
+		}
+
+		// Build the IAT-slot -> "<dll>!<api>" map. ImportFunction.address is the absolute VA of the
+		// FirstThunk slot the loader patches -- exactly what `call [iatVA]` references.
+		const iatNames = new Map<number, string>();
+		for (const lib of this.imports) {
+			for (const fn of lib.functions) {
+				if (fn.address > 0) {
+					iatNames.set(fn.address >>> 0, `${lib.name}!${fn.name}`);
+				}
+			}
+		}
+		if (iatNames.size === 0) {
+			return;
+		}
+
+		for (const func of this.functions.values()) {
+			for (const ins of func.instructions) {
+				const m = ins.mnemonic.toLowerCase();
+				if (m !== 'call' && m !== 'jmp') {
+					continue;
+				}
+				// Only memory-indirect operands carry an IAT reference: `... ptr [ ... ]`.
+				const op = ins.opStr;
+				if (!op || op.indexOf('[') < 0) {
+					continue;
+				}
+				const iatVA = this.resolveIatOperandVA(ins);
+				if (iatVA === undefined) {
+					continue;
+				}
+				const name = iatNames.get(iatVA >>> 0);
+				if (name && !ins.comment) {
+					ins.comment = name;
+				}
+			}
+		}
+	}
+
+	/**
+	 * v3.8.5: resolve the absolute IAT-slot VA referenced by a memory-indirect `call`/`jmp`.
+	 *
+	 * PE32: the operand is `dword ptr [<abs32>]` -- the bracketed value is the absolute VA.
+	 * PE64: the operand is `qword ptr [rip + <disp>]` (or `- <disp>`) -- RIP-relative, so the
+	 *       target VA is (address of the NEXT instruction) + disp. Capstone reports the
+	 *       displacement, not the resolved absolute, in the opStr, so compute it here.
+	 *
+	 * Returns undefined when the operand has a base/index register other than a bare `rip` (e.g.
+	 * `[rax]`, `[rbx + rcx*4]`, `[rsp + 0x20]`) -- those are not IAT references and must be left
+	 * alone (avoids ghost-naming a vtable / jump-table / stack slot).
+	 */
+	private resolveIatOperandVA(ins: Instruction): number | undefined {
+		const op = ins.opStr.toLowerCase();
+		const lb = op.indexOf('[');
+		const rb = op.indexOf(']', lb + 1);
+		if (lb < 0 || rb < 0) {
+			return undefined;
+		}
+		const inner = op.slice(lb + 1, rb).trim();
+
+		// PE64 rip-relative: `rip + 0x...` or `rip - 0x...`.
+		const ripMatch = inner.match(/^rip\s*([+-])\s*0x([0-9a-f]+)$/);
+		if (ripMatch) {
+			const disp = parseInt(ripMatch[2], 16);
+			const signed = ripMatch[1] === '-' ? -disp : disp;
+			// RIP points at the next instruction.
+			const nextVA = (typeof ins.address === 'number' ? ins.address : Number(ins.address)) + ins.size;
+			return (nextVA + signed) >>> 0;
+		}
+
+		// PE32 absolute: `0x...` (no base/index register). Reject anything with a register inside.
+		const absMatch = inner.match(/^0x([0-9a-f]+)$/);
+		if (absMatch) {
+			return parseInt(absMatch[1], 16) >>> 0;
+		}
+
+		return undefined;
 	}
 
 	/**
