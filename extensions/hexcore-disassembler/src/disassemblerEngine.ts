@@ -468,6 +468,54 @@ export interface DisassemblyOptions {
 	entryPoint?: number;
 }
 
+/**
+ * v3.8.5: decode the absolute IAT-slot VA referenced by a memory-indirect `call`/`jmp` operand.
+ * Shared single source of truth used by BOTH the engine post-pass (`applyIatCallNames`, which
+ * stamps `instruction.comment`) AND the interactive `resolveInstructionComment` path in
+ * `extension.ts` (which re-disassembles fresh), so the two paths cannot drift in their handling
+ * of the operand-decode subtleties (rip-relative sign, next-instruction base, register rejection).
+ *
+ * PE32: the operand is `dword ptr [<abs32>]` -- the bracketed value is the absolute VA.
+ * PE64: the operand is `qword ptr [rip + <disp>]` (or `- <disp>`) -- RIP-relative, so the target
+ *       VA is (address of the NEXT instruction) + disp. Capstone reports the displacement, not
+ *       the resolved absolute, in the opStr, so compute it here.
+ *
+ * Returns undefined when the operand has a base/index register other than a bare `rip` (e.g.
+ * `[rax]`, `[rbx + rcx*4]`, `[rsp + 0x20]`) or is register-indirect (`rax`) -- those are not IAT
+ * references and must be left alone (avoids ghost-naming a vtable / jump-table / stack slot).
+ *
+ * @param opStr        Capstone operand string (Intel syntax), any case.
+ * @param instrAddress VA of the instruction itself (number; bigint callers must Number() first).
+ * @param instrSize    encoded length in bytes (needed for the rip-relative next-instruction base).
+ */
+export function decodeIatOperandVA(opStr: string, instrAddress: number, instrSize: number): number | undefined {
+	const op = opStr.toLowerCase();
+	const lb = op.indexOf('[');
+	const rb = op.indexOf(']', lb + 1);
+	if (lb < 0 || rb < 0) {
+		return undefined;
+	}
+	const inner = op.slice(lb + 1, rb).trim();
+
+	// PE64 rip-relative: `rip + 0x...` or `rip - 0x...`.
+	const ripMatch = inner.match(/^rip\s*([+-])\s*0x([0-9a-f]+)$/);
+	if (ripMatch) {
+		const disp = parseInt(ripMatch[2], 16);
+		const signed = ripMatch[1] === '-' ? -disp : disp;
+		// RIP points at the next instruction.
+		const nextVA = instrAddress + instrSize;
+		return (nextVA + signed) >>> 0;
+	}
+
+	// PE32 absolute: `0x...` (no base/index register). Reject anything with a register inside.
+	const absMatch = inner.match(/^0x([0-9a-f]+)$/);
+	if (absMatch) {
+		return parseInt(absMatch[1], 16) >>> 0;
+	}
+
+	return undefined;
+}
+
 export class DisassemblerEngine {
 	private currentFile?: string;
 	private fileBuffer?: Buffer;
@@ -4526,42 +4574,14 @@ export class DisassemblerEngine {
 
 	/**
 	 * v3.8.5: resolve the absolute IAT-slot VA referenced by a memory-indirect `call`/`jmp`.
-	 *
-	 * PE32: the operand is `dword ptr [<abs32>]` -- the bracketed value is the absolute VA.
-	 * PE64: the operand is `qword ptr [rip + <disp>]` (or `- <disp>`) -- RIP-relative, so the
-	 *       target VA is (address of the NEXT instruction) + disp. Capstone reports the
-	 *       displacement, not the resolved absolute, in the opStr, so compute it here.
-	 *
-	 * Returns undefined when the operand has a base/index register other than a bare `rip` (e.g.
-	 * `[rax]`, `[rbx + rcx*4]`, `[rsp + 0x20]`) -- those are not IAT references and must be left
-	 * alone (avoids ghost-naming a vtable / jump-table / stack slot).
+	 * Thin wrapper over the shared, pure `decodeIatOperandVA` (module-level) so the engine
+	 * post-pass and the interactive `resolveInstructionComment` path share ONE decode and cannot
+	 * drift. See `decodeIatOperandVA` for the PE32-absolute / PE64-rip-relative / register-reject
+	 * semantics.
 	 */
 	private resolveIatOperandVA(ins: Instruction): number | undefined {
-		const op = ins.opStr.toLowerCase();
-		const lb = op.indexOf('[');
-		const rb = op.indexOf(']', lb + 1);
-		if (lb < 0 || rb < 0) {
-			return undefined;
-		}
-		const inner = op.slice(lb + 1, rb).trim();
-
-		// PE64 rip-relative: `rip + 0x...` or `rip - 0x...`.
-		const ripMatch = inner.match(/^rip\s*([+-])\s*0x([0-9a-f]+)$/);
-		if (ripMatch) {
-			const disp = parseInt(ripMatch[2], 16);
-			const signed = ripMatch[1] === '-' ? -disp : disp;
-			// RIP points at the next instruction.
-			const nextVA = (typeof ins.address === 'number' ? ins.address : Number(ins.address)) + ins.size;
-			return (nextVA + signed) >>> 0;
-		}
-
-		// PE32 absolute: `0x...` (no base/index register). Reject anything with a register inside.
-		const absMatch = inner.match(/^0x([0-9a-f]+)$/);
-		if (absMatch) {
-			return parseInt(absMatch[1], 16) >>> 0;
-		}
-
-		return undefined;
+		const addr = typeof ins.address === 'number' ? ins.address : Number(ins.address);
+		return decodeIatOperandVA(ins.opStr, addr, ins.size);
 	}
 
 	/**

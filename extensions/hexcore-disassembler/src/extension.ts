@@ -11,7 +11,7 @@ import { StringRefProvider } from './stringRefTree';
 import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
-import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis, ELFExecutableSection } from './disassemblerEngine';
+import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis, ELFExecutableSection, decodeIatOperandVA } from './disassemblerEngine';
 import { formatApiSignatureCompact, CATEGORY_LABELS } from './peApiDatabase';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
@@ -266,16 +266,25 @@ export function buildImportLookup(
  * Pure function that resolves the comment for a disassembled instruction based on
  * reference maps (strings, functions, imports) and user comments.
  *
- * Priority (descending): string > import > function > raw address > empty.
- * User comments are prepended with " | " separator when a reference also exists.
+ * Priority (descending): string > import(direct target) > function > raw address >
+ * IAT indirect call/jmp > empty. User comments are prepended with " | " separator when a
+ * reference also exists.
+ *
+ * v3.8.5: the LAST resort (only when nothing higher matched) is the PE IAT indirect-call name.
+ * This mirrors the engine post-pass `applyIatCallNames` so the interactive `disassembleAtInstruction`
+ * path -- which re-disassembles fresh via `disassembleRange` and derives comments here -- surfaces
+ * `call ReadFile` for `call dword ptr [0x402000]` (PE32) / `call qword ptr [rip+disp]` (PE64)
+ * exactly like the function-view path. It is kept LOWEST priority and never overrides an existing
+ * string-xref / function / direct-import / user comment. PE-gated (`isPE`); no-op for ELF.
  */
 export function resolveInstructionComment(
-	instruction: { targetAddress?: number; comment?: string },
+	instruction: { targetAddress?: number; comment?: string; mnemonic?: string; opStr?: string; size?: number; address?: number },
 	strings: Map<number, { string: string; address: number }>,
 	functions: Map<number, { name: string; address: number }>,
 	imports: { name: string; functions: { name: string; address: number }[] }[],
 	userComments: Map<number, string>,
-	instructionAddress: number
+	instructionAddress: number,
+	isPE: boolean = false
 ): string {
 	let resolved = '';
 
@@ -307,6 +316,26 @@ export function resolveInstructionComment(
 					resolved = `-> func:${funcRef.name} (0x${target.toString(16).toUpperCase()})`;
 				} else {
 					resolved = `-> 0x${target.toString(16).toUpperCase()}`;
+				}
+			}
+		}
+	}
+
+	// v3.8.5: lowest-priority PE IAT indirect call/jmp name. Only when nothing above resolved
+	// (memory-indirect `[...]` operands carry NO targetAddress, so the block above never fires for
+	// them), and never overriding a higher reference. Same `<dll>!<api>` format as applyIatCallNames.
+	if (!resolved && isPE) {
+		const m = (instruction.mnemonic ?? '').toLowerCase();
+		const op = instruction.opStr ?? '';
+		if ((m === 'call' || m === 'jmp') && op.indexOf('[') >= 0) {
+			const iatVA = decodeIatOperandVA(op, instruction.address ?? instructionAddress, instruction.size ?? 0);
+			if (iatVA !== undefined) {
+				for (const lib of imports) {
+					const hit = lib.functions.find(fn => (fn.address >>> 0) === (iatVA >>> 0));
+					if (hit) {
+						resolved = `${lib.name}!${hit.name}`;
+						break;
+					}
 				}
 			}
 		}
@@ -4062,13 +4091,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			const functionsMap = engine.getFunctionsMap();
 			const importsArray = engine.getImports();
 			const commentsMap = engine.getComments();
+			// v3.8.5: PE-gate for IAT indirect-call naming in resolveInstructionComment (no-op for ELF).
+			const isPE = engine.getFileInfo()?.format.startsWith('PE') === true;
 
 			// 8. Format all instructions (context + main)
 			const allEntries: DisassembleAtInstructionEntry[] = [];
 
 			for (const instr of contextInstructions) {
 				const comment = resolveInstructionComment(
-					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address, isPE
 				);
 				allEntries.push({
 					address: `0x${instr.address.toString(16).toUpperCase()}`,
@@ -4083,7 +4114,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			for (const instr of mainInstructions) {
 				const comment = resolveInstructionComment(
-					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+					instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address, isPE
 				);
 				allEntries.push({
 					address: `0x${instr.address.toString(16).toUpperCase()}`,
@@ -4106,7 +4137,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				const filteredEntries: DisassembleAtInstructionEntry[] = [];
 				for (const instr of filtered) {
 					const comment = resolveInstructionComment(
-						instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address
+						instr, stringsMap, functionsMap, importsArray, commentsMap, instr.address, isPE
 					);
 					filteredEntries.push({
 						address: `0x${instr.address.toString(16).toUpperCase()}`,
