@@ -3735,6 +3735,32 @@ export class DisassemblerEngine {
 	}
 
 	/**
+	 * v3.8.5: Is `va` inside the IBT/CET `.plt.sec` stub section?
+	 *
+	 * Used to bound the extent of `.plt.sec` thunks. A `.plt.sec` thunk is `endbr64 ; bnd jmp
+	 * *GOT[n](%rip)` padded to a 16-byte stride: Capstone folds the F2 (BND) prefix into the
+	 * mnemonic ("bnd jmp"), so the wrapper classifies it isJump=false, AND it is an indirect
+	 * jump with no immediate target. analyzeFunction's end-detection therefore never terminates
+	 * on it, so the stub runs on into the next thunk and, on IBT binaries that also trip the
+	 * trap-handler gate, all the way to the shared `hlt` padding at the section tail (observed:
+	 * every `.plt.sec` entry on behindthescenes over-read to one shared end). Clamping is gated
+	 * to `.plt.sec` so legacy `.plt`/`.plt.got` stubs and normal indirect `jmp [rip+disp]`
+	 * (jump tables / tail calls) are byte-identical -- the legacy `.plt` end-handling is
+	 * unchanged (its stubs are not over-read on the regression set; only the new IBT thunk was).
+	 * x86/x64 only -- `.plt.sec` is an x86 CET construct; other arches have no such section.
+	 */
+	private isPltSecAddress(va: number): boolean {
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return false; }
+		for (const s of this.sections) {
+			if (s.name === '.plt.sec' &&
+				va >= s.virtualAddress && va < s.virtualAddress + s.virtualSize) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * v3.8.5: Is this instruction an x86 trap/undefined opcode that a SIGILL/SIGTRAP
 	 * handler can skip over? ud2 (0F 0B, 2 bytes), int3 (CC, 1 byte), hlt (F4, 1 byte).
 	 * Used only when trapHandlerGate is active.
@@ -3907,9 +3933,37 @@ export class DisassemblerEngine {
 		// padding or another function prolog. Architecture-aware detection.
 		const isARM = this.architecture === 'arm64' || this.architecture === 'arm';
 
+		// v3.8.5: `.plt.sec` extent clamp. An IBT/CET `.plt.sec` thunk ends at its `bnd jmp
+		// *GOT(%rip)` indirect tail-transfer -- which carries no immediate target AND is reported
+		// isJump=false (Capstone folds the BND prefix into the mnemonic), so the generic
+		// end-detection below never terminates on it and the stub over-reads into the next thunk
+		// / shared `hlt` padding (worse under the trap-handler gate, which makes `hlt`
+		// non-terminating). When the function entry is in `.plt.sec`, clamp the extent to its
+		// first unconditional jmp. Gated strictly to `.plt.sec` so legacy `.plt`/`.plt.got` and
+		// normal indirect `jmp [rip+disp]` (jump tables / tail calls) stay byte-identical.
+		const addrForRegion = typeof address === 'bigint' ? Number(address) : address;
+		const isPltStub = this.isPltSecAddress(addrForRegion);
+
 		let endIdx = instructions.length;
 		let lastRetIdx = -1;
 		for (let i = 0; i < instructions.length; i++) {
+			// v3.8.5: `.plt.sec` extent clamp (see above). Runs BEFORE the trap-handler-gate
+			// skip so a stub's `bnd jmp` terminator wins even when the gate would otherwise
+			// keep sweeping through the section's shared `hlt` padding.
+			//
+			// NOTE: a `.plt.sec` thunk's tail transfer is `bnd jmp *GOT(%rip)`. Capstone folds
+			// the F2 (BND) prefix INTO the mnemonic ("bnd jmp"), so the wrapper's plain-`jmp`
+			// jump-set classification reports isJump=false for it (this is also why the generic
+			// unconditional-jump end-detection below never terminates the stub). Recognize the
+			// terminator here by stripping the leading bnd/notrack prefix from the mnemonic, so
+			// the clamp catches both `jmp` and `bnd jmp`.
+			if (isPltStub) {
+				const m = instructions[i].mnemonic.toLowerCase().replace(/^(?:bnd|notrack)\s+/, '');
+				if (m === 'jmp') {
+					endIdx = i + 1;
+					break;
+				}
+			}
 			// v3.8.5: trap-handler idiom. When the binary installs a SIGILL/SIGTRAP/SIGSEGV
 			// handler that advances RIP past the faulting instruction, ud2/int3/hlt are NOT
 			// function terminators -- execution resumes at trap_addr + trap_size. Skip the
@@ -4373,14 +4427,26 @@ export class DisassemblerEngine {
 	 * detectPRNG; discovered PLT thunks stayed `sub_<addr>`. This names them `<symbol>@plt`
 	 * (e.g. `puts@plt`) so calls through the PLT are readable. Only the auto-generated
 	 * `sub_*` name is replaced, preserving any user / session rename. No-op for non-ELF.
+	 *
+	 * v3.8.5: IBT/CET fallback. On modern PIE ELF the linker emits BOTH a legacy `.plt`
+	 * (keyed in _pltSymbolMap) AND an `endbr64`-guarded `.plt.sec` thunk that the code
+	 * actually calls. Function discovery lands functions at the `.plt.sec` VA, which is NOT
+	 * a _pltSymbolMap key, so the direct lookup misses and the stub stays `sub_*`. When the
+	 * direct lookup misses, fall back to resolveStubSymbol() -- it decodes the thunk's
+	 * `bnd jmp *GOT(%rip)` GOT reference and resolves it via _gotSymbolMap -- so the
+	 * `.plt.sec` thunk is named `<symbol>@plt` too. Still ELF-gated (resolveStubSymbol is a
+	 * no-op when the maps are empty / on non-x86) and still only replaces auto `sub_*` names.
 	 */
 	private applyPltStubNames(): void {
 		if (this._pltSymbolMap.size === 0) {
 			return;
 		}
 		for (const fn of this.functions.values()) {
-			const sym = this._pltSymbolMap.get(fn.address);
-			if (sym && /^sub_[0-9a-fA-F]+$/i.test(fn.name)) {
+			if (!/^sub_[0-9a-fA-F]+$/i.test(fn.name)) {
+				continue;
+			}
+			const sym = this._pltSymbolMap.get(fn.address) ?? this.resolveStubSymbol(fn.address);
+			if (sym) {
 				fn.name = `${sym}@plt`;
 			}
 		}
