@@ -1558,9 +1558,18 @@ function resolveStepOutput(outDir: string, step: PipelineStep, index: number): S
 	const explicitPath = step.output?.path;
 	let outputPath: string;
 	if (typeof explicitPath === 'string' && explicitPath.length > 0) {
-		outputPath = path.isAbsolute(explicitPath)
-			? explicitPath
-			: path.resolve(outDir, explicitPath);
+		// CWE-22 containment: a *.hexcore_job.json is attacker-controllable and
+		// AUTO-RUN, so an explicit output path MUST resolve INSIDE outDir — reject
+		// absolute paths and any "../" escape (an unconstrained path here is an
+		// arbitrary-file-write primitive).
+		const root = path.resolve(outDir);
+		const resolved = path.resolve(outDir, explicitPath);
+		const contained = !path.isAbsolute(explicitPath) &&
+			(resolved === root || resolved.startsWith(root + path.sep));
+		if (!contained) {
+			throw new Error(`Invalid "output.path" in step ${index} (${step.cmd}): must be a relative path inside the job output directory (no absolute paths, no ".." escape). Got: ${explicitPath}`);
+		}
+		outputPath = resolved;
 	} else {
 		const safeName = sanitizeFileName(step.cmd);
 		outputPath = path.join(outDir, `${String(index + 1).padStart(2, '0')}-${safeName}.json`);

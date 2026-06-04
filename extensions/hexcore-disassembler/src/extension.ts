@@ -4466,19 +4466,43 @@ export function activate(context: vscode.ExtensionContext): void {
 				? arg.output
 				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
 
+			// CWE-22 path containment + DoS size guard: this command is reachable
+			// from the auto-run *.hexcore_job.json pipeline, so caller-supplied
+			// input/output paths must stay inside the workspace and the input must be
+			// bounded. With a workspace, the path must resolve inside a folder (blocks
+			// both ".." escape and absolute escape); with none, refuse absolute.
+			const MAX_AUDIT_INPUT_BYTES = 16 * 1024 * 1024;
+			const assertContainedPath = (p: string, kind: 'input' | 'output'): string => {
+				const resolved = path.resolve(p);
+				const roots = (vscode.workspace.workspaceFolders ?? []).map(f => path.resolve(f.uri.fsPath));
+				const contained = roots.length === 0
+					? !path.isAbsolute(p)
+					: roots.some(r => resolved === r || resolved.startsWith(r + path.sep));
+				if (!contained) {
+					throw new Error(`refcountScan: ${kind} path "${p}" is outside the workspace; refusing (CWE-22 path containment).`);
+				}
+				return resolved;
+			};
+			const safeInput = assertContainedPath(rawInput, 'input');
+
 			let source: string;
 			try {
-				source = fs.readFileSync(rawInput, 'utf8');
+				const stat = fs.statSync(safeInput);
+				if (stat.size > MAX_AUDIT_INPUT_BYTES) {
+					throw new Error(`input is ${stat.size} bytes (cap ${MAX_AUDIT_INPUT_BYTES}); decompiled C is expected, refusing to avoid a DoS`);
+				}
+				source = fs.readFileSync(safeInput, 'utf8');
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				throw new Error(`refcountScan: failed to read ${rawInput}: ${message}`);
+				throw new Error(`refcountScan: failed to read ${safeInput}: ${message}`);
 			}
 
-			const report: RefcountAuditReport = auditRefcount(source, rawInput);
+			const report: RefcountAuditReport = auditRefcount(source, safeInput);
 
 			if (outputPath) {
-				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-				fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf8');
+				const safeOutput = assertContainedPath(outputPath, 'output');
+				fs.mkdirSync(path.dirname(safeOutput), { recursive: true });
+				fs.writeFileSync(safeOutput, JSON.stringify(report, null, 2), 'utf8');
 			}
 
 			if (!quietMode) {

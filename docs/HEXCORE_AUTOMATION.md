@@ -354,16 +354,17 @@ The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command t
 | `output.path` | string | — | Write JSON report to this path. |
 | `quiet` | boolean | `false` | Suppress the VS Code toast showing finding count + scan time. |
 
-**Patterns detected (v0.1):**
+**Patterns detected (v0.2):**
 
-| Pattern | What it catches | Bounty bug tag |
-|---------|-----------------|-----------------|
-| **A** | `get()`-family call followed by `goto err:` / `return -E*` without a matching `put()` on the error path | Mali Bug #1 (`kbase_gpu_mmap`) when family = `kbase_*` |
-| **B** | Functions named `*_force` that never call any `put()` primitive, OR callers invoking a `*_force(...)` variant | Mali Bug #2 (`release_force`) |
-| **C** | `if (!foo_get(obj)) { ... }` where the success branch dereferences `obj` without bail-out on failure | Qualcomm Bug #2 (`vm_open UAF`) when family = `kgsl_*` |
-| **E** | `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap` reachable from error paths (NULL / OOM / `copy_from_user` gated) | Qualcomm Bug #1 (`VBO BUG_ON`) when gating is NULL/OOM |
+| Pattern | What it catches | Class |
+|---------|-----------------|-------|
+| **A** | A reference is acquired and not released on an error path: a `get()`-family call **OR a raw struct-field increment** (`x->...count++` / `+= 1`) followed by `goto err:` / `return -E*` without the matching `put()` / decrement | Refcount leak on error path (CWE-911) |
+| **B** | Functions named `*_force` that never call any `put()` primitive, OR callers invoking a `*_force(...)` variant | Refcount-bypass via force variant (CWE-911) |
+| **C** | `if (!foo_get(obj)) { ... }` where the success branch dereferences `obj` without bail-out on failure | Dereference after failed get (CWE-416) |
+| **E** | `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap` reachable from error paths (NULL / OOM / `copy_from_user` gated) | Reachable crash primitive / DoS (CWE-617) |
+| **F** | Locking asymmetry between antonym-paired functions (enable/disable, lock/unlock, acquire/release, start/stop, suspend/resume, open/close, create/destroy): one sibling acquires a named lock around shared state, the other manipulates the same state without it | Locking asymmetry / race (CWE-667, CWE-362) |
 
-**Pattern D (lock-drop-reacquire with stale pointer)** is deferred to v0.2 — requires flow-sensitive dataflow that regex + label tracking cannot safely approximate.
+**Pattern D (lock-drop-reacquire with stale pointer)** is deferred — it requires flow-sensitive dataflow that regex + label tracking cannot safely approximate. Pattern F (v0.2) covers the common case of a missing lock in a paired function. Comment text is stripped before lock detection so commented-out / mentioned APIs do not produce false positives.
 
 **Output shape (`RefcountAuditReport`):**
 
@@ -378,19 +379,19 @@ The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command t
       "pattern": "A",
       "severity": "high",
       "confidence": 95,
-      "title": "Possible refcount leak: kbase get without matching put on error path",
+      "title": "Possible refcount leak: get without matching put on error path",
       "description": "...",
       "functionName": "vulnerable_get",
       "line": 6,
-      "snippet": ">>> 6:    kbase_mem_get(kctx, id);\n    7:    err = ...",
-      "affectedSymbol": "kctx",
+      "snippet": ">>> 6:    kref_get(&obj->ref);\n    7:    err = ...",
+      "affectedSymbol": "obj",
       "suggestion": "...",
-      "referenceBug": "Mali Bug #1 (kbase_gpu_mmap)"
+      "referenceBug": "CWE-911 (refcount leak on error path)"
     }
   ],
   "summary": {
     "total": 4,
-    "byPattern": { "A": 1, "B": 1, "C": 1, "E": 1 },
+    "byPattern": { "A": 1, "B": 1, "C": 1, "E": 1, "F": 0 },
     "bySeverity": { "high": 4, "medium": 0, "low": 0 },
     "highestConfidence": 95
   },

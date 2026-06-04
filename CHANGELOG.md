@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped; the version, GitHub tag, and installers are not cut. This single Unreleased bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions are cut. Waves are ordered newest-first below.
 
+### Security hardening - release-readiness fixes (headless path containment + audit-scanner ReDoS/robustness)
+
+> A 3.8.2 release-readiness validation pass (multi-agent, engine-direct) flagged two self-inflicted vulnerabilities in HexCore's OWN code -- both reachable through the auto-run `*.hexcore_job.json` pipeline -- plus two robustness gaps. All four fixed; TS-only (no native rebuild).
+
+- **CWE-22 path traversal / arbitrary file write (was a RELEASE BLOCKER).** The `hexcore.audit.refcountScan` command (`extension.ts`) wrote a caller-supplied `output` path verbatim (`mkdirSync({recursive})` + `writeFileSync`) and read `input` with no containment; the pipeline's `resolveStepOutput` (`automationPipelineRunner.ts`) accepted an absolute `output.path` verbatim and let a relative one escape via `..` (`sanitizeFileName` only ran on the AUTO-generated name). Because the documented New-Star flow AUTO-RUNS any dropped `*.hexcore_job.json`, a crafted job file was an arbitrary-file-write primitive (e.g. into `%APPDATA%\Code\User\`). Fix: `resolveStepOutput` now rejects absolute paths and any `..` escape and asserts the resolved path stays inside the job output directory; the command contains BOTH input and output to the workspace folder(s) (refuse-absolute when there is no workspace). Validated (`rag/_audit_pathcheck.cjs`): in-dir paths accepted, absolute + `..` escapes rejected.
+- **CWE-1333 ReDoS in the refcount scanner (was a RELEASE BLOCKER).** `RAW_INC_POST`/`RAW_INC_PRE` (`refcountAuditScanner.ts`) are unanchored and their member-chain group backtracks ~O(n^2) on a long member-access line that does NOT end in `++`/`+= 1`; since `auditRefcount` runs synchronously on the extension host (and a headless timeout cannot interrupt a synchronous regex), a large crafted `.c` froze the IDE/pipeline (measured 96 KB = 10.7 s). Fix: a `MAX_SCAN_LINE_LEN` (2000) per-line cap skips over-wide lines before any per-line regex, plus a 16 MB input size guard before `readFileSync`. Validated (`rag/_audit_redos.cjs`): 96 KB 10.7 s -> 5 ms; 256 KB = 4 ms.
+- **Pattern F O(n^2) in function count (robustness).** `detectPatternF` ran an all-pairs `for A for B` over every function BEFORE the cheap antonym/stem/lock gates, so a large decompiled `.c` (thousands of fns) would stall. Fix: bucket functions by `roleOf()` first (O(n)) and scan only each A's antonym bucket. Detection is byte-identical (fixture still 0 -> 2; A/B/C/E unchanged).
+- **Null-input guard (robustness).** `auditRefcount(non-string)` threw an unguarded `TypeError`; it now returns an empty report.
+- **Validated** (engine-direct, `out/` rebuilt via `tsc -p ./`): `rag/_audit_run.js` main fixture 0 -> 2 (A:1, F:1; kbase_gpu_mmap raw-`++` + trusted_touch disable flagged, control enable/disable pair NOT false-flagged), `_audit_old.c` A/B/C/E all fire; `tsc --noEmit` exits 0. Ship-flow note: keep a `tsc`-before-harness gate so the engine-direct harnesses never validate a stale `out/`.
+
+### Vulnerability Audit - refcount scanner gains raw-increment (Pattern A) and locking-asymmetry (Pattern F) detection
+
+> The `hexcore.audit.refcountScan` engine (`refcountAuditScanner.ts`) is regex/label based. Two common kernel bug shapes were not modeled: a reference taken via a RAW struct-field increment (rather than a get()-family call), and a locking asymmetry between paired functions. Both are added here.
+
+- **Pattern A (raw)** -- new `detectPatternARaw`: a raw struct-field refcount increment (`x->...count++` / `+= 1` / `++x->...count`, where the field is a struct member whose tail looks like a refcount -- count/refcnt/usage/users/nref/_ref) followed by a `goto err` / `return -E*` / `return NULL` exit with no matching decrement of the SAME field in between -> the reference leaks on the error path (CWE-911). The prior call-based Pattern A could not see raw increments.
+- **Pattern F** (new letter) -- `detectPatternF`, cross-function/pairwise: a function that acquires a NAMED lock (`mutex_lock`/`spin_lock`/`down_*`/..., normalized to the last member token) and has a recognizable role (enable/disable, lock/unlock, acquire/release, start/stop, suspend/resume, open/close, create/destroy) whose antonym sibling -- sharing a dominant common name stem (>= half the shorter name) -- does NOT acquire that lock -> the two paths can race on shared state (CWE-667 / CWE-362). Comment text is stripped before lock detection so a comment that merely mentions the missing API cannot self-cancel.
+- **Validated** (direct `auditRefcount` on the compiled `out/refcountAuditScanner.js`, no IDE): a synthetic fixture carrying both shapes goes 0 -> 2 findings, while a correctly-locked enable/disable control pair is NOT flagged; an initial cross-subsystem false positive (a loose shared-prefix match) was removed by the >= 50% name-coverage stem gate. No regression -- patterns A/B/C/E all still fire on their own fixture. TS-only (`tsc`, no native `.node` rebuild).
+
 ### Disassembler - PE IAT indirect call/jmp sites are annotated with the imported API name
 
 > The PE analog of the just-shipped ELF `<symbol>@plt` naming. HexCore already RESOLVES PE imports (`parsePEImports` records each import function's IAT-slot VA in `ImportFunction.address`) but never wired those names onto the call sites, so PE disassembly showed the opaque `call dword ptr [0x402000]` instead of `call ReadFile`. EVERY PE that calls a WinAPI through the IAT was affected. On Flare-On4 `IgniteMe.exe` (PE32 x86) the engine knew `0x402000 = KERNEL32.dll!ReadFile` (and WriteFile / ExitProcess / GetStdHandle), yet of its 7 `call dword ptr [...]` indirect calls ZERO carried a resolved name; the existing UI comment resolver (`resolveInstructionComment`) only matched a `targetAddress`, which `capstoneWrapper` deliberately leaves `undefined` for memory-indirect `[...]` operands, so the indirect IAT calls were never reached.
@@ -2008,15 +2026,15 @@ The dummy malware source `C:\Users\Mazum\Desktop\AkashaCorporationMalware\Malwar
 
 ### 🛡 Wave 3.2 — Refcount Audit Scanner v0.1 (Milestone 2.1 — P0, 2026-04-17) — NEW
 
-> Automates detection of the vulnerability patterns that produced all 4 of the bounty bugs found during HexCore battle-testing (ARM Mali `mali_kbase.ko`, Qualcomm Adreno `kgsl.c`). Regex + label-tracking based, zero-dep, operates on decompiled C from Helix output or raw source. Shipped as `hexcore.audit.refcountScan` headless command.
+> Automates detection of four recurring kernel vulnerability patterns (refcount mismanagement, force-variant refcount bypass, dereference-after-failed-get, reachable crash primitive) found during HexCore battle-testing on Linux GPU kernel drivers. Regex + label-tracking based, zero-dep, operates on decompiled C from Helix output or raw source. Shipped as `hexcore.audit.refcountScan` headless command.
 
 #### `extensions/hexcore-disassembler/src/refcountAuditScanner.ts` — new module (~480 LOC)
 
-- **4 pattern detectors covering the 4 real bounty bugs:**
-  - **Pattern A** — increment-before-error-check with no rollback on error path. Scans each function for `get()` hits from 15 curated pair families (kref, refcount, atomic, task, device, dentry, module, file, mount, inode, dma_buf, plus GPU-driver-specific `kbase_*` / `kgsl_*`, plus Windows KM `ObReferenceObject*`). Tracks `goto err:` / `return -E*` exit paths and flags risky exits that have no matching `put()` between the `get()` and the exit. Confidence 60–95 based on `(risky exits × 10) + (get/put imbalance bonus)`. Tags Mali Bug #1 (`kbase_gpu_mmap`) when the family matches `kbase_*`.
-  - **Pattern B** — `_force` variants that ignore refcounting. Two sub-detectors: (1) function definition with `_force` suffix that never calls any known put() → severity high, confidence 80, tags Mali Bug #2 (`release_force`); (2) caller invoking a `*_force(...)` → severity medium, confidence 60 — flags caller needs exclusive-ownership audit.
-  - **Pattern C** — unconditional operation after failed refcount `get()`. Detects `if (!kref_get_unless_zero(obj))` (or any `get()`-family variant inside an if-condition) where the following block dereferences the same symbol without bail-out. Extracts symbol name from the get() call args, scans the next 20 lines of the success branch for any expression that dereferences that symbol (`->` / `.` access). Confidence 75, tags Qualcomm Bug #2 (`vm_open UAF`) when the family is `kgsl_*`.
-  - **Pattern E** — reachable `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap`. Scans for crash-primitive calls, checks the 8 preceding lines for the gating condition. Scores `high` (85) when gated by NULL-check / OOM-check / `copy_from_user`; `medium` (55) for unknown gates; `low` (30) when gated by another BUG_ON (likely defensive). Tags Qualcomm Bug #1 (`VBO BUG_ON`) when confidence is high. Excludes `BUILD_BUG_ON` (compile-time constant).
+- **4 pattern detectors covering 4 recurring kernel bug classes:**
+  - **Pattern A** — increment-before-error-check with no rollback on error path. Scans each function for `get()` hits from 15 curated pair families (kref, refcount, atomic, task, device, dentry, module, file, mount, inode, dma_buf, plus GPU-driver-specific families, plus Windows KM `ObReferenceObject*`). Tracks `goto err:` / `return -E*` exit paths and flags risky exits that have no matching `put()` between the `get()` and the exit. Confidence 60–95 based on `(risky exits × 10) + (get/put imbalance bonus)`. Tagged CWE-911 (refcount leak on error path).
+  - **Pattern B** — `_force` variants that ignore refcounting. Two sub-detectors: (1) function definition with `_force` suffix that never calls any known put() → severity high, confidence 80, tagged CWE-911 (refcount-bypass via force variant); (2) caller invoking a `*_force(...)` → severity medium, confidence 60 — flags caller needs exclusive-ownership audit.
+  - **Pattern C** — unconditional operation after failed refcount `get()`. Detects `if (!kref_get_unless_zero(obj))` (or any `get()`-family variant inside an if-condition) where the following block dereferences the same symbol without bail-out. Extracts symbol name from the get() call args, scans the next 20 lines of the success branch for any expression that dereferences that symbol (`->` / `.` access). Confidence 75, tagged CWE-416 (dereference after failed get).
+  - **Pattern E** — reachable `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap`. Scans for crash-primitive calls, checks the 8 preceding lines for the gating condition. Scores `high` (85) when gated by NULL-check / OOM-check / `copy_from_user`; `medium` (55) for unknown gates; `low` (30) when gated by another BUG_ON (likely defensive). Tagged CWE-617 (reachable crash primitive) when confidence is high. Excludes `BUILD_BUG_ON` (compile-time constant).
 - **`REFCOUNT_PAIRS`** — 15 curated get/put regex pairs indexed by family name. Easily extensible for new driver subsystems (just add a row).
 - **`extractFunctions()`** — brace-matching function boundary extractor. Handles both inline (`int foo() {`) and multi-line (`int foo()` / `{` on next line) forms. 5000-line safety cap per function.
 - **`RefcountAuditFinding` record** — `{pattern, severity, confidence, title, description, functionName, line, snippet, affectedSymbol, suggestion, referenceBug}`. The `snippet` includes the 2 lines before/after the hit with a `>>>` marker for the hit line itself — trivial to paste into a bug report.
@@ -2038,14 +2056,14 @@ The dummy malware source `C:\Users\Mazum\Desktop\AkashaCorporationMalware\Malwar
 
 #### Verified on synthetic vulnerable functions
 
-Crafted test input reproducing the 4 bounty bug shapes — all 4 patterns fire with correct attribution:
+Crafted test input reproducing the 4 bug shapes — all 4 patterns fire with correct attribution:
 
-| Test case | Pattern | Severity | Confidence | Bounty bug tag |
+| Test case | Pattern | Severity | Confidence | Class |
 |---|---|---|---|---|
-| `vulnerable_get()` — `kbase_mem_get` + goto err_cleanup without put | A | high | 95 | Mali Bug #1 (kbase_gpu_mmap) |
-| `kbase_release_force()` — _force name, no put calls | B | high | 80 | Mali Bug #2 (release_force) |
-| `dangerous_uaf()` — `if (!kgsl_context_get(ctx)) return;` then `ctx->pid = 0` | C | high | 75 | Qualcomm Bug #2 (vm_open UAF) |
-| `alloc_vbo()` — `BUG_ON(1)` gated by `if (!ptr)` after kzalloc | E | high | 85 | Qualcomm Bug #1 (VBO BUG_ON) |
+| `vulnerable_get()` — `kref_get` + goto err_cleanup without put | A | high | 95 | CWE-911 (refcount leak on error path) |
+| `obj_release_force()` — _force name, no put calls | B | high | 80 | CWE-911 (refcount-bypass via force variant) |
+| `dangerous_uaf()` — `if (!ctx_get(ctx)) return;` then `ctx->pid = 0` | C | high | 75 | CWE-416 (dereference after failed get) |
+| `alloc_obj()` — `BUG_ON(1)` gated by `if (!ptr)` after kzalloc | E | high | 85 | CWE-617 (reachable crash primitive) |
 
 #### Not shipped in v0.1 (tracked as v0.2 targets)
 

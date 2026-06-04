@@ -1,9 +1,10 @@
 /*---------------------------------------------------------------------------------------------
  *  HexCore Refcount Audit Scanner v0.1 — Milestone 2.1 (P0)
  *
- *  Automates the vulnerability patterns that produced all 4 of the bounty bugs
- *  found across ARM Mali (mali_kbase.ko), Qualcomm Adreno KGSL (kgsl.c), and
- *  Riot Vanguard (vgk.sys) during the HexCore battle-testing sessions.
+ *  Automates four recurring kernel vulnerability patterns (refcount
+ *  mismanagement, force-variant refcount bypass, dereference-after-failed-get,
+ *  reachable crash primitive) surfaced during HexCore battle-testing on Linux
+ *  GPU kernel drivers and Windows kernel drivers.
  *
  *  Scans decompiled C output (from Helix or any C-like source) for:
  *    - Pattern A — "get()" before error check without matching "put()" on error path
@@ -21,7 +22,7 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-export type RefcountPattern = 'A' | 'B' | 'C' | 'E';
+export type RefcountPattern = 'A' | 'B' | 'C' | 'E' | 'F';
 
 export interface RefcountAuditFinding {
 	/** Which detection pattern fired */
@@ -44,7 +45,7 @@ export interface RefcountAuditFinding {
 	affectedSymbol?: string;
 	/** Suggested mitigation / root cause note */
 	suggestion?: string;
-	/** Reference to the bounty bug that matched this pattern (when applicable) */
+	/** Reference to the vulnerability class (CWE) that matched this pattern (when applicable) */
 	referenceBug?: string;
 }
 
@@ -87,7 +88,7 @@ const REFCOUNT_PAIRS: ReadonlyArray<{ get: RegExp; put: RegExp; family: string }
 	{ get: /\bmntget\s*\(/, put: /\bmntput\s*\(/, family: 'mount' },
 	{ get: /\bigrab\s*\(/, put: /\biput\s*\(/, family: 'inode' },
 	{ get: /\bdma_buf_get\s*\(/, put: /\bdma_buf_put\s*\(/, family: 'dma_buf' },
-	// GPU driver specifics that showed up in Mali / Adreno bounty work
+	// GPU driver refcount families (Linux DRM/GPU subsystems)
 	{ get: /\bkbase_[a-z_]*_(?:get|acquire|pin)\s*\(/, put: /\bkbase_[a-z_]*_(?:put|release|unpin)\s*\(/, family: 'kbase' },
 	{ get: /\bkgsl_[a-z_]*_(?:get|acquire|pin)\s*\(/, put: /\bkgsl_[a-z_]*_(?:put|release|unpin)\s*\(/, family: 'kgsl' },
 	// Windows KM
@@ -111,11 +112,53 @@ const CRASH_PRIMITIVES: RegExp = /\b(BUG_ON|BUG|panic|KeBugCheck(?:Ex)?|WARN_ON_
  */
 const ERROR_LABEL_PATTERN: RegExp = /^\s*(err|error|fail|cleanup|unwind|rollback|out_err|bad|oom|abort)[a-z_0-9]*\s*:/i;
 
+/**
+ * Pattern A (raw): a refcount FIELD being incremented directly (`x->count++`,
+ * `x.refcount += 1`) rather than through a get()-family call. Pattern A's
+ * REFCOUNT_PAIRS are call-based and CANNOT match a raw increment (e.g.
+ * `obj->...usage_count++`). The field must be a struct member (contains
+ * `.`/`->`) whose tail looks like a reference counter.
+ */
+const RAW_INC_POST: RegExp = /([A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)+)\s*(?:\+\+|\+=\s*1\b)/;
+const RAW_INC_PRE: RegExp = /\+\+\s*([A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*)+)/;
+/**
+ * ReDoS guard (CWE-1333). RAW_INC_POST/PRE are unanchored and their member-chain
+ * group backtracks ~O(n^2) against a very long member-access line that does NOT
+ * end in `++`/`+= 1`. Real decompiled C never carries a refcount expression on a
+ * line this wide, so any per-line regex is skipped beyond this width.
+ */
+const MAX_SCAN_LINE_LEN = 2000;
+function isRefcountField(path: string): boolean {
+	return /[.\->]/.test(path) && /(?:count|refcnt|refcount|usage|users|nref|_ref)\b/i.test(path);
+}
+
+/**
+ * Pattern F (locking asymmetry): a lock-acquire primitive on a NAMED object.
+ * Used to compare paired enable/disable (etc.) functions — if one acquires a
+ * lock the other does not, the pair can race (CWE-667 / CWE-362).
+ */
+const LOCK_ACQUIRE: RegExp = /\b(?:mutex_lock(?:_interruptible|_nested|_killable)?|spin_lock(?:_irqsave|_irq|_bh)?|raw_spin_lock\w*|read_lock\w*|write_lock\w*|down_read|down_write|down_interruptible|down)\s*\(\s*&?([A-Za-z_][\w\s.\->]*?)[,)]/g;
+/** Curated antonym pairs (strong, low-noise — short/common ones like on/off, up/down are intentionally excluded). */
+const ANTONYM_PAIRS: ReadonlyArray<readonly [string, string]> = [
+	['enable', 'disable'], ['lock', 'unlock'], ['acquire', 'release'],
+	['start', 'stop'], ['suspend', 'resume'], ['open', 'close'], ['create', 'destroy'],
+];
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 
 export function auditRefcount(source: string, filePath: string): RefcountAuditReport {
+	if (typeof source !== 'string') {
+		// Public-API surface: a non-string input previously threw an unguarded
+		// TypeError ("Cannot read properties of undefined (reading 'split')").
+		return {
+			inputFile: filePath, fileSize: 0, scannedLines: 0, functionsScanned: 0,
+			findings: [],
+			summary: { total: 0, byPattern: { A: 0, B: 0, C: 0, E: 0, F: 0 }, bySeverity: { high: 0, medium: 0, low: 0 }, highestConfidence: 0 },
+			scanTimeMs: 0,
+		};
+	}
 	const startedAt = Date.now();
 	const lines = source.split(/\r?\n/);
 	const fns = extractFunctions(source);
@@ -123,16 +166,21 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 
 	for (const fn of fns) {
 		findings.push(...detectPatternA(fn, source, lines));
+		findings.push(...detectPatternARaw(fn, source, lines));
 		findings.push(...detectPatternB(fn, source, lines));
 		findings.push(...detectPatternC(fn, source, lines));
 		findings.push(...detectPatternE(fn, source, lines));
 	}
+
+	// Pattern F is pairwise (cross-function), so it runs once over all functions.
+	findings.push(...detectPatternF(fns, lines));
 
 	// Also scan lines outside any detected function — covers hand-written
 	// helpers whose boundaries the brace-matcher misses.
 	if (fns.length === 0) {
 		const synthetic: Fn = { name: '<top-level>', startLine: 1, endLine: lines.length, bodyLines: lines };
 		findings.push(...detectPatternA(synthetic, source, lines));
+		findings.push(...detectPatternARaw(synthetic, source, lines));
 		findings.push(...detectPatternB(synthetic, source, lines));
 		findings.push(...detectPatternC(synthetic, source, lines));
 		findings.push(...detectPatternE(synthetic, source, lines));
@@ -142,7 +190,7 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 	// severity/confidence one.
 	const deduped = dedupeFindings(findings);
 
-	const byPattern: Record<RefcountPattern, number> = { A: 0, B: 0, C: 0, E: 0 };
+	const byPattern: Record<RefcountPattern, number> = { A: 0, B: 0, C: 0, E: 0, F: 0 };
 	const bySeverity = { high: 0, medium: 0, low: 0 };
 	let highestConfidence = 0;
 	for (const f of deduped) {
@@ -303,9 +351,80 @@ function detectPatternA(fn: Fn, _source: string, lines: string[]): RefcountAudit
 					snippet: snippetAround(lines, g.line, 2),
 					affectedSymbol: g.symbol,
 					suggestion: `Add \`${pair.family}\`-put() on all error paths reachable between the get() and the function exit, or restructure to acquire the reference only on the success branch.`,
-					referenceBug: pair.family === 'kbase' ? 'Mali Bug #1 (kbase_gpu_mmap)' : undefined,
+					referenceBug: 'CWE-911 (refcount leak on error path)',
 				});
 			}
+		}
+	}
+
+	return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern A (raw) — raw refcount-FIELD increment before an error exit without
+// a matching decrement. Pattern A above is call-based and cannot see this -- a
+// real-world shape is a raw `obj->...usage_count++` left unbalanced on error.
+// ---------------------------------------------------------------------------
+
+function detectPatternARaw(fn: Fn, _source: string, lines: string[]): RefcountAuditFinding[] {
+	const findings: RefcountAuditFinding[] = [];
+
+	const incHits: Array<{ line: number; field: string }> = [];
+	for (let i = 0; i < fn.bodyLines.length; i++) {
+		const ln = fn.bodyLines[i];
+		if (ln.length > MAX_SCAN_LINE_LEN) { continue; } // ReDoS guard (CWE-1333)
+		if (/^\s*(?:\/\/|\*|\/\*)/.test(ln)) { continue; } // skip comment lines
+		const m = RAW_INC_POST.exec(ln) ?? RAW_INC_PRE.exec(ln);
+		if (!m) { continue; }
+		const field = m[1].replace(/\s+/g, '');
+		if (!isRefcountField(field)) { continue; }
+		incHits.push({ line: fn.startLine + i, field });
+	}
+	if (incHits.length === 0) { return findings; }
+
+	for (const g of incHits) {
+		const bodyStartIdx = g.line - fn.startLine;
+		const f = escapeRegex(g.field);
+		const decRe = new RegExp(`${f}\\s*(?:--|-=\\s*1\\b)|--\\s*${f}`);
+		let riskyExits = 0;
+		let exitLine = 0;
+		let exitText = '';
+		for (let i = bodyStartIdx + 1; i < fn.bodyLines.length; i++) {
+			const ln = fn.bodyLines[i];
+			if (/\b(goto\s+(err|error|fail|out_err|cleanup|rollback|bad|abort)\w*)|return\s*-[A-Z]|return\s+NULL/i.test(ln)) {
+				let decBetween = false;
+				for (let j = bodyStartIdx + 1; j <= i; j++) {
+					if (decRe.test(fn.bodyLines[j].replace(/\s+/g, ''))) { decBetween = true; break; }
+				}
+				if (!decBetween) {
+					riskyExits++;
+					if (exitLine === 0) { exitLine = fn.startLine + i; exitText = ln.trim(); }
+				}
+			}
+		}
+
+		if (riskyExits > 0) {
+			const confidence = Math.min(92, 65 + riskyExits * 8);
+			findings.push({
+				pattern: 'A',
+				severity: confidence >= 80 ? 'high' : 'medium',
+				confidence,
+				title: `Possible refcount corruption: raw increment of \`${g.field}\` not unwound on error path`,
+				description:
+					`Function \`${fn.name}\` increments refcount field \`${g.field}\` at line ${g.line} ` +
+					`(raw \`++\`/\`+= 1\`, NOT a get()-family call), then takes ${riskyExits} error exit path(s) ` +
+					`(e.g. \`${exitText}\` at line ${exitLine}) with no matching decrement of \`${g.field}\`. ` +
+					`If the error path runs, the counter stays incremented -> corrupted refcount -> later ` +
+					`use-after-free or double-free.`,
+				functionName: fn.name,
+				line: g.line,
+				snippet: snippetAround(lines, g.line, 2),
+				affectedSymbol: g.field,
+				suggestion:
+					`Move the increment AFTER the success check, or decrement \`${g.field}\` on every error ` +
+					`path before exit.`,
+				referenceBug: 'CWE-911 (refcount mismanagement on error path)',
+			});
 		}
 	}
 
@@ -339,7 +458,7 @@ function detectPatternB(fn: Fn, _source: string, lines: string[]): RefcountAudit
 				snippet: snippetAround(lines, fn.startLine, 2),
 				affectedSymbol: fn.name,
 				suggestion: `Verify every caller of \`${fn.name}\` has exclusive ownership. If not, route those callers through the refcount-aware variant instead.`,
-				referenceBug: 'Mali Bug #2 (release_force)',
+				referenceBug: 'CWE-911 (refcount-bypass via force variant)',
 			});
 		}
 	}
@@ -436,7 +555,7 @@ function detectPatternC(fn: Fn, _source: string, lines: string[]): RefcountAudit
 					snippet: snippetAround(lines, fn.startLine + i, 3),
 					affectedSymbol: symbol,
 					suggestion: `Bail out on failure with \`return -ESTALE;\` / \`goto err;\` before touching \`${symbol}\`.`,
-					referenceBug: pair.family === 'kgsl' ? 'Qualcomm Bug #2 (vm_open UAF)' : undefined,
+					referenceBug: 'CWE-416 (dereference after failed get)',
 				});
 			}
 		}
@@ -499,8 +618,120 @@ function detectPatternE(fn: Fn, _source: string, lines: string[]): RefcountAudit
 			snippet: snippetAround(lines, fn.startLine + i, 3),
 			affectedSymbol: crashName,
 			suggestion: `Replace \`${crashName}\` with a soft error return (\`-ENOMEM\` / \`-EINVAL\`) and let the caller handle the failure.`,
-			referenceBug: reachability === 'high' ? 'Qualcomm Bug #1 (VBO BUG_ON)' : undefined,
+			referenceBug: reachability === 'high' ? 'CWE-617 (reachable crash primitive)' : undefined,
 		});
+	}
+
+	return findings;
+}
+
+// ---------------------------------------------------------------------------
+// Pattern F — locking asymmetry between paired functions (enable/disable etc.)
+// One sibling acquires a named lock around shared state; the antonym sibling
+// touches the same state WITHOUT it -> race (CWE-667 / CWE-362), which patterns
+// A-E do not model.
+// ---------------------------------------------------------------------------
+
+/** Strip block and line comments so commented-out / mentioned APIs are ignored. */
+function stripComments(s: string): string {
+	return s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+}
+
+function locksAcquiredBy(fn: Fn): Set<string> {
+	const set = new Set<string>();
+	const body = stripComments(fn.bodyLines.join('\n'));
+	const re = new RegExp(LOCK_ACQUIRE.source, 'g');
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(body)) !== null) {
+		const obj = m[1].replace(/\s+/g, '');
+		// normalize to the last member token so `&a->state_lock` and
+		// `&b->state_lock` compare equal across siblings.
+		const tail = obj.split(/[.\->]+/).filter(Boolean).pop();
+		if (tail) { set.add(tail); }
+	}
+	return set;
+}
+
+function roleOf(name: string): { role: string; anti: string } | null {
+	const lower = name.toLowerCase();
+	for (const [a, b] of ANTONYM_PAIRS) {
+		if (new RegExp(`(?:^|_)${a}(?:_|$)`).test(lower)) { return { role: a, anti: b }; }
+		if (new RegExp(`(?:^|_)${b}(?:_|$)`).test(lower)) { return { role: b, anti: a }; }
+	}
+	return null;
+}
+
+function longestCommonSubstr(a: string, b: string): string {
+	let best = '';
+	const dp: number[] = new Array(b.length + 1).fill(0);
+	for (let i = 1; i <= a.length; i++) {
+		let prev = 0;
+		for (let j = 1; j <= b.length; j++) {
+			const tmp = dp[j];
+			if (a[i - 1] === b[j - 1]) {
+				dp[j] = prev + 1;
+				if (dp[j] > best.length) { best = a.slice(i - dp[j], i); }
+			} else {
+				dp[j] = 0;
+			}
+			prev = tmp;
+		}
+	}
+	return best;
+}
+
+function detectPatternF(fns: Fn[], lines: string[]): RefcountAuditFinding[] {
+	const findings: RefcountAuditFinding[] = [];
+	const info = fns.map(fn => ({ fn, locks: locksAcquiredBy(fn), role: roleOf(fn.name) }));
+
+	// Bucket by role so each A scans only its ANTONYM bucket instead of all-pairs.
+	// The prior `for A for B` over every function was O(n^2) in function count — a
+	// large decompiled .c (thousands of fns) would stall the scanner. Grouping is
+	// O(n) and each anti-role bucket is usually tiny.
+	const byRole = new Map<string, typeof info>();
+	for (const it of info) {
+		if (!it.role) { continue; }
+		const bucket = byRole.get(it.role.role);
+		if (bucket) { bucket.push(it); } else { byRole.set(it.role.role, [it]); }
+	}
+
+	for (const A of info) {
+		// A must hold at least one named lock and have a recognizable role.
+		if (!A.role || A.locks.size === 0) { continue; }
+		const candidates = byRole.get(A.role.anti);
+		if (!candidates) { continue; }
+		for (const B of candidates) {
+			if (B.fn === A.fn || !B.role) { continue; } // B.role is non-null by bucket; the check also narrows the type for TS
+			const stem = longestCommonSubstr(A.fn.name.toLowerCase(), B.fn.name.toLowerCase());
+			// The shared subject must dominate the names, not just a common library
+			// prefix (e.g. `drv_`) — require it to cover >= half the shorter name.
+			const minLen = Math.min(A.fn.name.length, B.fn.name.length);
+			if (stem.length < Math.max(10, minLen * 0.5)) { continue; }
+			if (B.fn.bodyLines.length < 4) { continue; } // skip trivial stubs
+			const missing = [...A.locks].filter(l => !B.locks.has(l));
+			if (missing.length === 0) { continue; } // B locks everything A does -> symmetric
+			const lock = missing[0];
+			findings.push({
+				pattern: 'F',
+				severity: 'high',
+				confidence: 78,
+				title: `Locking asymmetry: \`${B.fn.name}\` omits \`${lock}\` held by sibling \`${A.fn.name}\``,
+				description:
+					`\`${A.fn.name}\` acquires \`${lock}\` around its critical section, but its ${B.role.role} ` +
+					`counterpart \`${B.fn.name}\` (shared subject \`${stem}\`) manipulates the same shared state ` +
+					`WITHOUT acquiring \`${lock}\`${missing.length > 1 ? ` (and ${missing.length - 1} more)` : ''}. ` +
+					`The two paths can run concurrently and corrupt shared state (e.g. double-release of resources, ` +
+					`torn transition state).`,
+				functionName: B.fn.name,
+				line: B.fn.startLine,
+				snippet: snippetAround(lines, B.fn.startLine, 2),
+				affectedSymbol: lock,
+				suggestion:
+					`Acquire \`${lock}\` in \`${B.fn.name}\` to match \`${A.fn.name}\`, and hold it across the ` +
+					`check-then-act in the common caller to close the TOCTOU window.`,
+				referenceBug: 'CWE-667 (locking asymmetry)',
+			});
+		}
 	}
 
 	return findings;
