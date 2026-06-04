@@ -480,6 +480,13 @@
 		"configuration": {
 			"title": "HexCore Disassembler",
 			"properties": {
+				"hexcore.pipeline.queue.poolSize": {
+					"type": "integer",
+					"default": 2,
+					"minimum": 1,
+					"maximum": 16,
+					"description": "Number of concurrent worker slots in the HexCore pipeline job queue (Issue #25). Each slot runs one .hexcore_job.json job at a time; keepAlive session jobs are pinned to a single worker (sticky routing). Changing this takes effect on the NEXT window reload — the live pool is not resized and in-flight jobs finish on their current workers."
+				},
 				"hexcore.disassembler.defaultArchitecture": {
 					"type": "string",
 					"default": "x64",

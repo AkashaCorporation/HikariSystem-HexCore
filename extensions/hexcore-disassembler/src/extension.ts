@@ -26,7 +26,7 @@ import {
 	disposeJobQueueManagerInstance,
 	JobPriority
 } from './automationPipelineRunner';
-import { QueuedJob, QueueStats } from './jobQueueManager';
+import { QueuedJob, QueueStats, JobStatusReport } from './jobQueueManager';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions } from './remillWrapper';
@@ -509,6 +509,30 @@ export async function computeContextInstructions(
 
 
 export function activate(context: vscode.ExtensionContext): void {
+	// Issue #25: prime the Job Queue worker pool from the
+	// hexcore.pipeline.queue.poolSize setting BEFORE anything lazily creates
+	// the singleton with the default. The pool size is fixed for the life of
+	// the extension host -- a setting change applies on the NEXT reload (we do
+	// NOT resize a live pool; in-flight jobs finish on their current workers).
+	const configuredPoolSize = vscode.workspace
+		.getConfiguration('hexcore.pipeline.queue')
+		.get<number>('poolSize', 2);
+	getJobQueueManagerInstance(configuredPoolSize);
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeConfiguration(e => {
+			if (e.affectsConfiguration('hexcore.pipeline.queue.poolSize')) {
+				console.warn(
+					'[HexCore] hexcore.pipeline.queue.poolSize changed; the new pool ' +
+					'size takes effect on the NEXT extension reload. The live worker ' +
+					'pool is not resized and in-flight jobs finish on their current workers.'
+				);
+				void vscode.window.showWarningMessage(
+					'HexCore: queue pool size change takes effect on the next window reload.'
+				);
+			}
+		})
+	);
+
 	// Emulator switcher — UX entry point for the hexcore.emulator setting.
 	// Status bar item + QuickPick command so users don't need to hand-edit
 	// settings.json to switch between Azoth, legacy debugger, or both.
@@ -1080,7 +1104,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			return report;
 		}),
-		vscode.commands.registerCommand('hexcore.pipeline.queueJob', async (arg?: { jobFile?: string; file?: string; priority?: JobPriority; quiet?: boolean }) => {
+		vscode.commands.registerCommand('hexcore.pipeline.queueJob', async (arg?: { jobFile?: string; file?: string; priority?: JobPriority; sessionId?: string; quiet?: boolean }) => {
 			// Accept both `jobFile` (original) and `file` (documented in
 			// HEXCORE_AUTOMATION.md + the orchestrator templates). When run as a
 			// pipeline step, the runner forwards the step-level `file`/`jobFile`
@@ -1102,14 +1126,18 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			const priority: JobPriority = arg?.priority ?? 'normal';
+			// Issue #26: optional keepAlive sessionId pins all same-session jobs
+			// to one worker (sticky routing). Omitted -> stateless (unchanged).
+			const sessionId = arg?.sessionId;
 			const manager = getJobQueueManagerInstance();
-			const jobId = manager.queueJob(jobFilePath, priority);
+			const jobId = manager.queueJob(jobFilePath, priority, sessionId);
 
 			if (!arg?.quiet) {
-				vscode.window.showInformationMessage(`Job queued with ID: ${jobId} (priority: ${priority})`);
+				const sessionNote = sessionId ? `, session: ${sessionId}` : '';
+				vscode.window.showInformationMessage(`Job queued with ID: ${jobId} (priority: ${priority}${sessionNote})`);
 			}
 
-			return { jobId, filePath: jobFilePath, priority };
+			return { jobId, filePath: jobFilePath, priority, ...(sessionId ? { sessionId } : {}) };
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.cancelJob', async (arg?: { jobId?: string; quiet?: boolean }) => {
 			let jobId = arg?.jobId;
@@ -1155,15 +1183,18 @@ export function activate(context: vscode.ExtensionContext): void {
 			const manager = getJobQueueManagerInstance();
 
 			if (arg?.jobId) {
-				const job = manager.getJobStatus(arg.jobId);
+				// Issue #24/#26: return the public status report, which carries
+				// the dispatch-order `position` while queued (null otherwise)
+				// and echoes the keepAlive `sessionId` when present.
+				const report = manager.getJobStatusReport(arg.jobId);
 				if (!arg.quiet) {
-					if (job) {
-						showJobStatusInOutputChannel(job);
+					if (report) {
+						showJobStatusInOutputChannel(report);
 					} else {
 						vscode.window.showWarningMessage(`Job not found: ${arg.jobId}`);
 					}
 				}
-				return job;
+				return report;
 			}
 
 			const allJobs = manager.getAllJobs();
@@ -6859,14 +6890,23 @@ async function pickJobFile(): Promise<string | undefined> {
 /**
  * Displays job status in an output channel.
  */
-function showJobStatusInOutputChannel(job: QueuedJob): void {
+function showJobStatusInOutputChannel(job: JobStatusReport): void {
 	const channel = vscode.window.createOutputChannel('HexCore Job Status');
 	channel.clear();
 	channel.appendLine(`Job ID: ${job.jobId}`);
 	channel.appendLine(`Status: ${job.status}`);
 	channel.appendLine(`Priority: ${job.priority}`);
+	if (job.position !== null && job.position !== undefined) {
+		channel.appendLine(`Queue Position: ${job.position}`);
+	}
+	if (job.sessionId) {
+		channel.appendLine(`Session: ${job.sessionId}`);
+	}
+	if (job.workerId !== undefined) {
+		channel.appendLine(`Worker: ${job.workerId}`);
+	}
 	channel.appendLine(`File: ${job.filePath}`);
-	channel.appendLine(`Created: ${new Date(job.createdAt).toLocaleString()}`);
+	channel.appendLine(`Submitted: ${new Date(job.submittedAt).toLocaleString()}`);
 	if (job.startedAt) {
 		channel.appendLine(`Started: ${new Date(job.startedAt).toLocaleString()}`);
 	}

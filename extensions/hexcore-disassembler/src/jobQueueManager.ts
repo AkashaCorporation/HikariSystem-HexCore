@@ -33,6 +33,19 @@ export interface QueuedJob {
 	result?: any;
 	error?: string;
 	abortController: AbortController;
+	/**
+	 * Optional keepAlive session identifier (Issue #26). When set, every job
+	 * sharing this id is routed to the SAME worker for the life of the session
+	 * (sticky / session-affinity). When unset, the job is stateless and runs on
+	 * any free worker (the original behavior).
+	 */
+	sessionId?: string;
+	/**
+	 * The worker slot id this job ran (or is running) on. Only populated once the
+	 * job has been dispatched to a worker. Useful for diagnostics and for
+	 * verifying sticky routing.
+	 */
+	workerId?: number;
 }
 
 /**
@@ -56,6 +69,48 @@ export interface QueueStats {
 	done: number;
 	failed: number;
 	cancelled: number;
+}
+
+/**
+ * The status contract returned by getJobStatusReport() / the
+ * hexcore.pipeline.jobStatus command for a single job.
+ *
+ * `position` (Issue #24) is the 1-based index of the job in DISPATCH order
+ * among all currently-queued jobs, accounting for priority then FIFO submit
+ * order. It is present ONLY while the job is `queued`; for any other status it
+ * is `null` (the field is always present so consumers can branch on it).
+ *
+ * `sessionId` (Issue #26) is echoed back when the job carries a keepAlive
+ * session affinity, and is omitted for stateless jobs.
+ */
+export interface JobStatusReport {
+	jobId: string;
+	status: JobStatus;
+	priority: JobPriority;
+	position: number | null;
+	submittedAt: number;
+	startedAt?: number;
+	completedAt?: number;
+	filePath: string;
+	sessionId?: string;
+	workerId?: number;
+	result?: any;
+	error?: string;
+}
+
+/**
+ * A single worker slot in the fixed-size pool (Issue #26). The pool is created
+ * once at construction time with `concurrencyLimit` slots and is NOT resized
+ * while live (a poolSize setting change takes effect on the next reload --
+ * Issue #25). `sessionId` records which keepAlive session, if any, this worker
+ * currently owns; the binding is established by the first session job and
+ * released when the session is torn down.
+ */
+interface WorkerSlot {
+	id: number;
+	busy: boolean;
+	/** The keepAlive session this worker is currently bound to, if any. */
+	sessionId?: string;
 }
 
 /**
@@ -167,6 +222,37 @@ class PriorityQueue {
 	}
 
 	/**
+	 * Returns all queued jobs in true DISPATCH order: by priority
+	 * (high -> normal -> low), then FIFO by submit sequence within a priority.
+	 * Does NOT mutate the heap. Used to compute a job's 1-based queue position
+	 * (Issue #24) and to drive session-aware dispatch (Issue #26).
+	 */
+	toSortedArray(): QueuedJob[] {
+		return this.heap
+			.slice()
+			.sort((a, b) => this.compareNodes(a, b))
+			.map(node => node.job);
+	}
+
+	/**
+	 * Removes and returns the first job in dispatch order for which `accept`
+	 * returns true, skipping any earlier-but-unassignable jobs (e.g. a session
+	 * job whose owning worker is still busy -- Issue #26 case (a)). Returns
+	 * undefined if no queued job is currently dispatchable. Heap order is
+	 * preserved for the jobs that are skipped.
+	 */
+	dequeueFirstMatching(accept: (job: QueuedJob) => boolean): QueuedJob | undefined {
+		const ordered = this.heap.slice().sort((a, b) => this.compareNodes(a, b));
+		for (const node of ordered) {
+			if (accept(node.job)) {
+				this.removeByJobId(node.job.jobId);
+				return node.job;
+			}
+		}
+		return undefined;
+	}
+
+	/**
 	 * Moves a node up the heap to maintain heap property.
 	 */
 	private bubbleUp(index: number): void {
@@ -243,16 +329,48 @@ export class JobQueueManager {
 	private readonly onJobStatusChangedEmitter = new vscode.EventEmitter<JobStatusChangeEvent>();
 
 	/**
+	 * The fixed-size worker pool (Issue #26). Created once at construction with
+	 * `concurrencyLimit` slots and never resized while live (Issue #25: a
+	 * poolSize setting change applies on the NEXT extension reload). Each slot
+	 * carries an optional `sessionId` recording the keepAlive session it owns
+	 * for sticky routing.
+	 */
+	private readonly workers: WorkerSlot[] = [];
+
+	/**
+	 * Tracks how many in-flight (running) jobs each keepAlive session currently
+	 * has. When a session's count returns to zero AND it has no queued jobs, the
+	 * session is torn down and its worker binding is released (Issue #26 case
+	 * (d)). Keyed by sessionId.
+	 */
+	private readonly sessionActiveCounts = new Map<string, number>();
+
+	/**
 	 * Event fired when a job's status changes.
 	 */
 	public readonly onJobStatusChanged = this.onJobStatusChangedEmitter.event;
 
 	/**
 	 * Creates a new JobQueueManager.
-	 * @param concurrencyLimit Maximum number of concurrent jobs (default: 2, max: 5)
+	 * @param concurrencyLimit Maximum number of concurrent jobs (pool size).
+	 *        Clamped to [1, 16] to match the hexcore.pipeline.queue.poolSize
+	 *        setting bounds (Issue #25). Defaults to 2.
 	 */
 	constructor(concurrencyLimit: number = 2) {
-		this.concurrencyLimit = Math.min(Math.max(1, concurrencyLimit), 5);
+		this.concurrencyLimit = Math.min(Math.max(1, concurrencyLimit), 16);
+		// Build the fixed-size worker pool once. The pool is never resized while
+		// live (Issue #25); in-flight jobs always finish on their current worker.
+		for (let i = 0; i < this.concurrencyLimit; i++) {
+			this.workers.push({ id: i, busy: false });
+		}
+	}
+
+	/**
+	 * Returns the configured pool size (number of worker slots). Read-only;
+	 * resizing a live pool is out of scope (Issue #25).
+	 */
+	get poolSize(): number {
+		return this.concurrencyLimit;
 	}
 
 	/**
@@ -300,6 +418,12 @@ export class JobQueueManager {
 			}
 		}
 		this.runningJobs.clear();
+		// Release all worker bindings and session bookkeeping (Issue #26).
+		for (const worker of this.workers) {
+			worker.busy = false;
+			worker.sessionId = undefined;
+		}
+		this.sessionActiveCounts.clear();
 		this.onJobStatusChangedEmitter.dispose();
 	}
 
@@ -307,9 +431,13 @@ export class JobQueueManager {
 	 * Queues a new job for execution.
 	 * @param filePath Path to the .hexcore_job.json file
 	 * @param priority Job priority (default: 'normal')
+	 * @param sessionId Optional keepAlive session id for sticky worker routing
+	 *        (Issue #26). When set, every job sharing this id is pinned to the
+	 *        SAME worker for the life of the session. When unset, the job is
+	 *        stateless and runs on any free worker (original behavior).
 	 * @returns The job ID (UUID)
 	 */
-	queueJob(filePath: string, priority: JobPriority = 'normal'): string {
+	queueJob(filePath: string, priority: JobPriority = 'normal', sessionId?: string): string {
 		const jobId = crypto.randomUUID();
 		const job: QueuedJob = {
 			jobId,
@@ -317,7 +445,8 @@ export class JobQueueManager {
 			status: 'queued',
 			createdAt: Date.now(),
 			filePath: path.resolve(filePath),
-			abortController: new AbortController()
+			abortController: new AbortController(),
+			...(sessionId ? { sessionId } : {})
 		};
 
 		this.jobs.set(jobId, job);
@@ -359,12 +488,12 @@ export class JobQueueManager {
 	 * @returns The new job ID, or the existing in-flight job ID if a duplicate
 	 *          was suppressed, or undefined if it could not be queued
 	 */
-	queueJobIfAbsent(filePath: string, priority: JobPriority = 'normal'): { jobId: string; deduped: boolean } {
+	queueJobIfAbsent(filePath: string, priority: JobPriority = 'normal', sessionId?: string): { jobId: string; deduped: boolean } {
 		const existing = this.getActiveJobForPath(filePath);
 		if (existing) {
 			return { jobId: existing.jobId, deduped: true };
 		}
-		return { jobId: this.queueJob(filePath, priority), deduped: false };
+		return { jobId: this.queueJob(filePath, priority, sessionId), deduped: false };
 	}
 
 	/**
@@ -410,6 +539,55 @@ export class JobQueueManager {
 	}
 
 	/**
+	 * Computes the 1-based DISPATCH-order position of a queued job (Issue #24).
+	 * Position 1 is the next job that would be dispatched. Order is by priority
+	 * (high -> normal -> low) then FIFO submit time within a priority -- i.e. a
+	 * freshly-submitted `high` job jumps ahead of pending `normal` jobs.
+	 *
+	 * Returns `null` for any job that is not currently `queued` (running / done /
+	 * failed / cancelled), or if the job id is unknown.
+	 */
+	getQueuePosition(jobId: string): number | null {
+		const job = this.jobs.get(jobId);
+		if (!job || job.status !== 'queued') {
+			return null;
+		}
+		const ordered = this.queue.toSortedArray();
+		const index = ordered.findIndex(j => j.jobId === jobId);
+		return index === -1 ? null : index + 1;
+	}
+
+	/**
+	 * Builds the public status report for a job (Issue #24 / #26 status
+	 * contract). Includes the dispatch-order `position` when queued (else null),
+	 * echoes the keepAlive `sessionId` when present, and reports the bound
+	 * `workerId` once dispatched.
+	 * @param jobId The job ID
+	 * @returns The status report, or undefined if the job id is unknown
+	 */
+	getJobStatusReport(jobId: string): JobStatusReport | undefined {
+		const job = this.jobs.get(jobId);
+		if (!job) {
+			return undefined;
+		}
+		const report: JobStatusReport = {
+			jobId: job.jobId,
+			status: job.status,
+			priority: job.priority,
+			position: job.status === 'queued' ? this.getQueuePosition(jobId) : null,
+			submittedAt: job.createdAt,
+			filePath: job.filePath
+		};
+		if (job.startedAt !== undefined) { report.startedAt = job.startedAt; }
+		if (job.completedAt !== undefined) { report.completedAt = job.completedAt; }
+		if (job.sessionId !== undefined) { report.sessionId = job.sessionId; }
+		if (job.workerId !== undefined) { report.workerId = job.workerId; }
+		if (job.result !== undefined) { report.result = job.result; }
+		if (job.error !== undefined) { report.error = job.error; }
+		return report;
+	}
+
+	/**
 	 * Gets all jobs (queued, running, and completed).
 	 * @returns Array of all jobs
 	 */
@@ -438,18 +616,41 @@ export class JobQueueManager {
 	}
 
 	/**
-	 * Main processing loop that assigns jobs to available slots.
+	 * Main processing loop that assigns jobs to worker slots.
+	 *
+	 * Dispatch is session-aware (Issue #26): rather than blindly popping the
+	 * single highest-priority job (which could be a session job whose owning
+	 * worker is busy and would head-of-line block the whole queue), we pick the
+	 * first job in dispatch order that has an assignable worker RIGHT NOW. A
+	 * session job is only assignable to ITS bound worker; if that worker is busy
+	 * the job waits (case (a)) while later stateless / other-session jobs may
+	 * still proceed on other free workers.
 	 */
 	private async processLoop(): Promise<void> {
 		while (this.running && !this.queue.isEmpty()) {
-			// Check if we have reached the concurrency limit
-			if (this.runningJobs.size >= this.concurrencyLimit) {
+			// Stop early if every worker is busy -- nothing can be dispatched.
+			if (!this.workers.some(w => !w.busy)) {
 				await this.delay(100);
 				continue;
 			}
 
-			const job = this.queue.dequeue();
-			if (!job) {
+			// Pick the highest-priority queued job that has a worker available to
+			// it under the session-affinity rules. assignWorker() returns the slot
+			// it would run on (without yet marking it busy) or undefined.
+			let chosenWorker: WorkerSlot | undefined;
+			const job = this.queue.dequeueFirstMatching(candidate => {
+				const worker = this.pickWorkerFor(candidate);
+				if (worker) {
+					chosenWorker = worker;
+					return true;
+				}
+				return false;
+			});
+
+			if (!job || !chosenWorker) {
+				// No queued job is dispatchable right now (e.g. all remaining are
+				// session jobs whose workers are busy). Wait and retry.
+				await this.delay(100);
 				continue;
 			}
 
@@ -459,11 +660,101 @@ export class JobQueueManager {
 				continue;
 			}
 
+			// Bind the job to the chosen worker. For a session job this also
+			// establishes / confirms the session->worker affinity.
+			this.bindJobToWorker(job, chosenWorker);
+
 			this.updateJobStatus(job, 'running');
 			this.runningJobs.set(job.jobId, job.abortController);
 
 			// Execute job asynchronously
 			this.executeJob(job);
+		}
+	}
+
+	/**
+	 * Selects the worker slot a queued job may run on RIGHT NOW, honoring
+	 * session affinity (Issue #26). Returns undefined if the job cannot be
+	 * dispatched yet.
+	 *
+	 * - Stateless job (no sessionId): any free worker.
+	 * - Session job whose session is already bound to a worker: ONLY that worker,
+	 *   and only if it is free (case (a) -- it WAITS for its worker, it never
+	 *   steals a different free worker; case (b) -- a second same-session job
+	 *   queued before either runs resolves to the same bound worker).
+	 * - Session job with no binding yet: the first free worker, which then
+	 *   becomes the owner (affinity established on first dispatch). To avoid
+	 *   handing a session a worker that is already pinned to a DIFFERENT live
+	 *   session, prefer a worker with no session binding; fall back to any free
+	 *   worker only if none is unbound.
+	 */
+	private pickWorkerFor(job: QueuedJob): WorkerSlot | undefined {
+		if (!job.sessionId) {
+			return this.workers.find(w => !w.busy);
+		}
+
+		const owner = this.workers.find(w => w.sessionId === job.sessionId);
+		if (owner) {
+			// Session already bound: must use its worker, and only when free.
+			return owner.busy ? undefined : owner;
+		}
+
+		// No binding yet: establish one on a free worker, preferring an unbound
+		// slot so two distinct live sessions don't collide on one worker.
+		const freeUnbound = this.workers.find(w => !w.busy && w.sessionId === undefined);
+		if (freeUnbound) {
+			return freeUnbound;
+		}
+		return this.workers.find(w => !w.busy);
+	}
+
+	/**
+	 * Marks a worker busy for a job and, for a session job, records / confirms
+	 * the session->worker binding (Issue #26).
+	 */
+	private bindJobToWorker(job: QueuedJob, worker: WorkerSlot): void {
+		worker.busy = true;
+		job.workerId = worker.id;
+		if (job.sessionId) {
+			worker.sessionId = job.sessionId;
+			this.sessionActiveCounts.set(
+				job.sessionId,
+				(this.sessionActiveCounts.get(job.sessionId) ?? 0) + 1
+			);
+		}
+	}
+
+	/**
+	 * Releases a worker after a job finishes. For a session job, decrements the
+	 * session's active count and, once it reaches zero with no queued siblings,
+	 * tears the session down -- releasing the worker's session binding so a later
+	 * same-sessionId job can rebind to a (possibly different) worker (case (d)).
+	 */
+	private releaseWorker(job: QueuedJob): void {
+		const worker = job.workerId !== undefined ? this.workers[job.workerId] : undefined;
+		if (worker) {
+			worker.busy = false;
+		}
+
+		if (!job.sessionId) {
+			return;
+		}
+
+		const remaining = (this.sessionActiveCounts.get(job.sessionId) ?? 1) - 1;
+		if (remaining > 0) {
+			this.sessionActiveCounts.set(job.sessionId, remaining);
+			return;
+		}
+		this.sessionActiveCounts.delete(job.sessionId);
+
+		// If no queued job still references this session, the session is fully
+		// drained: tear it down and release the worker binding so the slot is a
+		// generic free worker again.
+		const hasQueuedSibling = this.queue
+			.getAllJobs()
+			.some(j => j.sessionId === job.sessionId && j.status === 'queued');
+		if (!hasQueuedSibling && worker && worker.sessionId === job.sessionId) {
+			worker.sessionId = undefined;
 		}
 	}
 
@@ -493,6 +784,9 @@ export class JobQueueManager {
 			this.updateJobStatus(job, 'failed');
 		} finally {
 			this.runningJobs.delete(job.jobId);
+			// Free the worker slot and, for a session job, run session-teardown /
+			// binding-release bookkeeping (Issue #26).
+			this.releaseWorker(job);
 
 			// Continue processing more jobs
 			if (this.running) {

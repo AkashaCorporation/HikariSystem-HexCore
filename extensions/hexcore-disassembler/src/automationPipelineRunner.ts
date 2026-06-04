@@ -2115,14 +2115,17 @@ let jobQueueManagerInstance: JobQueueManager | undefined;
  */
 export function getJobQueueManagerInstance(concurrencyLimit?: number): JobQueueManager {
 	if (!jobQueueManagerInstance) {
-		// Default to SEQUENTIAL (1). The emulation engine (DebugEngine) is a
-		// process-wide singleton holding ONE shared x64-ELF worker, so two jobs
-		// that each run emulation/debug steps corrupt each other's session even
-		// with the per-session SessionLock: a sibling job's opening
-		// disposeHeadless / readMemory touches the shared engine OUTSIDE the lock
-		// and tears down the in-flight worker (SIGTERM "worker disposed"). The
-		// only command-level-safe model until per-session worker isolation (#26)
-		// is one job at a time. Callers may still pass an explicit limit.
+		// Pool size. Historically this defaulted to SEQUENTIAL (1) because the
+		// emulation engine (DebugEngine) is a process-wide singleton holding ONE
+		// shared x64-ELF worker, so two emulation/debug jobs corrupted each
+		// other's session (a sibling's disposeHeadless / readMemory touched the
+		// shared engine outside the per-session SessionLock and tore down the
+		// in-flight worker). Issue #26 (sessionId-based sticky worker routing)
+		// now lets same-session jobs pin to one worker, so a >1 pool is safe for
+		// session-tagged and stateless work. The actual size is driven by the
+		// hexcore.pipeline.queue.poolSize setting, which activate() reads and
+		// passes here on first call (Issue #25). When a caller passes nothing we
+		// stay conservative and sequential.
 		jobQueueManagerInstance = getJobQueueManager(concurrencyLimit ?? 1);
 		// Configure the job executor to use the AutomationPipelineRunner
 		jobQueueManagerInstance.setJobExecutor(async (filePath: string, abortSignal: AbortSignal) => {
