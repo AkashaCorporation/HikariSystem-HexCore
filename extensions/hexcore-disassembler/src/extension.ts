@@ -30,7 +30,7 @@ import { QueuedJob, QueueStats, JobStatusReport } from './jobQueueManager';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions } from './remillWrapper';
-import { runPathfinder, getPdataFunctionCount } from './pathfinder';
+import { runPathfinder, getPdataFunctionCount, resolveReanchorWindow } from './pathfinder';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
 import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
@@ -2813,7 +2813,41 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			const bytes = engine.getBytes(startAddress, size);
+			// D-scanrange: auto-backtrack a mid-function hit to the real prologue
+			// BEFORE fetching bytes, so the lift buffer starts at the function entry
+			// and Remill sees the full CFG (no use-before-def from a mid-function
+			// lift). Mirrors the liftToIR path's backtrack and reuses BOTH FIX-022c
+			// guards: the 4096-byte cap (in resolveReanchorWindow) and the Capstone
+			// continuity check (validateBacktrackCandidate). FIX-011 guard: the
+			// relocatable case is rejected inside resolveReanchorWindow, so this
+			// path never re-fetches an unpatched .ko window.
+			if (options.autoBacktrack !== false) {
+				const isRelocatableDecomp = engine.getFileInfo()?.isRelocatable === true;
+				const funcStartDecomp = await engine.findFunctionStartForAddress(startAddress, isRelocatableDecomp);
+				const reWindow = resolveReanchorWindow(
+					startAddress,
+					size,
+					funcStartDecomp,
+					engine.getFunctionAt(funcStartDecomp ?? startAddress)?.endAddress,
+					isRelocatableDecomp,
+				);
+				if (reWindow.scanStart !== undefined && reWindow.scanStart !== startAddress) {
+					const validReanchor = await validateBacktrackCandidate(engine, reWindow.scanStart, startAddress);
+					if (validReanchor) {
+						size += (startAddress - reWindow.scanStart);
+						startAddress = reWindow.scanStart;
+						const reFunc = engine.getFunctionAt(startAddress);
+						if (reFunc && reFunc.endAddress - reFunc.address > size) {
+							size = reFunc.endAddress - reFunc.address;
+						}
+						console.log(`[HexCore] rellic.decompile D-scanrange: re-anchored to prologue 0x${startAddress.toString(16)} (size now ${size})`);
+					} else {
+						console.log(`[HexCore] rellic.decompile D-scanrange: backtrack to 0x${reWindow.scanStart.toString(16)} REJECTED by continuity check`);
+					}
+				}
+			}
+
+			let bytes = engine.getBytes(startAddress, size);
 			if (!bytes || bytes.length === 0) {
 				const errorMsg = `Address 0x${startAddress.toString(16)} is outside the loaded binary.`;
 				if (quiet) {

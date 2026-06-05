@@ -57,6 +57,21 @@ export interface CFGHints {
 
 	/** Debug: number of unresolved indirect jumps */
 	unresolvedIndirects: number;
+
+	/**
+	 * D-scanrange: start of the [scanStart, scanEnd) window these hints were
+	 * computed over. After a mid-function hit is re-anchored to the real
+	 * prologue this equals the function entry, so the caller can size its
+	 * Remill buffer to match (scanEnd - scanStart). Undefined on empty hints.
+	 */
+	scanStart?: number;
+
+	/**
+	 * D-scanrange: end (exclusive) of the scan window. Every leader emitted in
+	 * `leaders` is guaranteed < scanEnd, so leaders never fall outside the
+	 * caller's real lift buffer. Undefined on empty hints.
+	 */
+	scanEnd?: number;
 }
 
 export interface IndirectJumpResolution {
@@ -1046,6 +1061,14 @@ export async function runPathfinder(
 	const scanStart = targetAddress;
 	const scanEnd = targetAddress + (bytes?.length ?? 0);
 
+	// D-scanrange: surface the window so the caller can size Remill's buffer to
+	// match pathfinder's [scanStart, scanEnd). The caller re-anchors a
+	// mid-function hit to the prologue BEFORE calling us, so scanStart already
+	// equals the function entry on the backtrack path; every leader we emit
+	// below is < scanEnd, so none falls outside the caller's real buffer.
+	hints.scanStart = scanStart;
+	hints.scanEnd = scanEnd;
+
 	if (!functionBytes || functionBytes.length === 0) {
 		console.log(`[pathfinder v0.2.0] no bytes available, returning Phase 1 hints only`);
 		return hints;
@@ -1219,6 +1242,60 @@ function emptyHints(): CFGHints {
 		instructionsDecoded: 0,
 		unresolvedIndirects: 0,
 	};
+}
+
+/** D-scanrange: result of the prologue re-anchor decision for a mid-function hit. */
+export interface ReanchorWindow {
+	/**
+	 * Re-anchored scan start (the recovered prologue), or undefined when the
+	 * caller MUST keep its original start -- i.e. the candidate is unsafe under
+	 * the FIX-011 relocatable guard or the FIX-022c 4096-byte distance cap.
+	 */
+	scanStart: number | undefined;
+	/**
+	 * Scan end (exclusive). Always >= the caller's original buffer end
+	 * (startAddress + bufferLen), so the window fully contains both the prologue
+	 * and the original mid-function hit.
+	 */
+	scanEnd: number;
+}
+
+/**
+ * D-scanrange: decide the prologue-re-anchored scan window for a mid-function
+ * lift hit, applying the SAME safety guards the liftToIR path uses.
+ *
+ * - FIX-011 guard: NEVER re-anchor on a relocatable (ET_REL / .ko) buffer.
+ *   The decompile lift path has no relocation patcher, so re-fetching a wider
+ *   .ko window would lift unpatched `call +5` NOPs (mali/rootkit corpus).
+ * - FIX-022c distance cap: refuse a backtrack of more than 4096 bytes; a
+ *   farther candidate is almost certainly a DIFFERENT (adjacent) function
+ *   (the ROTTR regression class). The caller still runs the Capstone
+ *   continuity check (validateBacktrackCandidate) on top of this.
+ *
+ * Returns scanStart=undefined whenever re-anchoring is unsafe; otherwise the
+ * recovered prologue plus a scanEnd that fully contains the original buffer.
+ */
+export function resolveReanchorWindow(
+	startAddress: number,
+	bufferLen: number,
+	funcStart: number | undefined,
+	boundaryEnd: number | undefined,
+	isRelocatable: boolean,
+): ReanchorWindow {
+	const originalEnd = startAddress + bufferLen;
+	// FIX-011: relocatable buffers are off-limits to the caller re-anchor.
+	// Also bail when there is no earlier candidate to re-anchor to.
+	if (isRelocatable || funcStart === undefined || funcStart >= startAddress) {
+		return { scanStart: undefined, scanEnd: originalEnd };
+	}
+	// FIX-022c: honor the 4096-byte distance cap.
+	if (startAddress - funcStart > 4096) {
+		return { scanStart: undefined, scanEnd: originalEnd };
+	}
+	const scanEnd = boundaryEnd !== undefined && boundaryEnd > originalEnd
+		? boundaryEnd
+		: originalEnd;
+	return { scanStart: funcStart, scanEnd };
 }
 
 // ═══════════════════════════════════════════════════════════════════════

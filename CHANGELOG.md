@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped; the version, GitHub tag, and installers are not cut. This single Unreleased bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions are cut. Waves are ordered newest-first below.
 
+### Disassembler - mid-function autoBacktrack re-anchors the lift window to the recovered .pdata prologue (HealthData truncation root)
+
+> When a decompile targets a mid-function address (e.g. the SOTR GodMode hit `0x140253B21`), Pathfinder's autoBacktrack found the real function start but the lift caller still fetched Remill's buffer from the mid-function hit -- the recovered prologue + leaders fell outside Remill's window, producing a truncated CFG and a structurally broken decompile (use-before-def). All in the `hexcore-disassembler` extension (`pathfinder.ts` + `extension.ts`), TS-only, `tsc --noEmit` exits 0.
+
+- **Re-anchor the lift window.** A new pure `resolveReanchorWindow` helper computes the re-anchored `[scanStart, scanEnd)` from the recovered prologue, surfaced end-to-end on `CFGHints` so Remill's `getBytes` window matches Pathfinder's `[boundary.start, boundary.end)` leader range. The `rellic.decompile` path passes the re-anchored window so a leader can never fall outside Remill's real buffer.
+- **Guards preserved (no regression).** The re-anchor is SKIPPED when `fileInfo.isRelocatable` (ELF ET_REL / `.ko`) so the FIX-011 relocation-patched buffer is never overwritten with raw bytes (mali / rootkit kernel-module corpus stays correct); the FIX-022c adjacent-function protection is kept (4096-byte backtrack cap + `validateBacktrackCandidate` continuity sweep) so the ROTTR adjacent-function regression cannot reopen; the `const bytes` / `size` decl is widened to `let` only where the re-anchor needs to reassign it.
+- **Validated**: `tsc --noEmit` exits 0 (baseline parity, no new type errors); the bundled `pathfinder.test.ts` pins the three safety properties of `resolveReanchorWindow` -- backtrack > 4096 -> scanStart undefined; ELF ET_REL keeps FIX-011; every leader < the caller's real buffer end -- green incl. 3000 fast-check runs. Known follow-up: on a Capstone-probed (non-table-registered) prologue the end-side window grows only by the backtrack distance, a benign under-grow no worse than today (leader emission stays < scanEnd).
+
+### Helix (decompiler engine) - honesty layer increment 2: function_starts NAPI + D4 confidence cap + #30 registry-miss (mirror)
+
+> Mirror of HexCore Helix Wave 27 (full detail in the Helix repo CHANGELOG). Three additive C-AST honesty fixes, all inert on the non-authoritative single-function corpus (byte-identical), gated engine-direct + a bundled GoogleTest. The cross-repo IDE caller that wires `analyzeAll -> setFunctionStarts` (which makes D2/#30 fire on the live game path) and the residual folded cross-function leak (A-D1) are deferred to a follow-up so they land where they can be validated end-to-end against a real multi-window authoritative table.
+
+- **FIX-092 NAPI `set_function_starts`** -- the keystone channel that lets an IDE single-function lift supply the authoritative `analyzeAll` function table, so D2 / #30 fire instead of degrading to the regression-safe fallback (plumbing only; no caller yet, 0 output movement).
+- **FIX-093 D4 damning-defect cap** -- a function that leaked a code address (D1) or called an out-of-table target (D2) is hard-capped at 50% confidence (SOTTR `UpdatePosition` 60.5% Medium -> 50.0% Low); clean functions stay byte-identical.
+- **FIX-094 #30 registry-miss** -- a stub-shaped function whose entry is absent from an authoritative table is scored 0 (honest "did not lift"), never a silent stub; proven by `RegistryMissTest` (3/3), 0 false-positives on real authoritative-table fixtures.
+
 ### Job Queue - queue position, configurable pool size, and sessionId-based sticky worker routing (closes #24 / #25 / #26)
 
 > Three follow-ups to the Job Queue Manager (shipped in #19, v3.8.0). All in `jobQueueManager.ts`, surfaced through the `hexcore.pipeline.jobStatus` / `hexcore.pipeline.queueJob` commands and a new `package.json` setting; TS-only, no native rebuild. The keepAlive emulation-session model can now run a >1 worker pool safely because same-session work is pinned to a single worker.
