@@ -55,6 +55,12 @@ interface HelixEngineInstance {
 	addDataSection?(vaStart: bigint, bytes: Buffer): void;
 	/** Drop all registered data sections. */
 	clearDataSections?(): void;
+	/** vX: the COMPLETE function-start table (analyzeAll discovery) as VAs.
+	 *  Makes the Helix function table authoritative so the D2 callee gate
+	 *  (out-of-table target -> honest indirect) and the #30 registry-miss
+	 *  honesty path fire.  Full table or omitted; a partial table wrongly
+	 *  flips the engine authoritative and mis-gates valid calls to indirect. */
+	setFunctionStarts?(starts: number[]): void;
 }
 
 interface HelixModule {
@@ -225,6 +231,14 @@ export class HelixWrapper {
 		 * `goto default` in the decompiled output.
 		 */
 		dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
+		/**
+		 * vX: the COMPLETE function-start table (every entry from the
+		 * disassembler analyzeAll discovery, as virtual addresses).  Makes
+		 * Helix authoritative so the D2 callee gate and the #30 registry-miss
+		 * honesty path fire.  Full table or omitted -- a partial table wrongly
+		 * flips the engine authoritative and mis-gates valid in-binary calls.
+		 */
+		functionStarts?: number[];
 	}): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
@@ -297,6 +311,22 @@ export class HelixWrapper {
 			} catch { /* Native module too old — proceed without sections */ }
 		}
 
+		// vX: feed the COMPLETE function-start table so the Helix function table
+		// is authoritative -- the D2 callee gate and the #30 registry-miss path
+		// only fire under an authoritative table.  Set AFTER setSkipOptimization
+		// / setUseCastLayer (the engine rebuilds its pipeline on those, which
+		// would discard an earlier table) and right before the decompile.  Full
+		// table or nothing (a partial table mis-gates valid calls to indirect).
+		const functionStarts = options?.functionStarts;
+		if (functionStarts && functionStarts.length > 0) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof (engine as any).setFunctionStarts === 'function') {
+					(engine as any).setFunctionStarts(functionStarts);
+				}
+			} catch { /* Native module too old -- proceed without authoritative table */ }
+		}
+
 		let result: HelixResult;
 		if (irText.length > ASYNC_THRESHOLD) {
 			// v3.7.4: Pass engine flags to worker — worker creates its own engine
@@ -305,6 +335,7 @@ export class HelixWrapper {
 				skipOptimization: skipOpt,
 				useCastLayer: castLayer,
 				variableRenames: renames,
+				functionStarts,
 			});
 		} else {
 			result = this.decompileIrSync(irText, mapping.helixArch);
@@ -466,7 +497,7 @@ export class HelixWrapper {
 	private decompileIrAsync(
 		irText: string,
 		arch: HelixArchValue,
-		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }> },
+		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[] },
 	): Promise<HelixResult> {
 		return new Promise<HelixResult>((resolve) => {
 			const workerCode = `
@@ -505,6 +536,11 @@ export class HelixWrapper {
 							}
 						}
 
+						// vX: authoritative function-start table (mirrors main thread)
+						if (workerData.functionStarts && workerData.functionStarts.length > 0 && typeof engine.setFunctionStarts === 'function') {
+							engine.setFunctionStarts(workerData.functionStarts);
+						}
+
 						const result = engine.decompileIr(workerData.irText);
 						engine.dispose();
 						parentPort.postMessage({ result });
@@ -523,6 +559,7 @@ export class HelixWrapper {
 					skipOptimization: flags?.skipOptimization ?? false,
 					useCastLayer: flags?.useCastLayer ?? false,
 					variableRenames: flags?.variableRenames ?? [],
+					functionStarts: flags?.functionStarts ?? [],
 				},
 			});
 

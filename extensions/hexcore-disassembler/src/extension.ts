@@ -3560,6 +3560,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
+				functionStarts?: number[];
 			} | undefined =
 				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
 					? {
@@ -3650,6 +3651,16 @@ export function activate(context: vscode.ExtensionContext): void {
 				helixIROptions.dataSections = peSections.map(s => ({
 					vaStart: s.vaStart, bytes: s.bytes
 				}));
+			}
+
+			// vX: pass the COMPLETE function-start table (engine.getFunctions() is
+			// the full analyzeAll discovery) so Helix's function table is
+			// authoritative and the D2 callee gate + #30 registry-miss fire
+			// honestly.  Full table or nothing -- a partial table mis-gates.
+			const allFunctionStarts = engine.getFunctions().map(f => f.address);
+			if (allFunctionStarts.length > 0) {
+				helixIROptions = helixIROptions ?? {};
+				helixIROptions.functionStarts = allFunctionStarts;
 			}
 
 			const decompileResult = await vscode.window.withProgress(
@@ -3791,6 +3802,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
+				functionStarts?: number[];
 			} | undefined =
 				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
 					? {
@@ -3862,6 +3874,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				helixOptions.dataSections = peSections2.map(s => ({
 					vaStart: s.vaStart, bytes: s.bytes
 				}));
+			}
+
+			// vX: pass the COMPLETE function-start table (analyzeAll discovery) so
+			// Helix's function table is authoritative and the D2 callee gate +
+			// #30 registry-miss fire honestly.  Full table or nothing.
+			const allFunctionStarts2 = engine.getFunctions().map(f => f.address);
+			if (allFunctionStarts2.length > 0) {
+				helixOptions = helixOptions ?? {};
+				helixOptions.functionStarts = allFunctionStarts2;
 			}
 
 			const decompileResult = await vscode.window.withProgress(
