@@ -36,6 +36,10 @@ interface StringsCommandOptions {
 	quiet?: boolean;
 	/** Enable XOR brute-force and stack-string deobfuscation (extractAdvanced). */
 	deobfuscate?: boolean;
+	/** Single known-plaintext crib for XOR brute-force (case-insensitive); merged with `cribs`. */
+	crib?: string;
+	/** Multiple cribs (OR semantics): keep decodes containing ANY of these. */
+	cribs?: string[];
 }
 
 interface ExtractedString {
@@ -1245,6 +1249,18 @@ function runDeobfuscation(
 	const targetSections = cmdOpts.targetSections as string[] | undefined;
 	const customPlaintextPatterns = cmdOpts.customPlaintextPatterns as string[] | undefined;
 
+	// Crib filtering: accept a single `crib` and/or a `cribs` array; dedupe non-empty.
+	const cribList: string[] = [];
+	if (typeof cmdOpts.crib === 'string' && cmdOpts.crib.length > 0) {
+		cribList.push(cmdOpts.crib);
+	}
+	if (Array.isArray(cmdOpts.cribs)) {
+		for (const c of cmdOpts.cribs) {
+			if (typeof c === 'string' && c.length > 0) { cribList.push(c); }
+		}
+	}
+	const cribs = cribList.length > 0 ? Array.from(new Set(cribList)) : undefined;
+
 	const scannerOpts: MultiByteXorOptions = {
 		minLength,
 		customPlaintextPatterns,
@@ -1340,7 +1356,7 @@ function runDeobfuscation(
 			}
 
 			// --- 1. XOR brute-force ---
-			const xorResults = xorBruteForce(buffer, offset, { minLength });
+			const xorResults = xorBruteForce(buffer, offset, { minLength, cribs });
 			for (const xr of xorResults) {
 				if (results.length >= MAX_DEOB_RESULTS) { break; }
 				const key = `xor:${xr.value}`;

@@ -26,6 +26,30 @@ export interface XorScanOptions {
 	minLength?: number;
 	/** Minimum confidence to include result (default: 0.6). */
 	minConfidence?: number;
+	/**
+	 * Optional known-plaintext substrings (cribs). When non-empty, a decoded run
+	 * is kept only if its (lowercased) value contains at least one crib. Prunes
+	 * in ADDITION to confidence scoring; never relaxes it, never invents results.
+	 * Empty/undefined => identical to the previous behavior. ref: CyberChef.
+	 */
+	cribs?: string[];
+	/**
+	 * Sample-window start offset (relative to `buffer`). Window is
+	 * [sampleOffset, end): lone offset bounds [sampleOffset, buffer.length);
+	 * with sampleLength it is [sampleOffset, sampleOffset+sampleLength). Reported
+	 * offsets stay ABSOLUTE (baseOffset + sampleStart + run.start). Floored. A
+	 * NaN/negative/non-finite value is PRESENT-BUT-INVALID: the whole window is
+	 * treated as absent (full-buffer scan for BOTH), so an invalid offset can
+	 * never be silently coerced to 0 while a length is honored.
+	 */
+	sampleOffset?: number;
+	/**
+	 * Sample-window length in bytes (perf bound for crib-hunting). Floored;
+	 * NaN/negative/non-finite => absent. A zero-length / otherwise empty window
+	 * is NEVER a silent-empty result: it falls back to a full-buffer scan.
+	 * Undefined => window runs to buffer.length.
+	 */
+	sampleLength?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -76,21 +100,61 @@ export function xorBruteForce(
 	const minLength = options?.minLength ?? DEFAULT_MIN_LENGTH;
 	const minConfidence = options?.minConfidence ?? DEFAULT_MIN_CONFIDENCE;
 
+	// Crib filter + bounded sample window. ref: CyberChef XORBruteForce.mjs
+	// (Apache-2.0); HexCore-owned TS impl (multi-crib OR over our own run
+	// extraction + scoring, absolute offsets preserved). No code copied verbatim.
+	const cribs = (options?.cribs ?? [])
+		.filter((c): c is string => typeof c === 'string' && c.length > 0)
+		.map(c => c.toLowerCase());
+	const hasCrib = cribs.length > 0;
+
+	// Window = [sampleStart, sampleEnd) over `buffer`; offsets stay ABSOLUTE.
+	// Validation (silent-empty / silent-relocation are NEVER acceptable):
+	//   - sampleOffset PRESENT-BUT-INVALID (supplied but NaN/negative/non-finite)
+	//     => whole window absent => full-buffer scan for BOTH (an invalid offset
+	//     can never be coerced to 0 while a length is honored).
+	//   - sampleLength invalid => absent.
+	//   - empty window (sampleEnd <= sampleStart, e.g. sampleLength:0 or offset at
+	//     EOF) => full-buffer fallback, never a silent [].
+	const rawSampleOffset = options?.sampleOffset;
+	const rawSampleLength = options?.sampleLength;
+	const normOffset = normalizeWindowArg(rawSampleOffset);
+	const offsetPresentButInvalid = rawSampleOffset !== undefined && normOffset === undefined;
+	const normLength = normalizeWindowArg(rawSampleLength);
+
+	let sampleStart: number;
+	let sampleEnd: number;
+	if (offsetPresentButInvalid) {
+		sampleStart = 0;
+		sampleEnd = buffer.length;
+	} else {
+		sampleStart = normOffset === undefined ? 0 : Math.min(normOffset, buffer.length);
+		sampleEnd = normLength === undefined
+			? buffer.length
+			: Math.min(sampleStart + normLength, buffer.length);
+	}
+	if (sampleEnd <= sampleStart) {
+		sampleStart = 0;
+		sampleEnd = buffer.length;
+	}
+	const scanBuffer = (sampleStart === 0 && sampleEnd === buffer.length)
+		? buffer
+		: buffer.subarray(sampleStart, sampleEnd);
+
 	// Dedup: key is "offset:decoded_value" to reject same string from multiple keys
 	const seen = new Set<string>();
 	const results: XorResult[] = [];
 
 	for (let key = 0x01; key <= 0xFF; key++) {
-		// Quick reject: try XOR on a sample of the buffer.
-		// If less than 5% of the first 256 bytes produce printable chars, skip.
-		if (!quickCheck(buffer, key)) {
+		// Quick reject on the (windowed) buffer.
+		if (!quickCheck(scanBuffer, key)) {
 			continue;
 		}
 
-		// Decode full buffer with this key
-		const decoded = Buffer.alloc(buffer.length);
-		for (let i = 0; i < buffer.length; i++) {
-			decoded[i] = buffer[i] ^ key;
+		// Decode the (windowed) buffer with this key
+		const decoded = Buffer.alloc(scanBuffer.length);
+		for (let i = 0; i < scanBuffer.length; i++) {
+			decoded[i] = scanBuffer[i] ^ key;
 		}
 
 		// Extract printable runs
@@ -103,6 +167,15 @@ export function xorBruteForce(
 			}
 
 			const value = decoded.subarray(run.start, run.start + run.length).toString('ascii');
+
+			// Crib filter (post-decode, pre-dedup): in ADDITION to confidence; prunes only.
+			if (hasCrib) {
+				const lowerValue = value.toLowerCase();
+				if (!cribs.some(c => lowerValue.includes(c))) {
+					continue;
+				}
+			}
+
 			const dedupKey = `${run.start}:${value}`;
 
 			if (seen.has(dedupKey)) {
@@ -113,7 +186,8 @@ export function xorBruteForce(
 			results.push({
 				key,
 				value,
-				offset: baseOffset + run.start,
+				// run.start is relative to scanBuffer; add sampleStart for absolute offset.
+				offset: baseOffset + sampleStart + run.start,
 				length: run.length,
 				confidence,
 			});
@@ -239,4 +313,20 @@ function scoreRun(decoded: Buffer, start: number, length: number): number {
 
 function isPrintable(byte: number): boolean {
 	return (byte >= 0x20 && byte <= 0x7E) || byte === 0x09 || byte === 0x0A || byte === 0x0D;
+}
+
+/**
+ * Coerce a sample-window arg to a non-negative integer, or `undefined` when
+ * absent/invalid. The value is floored; null/undefined, NaN, negative, or
+ * non-finite => undefined. Returning undefined lets the caller fall back to a
+ * whole-buffer scan (absent length, or any empty window) or, for a present-
+ * but-invalid offset, treat the whole window as absent -- so an invalid arg
+ * never yields a fractional offset, a silent-empty result, or a relocated window.
+ */
+function normalizeWindowArg(value: number | undefined): number | undefined {
+	if (value === undefined || value === null) {
+		return undefined;
+	}
+	const floored = Math.floor(value);
+	return (Number.isFinite(floored) && floored >= 0) ? floored : undefined;
 }
