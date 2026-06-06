@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 > **STATUS: UNRELEASED.** 3.8.2 has not shipped; the version, GitHub tag, and installers are not cut. This single Unreleased bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions are cut. Waves are ordered newest-first below.
 
+### Strings - Shannon entropy + monogram chi-squared plaintext-likelihood scorer (CyberChef Magic substrate, clean-room)
+
+> Adds three pure functions to `scoringEngine.ts` -- `shannonEntropy`, `chiSquaredEnglish`, `plaintextLikelihood` -- the confidence substrate a recursive auto-decoder (CyberChef "Magic"-style: try a decode, score the output, recurse on promising branches) ranks candidate decodes on. Clean-room TypeScript: entropy = `-sum(p*log2 p)` over a 256-bin histogram; Pearson chi-squared of the A-Za-z distribution vs the Mayzner/Norvig English letter table; an entropy-gated squashed likelihood. Attributed to CyberChef `lib/Magic.mjs` (Apache-2.0); pulls NO `chi-squared` npm dep (returns the raw statistic). TS-only and ADDITIVE: the existing scoring + `total` are unchanged, and the new `ScoreBreakdown.plaintextScore` is optional + informational (never folded into `total`), so all existing string scores stay identical.
+
+- **Validated**: `tsc --noEmit -p ./` exits 0; an independent smoke test (`scoringEntropyChiSqr.test.ts`, 5 passing) confirms the invariants -- Shannon entropy bounded 0..8 (single-symbol -> 0, uniform 0..255 ramp -> 8), natural English in the structured-text band and below random, English chi-squared << random, a strong English-vs-random `plaintextLikelihood` separation (>0.4), and correct window-scoping. The authored calibration test was adversarially verified deterministic over 300 runs / 60k random samples.
+
 ### Strings - XOR brute-force gains CyberChef-style crib filtering + a bounded sample-window (clean-room, Apache-2.0)
 
 > Adopts the crib (known-plaintext) filter + bounded sample-window from CyberChef `XORBruteForce.mjs` into the `hexcore-strings` single-byte XOR scanner -- a clean-room TypeScript re-implementation (a multi-crib OR layered over HexCore's own printable-run extraction + confidence scoring, with absolute file offsets preserved across the window slice), attributed. TS-only, `tsc --noEmit -p ./` exits 0.

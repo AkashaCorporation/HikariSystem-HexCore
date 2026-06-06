@@ -25,6 +25,14 @@ export interface ScoreBreakdown {
 	registryBonus: number;
 	repetitionPenalty: number;
 	digitPenalty: number;
+	/**
+	 * Plaintext-likelihood signal in [0,1] derived from Shannon entropy and
+	 * monogram chi-squared (see plaintextLikelihood). Neutral default is 1.0.
+	 * Informational only: NOT folded into total, so legacy scores are unchanged.
+	 * Optional so a partial / future ScoreBreakdown literal cannot TS2741; the one
+	 * literal in scoreStringDetailed still sets it to the neutral 1.0 default.
+	 */
+	plaintextScore?: number;
 	total: number;
 }
 
@@ -55,6 +63,37 @@ const ENGLISH_FREQ = new Set<number>([
 	0x20, 0x65, 0x74, 0x61, 0x6F, 0x69, 0x6E, 0x73, 0x68, 0x72, // ' etaoinshr'
 	0x64, 0x6C, 0x63, 0x75, 0x6D, 0x77, 0x66, 0x67, 0x79, 0x70, // 'dlcumwfgyp'
 ]);
+
+// technique adapted from CyberChef lib/Magic.mjs (calcEntropy + _chiSqr), Apache-2.0; clean-room TS implementation
+
+/**
+ * Expected English single-letter frequencies as a percentage of all letters,
+ * indexed 0..25 for 'a'..'z'. Used by chiSquaredEnglish as the Pearson expected
+ * distribution (lower chi-squared = more English-like).
+ * Values are the Mayzner/Norvig corpus (~743.8B letters).
+ * // ref: https://norvig.com/mayzner.html
+ */
+const EXPECTED_LETTER_FREQ: readonly number[] = Object.freeze([
+	8.04, 1.48, 3.34, 3.82, 12.49, 2.40, 1.87, 5.05, 7.57, 0.16,
+	0.54, 4.07, 2.51, 7.23, 7.64, 2.14, 0.12, 6.28, 6.51, 9.28,
+	2.73, 1.05, 1.68, 0.23, 1.66, 0.09,
+]);
+
+/**
+ * Entropy gate (bits/byte) below which data is treated as plausibly-structured
+ * plaintext. 5.0 matches CyberChef Magic's normal-text band. Shannon entropy is
+ * bounded 0..8 bits/byte.
+ * // ref: https://en.wikipedia.org/wiki/Entropy_(information_theory)
+ */
+const PLAINTEXT_ENTROPY_GATE = 5.0;
+
+/**
+ * Decay constant K for the chi-squared squash in plaintextLikelihood. Clean
+ * English windows (chi-sqr ~30-300 vs the Mayzner table) land near exp(-chi/K)
+ * ~0.6-0.9 while crypto-random / single-symbol windows collapse toward 0.
+ * // ref: https://norvig.com/mayzner.html
+ */
+const CHISQR_DECAY_K = 400;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -141,6 +180,7 @@ export function scoreStringDetailed(decoded: Buffer, start: number, length: numb
 		registryBonus: 0,
 		repetitionPenalty: 1.0,
 		digitPenalty: 1.0,
+		plaintextScore: 1.0,
 		total: 0,
 	};
 
@@ -293,4 +333,94 @@ export function scoreStringDetailed(decoded: Buffer, start: number, length: numb
  */
 export function scoreString(decoded: Buffer, start: number, length: number, options?: ScoringOptions): number {
 	return scoreStringDetailed(decoded, start, length, options).total;
+}
+
+// technique adapted from CyberChef lib/Magic.mjs (calcEntropy + _chiSqr), Apache-2.0; clean-room TS implementation
+
+/**
+ * Shannon entropy of the window [start, start+length) in bits/byte. 256-bin
+ * histogram, entropy = -sum(p*log2 p). Bounded 0..8. Window-scoped (chunk-friendly).
+ * // ref: https://en.wikipedia.org/wiki/Entropy_(information_theory)
+ */
+export function shannonEntropy(buf: Buffer, start = 0, length: number = buf.length - start): number {
+	if (length <= 0) { return 0; }
+	const end = Math.min(start + length, buf.length);
+	const n = end - start;
+	if (n <= 0) { return 0; }
+
+	const counts = new Float64Array(256);
+	for (let i = start; i < end; i++) {
+		counts[buf[i]]++;
+	}
+
+	const log2 = Math.log(2);
+	let entropy = 0;
+	for (let b = 0; b < 256; b++) {
+		const c = counts[b];
+		if (c === 0) { continue; }
+		const p = c / n;
+		entropy += p * (Math.log(p) / log2);
+	}
+
+	return -entropy;
+}
+
+/**
+ * Pearson chi-squared of the window's A-Za-z distribution vs EXPECTED_LETTER_FREQ.
+ * Lower = more English-like. Letterless window returns Infinity.
+ * // ref: https://norvig.com/mayzner.html
+ */
+export function chiSquaredEnglish(buf: Buffer, start = 0, length: number = buf.length - start): number {
+	if (length <= 0) { return Infinity; }
+	const end = Math.min(start + length, buf.length);
+
+	const letterCounts = new Float64Array(26);
+	let totalLetters = 0;
+	for (let i = start; i < end; i++) {
+		const byte = buf[i];
+		let idx = -1;
+		if (byte >= 0x41 && byte <= 0x5A) { idx = byte - 0x41; }
+		else if (byte >= 0x61 && byte <= 0x7A) { idx = byte - 0x61; }
+		if (idx >= 0) { letterCounts[idx]++; totalLetters++; }
+	}
+
+	if (totalLetters === 0) { return Infinity; }
+
+	let score = 0;
+	for (let i = 0; i < 26; i++) {
+		const observed = (letterCounts[i] / totalLetters) * 100;
+		const expected = EXPECTED_LETTER_FREQ[i];
+		const diff = observed - expected;
+		score += (diff * diff) / expected;
+	}
+
+	return score;
+}
+
+/**
+ * Plaintext-likelihood in [0,1]: printRatio * exp(-chiSqr/CHISQR_DECAY_K), hard-
+ * gated to 0 when entropy >= PLAINTEXT_ENTROPY_GATE (5.0). English > ~0.7,
+ * crypto-random and single-symbol runs < ~0.3. Window-scoped.
+ * // ref: https://en.wikipedia.org/wiki/Entropy_(information_theory)
+ */
+export function plaintextLikelihood(buf: Buffer, start = 0, length: number = buf.length - start): number {
+	if (length <= 0) { return 0; }
+	const end = Math.min(start + length, buf.length);
+	const n = end - start;
+	if (n <= 0) { return 0; }
+
+	const entropy = shannonEntropy(buf, start, n);
+	if (entropy >= PLAINTEXT_ENTROPY_GATE) { return 0; }
+
+	let printable = 0;
+	for (let i = start; i < end; i++) {
+		if (isPrintable(buf[i])) { printable++; }
+	}
+	const printRatio = printable / n;
+
+	const chiSqr = chiSquaredEnglish(buf, start, n);
+	const languageFit = Number.isFinite(chiSqr) ? Math.exp(-chiSqr / CHISQR_DECAY_K) : 0;
+
+	const score = printRatio * languageFit;
+	return score < 0 ? 0 : (score > 1 ? 1 : score);
 }
