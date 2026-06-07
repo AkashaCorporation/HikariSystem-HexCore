@@ -251,8 +251,19 @@ export class CapstoneWrapper {
 			}
 		}
 
+		// v3.8.2 FIX-028: defensive address coercion at the single decode chokepoint.
+		// The native binding currently loaded returns `address` as a Number, but a newer
+		// (v1.3.4+) build of hexcore-capstone emits it as a BigInt (with an `addressAsNumber`
+		// companion). Coercing here means a binding swap can never silently corrupt addresses:
+		// a BigInt key would miss every Number lookup in the instruction map, and mixed
+		// BigInt/Number arithmetic (func.address + size, .toString(16)) would throw. No-op for
+		// the current Number binding. Prefer addressAsNumber when the binding provides it.
+		const instAny = inst as { address: number | bigint; addressAsNumber?: number };
+		const address = instAny.addressAsNumber
+			?? (typeof instAny.address === 'bigint' ? Number(instAny.address) : instAny.address);
+
 		return {
-			address: inst.address,
+			address,
 			bytes: inst.bytes,
 			mnemonic: inst.mnemonic,
 			opStr: inst.opStr,

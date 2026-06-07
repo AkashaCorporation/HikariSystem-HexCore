@@ -4267,26 +4267,114 @@ export class DisassemblerEngine {
 		}
 		const base = this.baseAddress;
 		const rawRanges = pdata
-			.map(p => ({ begin: p.beginAddress + base, end: p.endAddress + base }))
+			.map(p => ({ begin: p.beginAddress + base, end: p.endAddress + base, unwind: p.unwindInfoAddress }))
 			.filter(r => r.end > r.begin)
 			.sort((a, b) => a.begin - b.begin);
 		if (rawRanges.length === 0) {
 			return;
 		}
-		// Drop .pdata continuation / chained-unwind records: a RUNTIME_FUNCTION FULLY nested
-		// inside an earlier entry's range (end <= coverEnd) describes an unwind sub-region of
-		// the SAME function, not a new function start. A record that only PARTIALLY overlaps
-		// (begin inside, end beyond) is kept as a top-level begin so its tail stays anchored
-		// (matters only for non-conformant / forged PEs; real MSVC .pdata never partially
-		// overlaps). Keep top-level ranges.
+
+		// v3.8.2 FIX-027: merge MSVC chained-unwind function FRAGMENTS into one logical
+		// function. A large/optimized function is emitted by MSVC as several CONTIGUOUS
+		// RUNTIME_FUNCTION records (end[i] == begin[i+1]); every continuation fragment's
+		// UNWIND_INFO carries UNW_FLAG_CHAININFO (0x4) plus a trailing RUNTIME_FUNCTION that
+		// chains (transitively) back to the PRIMARY fragment (the one holding the prologue).
+		// IDA / the Windows unwinder treat the whole chain as ONE function. The prior code
+		// dropped only FULLY NESTED records, so each CONTIGUOUS fragment survived as a
+		// SEPARATE function. That both fragmented the function table AND poisoned the Remill
+		// lift: extension.ts injects every function end into knownFunctionEnds, and the PE64
+		// scan-break (remill_wrapper.cpp) stops at the FIRST one, truncating any chained
+		// function to its first fragment (observed on SOTTR sub_140253A70: 6 fragments ->
+		// lift stopped at 0x49 of 0x2bd bytes, leaving Helix a 6-line stub).
+		//
+		// Read each fragment's UNW_FLAG_CHAININFO and resolve its chain-root. A chained
+		// continuation that is CONTIGUOUS with (and roots back to) the currently-open primary
+		// is absorbed into it; a non-chained record opens a new function. NO-OP on clean
+		// binaries: when no fragment is chained the ranges are identical to before.
+		const readChain = (unwindRva: number): { chained: boolean; targetBeginVa: number } => {
+			const buf = this.fileBuffer;
+			if (!buf) { return { chained: false, targetBeginVa: 0 }; }
+			// v3.8.2 FIX-027b (#5): only trust UNWIND_INFO that actually lives inside a section.
+			// rvaToFileOffset returns the RVA UNCHANGED for an out-of-section address (forged PE),
+			// which would otherwise let attacker-chosen bytes be read as unwind info.
+			let unwindInSection = false;
+			for (const section of this.sections) {
+				const sRva = section.virtualAddress - this.baseAddress;
+				if (unwindRva >= sRva && unwindRva < sRva + section.virtualSize) { unwindInSection = true; break; }
+			}
+			if (!unwindInSection) { return { chained: false, targetBeginVa: 0 }; }
+			const uoff = this.rvaToFileOffset(unwindRva);
+			if (uoff < 0 || uoff + 4 > buf.length) { return { chained: false, targetBeginVa: 0 }; }
+			const verFlags = buf[uoff];
+			const version = verFlags & 0x7;
+			if (version !== 1 && version !== 2) { return { chained: false, targetBeginVa: 0 }; }
+			const chained = ((verFlags >> 3) & 0x4) !== 0; // UNW_FLAG_CHAININFO
+			if (!chained) { return { chained: false, targetBeginVa: 0 }; }
+			const codeCount = buf[uoff + 2];
+			// Unwind codes are 2 bytes each, padded to an even count; the chained
+			// RUNTIME_FUNCTION follows them.
+			const trailing = uoff + 4 + 2 * ((codeCount + 1) & ~1);
+			if (trailing < 0 || trailing + 12 > buf.length) { return { chained: true, targetBeginVa: 0 }; }
+			const targetBeginRva = buf.readUInt32LE(trailing);
+			return { chained: true, targetBeginVa: targetBeginRva + base };
+		};
+
+		const chainByBegin = new Map<number, { chained: boolean; targetBeginVa: number }>();
+		for (const r of rawRanges) {
+			const info = readChain(r.unwind);
+			const existing = chainByBegin.get(r.begin);
+			// v3.8.2 FIX-027b (#4): on a duplicate begin (forged/unusual PE), prefer the
+			// NON-chained record so a real primary is never misclassified as a continuation
+			// and dropped.
+			if (existing === undefined || (existing.chained && !info.chained)) {
+				chainByBegin.set(r.begin, info);
+			}
+		}
+		// Resolve a fragment's transitive chain-root primary (the non-chained ancestor).
+		const rootCache = new Map<number, number>();
+		const resolveRoot = (beginVa: number): number => {
+			let cur = beginVa;
+			const seen: number[] = [];
+			for (let depth = 0; depth < 64; depth++) {
+				const cached = rootCache.get(cur);
+				if (cached !== undefined) { cur = cached; break; }
+				if (seen.includes(cur)) { break; } // cycle guard (malformed/forged PE)
+				seen.push(cur);
+				const ci = chainByBegin.get(cur);
+				if (!ci || !ci.chained) { break; }       // non-chained -> this is the root
+				if (!chainByBegin.has(ci.targetBeginVa)) { break; } // target outside table
+				cur = ci.targetBeginVa;
+			}
+			for (const v of seen) { rootCache.set(v, cur); }
+			return cur;
+		};
+
 		const ranges: { begin: number; end: number }[] = [];
 		let coverEnd = Number.NEGATIVE_INFINITY;
 		for (const r of rawRanges) {
 			if (r.end <= coverEnd) {
-				continue;
+				continue; // fully nested in an earlier kept range -> same function (legacy drop)
 			}
-			ranges.push(r);
-			coverEnd = r.end; // r.end > coverEnd here, so this always advances
+			const ci = chainByBegin.get(r.begin);
+			const isContinuation = !!ci && ci.chained;
+			if (isContinuation && ranges.length > 0) {
+				const open = ranges[ranges.length - 1];
+				// Absorb a chained continuation contiguous/overlapping with the open primary
+				// AND rooting back to it (the contiguous-fragment case).
+				if (r.begin <= coverEnd && resolveRoot(r.begin) === open.begin) {
+					open.end = r.end;
+					coverEnd = r.end;
+					continue;
+				}
+			}
+			// v3.8.2 FIX-027b (#2/#3): everything NOT absorbed above -- a non-chained primary,
+			// an ORPHAN continuation (CHAININFO set but its primary is absent from the table),
+			// or a NON-CONTIGUOUS cold/out-of-line continuation -- opens its OWN range. This
+			// matches the pre-FIX-027 coverage (a non-nested fragment stayed a standalone
+			// function), so no function / byte coverage is ever dropped; ONLY genuinely
+			// contiguous same-function fragments are merged away by the absorb branch above.
+			ranges.push({ begin: r.begin, end: r.end });
+			coverEnd = r.end;
 		}
 		const begins = new Set<number>(ranges.map(r => r.begin));
 		const beginsArr = ranges.map(r => r.begin); // sorted ascending (rawRanges was sorted)
@@ -4365,26 +4453,53 @@ export class DisassemblerEngine {
 			});
 		}
 
-		// (3) Clamp over-long authoritative functions (disassembly ran past the real end into
-		// a neighbour) to their .pdata extent.
+		// (3) Reconcile each authoritative function's extent to its merged .pdata range:
+		//   - clamp DOWN an over-long function (disassembly ran past the real end into a
+		//     neighbour), and
+		//   - v3.8.2 FIX-027b (#1): extend UP an under-discovered chained-unwind primary whose
+		//     prologue-scan end fell SHORT of the merged .pdata end (the control-flow scan
+		//     stopped at an interior `ret` before an out-of-line / cold block of the SAME
+		//     function). Without the extend-up the function keeps its short end, that short end
+		//     lands in knownFunctionEnds, and the PE64 lift re-truncates -- the exact bug
+		//     FIX-027 targets, surviving for the pre-discovered-short sub-case.
 		for (const r of ranges) {
 			const fn = this.functions.get(r.begin);
-			if (!fn || fn.endAddress <= r.end) {
+			if (!fn) {
 				continue;
 			}
-			fn.instructions = fn.instructions.filter(inst => {
-				const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
-				return a < r.end;
-			});
-			const last = fn.instructions[fn.instructions.length - 1];
-			if (last) {
-				const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
-				const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
-				fn.endAddress = Math.min(r.end, la + ls);
-			} else {
+			if (fn.endAddress > r.end) {
+				fn.instructions = fn.instructions.filter(inst => {
+					const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+					return a < r.end;
+				});
+				const last = fn.instructions[fn.instructions.length - 1];
+				if (last) {
+					const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
+					const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
+					fn.endAddress = Math.min(r.end, la + ls);
+				} else {
+					fn.endAddress = r.end;
+				}
+				fn.size = fn.endAddress - fn.address;
+			} else if (fn.endAddress < r.end) {
+				const shortEnd = fn.endAddress;
+				try {
+					// Recover the gap [shortEnd, r.end) non-recursively (like step 2) and append.
+					const gapInsns = await this.disassembleRange(
+						shortEnd, Math.min(r.end - shortEnd, this.maxFunctionSize));
+					for (const inst of gapInsns) {
+						const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+						if (a >= shortEnd && a < r.end) {
+							fn.instructions.push(inst);
+						}
+					}
+				} catch {
+					// Cold bytes could not be linearly recovered; still advance the authoritative
+					// end below so knownFunctionEnds carries the real .pdata boundary.
+				}
 				fn.endAddress = r.end;
+				fn.size = fn.endAddress - fn.address;
 			}
-			fn.size = fn.endAddress - fn.address;
 		}
 
 		// (4) Sweep again: step (2)'s analyzeFunction recursion may have re-introduced ghost
