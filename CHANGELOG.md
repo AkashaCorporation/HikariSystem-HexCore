@@ -5,9 +5,9 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.2] - Unreleased - "Callfuscation + Deflattening + Audit-Fix Wave + AArch64 lifting + obfuscated-binary discovery"
+## [3.8.2] - 2026-06-13 - "Callfuscation + Deflattening + Audit-Fix Wave + AArch64 lifting + obfuscated-binary discovery"
 
-> **STATUS: UNRELEASED.** 3.8.2 has not shipped; the version, GitHub tag, and installers are not cut. This single Unreleased bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions are cut. Waves are ordered newest-first below.
+> **STATUS: RELEASED 2026-06-13.** This single bucket holds ALL post-3.8.1 work -- no separate 3.8.3 / 3.8.4 versions were cut. Waves are ordered newest-first below.
 
 ### Disassembler - merge MSVC chained-unwind .pdata fragments into one function (fixes a general PE64 lift truncation)
 
