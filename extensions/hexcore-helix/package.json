@@ -1,7 +1,7 @@
 {
   "name": "hexcore-helix",
-  "version": "0.9.0",
-  "description": "HexCore Helix — MLIR-based decompilation engine (v0.9.0: Waves 1-12 + DWARF/PDB metadata pipeline)",
+  "version": "0.9.2",
+  "description": "HexCore Helix — MLIR-based decompilation engine (v0.9.2: leave-nightly honesty layer D1/D2/D4/#30 + DWARF/PDB metadata pipeline)",
   "main": "./index.js",
   "types": "./index.d.ts",
   "napi": {

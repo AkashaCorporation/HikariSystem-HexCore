@@ -1,6 +1,6 @@
 {
   "name": "hexcore-remill",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "HikariSystem fork of Remill N-API bindings — customized for the HexCore-Helix decompiler pipeline",
   "main": "./index.js",
   "module": "./index.mjs",
