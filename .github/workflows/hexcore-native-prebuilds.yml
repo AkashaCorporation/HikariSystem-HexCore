@@ -12,7 +12,10 @@ env:
 jobs:
   prebuild-windows:
     name: Build Native Prebuilds (Windows)
-    runs-on: windows-latest
+    # windows-latest now ships Visual Studio 18 (2026), which node-gyp 10.3.1
+    # cannot parse ("unknown version undefined"). Pin to windows-2022 (VS 2022,
+    # fully supported). Follow-up when 2022 retires: upgrade node-gyp for VS 18.
+    runs-on: windows-2022
     env:
       HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
     strategy:
