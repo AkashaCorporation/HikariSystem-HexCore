@@ -55,6 +55,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Setup MSVC dev environment (node-gyp VS detection on VS 18 runners)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Fetch LLVM deps (hexcore-llvm-mc)
         if: ${{ matrix.engine.name == 'hexcore-llvm-mc' }}
         run: |
