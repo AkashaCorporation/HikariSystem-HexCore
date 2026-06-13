@@ -21,7 +21,12 @@ env:
 jobs:
   build-windows:
     name: Build Windows Installer
-    runs-on: windows-latest
+    # Pinned to windows-2022 (VS 2022). The windows-latest image moved to
+    # Visual Studio 18 (2026), which node-gyp cannot detect ("unknown version
+    # undefined found at ...\Visual Studio\18\Enterprise" + the vswhere
+    # ERR_CHILD_PROCESS_STDIO_MAXB overflow), breaking native deps (tree-sitter)
+    # during `cd build && npm ci`. Same fix that greened hexcore-native-prebuilds.
+    runs-on: windows-2022
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
