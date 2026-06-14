@@ -101,11 +101,47 @@ function verifyBuildCoverage() {
 	assertIncludes(npmDirs, "'extensions/hexcore-yara'", 'build/npm/dirs.ts');
 }
 
-function verifyCompiledExtensionArtifacts() {
+function verifyExtensionCompileCoverage() {
+	// A tsc-built extension declares "main": "./out/..." and is compiled by the
+	// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
+	// gitignored build artifact, so if the extension is missing from that compile loop the
+	// shipped zip has no compiled entrypoint and the extension fails to activate ("Cannot
+	// find module out/extension.js") — exactly the hexcore-elixir regression behind issue #36.
+	//
+	// This is a STATIC config check, NOT a disk check: the preflight step runs BEFORE the
+	// "Compile HexCore Extensions" step in CI, so out/ does not exist yet at this point.
+	// Asserting the compiled artifact exists would (and did) fail on EVERY extension. Instead
+	// we parse the workflow and assert every out/-main extension is wired into the compile
+	// loop of EVERY build job (Windows + Linux) — the elixir bug shipped because it was
+	// omitted from both, and a single-job omission would silently break that platform's zip.
 	const extensionsDir = path.join(root, 'extensions');
 	if (!fs.existsSync(extensionsDir)) {
 		errors.push('Missing directory: extensions');
 		return;
+	}
+
+	const workflowRel = '.github/workflows/hexcore-installer.yml';
+	const workflow = readText(workflowRel);
+	if (!workflow) {
+		return; // readText already recorded a "Missing file" error
+	}
+
+	// One "Compile HexCore Extensions" step per build job (Windows + Linux today).
+	const compileJobCount = (workflow.match(/Compile HexCore Extensions/g) || []).length;
+
+	// Count, per extension, how many `npm run compile` lines reference it. Each compile-loop
+	// line looks like `cd ../hexcore-NAME && npm ci ... && npm run compile`; the first
+	// hexcore-* token on such a line is the cd target. Native/prebuilt fetch steps use
+	// `node`/bare `npm ci` (no `npm run compile`), so they are correctly ignored.
+	const compileCounts = new Map();
+	for (const line of workflow.split(/\r?\n/)) {
+		if (!line.includes('npm run compile')) {
+			continue;
+		}
+		const match = line.match(/hexcore-[a-z0-9-]+/);
+		if (match) {
+			compileCounts.set(match[0], (compileCounts.get(match[0]) || 0) + 1);
+		}
 	}
 
 	const extensionDirs = fs.readdirSync(extensionsDir, { withFileTypes: true })
@@ -119,20 +155,18 @@ function verifyCompiledExtensionArtifacts() {
 			continue;
 		}
 
-		// A tsc-built extension declares "main": "./out/..." and is compiled by the
-		// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
-		// gitignored build artifact, so if the extension is missing from that compile loop
-		// the shipped zip has no compiled entrypoint and the extension fails to activate
-		// ("Cannot find module out/extension.js"). Assert the entrypoint named by "main"
-		// exists. (Most extensions use ./out/extension.js; a few, e.g. hexcore-common, use
-		// ./out/index.js — always resolve the real "main", never hardcode the filename.)
+		// Only tsc-built extensions (./out/ main) need the compile loop. Native extensions
+		// (e.g. hexcore-helix, hexcore-remill) ship prebuilt and point main elsewhere.
 		const main = packageJson.main;
-		if (typeof main === 'string' && main.startsWith('./out/')) {
-			const artifactRelative = path.join('extensions', extensionName, main.replace(/^\.\//, ''));
-			const artifactFull = path.join(root, artifactRelative);
-			if (!fs.existsSync(artifactFull)) {
-				errors.push(`${packagePath} has "main": "${main}" but ${artifactRelative} is missing — add ${extensionName} to the "Compile HexCore Extensions" step in .github/workflows/hexcore-installer.yml`);
-			}
+		if (typeof main !== 'string' || !main.startsWith('./out/')) {
+			continue;
+		}
+
+		const count = compileCounts.get(extensionName) || 0;
+		if (count === 0) {
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is not in the "Compile HexCore Extensions" step of ${workflowRel} — add 'cd .../${extensionName} && npm ci --ignore-scripts && npm run compile' to every build job`);
+		} else if (compileJobCount > 0 && count < compileJobCount) {
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is compiled in only ${count} of ${compileJobCount} build jobs in ${workflowRel} — it must be in every job's "Compile HexCore Extensions" loop (Windows + Linux)`);
 		}
 	}
 }
@@ -166,7 +200,7 @@ function verifyManifestActivationEvents() {
 verifyYaraCommands();
 verifyPipelineCapabilities();
 verifyBuildCoverage();
-verifyCompiledExtensionArtifacts();
+verifyExtensionCompileCoverage();
 verifyManifestActivationEvents();
 
 if (errors.length > 0) {
