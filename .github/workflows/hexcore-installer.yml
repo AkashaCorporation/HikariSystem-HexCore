@@ -191,6 +191,7 @@ jobs:
           cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elixir && npm ci --ignore-scripts && npm run compile
 
       - name: Patch vsce npm resolver for local deps
         run: node scripts/patch-vsce-npm.js
@@ -364,6 +365,7 @@ jobs:
           cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elixir && npm ci --ignore-scripts && npm run compile
 
       - name: Patch vsce npm resolver for local deps
         run: node scripts/patch-vsce-npm.js

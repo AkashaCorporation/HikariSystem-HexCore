@@ -231,8 +231,8 @@ interface CommandCapability {
 	cancelCommand?: string;
 }
 
-const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
-const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
+export const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
+export const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_RETRY_COUNT = 0;
 const DEFAULT_RETRY_DELAY_MS = 1000;
@@ -1045,6 +1045,20 @@ export class AutomationPipelineRunner {
 					if (validateOutput) {
 						if (!output) {
 							throw new Error(`Expected output validation for ${resolvedCommand}, but no output path was assigned.`);
+						}
+						// Bug #36/2: surface the command's REAL failure instead of the
+						// generic "Expected output file was not created" mask. Scope this
+						// to validateOutput steps only — a future step may legitimately
+						// return success:false under continueOnError, and we must not
+						// blanket-throw on that. Both the quiet:false auto-run path
+						// (handler returns undefined) and the quiet:true path (handler
+						// returns {success:false,error}) are covered. This throw flows
+						// through the SAME continueOnError try/catch below, so behavior
+						// is unchanged except the recorded message is now the true cause.
+						if (commandReturn === undefined) {
+							throw new Error('command returned no result (likely missing or invalid input - see the Extension Host console for the real error)');
+						} else if (isRecord(commandReturn) && commandReturn.success === false) {
+							throw new Error(String(commandReturn.error ?? 'command reported success:false'));
 						}
 						validateStepOutput(output.path);
 					}

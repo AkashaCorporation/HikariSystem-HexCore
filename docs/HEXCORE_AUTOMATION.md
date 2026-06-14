@@ -441,6 +441,10 @@ HexCore v3.8.0 introduces a job queue system for managing multiple automation jo
 
 **Named job files:** The queue picker and watcher accept any file matching `*.hexcore_job.json`. Agents can create descriptive names like `sotr-strings.hexcore_job.json` and they will be auto-detected without manual intervention.
 
+**Worker pool size (v3.8.2):** how many jobs run concurrently is the **`hexcore.pipeline.queue.poolSize`** VS Code setting (integer, default `2`, range `1`–`16`). Higher = more throughput but more memory/CPU. A change applies on the **next window reload** — the live pool is not resized and in-flight jobs finish on their current workers.
+
+**Session affinity (v3.8.2):** a job tagged with a `sessionId` (see `queueJob` below) is pinned to a single worker for the life of that `keepAlive` emulation session, so session state is never split across workers. A session job waits for *its* worker if that worker is busy (it never steals a free one); stateless jobs (no `sessionId`) keep the original any-free-worker behavior.
+
 #### `hexcore.pipeline.queueJob`
 
 Queue a `*.hexcore_job.json` file for execution with optional priority.
@@ -450,7 +454,8 @@ Queue a `*.hexcore_job.json` file for execution with optional priority.
   "cmd": "hexcore.pipeline.queueJob",
   "args": {
     "file": "path/to/job.json",
-    "priority": "high"
+    "priority": "high",
+    "sessionId": "emu-session-1"
   }
 }
 ```
@@ -459,6 +464,7 @@ Queue a `*.hexcore_job.json` file for execution with optional priority.
 |-----------|------|---------|-------------|
 | `file` | `string` | *(required)* | Path to the `*.hexcore_job.json` file. Accepts both canonical (`.hexcore_job.json`) and named (`sotr-triage.hexcore_job.json`) formats. |
 | `priority` | `string` | `"normal"` | Priority level: `"high"`, `"normal"`, or `"low"`. |
+| `sessionId` | `string` | *(optional)* | **(v3.8.2)** Pin this job to the worker that owns the session — for `keepAlive` emulation jobs that share state across steps. Omit for stateless jobs (dispatched to any free worker). |
 
 **Returns:**
 
@@ -520,15 +526,24 @@ Get status of a specific job or all jobs.
   "success": true,
   "job": {
     "jobId": "hc-job-550e8400-e29b-41d4-a716-446655440000",
-    "status": "running",
+    "status": "queued",
     "priority": "high",
+    "position": 2,
+    "sessionId": "emu-session-1",
+    "workerId": null,
     "createdAt": "2026-04-11T10:30:00.000Z",
-    "startedAt": "2026-04-11T10:30:05.000Z",
+    "startedAt": null,
     "completedAt": null,
     "error": null
   }
 }
 ```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `position` | `number \| null` | **(v3.8.2)** 1-based index in the dispatch order (priority first, then FIFO within a priority). A number **only while the job is `queued`**; `null` for `running`/`done`/`failed`/`cancelled`. |
+| `sessionId` | `string \| null` | **(v3.8.2)** The session this job is pinned to (sticky routing), or `null`/absent if stateless. |
+| `workerId` | `number \| null` | **(v3.8.2)** The worker slot the job is bound to once it starts running; `null` while still queued. |
 
 **Returns (all jobs):**
 
@@ -1146,7 +1161,7 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 
 ### `hexcore.helix.decompileIR`
 
-Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use this as the second step of a two-step pipeline where the first step is `hexcore.disasm.liftToIR`. The `irPath` argument must point to the `.ll` file produced by `liftToIR` — use the same path as the `output.path` of that step (resolved from `outDir`).
+Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use this as the second step of a two-step pipeline where the first step is `hexcore.disasm.liftToIR`. The `irPath` argument must point to the `.ll` file produced by `liftToIR` — **use `"$step[N].output"`** (N = the 0-based index of the `liftToIR` step) so the path resolves to exactly what that step wrote, instead of a hardcoded path that can drift.
 
 ```json
 {
@@ -1182,7 +1197,7 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
     },
     {
       "cmd": "hexcore.helix.decompileIR",
-      "args": { "irPath": "C:\\reports\\helix\\bone_pos_calc.ll" },
+      "args": { "irPath": "$step[0].output" },
       "output": { "path": "bone_pos_calc.helix.c" },
       "timeoutMs": 180000
     }
@@ -1190,7 +1205,7 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 }
 ```
 
-> **Tip:** Use an absolute path for `irPath` when `outDir` is absolute — this avoids any workspace-root resolution ambiguity.
+> **Tip:** Prefer `"irPath": "$step[N].output"` (N = the 0-based index of the `liftToIR` step) over a hardcoded path. The runner resolves it to the exact file the lift step wrote, so it cannot drift if `outDir` or the lift's `output.path` changes. A mismatched hardcoded `irPath` makes `decompileIR` fail with `IR file not found`, which the pipeline surfaces only as the generic `Expected output file was not created` — the real error is in the Extension Host console (Help > Toggle Developer Tools > Console).
 
 ---
 
@@ -1635,11 +1650,14 @@ so a watcher tailing the file sees each transition live.
 - Check step status in `hexcore-pipeline.status.json`.
 - If step failed/timed out, output file will not be created.
 
-### `hexcore.helix.decompileIR` fails with "file not found"
-- The `irPath` must point to a `.ll` file that exists **before** this step runs.
-- Ensure `liftToIR` ran successfully (check its status in `hexcore-pipeline.status.json`).
-- Prefer absolute paths for `irPath` (e.g. `"C:\\reports\\helix\\bone_pos_calc.ll"`) to avoid workspace-root resolution issues.
-- Relative `irPath` values are resolved from the workspace root folder, not from `outDir`.
+### `hexcore.helix.decompileIR` fails / `Expected output file was not created`
+- **Use `"irPath": "$step[N].output"`** (N = the 0-based index of the `liftToIR` step) so the IR path always matches what the lift wrote. A hardcoded `irPath` that does not exactly match `outDir` + the lift step's `output.path` (drive casing, separators, every subfolder) makes `decompileIR` report `IR file not found`, which the pipeline surfaces only as the generic `Expected output file was not created`.
+- The true error is logged to the Extension Host console (Help > Toggle Developer Tools > Console), not to `hexcore-pipeline.status.json` — check there when a step "produced no output" for no obvious reason.
+- Ensure `liftToIR` ran successfully (check its status in `hexcore-pipeline.status.json`); if it failed, no `.ll` exists for this step.
+- A relative `irPath` is resolved from the workspace root folder, not from `outDir` — another reason to prefer `$step[N].output`.
+
+### `hexcore.helix.decompile` / `liftToIR` produces no output for an `address`
+- `address` is a **virtual address** (e.g. `0x140001000`) or the literal `"entry"`, NOT a raw file offset. An address with no code at it (e.g. `0x1000` on a binary based at `0x140000000`) decompiles nothing and surfaces only the generic `Expected output file was not created`. Pass `"entry"` or a real function VA from `analyzeAll`.
 
 ---
 
@@ -1745,7 +1763,7 @@ A job can enqueue other jobs via `hexcore.pipeline.queueJob`:
 }
 ```
 
-Priority levels: `high` > `normal` > `low`. Default: `normal`. Max concurrent: 2 (configurable).
+Priority levels: `high` > `normal` > `low`. Default: `normal`. Concurrent workers: default `2`, configurable `1`–`16` via the `hexcore.pipeline.queue.poolSize` setting (v3.8.2).
 
 ### Built-in Presets
 

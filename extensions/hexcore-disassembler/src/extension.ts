@@ -2,6 +2,7 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
@@ -24,7 +25,9 @@ import {
 	runPipelineDoctor,
 	getJobQueueManagerInstance,
 	disposeJobQueueManagerInstance,
-	JobPriority
+	JobPriority,
+	JOB_STATUS_FILENAME,
+	JOB_LOG_FILENAME
 } from './automationPipelineRunner';
 import { QueuedJob, QueueStats, JobStatusReport } from './jobQueueManager';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
@@ -668,6 +671,17 @@ export function activate(context: vscode.ExtensionContext): void {
 	const activeJobRuns = new Set<string>();
 	const queuedAutoRuns = new Set<string>();
 
+	// Bug #36/4: loop-breaker state for the *.hexcore_job.json FileSystemWatcher.
+	// Auto Save flushes the open dirty job buffer on every keystroke window, and
+	// jobs finish sub-second, so the queued/running dedup in JobQueueManager is not
+	// enough — each save re-enqueues. We additionally key on the job file's CONTENT
+	// (sha1) plus a per-path cooldown so an UNCHANGED file inside the cooldown window
+	// is skipped, while a real edit (changed bytes) still re-runs.
+	const lastWatcherRun = new Map<string, { hash: string; ts: number }>();
+	// Cooldown (ms) after a watcher-triggered run during which onDidChange for the
+	// SAME path with the SAME content is ignored, absorbing save/format churn.
+	const WATCHER_COOLDOWN_MS = 2500;
+
 	const executePipelineJob = async (
 		jobFilePath: string,
 		quiet: boolean,
@@ -725,20 +739,62 @@ export function activate(context: vscode.ExtensionContext): void {
 		return executePipelineJob(jobFilePath, quiet, false);
 	};
 
+	// Bug #36/4: a job-file written INSIDE an outDir self-matches the recursive
+	// `**/*.hexcore_job.json` glob and would loop with no editor at all. An outDir
+	// is identified by also containing the pipeline status file. We also never let
+	// the generated status/log files themselves trigger a run (they cannot match the
+	// job glob, but the check is cheap and future-proofs a rename). Returns the
+	// reason string when the path must be skipped, or undefined when it may run.
+	const watcherTriggerSkipReason = (normalizedPath: string): string | undefined => {
+		const base = path.basename(normalizedPath);
+		if (base === JOB_STATUS_FILENAME || base === JOB_LOG_FILENAME) {
+			return `generated pipeline file (${base})`;
+		}
+		// If the job file sits in a directory that ALSO holds a status file, that
+		// directory is an outDir and the job is a generated artifact — skip it so a
+		// job written under an outDir cannot self-trigger an unbounded loop.
+		try {
+			if (fs.existsSync(path.join(path.dirname(normalizedPath), JOB_STATUS_FILENAME))) {
+				return 'job file lives inside a resolved outDir (contains a status file)';
+			}
+		} catch {
+			/* stat failure — fall through and allow the run */
+		}
+		return undefined;
+	};
+
 	// Auto-run + FileSystemWatcher submissions go through the SAME JobQueueManager
 	// as the `hexcore.pipeline.queueJob` command, so concurrency is bounded by the
 	// pool size (default 2) instead of firing every root job at once (issue #27).
 	//
-	// Two layers of dedup are preserved here:
+	// Dedup / loop-breaker layers preserved here (Bug #36/4):
 	//   1. The 350ms debounce (pendingJobRuns) coalesces rapid save events for the
 	//      same path BEFORE anything reaches the queue.
 	//   2. queueJobIfAbsent() refuses to enqueue a path that already has a queued
 	//      or running job in the manager, covering saves that arrive after the
 	//      debounce window while the prior run is still in-flight.
+	//   3. Content-hash + cooldown: an UNCHANGED job file re-saved within the
+	//      cooldown window is skipped (Auto Save flushes the dirty buffer repeatedly
+	//      and jobs finish sub-second, defeating layers 1+2). A genuine edit changes
+	//      the bytes, so its hash differs and it still re-runs.
+	//   4. Generated-artifact exclusion: status/log files and job files inside an
+	//      outDir never trigger a run (watcherTriggerSkipReason).
+	// NOTE: this loop-breaker lives ONLY on the watcher/auto-run path. The manual
+	// `hexcore.pipeline.queueJob` command intentionally bypasses it so a user can
+	// re-run an unchanged job on demand.
 	// Auto/watcher jobs are submitted at LOW priority so they never starve
 	// user-submitted (normal/high) jobs from the queueJob command.
 	const scheduleJobRun = (jobFilePath: string): void => {
 		const normalizedPath = path.resolve(jobFilePath);
+
+		// Cheap, synchronous exclusion before we even debounce: never let a
+		// generated artifact or an in-outDir job file enter the scheduler.
+		const skipReason = watcherTriggerSkipReason(normalizedPath);
+		if (skipReason) {
+			console.log(`[HexCore][autoRun] skipped (${skipReason}): ${normalizedPath}`);
+			return;
+		}
+
 		const existing = pendingJobRuns.get(normalizedPath);
 		if (existing) {
 			clearTimeout(existing);
@@ -747,6 +803,28 @@ export function activate(context: vscode.ExtensionContext): void {
 		const timeoutHandle = setTimeout(() => {
 			pendingJobRuns.delete(normalizedPath);
 			try {
+				// Content-hash + cooldown loop-breaker. Read the (now-stable, post-
+				// debounce) bytes and hash them. If the hash is unchanged AND we are
+				// still inside the cooldown window since the last run for this path,
+				// skip — this is the save/format churn that caused the unbounded loop.
+				// Changed bytes (a real edit) always fall through and run.
+				let hash: string | undefined;
+				try {
+					hash = crypto.createHash('sha1').update(fs.readFileSync(normalizedPath)).digest('hex');
+				} catch (readErr) {
+					console.warn(`[HexCore][autoRun] could not read job for hashing (will still run): ${normalizedPath}`, readErr);
+				}
+				if (hash !== undefined) {
+					const prev = lastWatcherRun.get(normalizedPath);
+					if (prev && prev.hash === hash && (Date.now() - prev.ts) < WATCHER_COOLDOWN_MS) {
+						console.log(`[HexCore][autoRun] skipped (unchanged within ${WATCHER_COOLDOWN_MS}ms cooldown): ${normalizedPath}`);
+						return;
+					}
+					// Record BEFORE enqueue so concurrent save events racing this same
+					// tick are absorbed by the cooldown rather than stacking runs.
+					lastWatcherRun.set(normalizedPath, { hash, ts: Date.now() });
+				}
+
 				const manager = getJobQueueManagerInstance();
 				const { jobId, deduped } = manager.queueJobIfAbsent(normalizedPath, 'low');
 				if (deduped) {
@@ -2115,7 +2193,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Extract bytes from engine buffer (addressToOffset handles VA→file offset)
 			if (!engine.isFileLoaded()) {
 				const errorMsg = 'No binary file is loaded. Open a file in the disassembler first.';
-				if (quiet) {
+				// Bug #36/2: missing-input -> structured error for headless/pipeline runs.
+				if (quiet || isHeadless) {
 					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -2140,7 +2219,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				const base = engine.getBaseAddress();
 				const bufSize = engine.getBufferSize();
 				const errorMsg = `Address 0x${startAddress.toString(16)} is outside the loaded binary "${loadedFile}" (base=0x${base.toString(16)}, size=0x${bufSize.toString(16)}).`;
-				if (quiet) {
+				// Bug #36/2: no code at the requested address -> structured error for the
+				// pipeline runner, never undefined + modal in a headless auto-run.
+				if (quiet || isHeadless) {
 					return { success: false, ir: '', address: startAddress, bytesConsumed: 0, architecture: mapping.remillArch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -2609,6 +2690,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				const outputPath = typeof options.output === 'string'
 					? options.output
 					: (options.output as { path: string }).path;
+				// Bug #36/2: ensure the output directory exists before writing.
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 				fs.writeFileSync(outputPath, fullIR, 'utf-8');
 				return {
 					success: true,
@@ -3507,7 +3590,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!helixWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-helix is not available.';
-				if (quiet) {
+				// Bug #36/2: headless/pipeline runs get the structured error, not undefined + modal.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3527,7 +3611,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', irFilePath);
 				if (!fs.existsSync(resolved)) {
 					const errorMsg = `IR file not found: ${resolved}`;
-					if (quiet) {
+					// Bug #36/2: in headless/pipeline runs ALWAYS return the structured
+					// {success:false,error} so the runner surfaces the real cause; never
+					// return undefined or pop a modal during a headless auto-run (the
+					// file-watcher path is headless but has quiet:false).
+					if (quiet || isHeadless) {
 						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 					}
 					vscode.window.showErrorMessage(errorMsg);
@@ -3537,7 +3625,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			} else if (isHeadless && typeof options.file === 'string') {
 				if (!fs.existsSync(options.file)) {
 					const errorMsg = `File not found: ${options.file}`;
-					if (quiet) {
+					// Bug #36/2: headless callers must get the structured error, not a modal.
+					if (quiet || isHeadless) {
 						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 					}
 					vscode.window.showErrorMessage(errorMsg);
@@ -3671,7 +3760,10 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!decompileResult.success) {
 				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
 				console.error(`[hexcore-helix] decompileIR failed:`, decompileResult.error);
-				if (quiet) {
+				// Bug #36/2: a Helix failure in a pipeline step must reach the runner as a
+				// structured error, not undefined + modal, so the recorded step error is
+				// the real Helix cause rather than 'output file was not created'.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: decompileResult.error };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3721,6 +3813,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				// Bug #36/2: ensure the output directory exists before writing so a job
+				// whose reportsDir/outDir was never created does not silently fail the
+				// write and then trip the 'output file was not created' mask.
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 				fs.writeFileSync(outputPath, fullCode, 'utf-8');
 			}
 
@@ -3765,7 +3861,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!remillWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-remill is not available. Cannot lift machine code to IR.';
-				if (quiet) {
+				// Bug #36/2: headless/pipeline runs get the structured error, not undefined + modal.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3774,7 +3871,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!helixWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-helix is not available. Install the prebuild or build from source.';
-				if (quiet) {
+				// Bug #36/2: headless/pipeline runs get the structured error, not undefined + modal.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3788,7 +3886,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!liftResult || !liftResult.success) {
 				const errorMsg = liftResult?.error ?? 'Lift failed.';
-				if (quiet) {
+				// Bug #36/2: a failed lift (no function/code at address) must propagate as
+				// a structured error in headless/pipeline runs, not undefined + modal.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3893,7 +3993,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!decompileResult.success) {
 				const errorMsg = `Helix decompilation failed: ${decompileResult.error}`;
 				console.error(`[hexcore-helix] decompile failed:`, decompileResult.error);
-				if (quiet) {
+				// Bug #36/2: surface the real Helix failure to the pipeline runner.
+				if (quiet || isHeadless) {
 					return { success: false, code: '', functionCount: 0, address: String(liftResult.address ?? ''), architecture: arch, error: errorMsg };
 				}
 				vscode.window.showErrorMessage(errorMsg);
@@ -3911,6 +4012,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+				// Bug #36/2: ensure the output directory exists before writing.
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 				fs.writeFileSync(outputPath, fullCode, 'utf-8');
 			}
 

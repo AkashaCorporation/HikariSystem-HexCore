@@ -183,7 +183,7 @@ Recommended when you want to inspect the raw LLVM IR **and** the final pseudo-C 
     {
       "cmd": "hexcore.helix.decompileIR",
       "args": {
-        "irPath": "C:\\path\\to\\hexcore-reports\\helix\\bone_pos_calc.ll"
+        "irPath": "$step[0].output"
       },
       "output": { "path": "bone_pos_calc.helix.c" },
       "timeoutMs": 180000
@@ -193,7 +193,7 @@ Recommended when you want to inspect the raw LLVM IR **and** the final pseudo-C 
 ```
 
 **Notes:**
-- `irPath` must be an **absolute path** to the `.ll` file produced by `liftToIR`. Use the same path as `outDir` + `output.path` from step 1.
+- **Use `"irPath": "$step[0].output"`** (the 0-based index of the `liftToIR` step) instead of a hardcoded path — the runner resolves it to the exact file step 0 wrote, so it never drifts. A hardcoded absolute `irPath` is a footgun: it must match `outDir` + the lift step's `output.path` exactly (drive casing, separators, every subfolder) or `decompileIR` reports `IR file not found` and the step surfaces only the generic `Expected output file was not created` (the real cause is logged to the Extension Host console: Help > Toggle Developer Tools > Console).
 - If `liftToIR` fails, `decompileIR` will also fail (the `.ll` file won't exist). `continueOnError: true` lets you see both statuses in `hexcore-pipeline.status.json`.
 - Only supports x86/x64 binaries.
 
@@ -230,7 +230,7 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
     },
     {
       "cmd": "hexcore.helix.decompileIR",
-      "args": { "irPath": "C:\\path\\to\\hexcore-reports\\deep-reverse\\02-lifted.ll" },
+      "args": { "irPath": "$step[3].output" },
       "output": { "path": "03-decompiled.helix.c" },
       "timeoutMs": 180000
     },
@@ -256,7 +256,7 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
 **Notes:**
 - Replace `0x401000` with the function VA you want to decompile.
 - `liftToIR` and `helix.decompileIR` only support x86/x64 binaries.
-- Use absolute path for `irPath` (matches `outDir` + step 1 `output.path`).
+- `irPath` uses `$step[3].output` (the 0-based index of the `liftToIR` step) so the IR path resolves at runtime — never hardcode it (a mismatch fails with a masked `Expected output file was not created`; the real error is in the Extension Host console).
 - For Rellic-style output (mnemonic comments, deprecated), swap `hexcore.helix.decompileIR` with `hexcore.rellic.decompile`.
 
 ---
@@ -404,7 +404,7 @@ For functions with loop-at-entry patterns (backward branches to entry block) or 
     {
       "cmd": "hexcore.helix.decompileIR",
       "args": {
-        "irPath": "C:\\path\\to\\hexcore-reports\\helix-loop\\logic_1728.ll"
+        "irPath": "$step[1].output"
       },
       "output": { "path": "logic_1728.helix.c" },
       "timeoutMs": 240000
@@ -415,7 +415,7 @@ For functions with loop-at-entry patterns (backward branches to entry block) or 
 
 **Notes:**
 - `disposeHeadless` at the start prevents `UC_ERR_MAP` if a prior session was left open.
-- `irPath` must be an absolute path to the `.ll` file.
+- `irPath` uses `$step[1].output` (the `liftToIR` step index) so it resolves at runtime; avoid hardcoded absolute paths (a mismatch fails with a masked `Expected output file was not created`).
 - Functions with backward branches to the first block (common in loops at function entry) are now handled via `LLParser(UpgradeDebugInfo=false)` in the Helix engine.
 - Increase `count` for larger functions (>3000 bytes: use 300+).
 
@@ -1028,9 +1028,10 @@ Queue multiple analysis jobs with different priorities. High-priority jobs execu
 **Notes:**
 - `priority: "high"` ensures this job runs before `"normal"` and `"low"` priority jobs in the queue.
 - Use `hexcore.pipeline.queueJob` to submit: `{ "cmd": "hexcore.pipeline.queueJob", "args": { "file": "path/to/job.json", "priority": "high" } }`
-- Monitor with `hexcore.pipeline.jobStatus` — returns `queued`, `running`, `done`, `failed`, or `cancelled`.
+- Monitor with `hexcore.pipeline.jobStatus` — returns `queued`, `running`, `done`, `failed`, or `cancelled`, plus a 1-based `position` in the dispatch order while a job is `queued` (v3.8.2).
 - Cancel with `hexcore.pipeline.cancelJob` using the `jobId` returned by `queueJob`.
-- Queue supports up to 5 concurrent workers (default: 2). Configure in HexCore settings.
+- Concurrency is the `hexcore.pipeline.queue.poolSize` setting (integer, default `2`, range `1`–`16`; v3.8.2). A change applies on the next window reload, not mid-flight.
+- For `keepAlive` emulation jobs that share state across steps, pass a `sessionId` on `queueJob` (v3.8.2) — every job with that id is pinned to ONE worker, so the session is never split across workers.
 
 ---
 

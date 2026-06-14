@@ -101,6 +101,42 @@ function verifyBuildCoverage() {
 	assertIncludes(npmDirs, "'extensions/hexcore-yara'", 'build/npm/dirs.ts');
 }
 
+function verifyCompiledExtensionArtifacts() {
+	const extensionsDir = path.join(root, 'extensions');
+	if (!fs.existsSync(extensionsDir)) {
+		errors.push('Missing directory: extensions');
+		return;
+	}
+
+	const extensionDirs = fs.readdirSync(extensionsDir, { withFileTypes: true })
+		.filter(entry => entry.isDirectory() && entry.name.startsWith('hexcore-'))
+		.map(entry => entry.name);
+
+	for (const extensionName of extensionDirs) {
+		const packagePath = path.join('extensions', extensionName, 'package.json');
+		const packageJson = readJson(packagePath);
+		if (!packageJson) {
+			continue;
+		}
+
+		// A tsc-built extension declares "main": "./out/..." and is compiled by the
+		// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
+		// gitignored build artifact, so if the extension is missing from that compile loop
+		// the shipped zip has no compiled entrypoint and the extension fails to activate
+		// ("Cannot find module out/extension.js"). Assert the entrypoint named by "main"
+		// exists. (Most extensions use ./out/extension.js; a few, e.g. hexcore-common, use
+		// ./out/index.js — always resolve the real "main", never hardcode the filename.)
+		const main = packageJson.main;
+		if (typeof main === 'string' && main.startsWith('./out/')) {
+			const artifactRelative = path.join('extensions', extensionName, main.replace(/^\.\//, ''));
+			const artifactFull = path.join(root, artifactRelative);
+			if (!fs.existsSync(artifactFull)) {
+				errors.push(`${packagePath} has "main": "${main}" but ${artifactRelative} is missing — add ${extensionName} to the "Compile HexCore Extensions" step in .github/workflows/hexcore-installer.yml`);
+			}
+		}
+	}
+}
+
 function verifyManifestActivationEvents() {
 	const extensionsDir = path.join(root, 'extensions');
 	if (!fs.existsSync(extensionsDir)) {
@@ -130,6 +166,7 @@ function verifyManifestActivationEvents() {
 verifyYaraCommands();
 verifyPipelineCapabilities();
 verifyBuildCoverage();
+verifyCompiledExtensionArtifacts();
 verifyManifestActivationEvents();
 
 if (errors.length > 0) {
