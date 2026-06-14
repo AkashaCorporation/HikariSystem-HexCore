@@ -13,9 +13,12 @@
  * This is the exact pattern hexcore-debugger uses for pe32Worker.
  *
  * IPC protocol:
- *   parent → worker: { op: 'emulate' | 'stalker', binaryPath, maxInstructions, verbose }
+ *   parent → worker: { op: 'emulate' | 'stalker' | 'oracle', binaryPath, maxInstructions, verbose, startVa? }
+ *     startVa (optional, 0x-hex/decimal string): override the run start address. When
+ *     omitted, the run starts at load()'s entry; on a packed PE with AddressOfEntryPoint==0
+ *     that is the (non-executable) image header, so callers set startVa to the TLS-callback VA.
  *   worker → parent:
- *     { ok: true, kind: 'emulate', entry, stopReason, apiCallCount, apiCalls }
+ *     { ok: true, kind: 'emulate', entry, runStart, stopReason, apiCallCount, apiCalls, warning }
  *     { ok: true, kind: 'stalker', entry, stopReason, blockCount, drcovBase64 }
  *     { ok: false, error }
  *
@@ -128,7 +131,7 @@ process.on('message', async (msg) => {
             return;
         }
 
-        const { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle: oracleCfg } = msg;
+        const { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle: oracleCfg, startVa } = msg;
 
         const elixir = require(path.join(__dirname, '..', 'index.js'));
         if (!elixir || elixir.isAvailable === false || !elixir.Emulator) {
@@ -154,9 +157,30 @@ process.on('message', async (msg) => {
         const entry = emu.load(data);
         process.stderr.write(`[elixir-worker] loaded ${path.basename(binaryPath)} entry=${hex(entry)}\n`);
 
+        // P0: resolve the run start. When AddressOfEntryPoint is 0 (typical of a
+        // PACKED/protected PE whose real startup runs from a TLS callback), load()
+        // returns ImageBase = the PE header, which is non-executable -> emulate
+        // would fault at 0 instructions (UC_ERR_FETCH_PROT). Let the caller override
+        // the start via startVa (e.g. the TLS-callback VA), and warn when AOE==0 and
+        // no startVa was given so the failure is self-explaining instead of silent.
+        let runStart = entry;
+        let aoeWarning = null;
+        if (startVa !== undefined && startVa !== null) {
+            try { runStart = BigInt(startVa); }
+            catch { fail(new Error(`Invalid startVa: ${String(startVa)} (use a 0x-hex or decimal string)`)); return; }
+            process.stderr.write(`[elixir-worker] startVa override -> running from ${hex(runStart)} (load() entry was ${hex(entry)})\n`);
+        } else {
+            const lfanew = data.readUInt32LE(0x3c);
+            const aoe = data.readUInt32LE(lfanew + 24 + 16); // optional header + 16 = AddressOfEntryPoint (RVA)
+            if (aoe === 0) {
+                aoeWarning = `AddressOfEntryPoint is 0: load() entry resolves to ImageBase ${hex(entry)} (the PE header, non-executable). This binary is almost certainly PACKED/protected and its real startup runs from a TLS callback. Emulation will likely stop at 0 instructions. Pass "startVa":"0x<tls_callback_va>" to start at the protector stub (the TLS callback VA from IMAGE_DIRECTORY_ENTRY_TLS / AddressOfCallBacks).`;
+                process.stderr.write(`[elixir-worker] WARNING: ${aoeWarning}\n`);
+            }
+        }
+
         let payload;
         if (op === 'emulate') {
-            const reason = emu.run(entry, 0n);
+            const reason = emu.run(runStart, 0n);
             const apiCallCount = emu.getApiCallCount();
             const apiCalls = emu.getApiCalls() || [];
             process.stderr.write(`[elixir-worker] emu.run → ${reason.kind} (${reason.instructionsExecuted} insns, ${apiCallCount} api calls)\n`);
@@ -217,11 +241,13 @@ process.on('message', async (msg) => {
                 ok: true,
                 kind: 'emulate',
                 entry: hex(entry),
+                runStart: hex(runStart),
                 stopReason: serializeStopReason(reason),
                 apiCallCount,
                 apiCalls: apiCallsInline,
                 apiCallsPath,
-                apiCallsTotal: serializedCalls.length
+                apiCallsTotal: serializedCalls.length,
+                warning: aoeWarning
             };
         } else if (op === 'oracle') {
             // Project Pythia Oracle Hook (v3.9.0-preview.oracle.azoth).
@@ -242,7 +268,7 @@ process.on('message', async (msg) => {
             // stepEmulation→decide→apply→step-over→repeat). Returns a summary.
             const { runSummary, decisions } = await runOracle({
                 emu,
-                entry,
+                entry: runStart,
                 maxInstructions: maxInstructions || 2_000_000,
                 oracle: oracleCfg,
                 verbose: !!verbose,
@@ -300,7 +326,7 @@ process.on('message', async (msg) => {
             };
         } else if (op === 'stalker') {
             emu.stalkerFollow();
-            const reason = emu.run(entry, 0n);
+            const reason = emu.run(runStart, 0n);
             emu.stalkerUnfollow();
             const blockCount = emu.stalkerBlockCount();
             const drcov = emu.stalkerExportDrcov();

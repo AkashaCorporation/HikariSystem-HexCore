@@ -76,6 +76,25 @@ function bigintToString(v: bigint): string {
 	return '0x' + v.toString(16);
 }
 
+/**
+ * Normalize an optional startVa arg (0x-hex string, decimal string, or number)
+ * to a 0x-hex string for the worker IPC message (which is BigInt-free). Returns
+ * undefined when no startVa was given. Throws on an unparseable value.
+ */
+function normalizeStartVa(value: unknown, command: string): string | undefined {
+	if (value === undefined || value === null || value === '') {
+		return undefined;
+	}
+	try {
+		if (typeof value === 'string') { return '0x' + BigInt(value).toString(16); }
+		if (typeof value === 'number' && Number.isFinite(value)) { return '0x' + BigInt(Math.trunc(value)).toString(16); }
+		if (typeof value === 'bigint') { return '0x' + value.toString(16); }
+	} catch {
+		// fallthrough to the thrown error below
+	}
+	throw new Error(`${command}: invalid startVa "${String(value)}" — use a 0x-hex or decimal address string`);
+}
+
 const PE_MACHINE_LABELS: Record<number, string> = {
 	0x014c: 'x86 (PE32, IMAGE_FILE_MACHINE_I386)',
 	0x0200: 'ia64 (IMAGE_FILE_MACHINE_IA64)',
@@ -185,11 +204,13 @@ interface WorkerEmulateResult {
 	ok: true;
 	kind: 'emulate';
 	entry: string;
+	runStart?: string;
 	stopReason: { kind: string; address: string; instructionsExecuted: number; message: string };
 	apiCallCount: number;
 	apiCalls: Array<{ address: string | null; name: string | null; module: string | null; returnValue: string | null }>;
 	apiCallsPath?: string | null;
 	apiCallsTotal?: number;
+	warning?: string | null;
 }
 
 interface WorkerStalkerResult {
@@ -226,6 +247,7 @@ function runInWorker(
 	apiCallsOverflowPath?: string,
 	apiCallsOverflowDir?: string,
 	oracle?: OracleWorkerConfig,
+	startVa?: string,
 ): Promise<WorkerResult> {
 	return new Promise((resolve, reject) => {
 		const workerPath = path.join(__dirname, '..', 'worker', 'emulateWorker.js');
@@ -319,7 +341,7 @@ function runInWorker(
 		// delivery. The 10s timeout in the worker fires if no message lands in
 		// its process.on('message') listener, which can happen when the IPC
 		// channel is silently broken (stale child from prior run, etc.).
-		const sendMessage = { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle };
+		const sendMessage = { op, binaryPath, maxInstructions, verbose, apiCallsOverflowPath, apiCallsOverflowDir, oracle, startVa };
 		const sendResult = worker.send(sendMessage, undefined, {}, (err) => {
 			if (err) {
 				output.appendLine(`[elixir] worker.send CALLBACK error: ${err.message}`);
@@ -461,6 +483,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				// the Extension Host with STATUS_ACCESS_VIOLATION.
 				const file = resolveBinary(args, 'hexcore.elixir.emulateHeadless');
 				const maxInstructions = args.maxInstructions ?? 1_000_000;
+				// Optional start-address override. When AddressOfEntryPoint is 0 (packed/
+				// protected PE), load()'s entry is the non-executable image header and the
+				// run faults at 0 instructions; pass startVa (e.g. the TLS-callback VA) to
+				// start at the real protector stub. Native run(start,end) takes any start.
+				const startVa = normalizeStartVa(args.startVa, 'hexcore.elixir.emulateHeadless');
 				const outPath = args?.output?.path;
 				// Containment layer 1 (host): derive the apiCalls companion strictly
 				// inside the same directory as outPath, stripping any path
@@ -505,7 +532,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					(workerOp === 'oracle' ? `, triggers=${oracleArg!.triggers.length}` : '') +
 					`)`,
 				);
-				const workerResult = await runInWorker(workerOp, file, maxInstructions, !!args.verbose, 600_000, overflowPath, overflowDir, oracleArg);
+				const workerResult = await runInWorker(workerOp, file, maxInstructions, !!args.verbose, 600_000, overflowPath, overflowDir, oracleArg, startVa);
 				if (!workerResult.ok) {
 					throw new Error(`Elixir emulation failed: ${workerResult.error}`);
 				}
@@ -517,16 +544,19 @@ export function activate(context: vscode.ExtensionContext): void {
 					const result = {
 						file,
 						entry: emuResult.entry,
+						runStart: emuResult.runStart ?? emuResult.entry,
 						stopReason: emuResult.stopReason,
 						apiCallCount: emuResult.apiCallCount,
 						apiCalls: emuResult.apiCalls,
 						apiCallsPath: emuResult.apiCallsPath ?? null,
 						apiCallsTotal: emuResult.apiCallsTotal ?? emuResult.apiCalls.length,
+						warning: emuResult.warning ?? null,
 					};
 					output.appendLine(
 						`[elixir] run → ${result.stopReason.kind} @${result.stopReason.address} ` +
-						`(${result.stopReason.instructionsExecuted} insns, ${result.apiCallCount} api calls)`,
+						`(from ${result.runStart}, ${result.stopReason.instructionsExecuted} insns, ${result.apiCallCount} api calls)`,
 					);
+					if (result.warning) { output.appendLine(`[elixir] WARNING: ${result.warning}`); }
 					writeJsonResult(args, result);
 					return result;
 				}
@@ -573,8 +603,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			async (args: HeadlessArgs = {}) => {
 				const file = resolveBinary(args, 'hexcore.elixir.stalkerDrcovHeadless');
 				const maxInstructions = args.maxInstructions ?? 1_000_000;
+				const startVa = normalizeStartVa(args.startVa, 'hexcore.elixir.stalkerDrcovHeadless');
 				output.appendLine(`[elixir] stalkerDrcovHeadless ${path.basename(file)} — delegating to worker`);
-				const workerResult = await runInWorker('stalker', file, maxInstructions, false, 600_000);
+				const workerResult = await runInWorker('stalker', file, maxInstructions, false, 600_000, undefined, undefined, undefined, startVa);
 				if (!workerResult.ok) {
 					throw new Error(`Elixir stalker failed: ${workerResult.error}`);
 				}
@@ -643,6 +674,10 @@ interface HeadlessArgs {
 	maxInstructions?: number;
 	verbose?: boolean;
 	quiet?: boolean;
+	/** Optional run start-address override (0x-hex/decimal string or number). When
+	 *  AddressOfEntryPoint is 0 (packed PE), set this to the TLS-callback VA to start
+	 *  at the protector stub instead of the non-executable image header. */
+	startVa?: string | number;
 }
 
 export function deactivate(): void {
