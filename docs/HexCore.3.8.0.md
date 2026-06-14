@@ -24,7 +24,8 @@
 
 - Z3 constraint solving functional: `sub x, x → 0` proven
 - Near-zero impact on production binaries (ROTTR, kernel modules)
-- **Decision:** Disabled by default (`souper: false`), enable for obfuscated/crypto analysis
+- **Decision (as planned):** Disabled by default (`souper: false`), enable for obfuscated/crypto analysis
+  - **As shipped (correction):** the code actually defaults Souper **ON** in both Helix entrypoints (`souper !== false` in `extension.ts`), so it runs on every Helix decompile unless you pass `souper: false`. The "disabled by default" decision above was never applied to the code. Whether to flip the code to opt-in (matching this decision) or keep it opt-out is **still open** — see the automation doc `hexcore.helix.decompile` `souper` arg for the live behavior.
 
 ---
 

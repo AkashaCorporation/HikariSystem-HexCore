@@ -313,9 +313,9 @@ Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's 
 |---------|---------|-------------|------|
 | `hexcore.elixir.version` | — | Show the native Elixir engine version string (interactive toast). Not pipeline-safe. | n/a |
 | `hexcore.elixir.smokeTestHeadless` | 30s | Verify the native `.node` loaded and capability surface is exposed. Returns `{ok, version, loadError, platform, arch, codename: "Project Azoth", surface: [...] }`. | n/a |
-| `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE/ELF → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, stopReason, apiCallCount, apiCalls}`. | x86_64, ELF x86_64 |
+| `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE/ELF → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, stopReason, apiCallCount, apiCalls, apiCallsPath, apiCallsTotal}` — when the API-call log is large, the full list is spilled to a `<output-base>.apicalls.json` companion (`apiCallsPath` points to it; `apiCalls` then holds a capped preview, `apiCallsTotal` the true count). **Accepts an optional `oracle` arg that switches it to AI-driven mode — see "Oracle Hook" below.** | x86_64, ELF x86_64 |
 | `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes DRCOV v2 binary (IDA Lighthouse format) to `output.path.drcov`. Returns `{file, entry, stopReason, blockCount, drcovBytes}`. | x86_64, ELF x86_64 |
-| `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. | x86_64, ELF x86_64 |
+| `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. **Runs IN-HOST (no worker fork) — it loads + snapshots but never calls `run()`/`uc_emu_start`, so ACG does not apply; uses a fixed 100k cap and ignores the `maxInstructions` arg.** | x86_64, ELF x86_64 |
 
 **Args for emulateHeadless / stalkerDrcovHeadless / snapshotRoundTripHeadless:**
 
@@ -323,10 +323,27 @@ Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's 
 |-----|------|---------|-------------|
 | `file` | string | — **required** | Path to PE or ELF binary. `binaryPath` is also accepted as an alias. |
 | `maxInstructions` | number | `1_000_000` | Instruction cap for the emulation run. (Not used by snapshot command.) |
-| `verbose` | boolean | `false` | Stream additional trace lines to the Elixir output channel. |
-| `output.path` | string | — | Write JSON result to this path. For `stalkerDrcovHeadless`, a `.drcov` variant is written alongside (or replaces `.json` with `.drcov`). |
+| `verbose` | boolean | `false` | Stream additional trace lines to the Elixir output channel. **Only honored by `emulateHeadless`; `stalkerDrcovHeadless` and `snapshotRoundTripHeadless` hardcode it off and ignore the arg.** |
+| `output.path` | string | — | Write JSON result to this path. For `stalkerDrcovHeadless`, a `.drcov` variant is written alongside (or replaces `.json` with `.drcov`). For `emulateHeadless`, an `.apicalls.json` companion may be written alongside (see its return). |
+| `oracle` | object | — | *(optional, `emulateHeadless` only)* Enables the Project Pythia AI-oracle pause/resume run. See "Oracle Hook" below. |
 
-**stopReason shape:** `{ kind: "Exit" | "InsnLimit" | "Error" | "User", address: string, instructionsExecuted: number, message: string }`.
+**stopReason shape:** `{ kind: "Exit" | "InsnLimit" | "Error" | "User", address: string, instructionsExecuted: number, message: string }`. (Under the Oracle Hook, `run()` can also stop with `kind: "breakpoint"`.)
+
+**Oracle Hook (Project Pythia) — the `oracle` arg on `emulateHeadless` (v3.9.0-preview.oracle.azoth):**
+
+This is the path for driving **obfuscated / anti-debug / VM-protected** targets. When `emulateHeadless` is given an `oracle` object, it switches from a straight run to an AI-oracle-driven loop: the worker installs **native breakpoints** (`breakpointAdd`), and each time PC reaches one the engine pauses (`run()` returns `stopReason.kind === "breakpoint"`), asks an external **Pythia** decision process (spawned over stdio) what to do — e.g. patch a register or memory value to defeat an anti-debug / integrity / VM check — applies it (`regWrite`/`memWrite`), single-steps past the breakpoint (`runN(pc, 0n, 1n)`), re-installs it, and resumes. All register/memory access happens in-process inside the worker; the parent only receives the final summary.
+
+| `oracle` field | Type | Description |
+|----------------|------|-------------|
+| `pythiaRepoPath` | string | Path to the Pythia repo (the decision process spawned over stdio). **Required** to enable the oracle op. |
+| `triggers` | array | `{ kind, value, reason? }[]` — the breakpoint triggers Pythia reasons about. **Required and non-empty** to enable. |
+| `pythiaNodeBin` | string | *(optional)* Node binary used to spawn Pythia. |
+| `pythiaSpawnArgs` | string[] | *(optional)* Extra args for the Pythia process. |
+| `pauseTimeoutMs` | number | *(optional)* Max wait for a Pythia decision per pause. |
+
+When the oracle op runs, the result gains an `oracle` block — `{ pauseCount, patchesApplied, totalCostUsd, decisions }` — alongside the usual `{file, entry, stopReason, apiCallCount, apiCalls, apiCallsTotal}`. Wiring lives in `worker/oracleAdapter.js`; the op is selected automatically when `oracle.pythiaRepoPath` + a non-empty `oracle.triggers` are present (otherwise a plain emulate runs).
+
+**Full native instrumentation surface (beyond the 5 wrapped commands):** the `.node` exposes a Frida-style API typed in `extensions/hexcore-elixir/index.d.ts` — `Emulator.{memMap, memRead, memWrite, regRead, regWrite, breakpointAdd/Del/Clear, runN, interceptorAttach/Detach, stalkerFollow/Unfollow/exportDrcov, snapshotSave/Restore}` plus standalone `Interceptor` and `Stalker` classes. **Register access is by NUMERIC Unicorn `UC_X86_REG_*` id, NOT name** (e.g. RIP=41, RAX=35, RSP=44) — Elixir rejects register-name strings. Drive these from a forked worker (never in-host for anything that calls `run()`/`runN()`) to build custom instrumentation or Oracle triggers.
 
 **Worker process behaviour:**
 
@@ -837,7 +854,7 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
 - **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
-- **Rellic Decompiler** **(DEPRECATED -- still present as of v3.8.2; removal deferred)** -- Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. The `hexcore.rellic.decompile` / `hexcore.rellic.decompileIR` commands remain registered and functional for backward compatibility (the planned v3.8.0 removal did not happen). Use `hexcore.helix.decompile` / `hexcore.helix.decompileIR` instead. v3.7.1 adds `optimizationPasses` (DCE, ConstFold) and Souper hook.
+- **Rellic Decompiler** **(DEPRECATED -- still present as of v3.8.2; removal deferred)** -- Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. The `hexcore.rellic.decompile` / `hexcore.rellic.decompileIR` commands remain registered and functional for backward compatibility (the planned v3.8.0 removal did not happen). Use `hexcore.helix.decompile` / `hexcore.helix.decompileIR` instead. v3.7.1 adds `optimizationPasses` (DCE, ConstFold); the `optimizerStep: 'souper'` hook on the **Rellic** path is a **no-op stub** (it logs a warning and falls through without optimizing). Souper is actually implemented for **Helix** (default-on `souper` arg), not Rellic.
 - **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step). Pass `optimizeIR: false` to skip MLIR optimization passes when debugging pass pipeline issues.
 - **Auto-backtrack** (v3.7.3+) — `disassembleAtHeadless`, `helix.decompile`, and `liftToIR` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. v3.7.4 adds `forceProbe` mode, Capstone backward disassembly, ftrace preamble skip, and `endbr64` recognition. Disable with `autoBacktrack: false`.
 - **Section-filtered strings** (v3.7.4) — `hexcore.disasm.extractStrings` accepts `sections: [".rdata", ".data"]` to scan only specific PE/ELF sections. Eliminates noise from `.text`.
@@ -1081,7 +1098,7 @@ Decompile binary to pseudo-C in one step: lifts machine code via Remill, then de
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `100` | Number of instructions to lift before decompiling. |
-| `optimizerStep` | `string` | `'llvm-passes'` | Optimizer: `'none'`, `'llvm-passes'` (DCE + ConstFold), `'souper'` (not yet implemented — hook for v3.8). **(v3.7.1)** |
+| `optimizerStep` | `string` | `'llvm-passes'` | Optimizer: `'none'`, `'llvm-passes'` (DCE + ConstFold), `'souper'` (**no-op stub on the Rellic path** — logs a warning and falls through). Souper is implemented for **Helix** instead, via the default-on `souper` arg on `hexcore.helix.decompile` / `decompileIR`. **(v3.7.1)** |
 | `optimizationPasses` | `string[]` | — | Specific LLVM passes to run: `'dce'`, `'constfold'`, `'simplifycfg'`. Only used when `optimizerStep` is `'llvm-passes'`. **(v3.7.1)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
@@ -1140,6 +1157,8 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `150` | Number of instructions to lift before decompiling. |
 | `optimizeIR` | `boolean` | `true` | When `false`, skips MLIR optimization passes and emits IR as-is. Useful for debugging pass pipeline issues. **(v3.7.3)** |
+| `souper` | `boolean` | `true` | Run the **Souper superoptimizer** (Google Souper + Z3 SMT) on the Remill IR *before* Helix decompiles it — proves and collapses semantically-equivalent-but-simpler sequences (e.g. `sub x,x -> 0`). **On by default** when the `hexcore-souper` native module is present; pass `false` to skip. Near-zero effect on unprotected binaries (e.g. games like ROTTR), valuable on obfuscated / MBA / crypto targets. **(v3.8.0)** |
+| `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
 | `autoBacktrack` | `boolean` | `true` | Auto-detects function boundaries and backtracks to the real function start if the address is mid-function. Set to `false` to disable. **(v3.7.3)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
@@ -1177,6 +1196,8 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `irPath` | `string` | *(required)* | Path to a `.ll` LLVM IR file. Relative paths are resolved from the workspace root. Absolute paths are used as-is. |
+| `souper` | `boolean` | `true` | Run the **Souper superoptimizer** (Google Souper + Z3 SMT) on the IR before decompiling. **On by default** when `hexcore-souper` is present; pass `false` to skip. Near-zero effect on unprotected binaries, valuable on obfuscated / MBA / crypto targets. **(v3.8.0)** |
+| `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. Relative to `outDir`. |
 
 > **Important:** `irPath` must be the **path to the `.ll` file**, not inline IR text. The pipeline runner always sets `options.file` to the binary target, so `irPath` is the dedicated arg for specifying the IR file path.
