@@ -191,7 +191,7 @@ jobs:
           cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
-          cd ../hexcore-elixir && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elixir && npm install --ignore-scripts && npm run compile
 
       - name: Patch vsce npm resolver for local deps
         run: node scripts/patch-vsce-npm.js
@@ -247,6 +247,7 @@ jobs:
           npm install -g node-gyp
           npm install -g gulp-cli
           npm install -g tsx
+          npm install -g prebuild-install
 
       - name: Install build gyp dependencies
         run: npm --prefix build/npm/gyp ci
@@ -365,7 +366,7 @@ jobs:
           cd ../hexcore-report-composer && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-disassembler && npm ci --ignore-scripts && npm run compile
           cd ../hexcore-debugger && npm ci --ignore-scripts && npm run compile
-          cd ../hexcore-elixir && npm ci --ignore-scripts && npm run compile
+          cd ../hexcore-elixir && npm install --ignore-scripts && npm run compile
 
       - name: Patch vsce npm resolver for local deps
         run: node scripts/patch-vsce-npm.js
