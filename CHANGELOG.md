@@ -5,6 +5,28 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.2.2] - 2026-06-14 - "Post-release hotfix: Elixir runtime unicorn.dll packaging"
+
+> Second post-release HOTFIX of 3.8.2 (3.8.3 remains reserved for a feature release). Fixes the Elixir emulation engine failing to load in the packaged app with "Elixir native binding unavailable: ... module not found", and folds in the two already-committed post-3.8.2.1 adjustments (Elixir startVa override + Souper/Elixir doc corrections). No engine / decompiler behavior changes - packaging + TS / docs only; no native rebuild required.
+
+### Packaging - ship unicorn.dll next to the Elixir .node (High)
+
+> The hexcore-elixir napi-rs binary (`hexcore-elixir.win32-x64-msvc.node`) dynamically links `unicorn.dll`, but the DLL was never placed beside the .node in the packaged app, so the Windows loader could not resolve it and `worker/emulateWorker.js` threw "module not found" - every `hexcore.elixir.*` emulation call returned the `{ stub: true }` fallback. The .node itself is present and valid (loads cleanly once the DLL is beside it: `getVersion()` = '0.1.0', `Emulator` is a class). TWO pipeline points both dropped the DLL: the `prebuild-elixir-windows` job verifies unicorn.dll from `elixir-deps-win32-x64.zip` but uploads ONLY the .node, and `scripts/hexcore-native-install.js` ran its unicorn-runtime-deps copy ONLY for `moduleName === 'hexcore-unicorn'`. Not a stale-deps-zip issue: the two post-1.0.0 Elixir commits are Rust-only (`crates/hexcore-elixir/src/lib.rs`), so the vendored `elixir_engine.lib` + `unicorn.dll` in the zip were unchanged.
+
+- **Fix.** `scripts/hexcore-native-install.js` now copies `unicorn.dll` (and `libunicorn.so` / `libunicorn.dylib` on Linux / macOS, via the existing `getDllFilesForPlatform`) from the sibling `hexcore-unicorn` extension (`prebuilds/{platform}-{arch}` -> `deps/unicorn` -> root) into the Elixir module root next to the napi-rs .node, when `moduleName === 'hexcore-elixir'`. Reuses the existing `copyIfExists`; idempotent (skips when the DLL is already present). `hexcore-unicorn` is installed before `hexcore-elixir` in both installer jobs, so the source DLL exists at copy time.
+- **Validated.** `node --check` passes; a sandbox test proved copy-when-missing (absent -> present), idempotency on re-run, and correct source resolution (the 32.6 MB DLL). The packaged-app workaround (dropping unicorn.dll beside the .node) was confirmed end-to-end: the Elixir calc job's `emulateHeadless` ran for real (187 instructions, 8 API calls) instead of the stub.
+- **Workaround on the un-patched 3.8.2.1 zip.** Copy `resources/app/extensions/hexcore-unicorn/prebuilds/win32-x64/unicorn.dll` into `resources/app/extensions/hexcore-elixir/` (next to the .node), or wait for this patch.
+
+### Elixir - startVa override + AOE==0 warning (folded from post-3.8.2.1 main, commit 96900db)
+
+> `emulateHeadless` / `stalkerDrcovHeadless` seeded RIP from the `load()` entry, so a packed PE with `AddressOfEntryPoint == 0` started at the MZ header and stepped zero instructions.
+
+- An optional `startVa` start-address override threads host -> worker (`extension.ts` + `worker/emulateWorker.js`); an `AOE == 0` warning is surfaced; `HEXCORE_AUTOMATION.md` documents the `startVa` row and the `runStart` / `warning` return fields. Pure TS / JS plumbing (the native `Emulator.run(start, end)` already took a start) - no .node rebuild.
+
+### Docs - Souper + Elixir automation docs corrected (folded from post-3.8.2.1 main, commit bc55a7e)
+
+> `HEXCORE_AUTOMATION.md`: the Helix `optimizerStep: 'souper'` path IS implemented and default-on, and the `souper` / `souperTimeout` knobs are now documented; the Elixir section gained the `oracle` (Project Pythia) arg, the numeric `UC_*_REG` ids, and the full native surface.
+
 ## [3.8.2.1] - 2026-06-14 - "Post-release hotfix: issue #36 (elixir packaging, pipeline error honesty, watcher loop)"
 
 > Post-release HOTFIX (a patch of 3.8.2, not a feature bump - 3.8.3 is reserved for a feature release) for the three defects reported in GitHub issue #36 against the shipped 3.8.2 Windows zip. All three were reproduced and root-caused against the real artifact; two of the three reporter diagnoses were corrected during triage. No engine / decompiler behavior changes - this is packaging + pipeline-runner + watcher + docs hardening only (TS / workflow / docs; no native rebuild required). `tsc -p ./` in hexcore-disassembler exits 0; adversarially reviewed.

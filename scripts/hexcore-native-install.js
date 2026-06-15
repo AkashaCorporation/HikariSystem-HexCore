@@ -33,6 +33,16 @@ if (isNapiRs) {
 	installPrebuildify();
 }
 
+// hexcore-elixir's napi-rs .node dynamically links unicorn.dll and needs it right next to
+// the .node (at the module root). The prebuild release ships only the .node, and the
+// sibling hexcore-unicorn extension is the canonical source of the runtime DLL - copy it
+// here so the Elixir emulation engine loads at runtime. Without this the .node is present
+// and valid but fails to load with "module not found" (the missing piece is its runtime
+// dependency unicorn.dll, not the .node itself).
+if (moduleName === 'hexcore-elixir') {
+	copyUnicornDllForElixir();
+}
+
 // ---------------------------------------------------------------------------
 // NAPI-RS install path — downloads .node from GitHub Release
 // ---------------------------------------------------------------------------
@@ -261,6 +271,37 @@ function copyUnicornRuntimeDeps(binaryDir) {
 		console.warn('[hexcore-native-install] Ensure deps/unicorn/ contains the required DLL or check the GitHub Release assets.');
 	} else {
 		console.log(`[hexcore-native-install] Unicorn DLL verified: deps=${inDeps}, binary=${inBinary}`);
+	}
+}
+
+// Copy the Unicorn runtime DLL next to the Elixir napi-rs .node (which lives at the module
+// root). The DLL is sourced from the sibling hexcore-unicorn extension, which is installed
+// before hexcore-elixir in the installer and carries the DLL in its prebuilds/deps dirs.
+function copyUnicornDllForElixir() {
+	const dllFiles = getDllFilesForPlatform();
+	if (dllFiles.length === 0) {
+		return;
+	}
+
+	const destDir = cwd; // napi-rs emits the .node at the module root
+	const unicornRoot = path.join(cwd, '..', 'hexcore-unicorn');
+	const srcDirs = [
+		path.join(unicornRoot, 'prebuilds', `${process.platform}-${process.arch}`),
+		path.join(unicornRoot, 'deps', 'unicorn'),
+		unicornRoot
+	];
+
+	for (const dllFile of dllFiles) {
+		if (fs.existsSync(path.join(destDir, dllFile))) {
+			continue; // already present next to the .node
+		}
+		const src = srcDirs.map(d => path.join(d, dllFile)).find(p => fs.existsSync(p));
+		if (src) {
+			copyIfExists(src, destDir);
+			console.log(`[hexcore-native-install] Copied ${dllFile} next to the Elixir .node (from ${path.relative(cwd, src)})`);
+		} else {
+			console.warn(`[hexcore-native-install] WARNING: ${dllFile} not found in sibling hexcore-unicorn - Elixir emulation will fail to load at runtime.`);
+		}
 	}
 }
 
