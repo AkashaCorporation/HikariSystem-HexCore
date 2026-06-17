@@ -2225,8 +2225,19 @@ LiftResult RemillLifter::DoLift(
 
 		size_t resolvedCount = 0;
 
+		// FIX-054: an externalSymbols_ address that falls inside our OWN lifted
+		// window [address, address+length) is a SELF-reference (a callfuscated
+		// function that takes its own address), never a real external callee.
+		// Declaring it emits `declare @<self>(...)` that collides with the lifted
+		// `define` once the TS lifted_<addr>->symbol rename runs => invalid LLVM
+		// redefinition => Helix stage-1 parse abort => 8-line stub. The define is
+		// still named lifted_<addr> here, so a by-name guard would miss it; gate on
+		// the ADDRESS instead. Skip self-references in every strategy below.
+		auto isSelfRef = [&](uint64_t a) { return a >= address && a < address + length; };
+
 		// Strategy 1: Scan callTargets from Phase 3 and inject declares
 		for (uint64_t ct : result.callTargets) {
+			if (isSelfRef(ct)) continue;
 			auto it = externalSymbols_.find(ct);
 			if (it != externalSymbols_.end()) {
 				getOrCreateExtern(it->second);
@@ -2253,6 +2264,7 @@ LiftResult RemillLifter::DoLift(
 					if (!targetArg) continue;
 
 					uint64_t targetAddr = targetArg->getZExtValue();
+					if (isSelfRef(targetAddr)) continue;  // FIX-054: self-reference
 					auto symIt = externalSymbols_.find(targetAddr);
 					if (symIt == externalSymbols_.end()) continue;
 
@@ -2272,6 +2284,7 @@ LiftResult RemillLifter::DoLift(
 		// symbols so the IR has `declare ptr @mutex_lock(...)` etc.
 		// The Helix decompiler uses these + @__hxreloc__ to resolve calls.
 		for (auto& [addr, name] : externalSymbols_) {
+			if (isSelfRef(addr)) continue;  // FIX-054: self-reference, owned by the define
 			getOrCreateExtern(name);
 		}
 	}

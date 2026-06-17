@@ -309,6 +309,52 @@ export class RemillWrapper {
 	}
 
 	/**
+	 * Remove a redundant `declare <ty> @NAME(...)` line when the SAME module
+	 * already contains `define <ty> ... @NAME(`. Such a declare is both
+	 * provably redundant AND an invalid redefinition that makes the LLVM textual
+	 * parser (hence Helix stage 1) reject the whole module -> 8-line stub.
+	 *
+	 * Root cause: the native Remill Phase 5.6 external-symbol injector
+	 * (remill_wrapper.cpp `getOrCreateExtern`) declares every name in
+	 * externalSymbols_ but only de-dups against its own local cache, never
+	 * consulting liftModule->getFunction. A callfuscated function that takes its
+	 * own address has its symbol mapped into externalSymbols_, so it gets
+	 * `declare ptr @<self>(...)` appended next to its own `define`.
+	 *
+	 * SAFE: a declare is stripped ONLY when its exact @NAME also appears as a
+	 * `define ... @NAME(` in the very same text. A legitimately-external
+	 * declaration (mutex_lock, __fentry__, ...) has no matching define and is
+	 * never touched. Idempotent; a strict no-op on any collision-free module.
+	 *
+	 * IMPORTANT: must run AFTER the `lifted_<addr>` -> real-symbol rename
+	 * (extension.ts liftToIR), because the native lifter names the define
+	 * `lifted_<decimal>` while the spurious declare already carries the real
+	 * symbol name -- the define/declare names only collide once the rename has
+	 * happened. Running it on the raw native `result.ir` (pre-rename) is a no-op.
+	 */
+	static dedupSelfDeclares(ir: string): string {
+		if (!ir || ir.indexOf('declare') < 0) { return ir; }
+		const defined = new Set<string>();
+		const defRe = /^define\b[^@\n]*@("[^"]+"|[A-Za-z0-9._$-]+)\s*\(/gm;
+		let m: RegExpExecArray | null;
+		while ((m = defRe.exec(ir)) !== null) { defined.add(m[1]); }
+		if (defined.size === 0) { return ir; }
+		const declRe = /^declare\b[^@\n]*@("[^"]+"|[A-Za-z0-9._$-]+)\s*\([^\n]*\)\s*$/;
+		const out: string[] = [];
+		let stripped = 0;
+		for (const line of ir.split('\n')) {
+			const dm = declRe.exec(line);
+			if (dm && defined.has(dm[1])) { stripped++; continue; }
+			out.push(line);
+		}
+		if (stripped > 0) {
+			console.warn(`[remill] dedupSelfDeclares: stripped ${stripped} redundant self-declare(s) ` +
+				`(callfuscation self-reference: declare collided with an in-module define)`);
+		}
+		return out.join('\n');
+	}
+
+	/**
 	 * Convert TypeScript LiftOptions into the plain object the native module expects.
 	 */
 	private buildNativeOptions(opts: RemillLiftOptions): Record<string, unknown> {

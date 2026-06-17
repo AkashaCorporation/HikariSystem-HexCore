@@ -2656,6 +2656,16 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 
+			// FIX-054: the lifted_<addr> -> functionName rename above can collide with a
+			// spurious `declare ptr @functionName(...)` that the native Remill Phase 5.6
+			// external-symbol injector emits when a callfuscated function takes its OWN
+			// address (its symbol lands in externalSymbols_, e.g. fh_install_hook in
+			// malware.ko). The resulting `define @X` + `declare @X` is an invalid LLVM
+			// redefinition that aborts the Helix parser -> 8-line stub. Strip the
+			// redundant self-declare (safe: only fires when an in-module `define @X(`
+			// exists). No-op once the native getOrCreateExtern self-address guard ships.
+			processedIR = RemillWrapper.dedupSelfDeclares(processedIR);
+
 			const fileName = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
 			const header = buildIRHeader({
 				fileName,
