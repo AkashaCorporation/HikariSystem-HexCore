@@ -2286,6 +2286,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Strategy: patch bytes → Remill emits `call @sub_<fakeAddr>` →
 			// post-process IR to replace `@sub_<fakeAddr>` with `@mutex_lock` etc.
 			let symbolMap: Map<number, string> | undefined; // fakeAddr → symbolName
+			// FIX-097: relocated data sections (fake base VA → raw section bytes)
+			// carried from the byte-patch step to the post-lift metadata emit.
+			let dataSectionFakes: Array<{ vaStart: number; bytes: Buffer }> | undefined;
 			const fileInfo = engine.getFileInfo();
 			const textRelocs = engine.getTextRelocations();
 
@@ -2301,9 +2304,21 @@ export function activate(context: vscode.ExtensionContext): void {
 				const liftOffsetInText = startAddress - textSectionVA;
 				let patchCount = 0;
 
-				// Kernel infrastructure — NOPs at runtime, skip patching
+				// Kernel infrastructure — NOPs at runtime, skip patching.
+				// FIX-098: do NOT skip __x86_return_thunk. Spectre/retbleed-mitigated
+				// kernel modules (e.g. mali_kbase.ko = 2641 of them) compile EVERY
+				// `ret` as `jmp __x86_return_thunk` (e9 00000000 + PLT32 reloc, no c3
+				// byte). Skipping the reloc left the displacement 0, so Remill decoded
+				// the jmp as `jmp PC+5` = a forward branch into the body, NOT a return
+				// -> the lifted IR had ZERO `ret` edges -> every early return orphaned
+				// the rest of the body = the "N unreachable statements after return"
+				// premature-return defect. By PATCHING it like a normal symbol (below),
+				// the jmp target lands in externalSymbols_ and the native Remill FIX-019
+				// (remill_wrapper.cpp ~915/1224) recognizes the name and emits a RET in
+				// Phase 4. (The __x86_indirect_thunk_* retpolines stay skipped — those
+				// are indirect call/jump trampolines, not returns.)
 				const infraSymbols = new Set([
-					'__fentry__', '__x86_return_thunk', '__cfi_check',
+					'__fentry__', '__cfi_check',
 					'__x86_indirect_thunk_rax', '__x86_indirect_thunk_rbx',
 					'__x86_indirect_thunk_rcx', '__x86_indirect_thunk_rdx',
 					'__x86_indirect_thunk_rsi', '__x86_indirect_thunk_rdi',
@@ -2357,6 +2372,63 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				// Use patched buffer for lifting
 				bytes = patchedBytes;
+			}
+
+			// FIX-097: patch DATA relocations (string/constant loads). The engine
+			// collected R_X86_64_32/32S relocs against SECTION symbols (e.g.
+			// `mov rdi, .rodata.str1.1+OFF`) that FIX-011 dropped, leaving the
+			// operand `i64 0` => `printk(0, ...)`. We assign each referenced data
+			// section a non-overlapping fake base VA (well below the 0x7FFF0000 call
+			// range), patch the absolute 32-bit operand to base+offset, and carry the
+			// section bytes out as `dataSectionFakes`. The post-lift step embeds them
+			// as `!helix.strings` metadata so the decompiler can readCString(base+OFF)
+			// and render the real string literal.
+			const dataRelocs = engine.getDataRelocations();
+			if (fileInfo?.isRelocatable && dataRelocs.size > 0) {
+				const patchedBytes = Buffer.from(bytes); // may already carry FIX-011 patches
+				const textSection = engine.getSections().find(s => s.name === '.text');
+				const textSectionVA = textSection?.virtualAddress ?? 0;
+				const liftOffsetInText = startAddress - textSectionVA;
+				const sectionFakeBase = new Map<string, number>(); // section → fake base VA
+				let nextBase = 0x7F000000;
+				let dataPatchCount = 0;
+
+				for (const [textOffset, dreloc] of dataRelocs) {
+					const patchOffset = textOffset - liftOffsetInText;
+					if (patchOffset < 0 || patchOffset + 4 > patchedBytes.length) {
+						continue; // outside our lift window
+					}
+					// String literals live in .rodata*; skip .data/.text/module
+					// pointer relocs so we don't mis-render real data pointers as
+					// strings (and don't disturb their existing `i64 0` semantics).
+					if (!dreloc.sectionName.startsWith('.rodata')) {
+						continue;
+					}
+					let base = sectionFakeBase.get(dreloc.sectionName);
+					if (base === undefined) {
+						base = nextBase;
+						nextBase += 0x00100000; // 1 MiB spacing per section
+						sectionFakeBase.set(dreloc.sectionName, base);
+					}
+					// Absolute 32-bit value (32S sign-extends cleanly for < 0x80000000)
+					const value = (base + dreloc.addend) & 0xFFFFFFFF;
+					patchedBytes.writeInt32LE(value | 0, patchOffset);
+					dataPatchCount++;
+				}
+
+				if (dataPatchCount > 0) {
+					dataSectionFakes = [];
+					for (const [name, base] of sectionFakeBase) {
+						const secBytes = engine.getSectionBytesByName(name);
+						if (secBytes && secBytes.length > 0) {
+							dataSectionFakes.push({ vaStart: base, bytes: secBytes });
+						}
+					}
+					bytes = patchedBytes;
+				}
+				console.log(`[HexCore] liftToIR FIX-097: patched ${dataPatchCount} data relocs across ` +
+					`${sectionFakeBase.size} section(s); ${dataSectionFakes?.length ?? 0} fake data section(s) ` +
+					`carried (bases from 0x7F000000): ${[...sectionFakeBase].map(([n, b]) => `${n}@0x${b.toString(16)}`).join(', ')}`);
 			}
 
 			// Note: callfuscation deflattening (call-as-jmp) is applied centrally in
@@ -2665,6 +2737,93 @@ export function activate(context: vscode.ExtensionContext): void {
 			// redundant self-declare (safe: only fires when an in-module `define @X(`
 			// exists). No-op once the native getOrCreateExtern self-address guard ships.
 			processedIR = RemillWrapper.dedupSelfDeclares(processedIR);
+
+				// FIX-099 (Defect 2): name in-module direct/tail calls that the
+				// compiler resolved internally (no .rela.text reloc — real PC-relative
+				// displacement baked in), using the ELF .symtab. Without this a CALLI
+				// to another module function (e.g. csf_queue_register_internal@0x63150,
+				// trace_jit_stats@0xB90) lifts as a bare numeric target -> Helix renders
+				// (*(code*)0xADDR)() and the out-of-table-call honesty cap pins
+				// confidence at 50%. We map each lifted callTarget that equals a known
+				// .text function offset to its name and rewrite ONLY the CALLI-target
+				// operand (line-scoped, so a coincidental i64 immediate elsewhere is
+				// never touched).
+				if (fileInfo?.isRelocatable && Array.isArray(liftResult.callTargets) && liftResult.callTargets.length > 0) {
+					const textFnByOffset = new Map<number, string>();
+					for (const s of engine.getElfFunctionSymbols()) {
+						if (s.section === '.text') { textFnByOffset.set(s.offsetInSection, s.name); }
+					}
+					const named = new Set<string>();
+					const irLines = processedIR.split('\n');
+					for (let i = 0; i < irLines.length; i++) {
+						if (!irLines[i].includes('CALLI')) { continue; }
+						for (const t of liftResult.callTargets) {
+							const nm = textFnByOffset.get(t);
+							if (!nm || nm === functionName) { continue; }
+							const tok = `i64 ${t},`;
+							if (irLines[i].includes(tok)) {
+								irLines[i] = irLines[i].split(tok).join(`i64 ptrtoint (ptr @${nm} to i64),`);
+								named.add(nm);
+							}
+						}
+					}
+					if (named.size > 0) {
+						processedIR = irLines.join('\n');
+						const declared099 = new Set([...processedIR.matchAll(/^declare\s+\S+\s+@([\w.$]+)\s*\(/gm)].map(m => m[1]));
+						const newDecls099 = [...named]
+							.filter(n => !declared099.has(n) && !processedIR.includes(`define ptr @${n}(`))
+							.map(n => `declare ptr @${n}(...)`);
+						if (newDecls099.length > 0) {
+							const block099 = '\n' + newDecls099.join('\n') + '\n';
+							const lastDecl099 = processedIR.lastIndexOf('\ndeclare ');
+							if (lastDecl099 >= 0) {
+								const e099 = processedIR.indexOf('\n', lastDecl099 + 1);
+								processedIR = processedIR.slice(0, e099) + block099 + processedIR.slice(e099);
+							} else {
+								const fd099 = processedIR.indexOf('\ndefine ');
+								processedIR = fd099 >= 0 ? processedIR.slice(0, fd099) + block099 + processedIR.slice(fd099) : block099 + processedIR;
+							}
+						}
+						console.log(`[HexCore] liftToIR FIX-099: named ${named.size} in-module .symtab call target(s): ${[...named].slice(0, 8).join(', ')}`);
+					}
+				}
+
+			// FIX-097: embed the relocated data-section bytes as module metadata
+			// so the Helix decompiler can resolve a patched `mov rdi, <base+OFF>`
+			// back to the original string literal — turning printk(0, ...) into
+			// printk("DMESG: unresolved symbol: %s\n", ...). One !helix.strings
+			// node per fake data section: !{ i64 baseVA, !"<raw section bytes>" }.
+			if (dataSectionFakes && dataSectionFakes.length > 0) {
+				let maxMdId = -1;
+				for (const m of processedIR.matchAll(/^!(\d+)\s*=/gm)) {
+					const id = parseInt(m[1], 10);
+					if (id > maxMdId) { maxMdId = id; }
+				}
+				let mdId = Math.max(maxMdId + 1, 90000);
+				const nodeRefs: string[] = [];
+				const nodeDefs: string[] = [];
+				for (const ds of dataSectionFakes) {
+					// LLVM .ll string escaping: \HH (upper hex) for ", \ and non-printable.
+					let esc = '';
+					for (const b of ds.bytes) {
+						if (b === 0x22 || b === 0x5c || b < 0x20 || b > 0x7e) {
+							esc += '\\' + b.toString(16).padStart(2, '0').toUpperCase();
+						} else {
+							esc += String.fromCharCode(b);
+						}
+					}
+					const nid = mdId++;
+					nodeRefs.push(`!${nid}`);
+					nodeDefs.push(`!${nid} = !{i64 ${ds.vaStart}, !"${esc}"}`);
+				}
+				processedIR = processedIR.replace(/\s*$/, '\n') +
+					'\n; --- FIX-097: relocated data sections for string recovery ---\n' +
+					`!helix.strings = !{${nodeRefs.join(', ')}}\n` +
+					nodeDefs.join('\n') + '\n';
+				const totalBytes = dataSectionFakes.reduce((n, d) => n + d.bytes.length, 0);
+				console.log(`[HexCore] liftToIR FIX-097: embedded ${dataSectionFakes.length} data section(s) ` +
+					`as !helix.strings metadata (${totalBytes} bytes)`);
+			}
 
 			const fileName = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
 			const header = buildIRHeader({
@@ -5546,7 +5705,7 @@ async function liftAllExecutableSections(
 
 			// Kernel infrastructure symbols to skip
 			const infraSymbols = new Set([
-				'__fentry__', '__x86_return_thunk', '__cfi_check',
+				'__fentry__', '__cfi_check', // FIX-098: __x86_return_thunk removed -> patch it so native FIX-019 emits RET (retbleed `jmp __x86_return_thunk` == ret)
 				'__x86_indirect_thunk_rax', '__x86_indirect_thunk_rbx',
 				'__x86_indirect_thunk_rcx', '__x86_indirect_thunk_rdx',
 				'__x86_indirect_thunk_rsi', '__x86_indirect_thunk_rdi',

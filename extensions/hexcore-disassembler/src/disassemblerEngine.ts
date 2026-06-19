@@ -541,6 +541,14 @@ export class DisassemblerEngine {
 	 *  Maps file offset (in .text) → {symbolName, relocType, addend} */
 	private textRelocations: Map<number, { name: string; type: number; addend: number }> = new Map();
 
+	/** FIX-097: .rela.text DATA relocations (R_X86_64_32/32S) against SECTION
+	 *  symbols — i.e. string/constant loads like `mov rdi, .rodata.str1.1+OFF`.
+	 *  These carry an empty symbol name (st_name=0 for STT_SECTION) so FIX-011
+	 *  skipped them, which is why `printk(fmt, ...)` lifted as `printk(0, ...)`:
+	 *  the format-string operand was never relocated and stayed `i64 0`.
+	 *  Maps file offset (in .text) → {target sectionName, addend, relocType}. */
+	private dataRelocations: Map<number, { sectionName: string; type: number; addend: number }> = new Map();
+
 	/** v0.9.1 (G-001): ELF code/data sections keyed by name. Lets us resolve
 	 *  a symbol's bytes when ET_REL has multiple sections all at VA 0
 	 *  (`.text` / `.init.text` / `.text.unlikely` / `.exit.text`). */
@@ -3315,14 +3323,17 @@ export class DisassemblerEngine {
 						const symIdx = is64Bit ? Math.trunc(rInfo / 0x100000000) : (rInfo >> 8);
 						const relType = is64Bit ? (rInfo & 0xFFFFFFFF) : (rInfo & 0xFF);
 
-						if (!callRelTypes.has(relType)) {
-							continue;
-						}
-
-						// Read symbol name from .symtab
+						// Read the symbol table entry. Layouts differ by class:
+						//   Elf64_Sym: name@0(4) info@4(1) other@5(1) shndx@6(2) value@8(8)
+						//   Elf32_Sym: name@0(4) value@4(4) size@8(4) info@12(1) shndx@14(2)
 						const symOff = symtabSec.offset + symIdx * symEntSize;
 						if (symOff + symEntSize > this.fileBuffer.length) { continue; }
 						const stName = readU32(symOff);
+						const stInfoByte = this.fileBuffer[is64Bit ? symOff + 4 : symOff + 12];
+						const stType = stInfoByte & 0xf;            // STT_* (3 = SECTION)
+						const shndxOff = is64Bit ? symOff + 6 : symOff + 14;
+						const stShndx = this.fileBuffer[shndxOff] | (this.fileBuffer[shndxOff + 1] << 8);
+						const stValue = is64Bit ? Number(readU64(symOff + 8)) : readU32(symOff + 4);
 
 						let symName = '';
 						const symNameOff = strtabSec.offset + stName;
@@ -3331,6 +3342,35 @@ export class DisassemblerEngine {
 								symName += String.fromCharCode(this.fileBuffer[j]);
 								if (symName.length > 256) { break; }
 							}
+						}
+
+						// FIX-097: DATA relocations (R_X86_64_32=10 / R_X86_64_32S=11)
+						// are absolute references into a data section — overwhelmingly a
+						// string/constant load (`mov rdi, .rodata.str1.1+OFF`). They point
+						// at a SECTION symbol (st_name=0 => empty name) so FIX-011's
+						// empty-name skip dropped them, leaving the operand `i64 0` — the
+						// root of `printk(0, ...)`. Route them to dataRelocations keyed by
+						// the TARGET section name + effective in-section offset, so liftToIR
+						// can read the bytes and feed the string to the decompiler.
+						if (relType === 10 || relType === 11) {
+							const targetSec = (stShndx > 0 && stShndx < elfSections.length)
+								? elfSections[stShndx] : undefined;
+							// STT_SECTION(3): st_value is 0, the addend is the full offset.
+							// Named data object: in-section offset = st_value + addend.
+							const inSecOff = (stType === 3 ? 0 : stValue) + rAddend;
+							const secName = targetSec?.name ?? symName;
+							if (secName && secName.length > 0) {
+								this.dataRelocations.set(sectionBase + rOffset, {
+									sectionName: secName,
+									type: relType,
+									addend: inSecOff
+								});
+							}
+							continue; // absolute data ref — never a call/jump
+						}
+
+						if (!callRelTypes.has(relType)) {
+							continue;
 						}
 						if (symName.length === 0) { continue; }
 
@@ -3346,6 +3386,8 @@ export class DisassemblerEngine {
 				console.log(`[HexCore] FIX-011: Parsed ${totalParsed} reloc entries across ${relaSections.length} sections, ` +
 					`${this.textRelocations.size} call/jump relocations stored. ` +
 					`First 10: ${[...this.textRelocations.entries()].slice(0, 10).map(([off, r]) => `0x${off.toString(16)}→${r.name}(type=${r.type})`).join(', ')}`);
+				console.log(`[HexCore] FIX-097: ${this.dataRelocations.size} data relocations (string/constant loads) stored. ` +
+					`First 10: ${[...this.dataRelocations.entries()].slice(0, 10).map(([off, r]) => `0x${off.toString(16)}→${r.sectionName}+0x${r.addend.toString(16)}(type=${r.type})`).join(', ')}`);
 
 				if (this.textRelocations.size === 0 && totalParsed > 0) {
 					console.warn(`[HexCore] FIX-011: ${totalParsed} relocation entries found but NONE matched call/jump types ` +
@@ -5155,6 +5197,27 @@ export class DisassemblerEngine {
 
 	getExports(): ExportFunction[] {
 		return this.exports;
+	}
+
+	/** FIX-097: Get .rela.text DATA relocations (string/constant loads) for
+	 *  ET_REL files. Returns Map<textOffset, {sectionName, type, addend}> where
+	 *  addend is the in-section byte offset of the referenced datum. */
+	getDataRelocations(): Map<number, { sectionName: string; type: number; addend: number }> {
+		return this.dataRelocations;
+	}
+
+	/** FIX-097: Return the raw bytes of a named ELF section (e.g. `.rodata.str1.1`)
+	 *  from the file image, or undefined if the section/file is unavailable.
+	 *  Used by liftToIR to feed string-table bytes to the decompiler so a
+	 *  relocated `mov rdi, .rodata+OFF` renders as the actual string literal. */
+	getSectionBytesByName(name: string): Buffer | undefined {
+		if (!this.fileBuffer) { return undefined; }
+		const sec = this.elfSectionFileMap.get(name);
+		if (!sec) { return undefined; }
+		const start = sec.fileOffset;
+		const end = start + sec.size;
+		if (start < 0 || end > this.fileBuffer.length || sec.size <= 0) { return undefined; }
+		return this.fileBuffer.subarray(start, end);
 	}
 
 	/** v3.7.4 FIX-011: Get .rela.text relocations for ET_REL files.
