@@ -575,6 +575,18 @@ export class DisassemblerEngine {
 	private maxFunctions: number = 5000;
 	private maxFunctionSize: number = 65536;
 
+	// A-lazy function discovery: every .pdata function is registered as a cheap
+	// navigable STUB (correct address + endAddress, empty `instructions`) so the
+	// function LIST is complete and the lift gets exact bounds (it reads bytes via
+	// getBytes + the stub's endAddress, never func.instructions). The body is
+	// disassembled ON DEMAND by materializeFunction() the first time its instruction
+	// listing is actually read (the disasm view). This set tracks which registered
+	// functions are still unmaterialized stubs. maxStubFunctions is a high ceiling so
+	// ALL .pdata functions register (stubs are ~tens of bytes each, so 40K-159K stubs
+	// cost tens of MB, not the 6 GB an eager body-disassembly of every one would).
+	private unmaterializedStubs: Set<number> = new Set<number>();
+	private maxStubFunctions: number = 250000;
+
 	// Cache for text section byte-pattern scan results
 	private _textScanCache?: Map<number, number[]>;
 
@@ -2289,7 +2301,10 @@ export class DisassemblerEngine {
 		if (offset < 0) { return; }
 
 		const entrySize = 12; // RUNTIME_FUNCTION: BeginAddress(4) + EndAddress(4) + UnwindInfoAddress(4)
-		const count = Math.min(Math.floor(pdataSize / entrySize), 100000); // Safety cap at 100K
+		// A-lazy: raised 100K -> 250K so every .pdata function registers as a stub on the largest
+		// real targets (WWZ .pdata = 159,694 entries; ROTTR = 71,280). Stubs are cheap, so the
+		// higher cap costs only the stub registration (tens of MB), not a body disassembly each.
+		const count = Math.min(Math.floor(pdataSize / entrySize), 250000); // Safety cap at 250K
 
 		const entries: PdataEntry[] = [];
 		for (let i = 0; i < count; i++) {
@@ -3985,6 +4000,69 @@ export class DisassemblerEngine {
 		return this.trapHandlerGate;
 	}
 
+	/**
+	 * A-lazy function discovery: materialize a STUB function on demand. reconcileFunctionsWithPdata
+	 * registers every .pdata function as a lightweight stub (correct [address,endAddress), empty
+	 * `instructions`) so the function list is complete and the lift gets exact bounds WITHOUT paying
+	 * for per-function body disassembly up front. The body is disassembled here the FIRST time its
+	 * instruction listing is actually needed (the disasm view / CFG / single-function export).
+	 *
+	 * Idempotent:
+	 *  - address not in the table        -> undefined (nothing to materialize)
+	 *  - address not a tracked stub      -> already materialized (or never was a stub); return it as-is
+	 *  - otherwise                       -> disassemble [address,endAddress), filter to the function's
+	 *                                       bounds, assign instructions, recompute size, drop the stub flag
+	 *
+	 * Body disassembly is NON-recursive (it does not follow call/jump children) -- it mirrors
+	 * reconcileFunctionsWithPdata step (2): we already have the authoritative .pdata bounds, so the
+	 * call graph is rebuilt elsewhere and we must not re-explode into ghost children here.
+	 */
+	async materializeFunction(address: number): Promise<Function | undefined> {
+		// Safety: coerce BigInt from Capstone prebuilds to number (same as analyzeFunction).
+		if (typeof address === 'bigint') { address = Number(address); }
+		const fn = this.functions.get(address);
+		if (!fn) {
+			return undefined; // not a known function -- nothing to materialize
+		}
+		if (!this.unmaterializedStubs.has(address)) {
+			return fn; // already materialized (or never a stub) -- return as-is
+		}
+
+		const endAddress = typeof fn.endAddress === 'bigint' ? Number(fn.endAddress) : fn.endAddress;
+		const span = (endAddress - address) || this.maxFunctionSize;
+		const size = Math.min(span, this.maxFunctionSize);
+
+		let insns: Instruction[] = [];
+		try {
+			const rawInsns = await this.disassembleRange(address, size);
+			// Clamp to the authoritative .pdata bounds [address,endAddress); disassembleRange may
+			// over-read past the real end into a neighbour (same filter as reconcile step 2).
+			insns = rawInsns.filter(inst => {
+				const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				return a >= address && a < endAddress;
+			});
+		} catch {
+			insns = [];
+		}
+
+		fn.instructions = insns;
+		// Recompute size/end from the last recovered instruction (reuse analyzeFunction's
+		// BigInt coercion + last-instruction end-handling style), never exceeding the .pdata end.
+		const last = insns[insns.length - 1];
+		if (last) {
+			const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
+			const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
+			const recomputedEnd = Math.min(endAddress, la + ls);
+			fn.endAddress = recomputedEnd;
+			fn.size = recomputedEnd - address;
+		}
+		// else: body could not be linearly recovered (obfuscated/VM-protected) -- keep the
+		// authoritative .pdata bounds the stub already carried.
+
+		this.unmaterializedStubs.delete(address);
+		return fn;
+	}
+
 	async analyzeFunction(address: number, name?: string): Promise<Function> {
 		// Safety: coerce BigInt from Capstone prebuilds to number
 		if (typeof address === 'bigint') { address = Number(address); }
@@ -4448,51 +4526,36 @@ export class DisassemblerEngine {
 		// would otherwise fill the cap before step (2) can ensure the begins.
 		sweepOverlaps();
 
-		// (2) Ensure a function exists at every authoritative .pdata begin. When the body
-		// cannot be linearly disassembled (obfuscated / VM-protected, e.g. Vanguard), register
-		// a STUB at the authoritative [begin,end) so the function still exists in the table
-		// (navigable, countable, a valid decompile/lift target) even though its instructions
-		// could not be recovered. Clean binaries are unaffected -- the stub branch only fires
-		// when discovery actually failed (empty body / 0 size).
+		// (2) Ensure a function exists at every authoritative .pdata begin. A-lazy: register a
+		// cheap STUB at the authoritative [begin,end) -- correct address + endAddress, EMPTY
+		// `instructions` -- WITHOUT disassembling the body. The stub is fully navigable/countable
+		// and a valid decompile/lift target (the lift reads bytes via getBytes + the stub's
+		// endAddress for size; it never iterates func.instructions). The body is disassembled on
+		// demand by materializeFunction() the first time its instruction listing is actually read
+		// (the disasm view). This is what makes the full table affordable: on a large PE
+		// (ROTTR ~40K functions, WWZ ~159K) eager per-begin disassembly cost 7+ min / 6+ GB and
+		// hit the 5000 cap at 13% coverage; ~300-byte stubs cost tens of MB and register them all.
+		//
+		// The cap here is the high maxStubFunctions ceiling (not maxFunctions): stubs are cheap,
+		// so all .pdata begins must register or the table is incomplete again. A begin already
+		// discovered by the prologue scan / call graph (real instructions) is kept as-is.
 		for (const r of ranges) {
-			if (this.functions.size >= this.maxFunctions) {
+			if (this.functions.size >= this.maxStubFunctions) {
 				break;
 			}
 			if (this.functions.has(r.begin)) {
 				continue; // already discovered by the prologue scan / call graph; keep it
 			}
-			// Disassemble the begin's body WITHOUT recursion. analyzeFunction follows
-			// call/jump children, which on obfuscated code explodes into thousands of ghosts
-			// and exhausts the maxFunctions budget before the real begins are reached. The
-			// call graph is rebuilt from instructions afterwards (step 5). If the body cannot
-			// be disassembled, the empty instruction list yields a .pdata-bounded stub so the
-			// function still exists in the table.
-			let insns: Instruction[] = [];
-			try {
-				const rawInsns = await this.disassembleRange(r.begin, Math.min(r.end - r.begin, this.maxFunctionSize));
-				insns = rawInsns.filter(inst => {
-					const a = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
-					return a < r.end;
-				});
-			} catch {
-				insns = [];
-			}
-			let endAddr = r.end;
-			const last = insns[insns.length - 1];
-			if (last) {
-				const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
-				const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
-				endAddr = Math.min(r.end, la + ls);
-			}
 			this.functions.set(r.begin, {
 				address: r.begin,
 				name: `sub_${r.begin.toString(16).toUpperCase()}`,
-				size: endAddr - r.begin,
-				endAddress: endAddr,
-				instructions: insns,
+				size: r.end - r.begin,
+				endAddress: r.end,
+				instructions: [],
 				callers: [],
 				callees: []
 			});
+			this.unmaterializedStubs.add(r.begin);
 		}
 
 		// (3) Reconcile each authoritative function's extent to its merged .pdata range:
@@ -5457,6 +5520,19 @@ export class DisassemblerEngine {
 
 	getFunctionAt(address: number): Function | undefined {
 		return this.functions.get(address);
+	}
+
+	/**
+	 * A-lazy view accessor: return a function's instruction listing, materializing it on demand if
+	 * it is still an unmaterialized .pdata stub. Use this at VIEW / render / single-function-export
+	 * call sites that need to DISPLAY a function's body. Do NOT use it on the lift/decompile path
+	 * (that reads bytes via getBytes + endAddress, not instructions) or on whole-table analysis
+	 * passes (materializing every function would re-introduce the eager cost lazy discovery removes).
+	 * Returns [] when the address is not a known function.
+	 */
+	async getFunctionInstructions(address: number): Promise<Instruction[]> {
+		const fn = await this.materializeFunction(address);
+		return fn ? fn.instructions : [];
 	}
 
 	/**

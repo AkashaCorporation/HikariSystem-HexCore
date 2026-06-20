@@ -1400,6 +1400,12 @@ export function activate(context: vscode.ExtensionContext): void {
 					func = funcs.find(f => targetAddress >= f.address && targetAddress < f.endAddress);
 				}
 
+				// A-lazy: materialize so a .pdata stub gets its body before the "has instructions"
+				// gate; otherwise an unopened stub (empty instructions) would never auto-focus the graph.
+				if (func) {
+					await engine.materializeFunction(func.address);
+				}
+
 				if (func && func.instructions.length > 0) {
 					// Auto-focus the graph view and show CFG
 					try {
@@ -4774,7 +4780,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
 			if (functionAddress !== undefined && !isNaN(functionAddress)) {
-				// Export single function
+				// Export single function. A-lazy: materialize so an unopened .pdata stub's body is
+				// disassembled before we emit its instruction listing (this is a display/export read).
+				await engine.materializeFunction(functionAddress);
 				const func = engine.getFunctionAt(functionAddress);
 				if (!func) {
 					throw new Error(`No function found at address 0x${functionAddress.toString(16).toUpperCase()}`);
@@ -6910,7 +6918,7 @@ async function resolveFormulaInstructions(
 
 		const instructions: Instruction[] = [];
 		for (const address of parsedAddresses) {
-			const instruction = findInstructionByAddress(engine, address);
+			const instruction = await findInstructionByAddress(engine, address);
 			if (!instruction) {
 				throw new Error(`Instruction not found at ${toHexAddress(address)}.`);
 			}
@@ -6961,7 +6969,7 @@ async function resolveFormulaInstructions(
 	return collectInstructionsInRange(engine, startAddress, endAddress);
 }
 
-function collectInstructionsInRange(engine: DisassemblerEngine, startAddress: number, endAddress: number): Instruction[] {
+async function collectInstructionsInRange(engine: DisassemblerEngine, startAddress: number, endAddress: number): Promise<Instruction[]> {
 	const from = Math.min(startAddress, endAddress);
 	const to = Math.max(startAddress, endAddress);
 
@@ -6972,6 +6980,9 @@ function collectInstructionsInRange(engine: DisassemblerEngine, startAddress: nu
 		throw new Error(`No containing function found for ${toHexAddress(from)}.`);
 	}
 
+	// A-lazy: materialize the containing function so a .pdata stub's body exists before we read it.
+	await engine.materializeFunction(containing.address);
+
 	const instructions = containing.instructions
 		.filter(instruction => instruction.address >= from && instruction.address <= to)
 		.sort((left, right) => left.address - right.address);
@@ -6981,7 +6992,13 @@ function collectInstructionsInRange(engine: DisassemblerEngine, startAddress: nu
 	return instructions;
 }
 
-function findInstructionByAddress(engine: DisassemblerEngine, address: number): Instruction | undefined {
+async function findInstructionByAddress(engine: DisassemblerEngine, address: number): Promise<Instruction | undefined> {
+	// A-lazy: the target instruction lives in some function's body. Materialize the containing
+	// function (if the address falls inside one) so a .pdata stub is disassembled before the search.
+	const containing = engine.getFunctions().find(func => address >= func.address && address < func.endAddress);
+	if (containing) {
+		await engine.materializeFunction(containing.address);
+	}
 	for (const func of engine.getFunctions()) {
 		const instruction = func.instructions.find(item => item.address === address);
 		if (instruction) {

@@ -41,13 +41,13 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			this.currentFunctionAddress = containing.address;
 		}
 		this.currentAddress = address;
-		this.updateWebview(this.activeWebview, containing ? containing.address : address);
+		void this.updateWebview(this.activeWebview, containing ? containing.address : address);
 	}
 
 	/** Refresh the current view */
 	refresh(): void {
 		if (this.activeWebview) {
-			this.updateWebview(this.activeWebview, this.currentFunctionAddress);
+			void this.updateWebview(this.activeWebview, this.currentFunctionAddress);
 		}
 	}
 
@@ -125,7 +125,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			});
 
 			// Initial data send
-			this.updateWebview(webviewPanel.webview);
+			await this.updateWebview(webviewPanel.webview);
 
 		} catch (error: any) {
 			vscode.window.showErrorMessage(`Failed to open binary: ${error.message}`);
@@ -138,7 +138,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 	private async handleMessage(message: any, webview: vscode.Webview): Promise<void> {
 		switch (message.command) {
 			case 'ready':
-				this.updateWebview(webview);
+				await this.updateWebview(webview);
 				break;
 
 			case 'jumpToAddress':
@@ -147,7 +147,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 					const target = message.address as number;
 					const funcs = this.engine.getFunctions();
 					const containing = funcs.find(f => target >= f.address && target < f.endAddress);
-					this.updateWebview(webview, containing ? containing.address : target);
+					await this.updateWebview(webview, containing ? containing.address : target);
 				}
 				break;
 
@@ -156,7 +156,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				if (func) {
 					this.currentFunctionAddress = func.address;
 					this.currentAddress = func.address;
-					this.updateWebview(webview, func.address);
+					await this.updateWebview(webview, func.address);
 					// Auto-update graph view when switching functions
 					vscode.commands.executeCommand('hexcore.disasm.showCFG');
 				}
@@ -170,7 +170,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				});
 				if (comment) {
 					this.engine.addComment(message.address, comment);
-					this.updateWebview(webview);
+					await this.updateWebview(webview);
 				}
 				break;
 			}
@@ -185,7 +185,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 						const result = await this.engine.patchInstruction(message.address, newCode);
 						if (result.success) {
 							this.engine.applyPatch(message.address, result.bytes);
-							this.updateWebview(webview);
+							await this.updateWebview(webview);
 							const msg = result.nopPadding > 0
 								? `Patched with ${result.nopPadding} NOP padding`
 								: 'Patched successfully';
@@ -219,7 +219,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 				});
 
 				if (selected) {
-					this.updateWebview(webview, selected.address);
+					await this.updateWebview(webview, selected.address);
 				}
 				break;
 			}
@@ -276,7 +276,7 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		}
 	}
 
-	private updateWebview(webview: vscode.Webview, address?: number): void {
+	private async updateWebview(webview: vscode.Webview, address?: number): Promise<void> {
 		const fileInfo = this.engine.getFileInfo();
 		const sections = this.engine.getSections();
 		const functions = this.engine.getFunctions();
@@ -289,7 +289,9 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 			address = entryFunc?.address ?? firstWithSize?.address ?? functions[0].address;
 		}
 
-		const currentFunction = address ? this.engine.getFunctionAt(address) : undefined;
+		// A-lazy: this is the disasm-view render choke point -- materialize the function the user
+		// opened so a .pdata stub's body is disassembled exactly here, the first time it is shown.
+		const currentFunction = address ? await this.engine.materializeFunction(address) : undefined;
 
 		webview.postMessage({
 			command: 'updateDisassembly',

@@ -202,7 +202,9 @@ export class DisassemblerViewProvider implements vscode.WebviewViewProvider {
 		const fileInfo = this.engine.getFileInfo();
 		const sections = this.engine.getSections();
 		const funcs = this.engine.getFunctions();
-		const func = this.currentFunction ? this.engine.getFunctionAt(this.currentFunction) : undefined;
+		// A-lazy: materialize the opened function so a .pdata stub's body is disassembled here, the
+		// first time it is shown (this is a render choke point that reads func.instructions below).
+		const func = this.currentFunction ? await this.engine.materializeFunction(this.currentFunction) : undefined;
 
 		this.view.webview.postMessage({
 			command: 'updateView',

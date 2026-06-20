@@ -61,11 +61,17 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 	public async showFunction(func: DisasmFunction): Promise<void> {
 		if (!this._view) return;
 
+		// A-lazy: the passed function may be an unmaterialized .pdata stub (empty instructions).
+		// Materialize its body here so the CFG is built from real instructions; the returned object
+		// is the same Function instance (now populated). No-op for an already-materialized function.
+		const materialized = await this.engine.materializeFunction(func.address);
+		const fn = materialized ?? func;
+
 		// Build CFG from function instructions
 		this.currentCFG = this.blockAnalyzer.buildCFG(
-			func.instructions,
-			func.name,
-			func.address
+			fn.instructions,
+			fn.name,
+			fn.address
 		);
 
 		// Calculate layout
