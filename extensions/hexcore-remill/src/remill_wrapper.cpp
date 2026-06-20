@@ -651,6 +651,14 @@ LiftResult RemillLifter::DoLift(
 		return result;
 	}
 
+	// FIX-101 (issue #37 Bug 5): the cloned semantics module inherits amd64.bc's
+	// ModuleID, which is the absolute load path of the bitcode on the BUILD host
+	// (e.g. "\\?\c:\Users\<builder>\...\amd64.bc"). Printing the lifted IR then
+	// leaks that host path in the `; ModuleID = '...'` header line. Reset both the
+	// module identifier and the source filename to a stable, host-independent name.
+	liftModule->setModuleIdentifier("hexcore-remill-lift");
+	liftModule->setSourceFileName("hexcore-remill-lift");
+
 	auto intrinsics = std::make_unique<remill::IntrinsicTable>(liftModule.get());
 	auto lifter = arch_->DefaultLifter(*intrinsics);
 	auto instLifter = std::static_pointer_cast<remill::InstructionLifterIntf>(lifter);

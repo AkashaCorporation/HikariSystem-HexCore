@@ -5145,6 +5145,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				? arg.output
 				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
 
+			// FIX-102 (issue #37 Bug 1): concurrent headless jobs all shared the one
+			// global DisassemblerEngine, so two pipeline jobs analyzing DIFFERENT
+			// binaries at the same time stomped each other's analysis state -- e.g.
+			// a 3 MB Speed.exe job reporting a 465 MB Hogwarts imageSize because the
+			// concurrent Hogwarts job had loaded into the shared engine between this
+			// job's load and its reads. Resolve a PER-FILE engine from the factory
+			// (keyed by normalized path) so each distinct binary gets an isolated
+			// engine and concurrent jobs can no longer interleave. Shadows the global
+			// `engine` for this command only; falls back to the global engine when no
+			// path is given (UI / generic callers).
+			const engine = filePath ? factory.getEngine(filePath) : factory.getEngine();
+
 			// Load file into engine if a path is provided.
 			// Cache-poison guard: previous sessions in the same workspace can leave
 			// the shared DisassemblerEngine with stale analysis state for a different
