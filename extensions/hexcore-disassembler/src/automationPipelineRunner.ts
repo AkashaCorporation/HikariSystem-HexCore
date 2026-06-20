@@ -261,6 +261,9 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.disasm.scanRtti', 'hexcore.disasm.rttiScanHeadless'],
 	['hexcore.disasm.searchBytes', 'hexcore.disasm.searchBytesHeadless'],
 	['hexcore.disasm.aobScan', 'hexcore.disasm.searchBytesHeadless'],
+	// HQL semantic scanner aliases (doc-friendly short forms).
+	['hexcore.hql.scan', 'hexcore.hql.scanHeadless'],
+	['hexcore.hql.scanFunctions', 'hexcore.hql.scanHeadless'],
 	['hexcore.debug.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemoryHeadless', 'hexcore.debug.searchMemoryHeadless'],
@@ -382,6 +385,11 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	// HQL (Helix Query Language) semantic scanner. Decompiles the target
+	// function(s) via the helix pipeline then evaluates the built-in signature
+	// library over the HAST. Writes a JSON report ({ results: [...] }) to output.
+	['hexcore.hql.scanHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.hql.scanFunction', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command scans the function in the active disassembler editor and shows notifications.' }],
 	['hexcore.souper.optimize', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.extractStructInfo', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.disasm.disassembleAtHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
@@ -515,6 +523,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.searchBytesHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.hql.scanHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.hql.scanFunction', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.souper.optimize', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.extractStructInfo', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.extractStrings', ['hikarisystem.hexcore-disassembler']],

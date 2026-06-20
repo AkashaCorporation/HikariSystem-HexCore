@@ -36,6 +36,15 @@ import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions }
 import { runPathfinder, getPdataFunctionCount, resolveReanchorWindow } from './pathfinder';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
+import {
+	loadHql,
+	getHqlLoadError,
+	runHqlScanBatch,
+	buildScanTargets,
+	scanOneTarget,
+	type HqlScanTarget,
+	type HelixDecompileQuietResult,
+} from './hqlScanner';
 import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
 import { SouperWrapper } from './souperWrapper';
 import { getStructInfoForFunction, exportStructInfoJson, type StructInfoJson, type StructInfo } from './elfBtfLoader';
@@ -584,6 +593,17 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	const helixWrapper = new HelixWrapper();
 	context.subscriptions.push({ dispose: () => helixWrapper.dispose() });
+
+	// HQL scanner output channel -- created lazily on first interactive scan so
+	// pure-headless sessions never spawn an empty "HexCore HQL" channel.
+	let hqlChannel: vscode.OutputChannel | undefined;
+	const hqlOutputChannel = (): vscode.OutputChannel => {
+		if (!hqlChannel) {
+			hqlChannel = vscode.window.createOutputChannel('HexCore HQL');
+			context.subscriptions.push(hqlChannel);
+		}
+		return hqlChannel;
+	};
 
 	// Cache PE data sections per-binary so the pipeline doesn't re-read the
 	// .exe for every function it decompiles.  Keyed by absolute binary path;
@@ -4003,6 +4023,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					address: decompileResult.entryAddress,
 					architecture: arch,
 					error: '',
+					// HQL: expose the raw HAST FlatBuffer so headless callers
+					// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
+					// function. In-process executeCommand returns the literal object so
+					// the Buffer survives uncopied. Additive: existing callers ignore it.
+					astBuffer: decompileResult.astBuffer,
 				};
 			}
 
@@ -4017,6 +4042,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				address: decompileResult.entryAddress,
 				architecture: arch,
 				error: '',
+				astBuffer: decompileResult.astBuffer,
 			};
 		})
 	);
@@ -4200,6 +4226,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					address: decompileResult.entryAddress || String(liftResult.address || ''),
 					architecture: arch,
 					error: '',
+					// HQL: raw HAST FlatBuffer for headless scanHAST() callers (additive).
+					astBuffer: decompileResult.astBuffer,
 				};
 			}
 
@@ -4214,7 +4242,132 @@ export function activate(context: vscode.ExtensionContext): void {
 				address: decompileResult.entryAddress || String(liftResult.address || ''),
 				architecture: arch,
 				error: '',
+				astBuffer: decompileResult.astBuffer,
 			};
+		})
+	);
+
+	// -----------------------------------------------------------------------
+	// HQL (Helix Query Language) -- semantic signature scanner.
+	// Decompiles the target function (reusing the helix.decompile* commands,
+	// which now expose the raw HAST FlatBuffer) and evaluates the built-in HQL
+	// signature library over its AST. See ./hqlScanner.ts.
+	// -----------------------------------------------------------------------
+
+	// Adapter: turn an HqlScanTarget into the right Helix decompile command
+	// invocation and return the quiet result (which carries astBuffer). Binary
+	// targets -> helix.decompile (lift+decompile); IR targets -> helix.decompileIR.
+	const hqlDecompile = async (target: HqlScanTarget): Promise<HelixDecompileQuietResult | undefined> => {
+		if (target.irPath !== undefined || target.irText !== undefined) {
+			return vscode.commands.executeCommand<HelixDecompileQuietResult>(
+				'hexcore.helix.decompileIR',
+				{
+					...(target.irPath !== undefined ? { irPath: target.irPath } : {}),
+					...(target.irText !== undefined ? { irText: target.irText } : {}),
+					quiet: true,
+					output: undefined,
+				}
+			);
+		}
+		return vscode.commands.executeCommand<HelixDecompileQuietResult>(
+			'hexcore.helix.decompile',
+			{
+				...(target.file !== undefined ? { file: target.file } : {}),
+				...(target.address !== undefined ? { address: target.address } : {}),
+				quiet: true,
+				output: undefined,
+			}
+		);
+	};
+
+	// Interactive: scan the current/selected function for HQL signature matches.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hql.scanFunction', async (arg?: unknown) => {
+			if (!loadHql()) {
+				vscode.window.showErrorMessage(`HexCore HQL is unavailable: ${getHqlLoadError() ?? 'hexcore-hql not loaded'}`);
+				return;
+			}
+
+			// Resolve the function address: explicit arg, then the current function
+			// in the active disassembler editor.
+			const explicit = (arg && typeof arg === 'object' && !(arg instanceof vscode.Uri))
+				? (arg as Record<string, unknown>).address
+				: undefined;
+			const addr = parseAddressValue(explicit as string | number | undefined)
+				?? disasmEditorProvider.getCurrentFunctionAddress();
+			if (addr === undefined) {
+				vscode.window.showWarningMessage('HQL: no function selected. Open a function in the disassembler first.');
+				return;
+			}
+
+			const target: HqlScanTarget = { file: engine.getFilePath(), address: addr };
+			const result = await vscode.window.withProgress(
+				{ location: vscode.ProgressLocation.Notification, title: 'HQL: Scanning function...', cancellable: false },
+				async () => scanOneTarget(target, hqlDecompile)
+			);
+
+			const channel = hqlOutputChannel();
+			const label = result.function || result.address || `0x${addr.toString(16)}`;
+			if (result.error && result.findings.length === 0) {
+				channel.appendLine(`[HQL] ${label}: ${result.error}`);
+				vscode.window.showInformationMessage(`HQL: ${result.error}`);
+				return result;
+			}
+			channel.appendLine(`[HQL] ${label} -- ${result.findings.length} signature(s) matched`);
+			for (const f of result.findings) {
+				channel.appendLine(`         ${f.signatureId} (confidence ${f.confidence.toFixed(2)}, ${f.matchCount} node(s))`);
+			}
+			channel.show(true);
+			vscode.window.showInformationMessage(`HQL: ${result.findings.length} signature(s) matched in ${label}`);
+			return result;
+		})
+	);
+
+	// Headless: batch HQL scan for the automation pipeline.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hql.scanHeadless', async (arg?: Record<string, unknown>) => {
+			const file = typeof arg?.file === 'string' ? arg.file : undefined;
+			const irPath = typeof arg?.irPath === 'string' ? arg.irPath : undefined;
+			const irText = typeof arg?.irText === 'string' ? arg.irText : undefined;
+			const address = (typeof arg?.address === 'string' || typeof arg?.address === 'number')
+				? arg.address : undefined;
+			const addresses = Array.isArray(arg?.addresses)
+				? (arg!.addresses as Array<unknown>).filter(
+					(a): a is string | number => typeof a === 'string' || typeof a === 'number')
+				: undefined;
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (typeof (arg?.output as { path?: unknown })?.path === 'string'
+					? (arg!.output as { path: string }).path : undefined);
+
+			const targets = buildScanTargets({ file, address, addresses, irPath, irText });
+			if (targets.length === 0) {
+				const report = {
+					success: false,
+					command: 'hexcore.hql.scanHeadless' as const,
+					file,
+					targetCount: 0,
+					matchedFunctionCount: 0,
+					totalFindings: 0,
+					results: [],
+					error: 'hexcore.hql.scanHeadless requires an "address", "addresses", "irPath", or "irText".',
+				};
+				if (outputPath) {
+					fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+					fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf-8');
+				}
+				return report;
+			}
+
+			const report = await runHqlScanBatch(file, targets, hqlDecompile);
+
+			if (outputPath) {
+				// Bug #36/2: create the parent dir so the write never silently fails
+				// and trips the runner's "output file not created" mask.
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf-8');
+			}
+			return report;
 		})
 	);
 

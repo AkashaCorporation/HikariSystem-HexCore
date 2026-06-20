@@ -23,6 +23,8 @@
 		"onCommand:hexcore.pipeline.jobStatus",
 		"onCommand:hexcore.disasm.buildFormula",
 		"onCommand:hexcore.disasm.checkConstants",
+		"onCommand:hexcore.hql.scanFunction",
+		"onCommand:hexcore.hql.scanHeadless",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -346,6 +348,17 @@
 				"icon": "$(beaker)"
 			},
 			{
+				"command": "hexcore.hql.scanFunction",
+				"title": "HQL: Scan Function for Patterns",
+				"category": "HexCore Disassembler",
+				"icon": "$(search-fuzzy)"
+			},
+			{
+				"command": "hexcore.hql.scanHeadless",
+				"title": "HQL: Scan Function for Patterns (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.extractStructInfo",
 				"title": "Extract Struct Info (BTF/DWARF)",
 				"category": "HexCore Disassembler",
@@ -371,6 +384,12 @@
 			}
 		],
 		"menus": {
+			"commandPalette": [
+				{
+					"command": "hexcore.hql.scanHeadless",
+					"when": "false"
+				}
+			],
 			"explorer/context": [
 				{
 					"command": "hexcore.disasm.analyzeFile",

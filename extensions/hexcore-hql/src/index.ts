@@ -54,6 +54,11 @@ export { HQLMatcher } from './engine/matcher.js';
 // HAST FlatBuffer Adapter
 export { hydrateHAST } from './adapter/flatbuf.js';
 
+// Built-in signature library + one-call scan API
+export { BUILTIN_SIGNATURES } from './signatures/builtin.js';
+export { scanHAST } from './scan.js';
+export type { HQLFunctionFindings } from './scan.js';
+
 // v3.7.4: Session DB Reader (read-only access to disassembler's .hexcore_session.db)
 export { SessionDbReader } from './adapter/sessionDb.js';
 export type { SessionFunctionEntry, SessionVariableRename, HexcoreBetterSqlite3Module } from './adapter/sessionDb.js';
