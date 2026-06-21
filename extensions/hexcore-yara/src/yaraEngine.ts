@@ -17,6 +17,14 @@ export interface RuleMatch {
 	strings: Array<{ identifier: string; offset: number; data: string }>;
 	severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
 	score: number;  // 0-100 threat score
+	/**
+	 * Set when the target is a .NET/managed assembly and this match comes from a
+	 * native byte-pattern (non-.NET-aware) rule. Such matches land in managed
+	 * metadata / IL / string-heap bytes, NOT native code, so they are reclassified
+	 * as advisory: still reported (nothing is hidden) but excluded from the
+	 * headline threat score. See GAP #3 / .NET false-positive fix.
+	 */
+	advisoryOnly?: boolean;
 }
 
 export interface YaraRule {
@@ -52,6 +60,25 @@ export interface ScanResult {
 	activeRules?: number;
 	/** Which rule directories the engine tried, and which succeeded. */
 	ruleLoadDiagnostics?: { triedPaths: string[]; loadedFrom: string | null };
+	/**
+	 * True when the scanned file is a .NET / managed assembly (CLR runtime header
+	 * present). Native byte-pattern YARA rules are unreliable on managed code, so
+	 * the headline `threatScore` is derived from .NET-aware rules only when this
+	 * is set. See `dotNetAdvisory` for what was reclassified.
+	 */
+	isDotNet?: boolean;
+	/**
+	 * Present only for .NET targets. Records how many matched rules were
+	 * reclassified as advisory (native byte-pattern rules matching managed
+	 * metadata = false positives) vs retained (.NET-aware rules that still count
+	 * toward the threat score). Makes the suppression transparent rather than
+	 * silently dropping matches. See GAP #3 / .NET false-positive fix.
+	 */
+	dotNetAdvisory?: {
+		suppressedRuleMatches: number;
+		retainedRuleMatches: number;
+		note: string;
+	};
 	/**
 	 * Result of an on-demand DefenderYara category load triggered by the scan
 	 * `categories` / `loadEssentials` options. Present only when such a load
@@ -818,6 +845,49 @@ export class YaraEngine {
 		return total;
 	}
 
+	// ── .NET / managed-code awareness (GAP #3 false-positive fix) ─────────
+
+	/**
+	 * Detect whether `buf` is a .NET / managed PE by reading the COM descriptor
+	 * (CLR Runtime Header) data directory, index 14 of the optional header. A
+	 * nonzero VA+size there is the canonical "this is a managed assembly" marker.
+	 *
+	 * Only the PE headers are needed, so callers may pass just the first few KB.
+	 * Returns false for non-PE input, truncated headers, or native-only PEs.
+	 */
+	detectDotNet(buf: Buffer): boolean {
+		try {
+			if (buf.length < 0x40 || buf.readUInt16LE(0) !== 0x5a4d /* MZ */) { return false; }
+			const lfanew = buf.readUInt32LE(0x3c);
+			if (lfanew <= 0 || lfanew + 24 + 0x70 > buf.length) { return false; }
+			if (buf.readUInt32LE(lfanew) !== 0x00004550 /* "PE\0\0" */) { return false; }
+			const optHeader = lfanew + 24;
+			const magic = buf.readUInt16LE(optHeader);
+			// Data directories start after the optional-header standard+windows
+			// fields: 96 bytes in for PE32 (0x10b), 112 for PE32+ (0x20b).
+			const ddBase = magic === 0x20b ? optHeader + 112 : optHeader + 96;
+			const clrDir = ddBase + 14 * 8; // index 14 = CLR Runtime Header
+			if (clrDir + 8 > buf.length) { return false; }
+			const clrVA = buf.readUInt32LE(clrDir);
+			const clrSize = buf.readUInt32LE(clrDir + 4);
+			return clrVA !== 0 && clrSize !== 0;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Whether a matched rule is reliable on managed code. .NET-aware rules
+	 * (DefenderYara MSIL platform, or rules that name MSIL/.NET) interpret the
+	 * managed metadata correctly and keep full weight on a .NET target; every
+	 * other rule is a native byte-pattern heuristic whose hits inside metadata /
+	 * IL / string-heap bytes are false positives.
+	 */
+	private isManagedAwareMatch(m: RuleMatch): boolean {
+		const hay = `${m.meta.platform || ''} ${m.namespace} ${(m.meta.family || '')} ${m.ruleName}`;
+		return /\bMSIL\b|\.NET|dotnet|AnyCPU/i.test(hay);
+	}
+
 	// ── Scanning ────────────────────────────────────────────────────────
 
 	async scanFile(filePath: string): Promise<RuleMatch[]> {
@@ -863,21 +933,44 @@ export class YaraEngine {
 		const startTime = Date.now();
 		const matches = await this.scanFile(filePath);
 
+		// GAP #3: detect a .NET / managed assembly so native byte-pattern rules
+		// don't inflate the threat score against metadata/IL bytes. Reading the
+		// PE headers (first 4KB) is enough; the data directories live there.
+		let isDotNet = false;
+		try {
+			const fd = fs.openSync(filePath, 'r');
+			const header = Buffer.alloc(Math.min(4096, fs.fstatSync(fd).size));
+			fs.readSync(fd, header, 0, header.length, 0);
+			fs.closeSync(fd);
+			isDotNet = this.detectDotNet(header);
+		} catch { /* unreadable -> treat as native, no suppression */ }
+
 		const categories: Record<string, number> = {};
 		let maxScore = 0;
+		let scoredMatches = 0;       // matches that count toward the headline score
+		let suppressed = 0;          // native-heuristic matches reclassified as advisory
 
 		for (const m of matches) {
 			categories[m.namespace] = (categories[m.namespace] || 0) + 1;
+			// On a .NET target, only .NET-aware rules are reliable. Native
+			// byte-pattern matches are flagged advisory and excluded from the
+			// score (but still reported in `matches`).
+			if (isDotNet && !this.isManagedAwareMatch(m)) {
+				m.advisoryOnly = true;
+				suppressed++;
+				continue;
+			}
+			scoredMatches++;
 			if (m.score > maxScore) { maxScore = m.score; }
 		}
 
 		let stat: fs.Stats | null = null;
 		try { stat = fs.statSync(filePath); } catch { /* */ }
 
-		return {
+		const result: ScanResult = {
 			file: filePath,
 			matches,
-			threatScore: Math.min(100, maxScore + (matches.length > 5 ? 10 : 0)),
+			threatScore: Math.min(100, maxScore + (scoredMatches > 5 ? 10 : 0)),
 			scanTime: Date.now() - startTime,
 			fileSize: stat?.size || 0,
 			categories,
@@ -888,6 +981,21 @@ export class YaraEngine {
 			activeRules: this.getAllRules().length,
 			ruleLoadDiagnostics: this.getLoadDiagnostics()
 		};
+
+		if (isDotNet) {
+			result.isDotNet = true;
+			result.dotNetAdvisory = {
+				suppressedRuleMatches: suppressed,
+				retainedRuleMatches: scoredMatches,
+				note: suppressed > 0
+					? `.NET/managed assembly: ${suppressed} native byte-pattern match(es) reclassified as advisory ` +
+					  `(they hit managed metadata/IL, not native code) and excluded from the threat score. ` +
+					  `Score reflects ${scoredMatches} .NET-aware match(es).`
+					: `.NET/managed assembly: threat score derived from .NET-aware rules only.`
+			};
+		}
+
+		return result;
 	}
 
 	async scanDirectory(dirPath: string): Promise<Array<{ file: string; matches: RuleMatch[] }>> {

@@ -706,7 +706,7 @@ function showThreatReport(filePath: string, result: { matches: RuleMatch[]; thre
 	});
 }
 
-function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number> }): string {
+function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number>; isDotNet?: boolean; dotNetAdvisory?: { suppressedRuleMatches: number; retainedRuleMatches: number; note: string } }): string {
 	const lines: string[] = [];
 	const scoreLabel = result.threatScore > 70 ? '🔴 CRITICAL' :
 		result.threatScore >= 30 ? '🟡 MEDIUM' : '🟢 CLEAN';
@@ -723,7 +723,17 @@ function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatc
 	lines.push(`| Scan Time | ${result.scanTime} ms |`);
 	lines.push(`| Threat Score | **${result.threatScore}/100** (${scoreLabel}) |`);
 	lines.push(`| Total Matches | ${result.matches.length} |`);
+	if (result.isDotNet) {
+		lines.push(`| File Type | .NET / managed assembly |`);
+	}
 	lines.push('');
+
+	// .NET advisory: native byte-pattern rules are unreliable on managed code,
+	// so any that fired were reclassified out of the threat score. Be explicit.
+	if (result.isDotNet && result.dotNetAdvisory) {
+		lines.push(`> ℹ️ **.NET assembly.** ${result.dotNetAdvisory.note}`);
+		lines.push('');
+	}
 
 	// Threat score bar
 	const barLen = 30;
@@ -768,11 +778,12 @@ function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatc
 				const icon = m.severity === 'critical' ? '🔴' :
 					m.severity === 'high' ? '🟠' :
 						m.severity === 'medium' ? '🟡' : '🟢';
-				lines.push(`#### ${icon} ${m.ruleName}`);
+				const advisoryTag = m.advisoryOnly ? ' — ⚪ _advisory (managed metadata, excluded from score)_' : '';
+				lines.push(`#### ${icon} ${m.ruleName}${advisoryTag}`);
 				lines.push('');
 				lines.push(`- **Family:** ${m.meta.family || 'unknown'}`);
 				lines.push(`- **Severity:** ${m.severity}`);
-				lines.push(`- **Score:** ${m.score}`);
+				lines.push(`- **Score:** ${m.score}${m.advisoryOnly ? ' _(advisory — not counted)_' : ''}`);
 				lines.push(`- **Platform:** ${m.meta.platform || 'unknown'}`);
 
 				if (m.strings.length > 0) {

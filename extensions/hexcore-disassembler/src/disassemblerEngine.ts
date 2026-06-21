@@ -401,7 +401,11 @@ export interface CLRHeader {
 	metadataSize: number;
 	flags: number;
 	entryPointToken: number;
+	/** COMIMAGE_FLAGS_ILONLY (0x01): pure managed image, no embedded native code. */
+	ilOnly: boolean;
+	/** COMIMAGE_FLAGS_NATIVE_ENTRYPOINT (0x10): EntryPointToken is an RVA to native entry code. */
 	isNative: boolean;
+	/** COMIMAGE_FLAGS_32BITREQUIRED (0x02). */
 	is32BitRequired: boolean;
 }
 
@@ -2503,7 +2507,11 @@ export class DisassemblerEngine {
 			metadataSize,
 			flags,
 			entryPointToken,
-			isNative: (flags & 0x01) !== 0,        // COMIMAGE_FLAGS_ILONLY inverted
+			// Issue #32 honesty: derive these from the correct COMIMAGE_FLAGS bits (ECMA-335 /
+			// corhdr.h). The previous `isNative: (flags & 0x01)` read the ILONLY bit and named it
+			// `isNative`, so a pure-managed assembly reported isNative:true — exactly backwards.
+			ilOnly: (flags & 0x01) !== 0,           // COMIMAGE_FLAGS_ILONLY
+			isNative: (flags & 0x10) !== 0,         // COMIMAGE_FLAGS_NATIVE_ENTRYPOINT
 			is32BitRequired: (flags & 0x02) !== 0   // COMIMAGE_FLAGS_32BITREQUIRED
 		};
 	}

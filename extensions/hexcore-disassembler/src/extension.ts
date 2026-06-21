@@ -629,6 +629,56 @@ export function activate(context: vscode.ExtensionContext): void {
 		}
 	};
 
+	// Issue #32 (HONESTY): detect a managed .NET (CIL) assembly before the native
+	// x86 lift/decompile path runs. On a .NET PE the `.text` holds CIL + metadata, not
+	// native machine code — lifting it as x86 produces the `_CorExeMain` thunk plus a
+	// run of mis-decoded "add byte ptr [eax], al" (zero padding) and Helix then emits a
+	// confident `void entry_point(void){return;}` "stub function" at ~85%. A confident
+	// fake reads as success and hides the entire managed program, so the native path must
+	// instead surface an honest "not applicable; use an IL decompiler" signal (D4 honesty).
+	//
+	// Returns the parsed CLR header when the target is managed, else undefined. Loads the
+	// file into the engine if a `file` option is supplied and it isn't loaded yet, so a
+	// standalone call (not just the analyze pipeline) detects it too. The CLR data
+	// directory is parsed in `loadFile`→`parsePEStructure`, so this is reliable post-load.
+	const detectManagedDotNet = async (
+		options: Record<string, unknown>
+	): Promise<import('./disassemblerEngine').CLRHeader | undefined> => {
+		const filePath = typeof options.file === 'string' ? options.file : undefined;
+		if (filePath) {
+			try {
+				if (!engine.isFileLoaded() || engine.getFilePath() !== filePath) {
+					await engine.loadFile(filePath);
+				}
+			} catch (err) {
+				console.warn(`[helix] managed-dotnet probe: load failed for ${filePath}:`, err);
+				return undefined;
+			}
+		}
+		return engine.getPEDataDirectories().clr;
+	};
+
+	// Issue #32: the honest managed-code marker written in place of the native stub. Plain
+	// C comments so it round-trips through the .helix.c consumers without a fake function.
+	const buildManagedDotNetMarker = (clr: import('./disassemblerEngine').CLRHeader): string => {
+		const ver = `${clr.majorRuntimeVersion}.${clr.minorRuntimeVersion}`;
+		return [
+			'// ─────────────────────────────────────────────────────────────',
+			'// Managed .NET (CIL) assembly — native x86 decompile not applicable',
+			'// ─────────────────────────────────────────────────────────────',
+			'//',
+			'// This target carries a CLR Runtime Header (PE data directory 14), so its',
+			`// .text section holds CIL bytecode + .NET metadata (runtime v${ver}), not`,
+			'// native machine code. The native Remill→Helix pipeline cannot decompile it;',
+			'// disassembling the entry point yields the _CorExeMain thunk followed by',
+			'// metadata bytes that mis-decode as "add byte ptr [eax], al".',
+			'//',
+			'// Use a .NET/IL decompiler (ILSpy / dnSpyEx / ilspycmd / dotPeek) on this',
+			'// assembly. (HexCore issue #32: do not emit a confident native stub here.)',
+			''
+		].join('\n');
+	};
+
 	const souperWrapper = new SouperWrapper();
 	context.subscriptions.push({ dispose: () => souperWrapper.dispose() });
 	vscode.commands.executeCommand('setContext', 'hexcore:helixAvailable', helixWrapper.isAvailable());
@@ -2015,6 +2065,21 @@ export function activate(context: vscode.ExtensionContext): void {
 						vscode.window.showErrorMessage(errorMsg);
 						return undefined;
 					}
+				}
+				// Issue #32 (HONESTY): a managed .NET (CIL) assembly carries a CLR Runtime
+				// Header and CIL (not native x86) in .text. Lifting it as x86 yields the
+				// _CorExeMain thunk + mis-decoded metadata, which the decompiler then dresses
+				// up as a confident "stub function". Refuse the native lift with a structured
+				// honest error rather than emitting garbage IR (use a .NET/IL decompiler).
+				if (engine.getPEDataDirectories().clr) {
+					const errorMsg = 'managed .NET (CIL) assembly — native x86 lift not applicable; use a .NET/IL decompiler';
+					if (quiet) {
+						return { success: false, ir: '', address: 0, bytesConsumed: 0, architecture: arch, error: errorMsg, managed: true };
+					}
+					vscode.window.showWarningMessage(
+						'Managed .NET (CIL) assembly: native x86 lift is not applicable. Use a .NET/IL decompiler (ILSpy / dnSpyEx).'
+					);
+					return undefined;
 				}
 				// v0.9.1 (G-001): when `symbolName:` is given, resolve via
 				// the ELF `.symtab` to pick the right section's bytes —
@@ -4080,6 +4145,43 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
+			// Issue #32 (HONESTY): if the target is a managed .NET (CIL) assembly, do NOT
+			// lift its CIL .text as native x86 — that produces the _CorExeMain thunk + a run
+			// of mis-decoded zero padding and a confident 85% "stub function". Short-circuit
+			// with an honest marker (managed:true, confidence 0) so the analyze/decompile
+			// output reads as "can't, use IL tooling" instead of a fake success (D4).
+			const clrHeader = await detectManagedDotNet(options);
+			if (clrHeader) {
+				const markerCode = buildManagedDotNetMarker(clrHeader);
+				if (isHeadless && options.output) {
+					const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
+					fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+					fs.writeFileSync(outputPath, markerCode, 'utf-8');
+				}
+				const reqAddr = parseAddressValue(options.address as string | number | undefined)
+					?? parseAddressValue(options.startAddress as string | number | undefined);
+				const managedResult = {
+					success: true,
+					managed: true,
+					managedFormat: 'dotnet-cil',
+					confidence: 0,
+					code: markerCode,
+					functionCount: 0,
+					address: reqAddr !== undefined ? `0x${reqAddr.toString(16).toUpperCase()}` : '',
+					architecture: arch,
+					error: 'managed .NET (CIL) assembly — native x86 decompile not applicable; use a .NET/IL decompiler',
+				};
+				if (quiet || isHeadless) {
+					return managedResult;
+				}
+				const mdoc = await vscode.workspace.openTextDocument({ content: markerCode, language: 'c' });
+				await vscode.window.showTextDocument(mdoc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
+				vscode.window.showWarningMessage(
+					'Managed .NET (CIL) assembly: native x86 decompile is not applicable. Use a .NET/IL decompiler (ILSpy / dnSpyEx).'
+				);
+				return managedResult;
+			}
+
 			// Lift machine code to LLVM IR via liftToIR command
 			const liftResult: LiftResult | undefined = await vscode.commands.executeCommand(
 				'hexcore.disasm.liftToIR', { ...options, quiet: true, output: undefined }
@@ -5446,9 +5548,10 @@ export function activate(context: vscode.ExtensionContext): void {
 					runtimeVersion: `${clr.majorRuntimeVersion}.${clr.minorRuntimeVersion}`,
 					metadataSize: clr.metadataSize,
 					entryPointToken: `0x${clr.entryPointToken.toString(16).toUpperCase()}`,
+					ilOnly: clr.ilOnly,
 					isNative: clr.isNative,
 					is32BitRequired: clr.is32BitRequired,
-					warning: '.NET assembly detected'
+					warning: '.NET (managed/CIL) assembly detected — native decompile not applicable; use a .NET/IL decompiler'
 				};
 			}
 

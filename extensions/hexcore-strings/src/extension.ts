@@ -19,6 +19,7 @@ import { rollingXorExtScan } from './rollingXorExt';
 import { layeredXorScan } from './layeredXor';
 import { parsePESections, getSectionForOffset, type PESectionMap, type PESectionInfo } from './peSectionParser';
 import { scoreString } from './scoringEngine';
+import { scanDotNetMetadata } from './dotnetMetadata';
 import type { MultiByteXorOptions } from './multiByteXor';
 
 type OutputFormat = 'json' | 'md';
@@ -122,6 +123,16 @@ interface CoreExtractionResult {
 const CHUNK_SIZE = 64 * 1024;
 const DEFAULT_MIN_LENGTH = 6;
 const DEFAULT_MAX_STRINGS = 50000;
+
+/**
+ * Max file size for the .NET metadata heap reader. The reader needs random
+ * access across the file (metadata can sit anywhere the CLI header points), so
+ * it reads the whole file into memory. Managed assemblies are almost always
+ * well under this; anything larger falls back to the chunked byte-scan only,
+ * so we never readFileSync a giant binary just to look for managed strings.
+ * (FEAT-STRINGS-DOTNET)
+ */
+const DOTNET_MAX_FILE_SIZE = 128 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // PE Section Prioritization — FEAT-STRINGS-001
@@ -467,17 +478,91 @@ function extractStringsCore(
 	}
 
 	// --- Decide extraction strategy ---
+	let coreResult: CoreExtractionResult;
 	if (peSections && peSections.isPE && peSections.sections.length > 0) {
-		const result = extractStringsSectionAware(fd, totalSize, peSections, minLength, maxStrings, onProgress, isCancelled);
+		coreResult = extractStringsSectionAware(fd, totalSize, peSections, minLength, maxStrings, onProgress, isCancelled);
 		fs.closeSync(fd);
-		return result;
+	} else {
+		// --- Fallback: linear scan (non-PE files, ELF, raw buffers) ---
+		try {
+			coreResult = extractStringsLinear(fd, totalSize, null, minLength, maxStrings, onProgress, isCancelled);
+		} finally {
+			fs.closeSync(fd);
+		}
 	}
 
-	// --- Fallback: linear scan (non-PE files, ELF, raw buffers) ---
+	// --- .NET metadata heap pass (FEAT-STRINGS-DOTNET) ---
+	// The byte-scan above misses managed string literals, which live in the
+	// #Strings / #US metadata heaps rather than as contiguous runs. Run a
+	// dedicated reader ONLY for managed PEs of reasonable size; merge its
+	// results (deduplicated by offset+value) into the same result set so they
+	// flow through to the report/UI just like native strings. Failures here
+	// are swallowed and never affect the native scan.
+	if (!coreResult.cancelled && peSections && peSections.isPE && totalSize <= DOTNET_MAX_FILE_SIZE) {
+		mergeDotNetMetadataStrings(filePath, coreResult, peSections, minLength, maxStrings);
+	}
+
+	return coreResult;
+}
+
+/**
+ * Read the .NET #Strings / #US metadata heaps and merge any recovered strings
+ * into the core result. Bounded, defensive, and a no-op for non-managed PEs.
+ */
+function mergeDotNetMetadataStrings(
+	filePath: string,
+	coreResult: CoreExtractionResult,
+	peSections: PESectionMap,
+	minLength: number,
+	maxStrings: number,
+): void {
 	try {
-		return extractStringsLinear(fd, totalSize, null, minLength, maxStrings, onProgress, isCancelled);
-	} finally {
-		fs.closeSync(fd);
+		const fileBuffer = fs.readFileSync(filePath);
+		const dotNet = scanDotNetMetadata(fileBuffer);
+		if (!dotNet.isDotNet || dotNet.strings.length === 0) {
+			return;
+		}
+
+		// Dedup against existing byte-scan results by offset+value prefix, the
+		// same key shape deduplicateStrings uses, so a literal that happened to
+		// also appear as a raw run isn't double-counted.
+		const seen = new Set<string>();
+		for (const s of coreResult.strings) {
+			seen.add(`${s.offset}-${s.value.substring(0, 50)}`);
+		}
+
+		for (const ms of dotNet.strings) {
+			if (coreResult.strings.length >= maxStrings) {
+				coreResult.truncated = true;
+				break;
+			}
+			// Apply the same minLength gate the byte-scanner uses so the two
+			// paths agree on what counts as a "string".
+			if (ms.value.length < minLength) {
+				continue;
+			}
+			const key = `${ms.offset}-${ms.value.substring(0, 50)}`;
+			if (seen.has(key)) {
+				continue;
+			}
+			seen.add(key);
+			const entry: ExtractedString = {
+				offset: ms.offset,
+				value: ms.value,
+				encoding: ms.encoding,
+				category: '.net-metadata',
+			};
+			const section = getSectionForOffset(peSections.sections, ms.offset);
+			if (section) {
+				entry.section = section;
+			}
+			coreResult.strings.push(entry);
+		}
+
+		// Keep the result ordered by offset like the native paths do.
+		coreResult.strings.sort((a, b) => a.offset - b.offset);
+	} catch {
+		// Any error (read failure, parse error) => leave native results intact.
 	}
 }
 
@@ -956,7 +1041,7 @@ ${sectionBreakdown}
 
 `;
 
-	const priorityCategories = ['URL', 'IP Address', 'Email', 'Registry Key', 'Sensitive', 'File Path', 'DLL', 'Executable', 'WinAPI', 'Function'];
+	const priorityCategories = ['URL', 'IP Address', 'Email', 'Registry Key', 'Sensitive', 'File Path', 'DLL', 'Executable', 'WinAPI', 'Function', '.net-metadata'];
 
 	for (const category of priorityCategories) {
 		const items = categorized.get(category);
