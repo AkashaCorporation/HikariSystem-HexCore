@@ -1,0 +1,70 @@
+{
+	"name": "hexcore-revenant",
+	"displayName": "HexCore Revenant (.NET / IL Decompiler)",
+	"description": "Managed .NET (CIL) decompiler. Recovers C# / IL from managed assemblies the native Remill->Helix pipeline cannot decompile, by wrapping ILSpy's ICSharpCode.Decompiler engine. Closes the 'Better' tier of issue #32.",
+	"version": "0.1.0",
+	"publisher": "hikarisystem",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.75.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"keywords": [
+		"dotnet",
+		"il",
+		"cil",
+		"msil",
+		"decompiler",
+		"ilspy",
+		"csharp",
+		"managed",
+		"reverse-engineering"
+	],
+	"activationEvents": [
+		"onCommand:hexcore.revenant.decompile",
+		"onCommand:hexcore.revenant.decompileIL"
+	],
+	"main": "./out/extension.js",
+	"contributes": {
+		"commands": [
+			{
+				"command": "hexcore.revenant.decompile",
+				"title": "Revenant: Decompile .NET Assembly to C#",
+				"category": "HexCore Revenant",
+				"icon": "$(file-code)"
+			},
+			{
+				"command": "hexcore.revenant.decompileIL",
+				"title": "Revenant: Disassemble .NET Assembly to IL",
+				"category": "HexCore Revenant",
+				"icon": "$(symbol-misc)"
+			}
+		],
+		"configuration": {
+			"title": "HexCore Revenant",
+			"properties": {
+				"hexcore.revenant.ilspyPath": {
+					"type": "string",
+					"default": "",
+					"description": "Path to the ilspycmd executable. Leave empty to auto-locate (PATH, then the dotnet global-tools directory). In a future release this is replaced by a bundled self-contained wrapper, removing the .NET runtime dependency."
+				},
+				"hexcore.revenant.timeoutMs": {
+					"type": "number",
+					"default": 120000,
+					"description": "Maximum time (ms) to wait for a decompile before aborting."
+				}
+			}
+		}
+	},
+	"scripts": {
+		"compile": "tsc -p ./",
+		"watch": "tsc -watch -p ./"
+	},
+	"devDependencies": {
+		"@types/node": "^20.0.0",
+		"@types/vscode": "^1.75.0",
+		"typescript": "^5.4.0"
+	}
+}

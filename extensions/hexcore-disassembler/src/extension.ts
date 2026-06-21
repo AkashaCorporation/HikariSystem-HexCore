@@ -4176,9 +4176,23 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 				const mdoc = await vscode.workspace.openTextDocument({ content: markerCode, language: 'c' });
 				await vscode.window.showTextDocument(mdoc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
-				vscode.window.showWarningMessage(
-					'Managed .NET (CIL) assembly: native x86 decompile is not applicable. Use a .NET/IL decompiler (ILSpy / dnSpyEx).'
-				);
+				// Issue #32 "Better" tier: offer to recover the real C# / IL via the
+				// Revenant managed decompiler (hexcore-revenant) rather than only pointing
+				// at external tooling. The user clicks the action; nothing auto-runs.
+				const REVENANT_ACTION = 'Decompile with Revenant';
+				const dotnetFile = (typeof options.file === 'string' ? options.file : undefined) || engine.getFilePath();
+				void vscode.window.showWarningMessage(
+					'Managed .NET (CIL) assembly: native x86 decompile is not applicable. Recover the C# / IL with Revenant.',
+					REVENANT_ACTION
+				).then(async action => {
+					if (action !== REVENANT_ACTION) { return; }
+					const cmds = await vscode.commands.getCommands(true);
+					if (!cmds.includes('hexcore.revenant.decompile')) {
+						void vscode.window.showErrorMessage('HexCore Revenant extension is not available. Decompile manually with ilspycmd / ILSpy (ICSharpCode.Decompiler).');
+						return;
+					}
+					void vscode.commands.executeCommand('hexcore.revenant.decompile', dotnetFile ? { file: dotnetFile } : undefined);
+				});
 				return managedResult;
 			}
 
