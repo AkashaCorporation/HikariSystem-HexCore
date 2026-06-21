@@ -256,6 +256,15 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.souper', 'hexcore.souper.optimize'],
 	['hexcore.optimize', 'hexcore.souper.optimize'],
 	['hexcore.superoptimize', 'hexcore.souper.optimize'],
+	// Revenant (.NET / CIL) decompiler — doc-friendly short forms. The bare
+	// `hexcore.decompile` alias is already claimed by Helix (native targets),
+	// so managed aliases are namespaced under `dotnet`/`revenant` to avoid the
+	// collision and make the managed-vs-native split explicit in job files.
+	['hexcore.dotnet.decompile', 'hexcore.revenant.decompile'],
+	['hexcore.decompile.dotnet', 'hexcore.revenant.decompile'],
+	['hexcore.revenant.decompileCSharp', 'hexcore.revenant.decompile'],
+	['hexcore.dotnet.decompileIL', 'hexcore.revenant.decompileIL'],
+	['hexcore.decompile.il', 'hexcore.revenant.decompileIL'],
 	['hexcore.disasm.disassembleAt', 'hexcore.disasm.disassembleAtHeadless'],
 	['hexcore.disasm.rttiScan', 'hexcore.disasm.rttiScanHeadless'],
 	['hexcore.disasm.scanRtti', 'hexcore.disasm.rttiScanHeadless'],
@@ -385,6 +394,14 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	// Revenant — managed (.NET / CIL) decompiler. The native Remill->Helix
+	// pipeline lifts CIL .text as x86 and emits a fake stub; Revenant recovers
+	// the real C# / IL via the bundled self-contained engine (ICSharpCode.
+	// Decompiler). Consumes a managed PE (`file`), writes C#/IL source to
+	// `output`, honours `quiet`. validateOutput:true — both modes emit a real
+	// source file the runner validates, exactly like helix.decompile.
+	['hexcore.revenant.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.revenant.decompileIL', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	// HQL (Helix Query Language) semantic scanner. Decompiles the target
 	// function(s) via the helix pipeline then evaluates the built-in signature
 	// library over the HAST. Writes a JSON report ({ results: [...] }) to output.
@@ -523,6 +540,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.searchBytesHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.helix.decompileIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.revenant.decompile', ['hikarisystem.hexcore-revenant']],
+	['hexcore.revenant.decompileIL', ['hikarisystem.hexcore-revenant']],
 	['hexcore.hql.scanHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.hql.scanFunction', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.souper.optimize', ['hikarisystem.hexcore-disassembler']],

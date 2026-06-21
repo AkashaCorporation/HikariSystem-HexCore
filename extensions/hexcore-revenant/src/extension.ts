@@ -11,7 +11,10 @@ import { decompile, RevenantMode, RevenantResult } from './ilspyRunner';
 
 interface RevenantCommandOptions {
 	file?: string;
-	output?: string;
+	// The headless pipeline (automationPipelineRunner) injects `output` as an
+	// object `{ path, format? }`, while an interactive/scripted caller may pass a
+	// bare string. Accept both; resolve to a concrete path via resolveOutputPath.
+	output?: string | { path?: string };
 	type?: string;
 	quiet?: boolean;
 }
@@ -20,6 +23,20 @@ function normalizeOptions(arg?: vscode.Uri | RevenantCommandOptions): RevenantCo
 	if (!arg) { return {}; }
 	if (arg instanceof vscode.Uri) { return { file: arg.fsPath }; }
 	return arg;
+}
+
+/**
+ * Resolve the output destination to a concrete file path. The pipeline runner
+ * passes `{ path }`; direct callers may pass a string. Returns undefined when no
+ * usable path was supplied (then the command just returns the result in-memory).
+ * Mirrors resolveOptionalOutputPath in hexcore-disassembler so both agree.
+ */
+function resolveOutputPath(output?: string | { path?: string }): string | undefined {
+	if (typeof output === 'string' && output.length > 0) { return output; }
+	if (output && typeof output === 'object' && typeof output.path === 'string' && output.path.length > 0) {
+		return output.path;
+	}
+	return undefined;
 }
 
 async function resolveTargetFile(options: RevenantCommandOptions): Promise<string | undefined> {
@@ -56,20 +73,31 @@ async function runDecompile(mode: RevenantMode, arg?: vscode.Uri | RevenantComma
 	const ilspyPath = cfg.get<string>('ilspyPath') || undefined;
 	const timeoutMs = cfg.get<number>('timeoutMs') || 120000;
 
+	const outputPath = resolveOutputPath(options.output);
+
 	const execute = async (): Promise<RevenantResult> => {
 		const r = await decompile(file, { mode, type: options.type, ilspyPath, timeoutMs });
-		if (r.ok && options.output) {
+		if (r.ok && outputPath) {
 			try {
-				fs.mkdirSync(path.dirname(options.output), { recursive: true });
-				fs.writeFileSync(options.output, banner(file, r) + r.code, 'utf-8');
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, banner(file, r) + r.code, 'utf-8');
 			} catch (err) {
+				r.ok = false;
 				r.error = `decompiled OK but could not write output: ${(err as Error).message}`;
 			}
 		}
 		return r;
 	};
 
-	if (options.quiet) { return execute(); }
+	// Headless (pipeline) path: return the structured result with a `success`
+	// mirror of `ok`. The automation runner inspects `commandReturn.success ===
+	// false` to surface the command's real `error` instead of a generic
+	// "output file not created" mask; without this mirror a Revenant failure
+	// would be reported as a blank validation error.
+	if (options.quiet) {
+		const r = await execute();
+		return { ...r, success: r.ok } as RevenantResult & { success: boolean };
+	}
 
 	let result: RevenantResult | undefined;
 	await vscode.window.withProgress(
