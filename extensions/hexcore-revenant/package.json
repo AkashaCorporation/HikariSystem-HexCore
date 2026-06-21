@@ -4,7 +4,7 @@
 	"description": "Managed .NET (CIL) decompiler. Recovers C# / IL from managed assemblies the native Remill->Helix pipeline cannot decompile, by wrapping ILSpy's ICSharpCode.Decompiler engine. Closes the 'Better' tier of issue #32.",
 	"version": "0.1.0",
 	"publisher": "hikarisystem",
-	"license": "MIT",
+	"license": "Apache-2.0",
 	"engines": {
 		"vscode": "^1.75.0"
 	},
