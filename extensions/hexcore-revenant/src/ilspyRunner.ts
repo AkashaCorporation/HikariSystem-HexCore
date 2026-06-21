@@ -165,7 +165,7 @@ export async function getIlspyVersion(cmd: string, timeoutMs = 15000): Promise<s
 	if (error) { return undefined; }
 	// Both backends print a "<name>: <ver>" line:
 	//   ilspycmd:        "ilspycmd: 8.2.0.7535\nICSharpCode.Decompiler: 8.2.0.7535"
-	//   bundled engine:  "revenant-engine: 0.2.0\nICSharpCode.Decompiler: 8.2.0.7535"
+	//   bundled engine:  "revenant-engine: 0.3.0\nICSharpCode.Decompiler: 10.1.0.8386"
 	const m = stdout.match(/(?:revenant-engine|ilspycmd|ICSharpCode\.Decompiler):\s*([0-9][0-9.]*)/i);
 	return m ? m[1] : stdout.split(/\r?\n/)[0].trim() || undefined;
 }
