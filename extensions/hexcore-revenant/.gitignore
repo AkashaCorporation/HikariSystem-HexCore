@@ -1,0 +1,4 @@
+# The bundled self-contained engine is a built/downloaded prebuild artifact
+# (like the .node files), not source -- never commit it to the monorepo.
+bin/
+out/

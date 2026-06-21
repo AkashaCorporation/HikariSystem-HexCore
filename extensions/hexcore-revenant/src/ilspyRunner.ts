@@ -42,8 +42,11 @@ export interface RevenantResult {
 	code: string;
 	/** Whether the input was detected as a managed (.NET) PE. */
 	isDotNet: boolean;
-	/** Resolved ilspycmd path actually used (null if none found). */
+	/** Resolved backend path actually used (null if none found). */
 	tool: string | null;
+	/** Which backend resolved: the bundled self-contained engine (Phase 2),
+	 *  a system ilspycmd (Phase 1 / dev), or an explicit config override. */
+	backend?: 'override' | 'bundled' | 'ilspycmd';
 	toolVersion?: string;
 	error?: string;
 	elapsedMs: number;
@@ -106,6 +109,48 @@ export function locateIlspy(override?: string): string | null {
 	return null;
 }
 
+/** Platform/arch folder for the bundled engine, e.g. win-x64 / linux-x64 / osx-arm64. */
+export function platformDir(): string {
+	const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
+	const o = process.platform === 'win32' ? 'win' : process.platform === 'darwin' ? 'osx' : 'linux';
+	return `${o}-${arch}`;
+}
+
+/**
+ * Locate the bundled self-contained Revenant engine (Phase 2) -- the portable
+ * binary shipped with the extension so the user needs no .NET install and no
+ * downloads. Looked up under the extension's `bin/<plat>/` (sibling of `out/`).
+ * Returns null if not shipped (then we fall back to a system ilspycmd in dev).
+ */
+export function locateBundledEngine(): string | null {
+	const exe = process.platform === 'win32' ? 'revenant-engine.exe' : 'revenant-engine';
+	const candidates = [
+		path.join(__dirname, '..', 'bin', platformDir(), exe),
+		path.join(__dirname, '..', 'bin', exe),
+	];
+	for (const c of candidates) {
+		try { if (fs.existsSync(c) && fs.statSync(c).isFile()) { return c; } } catch { /* */ }
+	}
+	return null;
+}
+
+/**
+ * Resolve the decompiler backend in priority order: explicit config override ->
+ * bundled self-contained engine (Phase 2) -> system ilspycmd (Phase 1 / dev).
+ * Both binaries take the same CLI, so callers build args identically.
+ */
+export function locateBackend(override?: string): { path: string; kind: 'override' | 'bundled' | 'ilspycmd' } | null {
+	if (override && override.trim()) {
+		const o = override.trim();
+		try { if (fs.existsSync(o) && fs.statSync(o).isFile()) { return { path: o, kind: 'override' }; } } catch { /* */ }
+	}
+	const bundled = locateBundledEngine();
+	if (bundled) { return { path: bundled, kind: 'bundled' }; }
+	const ilspy = locateIlspy();
+	if (ilspy) { return { path: ilspy, kind: 'ilspycmd' }; }
+	return null;
+}
+
 function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: string; stderr: string; error?: Error }> {
 	return new Promise(resolve => {
 		execFile(cmd, args, { timeout: timeoutMs, maxBuffer: 256 * 1024 * 1024, windowsHide: true }, (error, stdout, stderr) => {
@@ -118,8 +163,10 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: 
 export async function getIlspyVersion(cmd: string, timeoutMs = 15000): Promise<string | undefined> {
 	const { stdout, error } = await run(cmd, ['--version'], timeoutMs);
 	if (error) { return undefined; }
-	// ilspycmd prints e.g. "ilspycmd: 8.2.0.7535\nICSharpCode.Decompiler: 8.2.0.7535"
-	const m = stdout.match(/ilspycmd:\s*([0-9][0-9.]*)/i);
+	// Both backends print a "<name>: <ver>" line:
+	//   ilspycmd:        "ilspycmd: 8.2.0.7535\nICSharpCode.Decompiler: 8.2.0.7535"
+	//   bundled engine:  "revenant-engine: 0.2.0\nICSharpCode.Decompiler: 8.2.0.7535"
+	const m = stdout.match(/(?:revenant-engine|ilspycmd|ICSharpCode\.Decompiler):\s*([0-9][0-9.]*)/i);
 	return m ? m[1] : stdout.split(/\r?\n/)[0].trim() || undefined;
 }
 
@@ -142,13 +189,14 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 		return { ...base, isDotNet: false, error: 'not a managed .NET assembly (no CLR runtime header) -- native target, use the native decompiler', elapsedMs: Date.now() - startedAt };
 	}
 
-	const tool = locateIlspy(options.ilspyPath);
-	if (!tool) {
-		return { ...base, isDotNet: true, error: "ilspycmd not found. Install it with 'dotnet tool install -g ilspycmd', or set hexcore.revenant.ilspyPath.", elapsedMs: Date.now() - startedAt };
+	const backend = locateBackend(options.ilspyPath);
+	if (!backend) {
+		return { ...base, isDotNet: true, error: "no decompiler backend found. Ship the bundled revenant-engine binary, install ilspycmd ('dotnet tool install -g ilspycmd'), or set hexcore.revenant.ilspyPath.", elapsedMs: Date.now() - startedAt };
 	}
+	const tool = backend.path;
 
-	// ilspycmd: positional <assembly> + flags (System.CommandLine, order-independent).
-	// IL mode is --ilcode; -t selects a single type; -r adds reference dirs.
+	// Both backends share the same CLI: positional <assembly> + flags. IL mode is
+	// --ilcode; -t selects a single type; -r adds reference dirs.
 	const args: string[] = [filePath];
 	if (mode === 'il') { args.push('--ilcode'); }
 	if (options.type && options.type.trim()) { args.push('-t', options.type.trim()); }
@@ -162,10 +210,10 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 		const reason = (error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
 			? `decompile timed out after ${timeoutMs}ms`
 			: (stderr.trim() || error.message);
-		return { ...base, isDotNet: true, tool, toolVersion, error: reason, elapsedMs };
+		return { ...base, isDotNet: true, tool, backend: backend.kind, toolVersion, error: reason, elapsedMs };
 	}
 	if (!stdout.trim()) {
-		return { ...base, isDotNet: true, tool, toolVersion, error: stderr.trim() || 'ilspycmd produced no output', elapsedMs };
+		return { ...base, isDotNet: true, tool, backend: backend.kind, toolVersion, error: stderr.trim() || 'decompiler produced no output', elapsedMs };
 	}
-	return { ok: true, mode, code: stdout, isDotNet: true, tool, toolVersion, elapsedMs };
+	return { ok: true, mode, code: stdout, isDotNet: true, tool, backend: backend.kind, toolVersion, elapsedMs };
 }

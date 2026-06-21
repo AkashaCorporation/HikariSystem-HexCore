@@ -7,7 +7,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { decompile, detectDotNet, isDotNetFile, locateIlspy } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
+const { decompile, detectDotNet, isDotNetFile, locateIlspy, locateBundledEngine } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
 
 const MANAGED = String.raw`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Accessibility.dll`;
 const BYPASS = String.raw`C:\Users\Mazum\Desktop\New-Star\Easy\rev_bypass\Bypass.exe`;
@@ -31,8 +31,15 @@ async function test(name, fn) {
 	fs.writeFileSync(garbage, Buffer.from('this is not a PE file at all, just text.'.repeat(20)));
 	fs.writeFileSync(empty, Buffer.alloc(0));
 
-	await test('ilspycmd is locatable', () => {
-		assert.ok(locateIlspy(), 'ilspycmd not found on this machine');
+	await test('a backend is locatable (bundled engine or ilspycmd)', () => {
+		assert.ok(locateBundledEngine() || locateIlspy(), 'neither the bundled revenant-engine nor ilspycmd was found');
+	});
+
+	await test('Phase 2: bundled engine is preferred + used as the backend', async () => {
+		if (!locateBundledEngine()) { return; } // skip cleanly in dev without the binary shipped
+		const r = await decompile(MANAGED, { mode: 'csharp' });
+		assert.ok(r.ok, `expected ok, got: ${r.error}`);
+		assert.strictEqual(r.backend, 'bundled', 'should use the bundled self-contained engine, not ilspycmd');
 	});
 
 	await test('detectDotNet: native buffer => false', () => {
