@@ -252,7 +252,13 @@ const IOC_PATTERNS: IOCPattern[] = [
 	},
 	{
 		category: 'domain',
-		regex: /\b[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,24}\b/g,
+		// ReDoS guard: the subdomain-label repetition is capped at {0,32} instead
+		// of an unbounded `*`. The unbounded form is O(n^2) on a long dotted run
+		// with no valid TLD (e.g. "a.a.a...a." planted in a hostile sample) --
+		// ~1.3s at 16k labels, seconds-scale on a 64KB printable region, run on
+		// every chunk. 32 levels is far more than any real domain, so legitimate
+		// matches are unaffected (validateDomain still gates the actual TLD).
+		regex: /\b[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?){0,32}\.[a-zA-Z]{2,24}\b/g,
 		validate: validateDomain,
 	},
 
