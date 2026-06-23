@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mkdirSync(outDir)`** -- a job-controlled `outDir` that resolves onto an existing file (ENOTDIR/EEXIST) now yields a labelled error instead of a raw fs throw.
 - Validated before/after on the compiled `out/` artifact with crafted job files (regex `"("` -> was rejected with status frozen on `running`, now clean terminal `error`; goto `NaN` -> was silent `ok`, now `error`; abort -> was `partial`, now `error`; valid 2-step / valid goto / valid skip jobs byte-identical). Follow-ups filed: #43 (outDir arbitrary-directory-write containment, security) and #44 ($step append-order desync, retryDelayMs/timeoutMs clamps, validateJob divergence).
 
+### Pipeline: clamp absurd timeoutMs / retryDelayMs (autonomous audit loop, #44)
+
+> Two unbounded numeric job-file fields in the pipeline runner (`hexcore-disassembler/automationPipelineRunner.ts`): a `timeoutMs` above 2^31-1 silently overflows Node's setTimeout to ~1ms (an instant spurious timeout, the opposite of the author's "long timeout" intent), and a multi-day `retryDelayMs` pins a queue worker between attempts. `parseTimeoutMs` now caps to the 32-bit ceiling (2147483647) and `parseRetryDelayMs` caps to a 5-minute ceiling (with a warning). Validated before/after on the compiled artifact (99999999999 -> 2147483647; 2000000000 -> 300000; normal values unchanged). Disassembler `1.4.8 -> 1.4.9`. Closes 2 of the 4 items in #44 (the `$step` append-order desync and the validateJob/runtime divergence remain open).
+
 ### BTF debug-info loader: bound allocations + reads to the real data, fix the ENUM64 64-bit combine (autonomous parser-bounds audit)
 
 > `hexcore-disassembler/elfBtfLoader.ts` parses BTF debug info out of an UNTRUSTED .ko / vmlinux. A 21-agent adversarial parser-bounds audit confirmed several issues; the high-value cluster is fixed here, validated before/after on the compiled artifact + a new unit suite (3 passing). Disassembler `1.4.7 -> 1.4.8`.

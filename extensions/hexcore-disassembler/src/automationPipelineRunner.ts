@@ -236,6 +236,12 @@ export const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_RETRY_COUNT = 0;
 const DEFAULT_RETRY_DELAY_MS = 1000;
+// Node's setTimeout silently truncates a delay > 2^31-1 ms to ~1ms, so a "very
+// long timeout" sentinel would fire almost immediately. Cap timeoutMs to the
+// 32-bit ceiling, and cap retryDelayMs to a sane 5-minute ceiling so an absurd
+// inter-attempt delay cannot pin a queue worker for days (#44).
+const MAX_TIMEOUT_MS = 2147483647;
+const MAX_RETRY_DELAY_MS = 300000;
 const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hash.file', 'hexcore.hashcalc.calculate'],
 	['hexcore.hash.calculate', 'hexcore.hashcalc.calculate'],
@@ -1652,6 +1658,11 @@ function parseTimeoutMs(
 	if (normalized < 1) {
 		throw new Error(`Invalid "timeoutMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 1`);
 	}
+	if (normalized > MAX_TIMEOUT_MS) {
+		// A larger value overflows Node's 32-bit setTimeout to ~1ms (an instant
+		// spurious timeout); cap to the ceiling, preserving the long-timeout intent.
+		return MAX_TIMEOUT_MS;
+	}
 	return normalized;
 }
 
@@ -1689,6 +1700,10 @@ function parseRetryDelayMs(
 	const normalized = Math.floor(rawValue);
 	if (normalized < 0) {
 		throw new Error(`Invalid "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: expected value >= 0`);
+	}
+	if (normalized > MAX_RETRY_DELAY_MS) {
+		console.warn(`[hexcore.pipeline] "retryDelayMs" in step ${index} (${cmd}) of ${jobFilePath}: ${normalized}ms exceeds the ${MAX_RETRY_DELAY_MS}ms ceiling; clamping (a multi-day inter-attempt delay would pin a queue worker).`);
+		return MAX_RETRY_DELAY_MS;
 	}
 	return normalized;
 }
