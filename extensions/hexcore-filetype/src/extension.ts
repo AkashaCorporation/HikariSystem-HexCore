@@ -251,6 +251,17 @@ async function detectFileType(uri: vscode.Uri, options: DetectFileTypeCommandOpt
 	return result;
 }
 
+/**
+ * True if `child` is `parent` or lives inside it. Uses path.relative rather than
+ * a raw `startsWith` prefix match -- the prefix form wrongly accepts a sibling
+ * directory that shares the textual prefix (e.g. `C:\Users\Bob` passing a
+ * `C:\Users\Bo` guard), defeating the "writes must stay in workspace/home" check.
+ */
+export function isWithinDir(parent: string, child: string): boolean {
+	const rel = path.relative(parent, child);
+	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
 function writeOutput(result: FileTypeDetectionResult, output: CommandOutputOptions): void {
 	const outputFormat = normalizeOutputFormat(output.path, output.format);
 
@@ -258,8 +269,8 @@ function writeOutput(result: FileTypeDetectionResult, output: CommandOutputOptio
 	const resolvedPath = path.resolve(output.path);
 	const workspaceFolders = vscode.workspace.workspaceFolders;
 	const homeDir = require('os').homedir();
-	const isInWorkspace = workspaceFolders?.some(f => resolvedPath.startsWith(f.uri.fsPath));
-	const isInHome = resolvedPath.startsWith(homeDir);
+	const isInWorkspace = workspaceFolders?.some(f => isWithinDir(f.uri.fsPath, resolvedPath)) ?? false;
+	const isInHome = isWithinDir(homeDir, resolvedPath);
 	if (!isInWorkspace && !isInHome) {
 		throw new Error(`Output path must be within workspace or user home directory: ${resolvedPath}`);
 	}
@@ -272,7 +283,7 @@ function writeOutput(result: FileTypeDetectionResult, output: CommandOutputOptio
 	}
 
 	fs.writeFileSync(
-		output.path,
+		resolvedPath,
 		JSON.stringify(
 			{
 				fileName: result.fileName,
