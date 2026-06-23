@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.3",
+	"version": "1.4.4",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

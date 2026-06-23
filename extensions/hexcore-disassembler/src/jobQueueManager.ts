@@ -346,6 +346,17 @@ export class JobQueueManager {
 	private readonly sessionActiveCounts = new Map<string, number>();
 
 	/**
+	 * Upper bound on retained TERMINAL jobs (done/failed/cancelled). The jobs Map
+	 * is the long-lived singleton's master record and was previously never pruned,
+	 * so a session fed by the startup auto-run + FileSystemWatcher accumulated one
+	 * entry (with its full pipeline `result`) per completed run forever. We keep the
+	 * most recent MAX_RETAINED_COMPLETED terminal jobs and evict the oldest; queued
+	 * and running jobs are never evicted.
+	 */
+	private static readonly MAX_RETAINED_COMPLETED = 200;
+	private readonly completedJobIds: string[] = [];
+
+	/**
 	 * Event fired when a job's status changes.
 	 */
 	public readonly onJobStatusChanged = this.onJobStatusChangedEmitter.event;
@@ -471,7 +482,13 @@ export class JobQueueManager {
 	getActiveJobForPath(filePath: string): QueuedJob | undefined {
 		const normalized = path.resolve(filePath);
 		for (const job of this.jobs.values()) {
-			if (job.filePath === normalized && (job.status === 'queued' || job.status === 'running')) {
+			// A job cancelled while its executor is still running stays in-flight
+			// (its worker is busy and it is still in runningJobs) until the executor
+			// settles. Treat it as active so the watcher / auto-run does not enqueue a
+			// duplicate run against the same file's outputs while the original is
+			// still writing them.
+			if (job.filePath === normalized &&
+				(job.status === 'queued' || job.status === 'running' || this.runningJobs.has(job.jobId))) {
 				return job;
 			}
 		}
@@ -818,6 +835,13 @@ export class JobQueueManager {
 	 */
 	private updateJobStatus(job: QueuedJob, newStatus: JobStatus): void {
 		const oldStatus = job.status;
+		// Terminal states are final. A job cancelled while its executor is still
+		// running stays in runningJobs (cancelJob does not remove it), so a later
+		// dispose() would otherwise re-finalize it -- overwriting completedAt and
+		// firing a spurious duplicate (e.g. cancelled -> cancelled) event.
+		if (oldStatus === 'done' || oldStatus === 'failed' || oldStatus === 'cancelled') {
+			return;
+		}
 		job.status = newStatus;
 
 		if (newStatus === 'running') {
@@ -833,6 +857,29 @@ export class JobQueueManager {
 			result: job.result,
 			error: job.error
 		});
+
+		if (newStatus === 'done' || newStatus === 'failed' || newStatus === 'cancelled') {
+			this.retainCompletedJob(job.jobId);
+		}
+	}
+
+	/**
+	 * Records a freshly-finalized job and, once more than MAX_RETAINED_COMPLETED
+	 * terminal jobs are retained, evicts the oldest from the jobs Map (dropping its
+	 * heavy pipeline `result` + AbortController). Never evicts a queued/running job.
+	 */
+	private retainCompletedJob(jobId: string): void {
+		this.completedJobIds.push(jobId);
+		while (this.completedJobIds.length > JobQueueManager.MAX_RETAINED_COMPLETED) {
+			const oldest = this.completedJobIds.shift();
+			if (oldest === undefined) {
+				break;
+			}
+			const job = this.jobs.get(oldest);
+			if (job && (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled')) {
+				this.jobs.delete(oldest);
+			}
+		}
 	}
 
 	/**
