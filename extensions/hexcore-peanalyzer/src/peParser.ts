@@ -594,8 +594,9 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		timestamps: { compile: 'Unknown', compileUnix: 0 },
 	};
 
+	let fd: number | undefined;
 	try {
-		const fd = fs.openSync(filePath, 'r');
+		fd = fs.openSync(filePath, 'r');
 		const buffer = Buffer.alloc(Math.min(stats.size, 1024 * 1024)); // Read up to 1MB
 		fs.readSync(fd, buffer, 0, buffer.length, 0);
 
@@ -679,6 +680,16 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		fs.closeSync(fd);
 	} catch (error: any) {
 		analysis.error = error.message;
+		// A partial/failed parse must NOT render as a valid PE: the COFF/optional/
+		// section/import parsers do fixed-offset reads that throw RangeError on a
+		// truncated/hostile file, and downstream consumers gate only on isPE. Reset
+		// it so a corrupt file is shown as failed, not as a clean import-less PE.
+		analysis.isPE = false;
+		// Close the descriptor if a parser threw before the in-try closeSync ran;
+		// otherwise every malformed file leaks an fd (eventual EMFILE).
+		if (fd !== undefined) {
+			try { fs.closeSync(fd); } catch { /* already closed or invalid */ }
+		}
 	}
 
 	return analysis;
@@ -721,6 +732,13 @@ function parsePEHeader(buffer: Buffer, offset: number): PEHeader {
 
 function parseOptionalHeader(buffer: Buffer, offset: number, size: number): OptionalHeader {
 	const magic = buffer.readUInt16LE(offset);
+	// Reject an unknown optional-header magic instead of silently treating it as
+	// PE32 -- otherwise a corrupt/ROM image is mislabeled as a normal 32-bit PE
+	// with a fabricated imageBase / data-directory / mitigation read. The throw
+	// surfaces via analyzePEFile's catch as analysis.error + isPE=false.
+	if (magic !== 0x10b && magic !== 0x20b) {
+		throw new Error(`Unknown optional header magic 0x${magic.toString(16)}`);
+	}
 	const is64Bit = magic === 0x20b;
 
 	const subsystem = buffer.readUInt16LE(offset + (is64Bit ? 68 : 68));
@@ -780,7 +798,13 @@ function parseOptionalHeader(buffer: Buffer, offset: number, size: number): Opti
 function parseSectionHeaders(buffer: Buffer, offset: number, count: number, fd: number): SectionHeader[] {
 	const sections: SectionHeader[] = [];
 
-	for (let i = 0; i < count; i++) {
+	// Clamp the attacker-controlled NumberOfSections to a sane PE/COFF limit (real
+	// images have far fewer; the Windows loader rejects >96). Without this a crafted
+	// header drives thousands of synchronous per-section reads + entropy passes on
+	// the main thread (blocking DoS). Mirrors the numberOfRvaAndSizes (16) /
+	// imports (200) caps elsewhere in this parser.
+	const safeCount = Math.min(count, 96);
+	for (let i = 0; i < safeCount; i++) {
 		const secOffset = offset + i * 40;
 		if (secOffset + 40 > buffer.length) {
 			break;
