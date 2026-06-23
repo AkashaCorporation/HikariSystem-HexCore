@@ -46,7 +46,7 @@ import {
 	type HelixDecompileQuietResult,
 } from './hqlScanner';
 import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
-import { SouperWrapper } from './souperWrapper';
+import { SouperWrapper, decideSouperGate } from './souperWrapper';
 import { getStructInfoForFunction, exportStructInfoJson, type StructInfoJson, type StructInfo } from './elfBtfLoader';
 import { auditRefcount, type RefcountAuditReport } from './refcountAuditScanner';
 import { mapCapstoneToRemill } from './archMapper';
@@ -3971,7 +3971,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// v3.8.0: Souper superoptimization — optimize IR before Helix decompilation
 			let irForHelix = irText;
-			if (souperWrapper.isAvailable() && options.souper !== false) {
+			// v3.9.x: tri-state Souper gate -- 'auto' runs Souper only on
+			// crypto/MBA-dense IR; true/absent keep legacy default-ON; false off.
+			const souperGate = decideSouperGate(options.souper, irText, {
+				threshold: typeof options.souperAutoThreshold === 'number' ? options.souperAutoThreshold : undefined,
+				minSignalOps: typeof options.souperAutoMinOps === 'number' ? options.souperAutoMinOps : undefined,
+			});
+			if (souperWrapper.isAvailable() && souperGate.mode === 'auto-skip' && !quiet) {
+				console.log(`[souper] auto-skip (${souperGate.reason})`);
+			}
+			if (souperWrapper.isAvailable() && souperGate.run) {
 				const souperResult = await vscode.window.withProgress(
 					{ location: vscode.ProgressLocation.Notification, title: 'Souper: Optimizing IR...', cancellable: false },
 					async () => souperWrapper.optimize(irText, {
@@ -4264,7 +4273,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// v3.8.0: Souper superoptimization — optimize lifted IR before Helix
 			let irForHelix2 = liftResult.ir;
-			if (souperWrapper.isAvailable() && options.souper !== false) {
+			// v3.9.x: tri-state Souper gate -- 'auto' runs Souper only on
+			// crypto/MBA-dense IR; true/absent keep legacy default-ON; false off.
+			const souperGate2 = decideSouperGate(options.souper, liftResult.ir, {
+				threshold: typeof options.souperAutoThreshold === 'number' ? options.souperAutoThreshold : undefined,
+				minSignalOps: typeof options.souperAutoMinOps === 'number' ? options.souperAutoMinOps : undefined,
+			});
+			if (souperWrapper.isAvailable() && souperGate2.mode === 'auto-skip' && !quiet) {
+				console.log(`[souper] auto-skip (${souperGate2.reason})`);
+			}
+			if (souperWrapper.isAvailable() && souperGate2.run) {
 				const souperResult = await vscode.window.withProgress(
 					{ location: vscode.ProgressLocation.Notification, title: 'Souper: Optimizing IR...', cancellable: false },
 					async () => souperWrapper.optimize(liftResult.ir, {
