@@ -42,7 +42,7 @@ export interface EntropySummary {
 }
 
 export interface CryptoSignal {
-	type: 'aes-candidate';
+	type: 'aes-candidate' | 'chacha-salsa-constant';
 	confidence: number;
 	offset?: number;
 	details: string;

@@ -6,12 +6,12 @@
 
 import * as fs from 'fs';
 import {
-	CryptoSignal,
 	EntropyBlock,
 	EntropyCoreResult,
 	EntropyProgressEvent,
 	EntropySummary
 } from './types';
+import { CryptoConstantScanner, cryptoConstantHitsToSignals } from './cryptoConstants';
 
 export interface AnalyzeEntropyOptions {
 	blockSize?: number;
@@ -29,15 +29,17 @@ export async function analyzeEntropyFile(filePath: string, options: AnalyzeEntro
 	const stats = fs.statSync(filePath);
 	const blockSize = normalizeBlockSize(options.blockSize, stats.size);
 	const sampleRatio = normalizeSampleRatio(options.sampleRatio);
+	const cryptoScanner = new CryptoConstantScanner();
 	const blocks = await analyzeEntropyBlocksStream(
 		filePath,
 		blockSize,
 		stats.size,
 		sampleRatio,
-		options.onProgress
+		options.onProgress,
+		cryptoScanner
 	);
 	const summary = summarizeEntropy(blocks);
-	const cryptoSignals = detectCryptoSignalsStub(summary, blocks);
+	const cryptoSignals = cryptoConstantHitsToSignals(cryptoScanner.hits);
 
 	return {
 		filePath,
@@ -82,7 +84,8 @@ async function analyzeEntropyBlocksStream(
 	blockSize: number,
 	fileSize: number,
 	sampleRatio: number,
-	onProgress?: (event: EntropyProgressEvent) => void
+	onProgress?: (event: EntropyProgressEvent) => void,
+	scanner?: CryptoConstantScanner
 ): Promise<EntropyBlock[]> {
 	const blocks: EntropyBlock[] = [];
 	const streamChunkSize = Math.max(blockSize, STREAM_CHUNK_SIZE);
@@ -99,6 +102,8 @@ async function analyzeEntropyBlocksStream(
 		stream.on('data', chunk => {
 			const chunkBuffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
 			bytesRead += chunkBuffer.length;
+			// Scan the raw chunk for known crypto constants (boundary-safe).
+			scanner?.scanChunk(chunkBuffer, bytesRead - chunkBuffer.length);
 
 			const data = bufferedRemainder.length > 0
 				? Buffer.concat([bufferedRemainder, chunkBuffer])
@@ -276,13 +281,3 @@ function fastLog2(value: number): number {
 	return Math.log2(value);
 }
 
-function detectCryptoSignalsStub(summary: EntropySummary, blocks: EntropyBlock[]): CryptoSignal[] {
-	// Future hook for dedicated AES heuristics:
-	// - S-Box constants scan
-	// - AES-NI opcode patterns
-	// - round-key schedule structures
-	// Kept conservative for now to avoid false positives.
-	void summary;
-	void blocks;
-	return [];
-}
