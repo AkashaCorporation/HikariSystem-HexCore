@@ -39,6 +39,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mkdirSync(outDir)`** -- a job-controlled `outDir` that resolves onto an existing file (ENOTDIR/EEXIST) now yields a labelled error instead of a raw fs throw.
 - Validated before/after on the compiled `out/` artifact with crafted job files (regex `"("` -> was rejected with status frozen on `running`, now clean terminal `error`; goto `NaN` -> was silent `ok`, now `error`; abort -> was `partial`, now `error`; valid 2-step / valid goto / valid skip jobs byte-identical). Follow-ups filed: #43 (outDir arbitrary-directory-write containment, security) and #44 ($step append-order desync, retryDelayMs/timeoutMs clamps, validateJob divergence).
 
+### Helix worker (>64KB async) path -- forward data sections (switch recovery) + always settle the Promise (autonomous audit loop)
+
+> The Helix decompile wrapper (`hexcore-disassembler/helixWrapper.ts`) offloads any IR larger than 64KB to a worker thread that builds its OWN engine. Two gaps on that path, both fixed + validated before/after on the compiled artifact (a mocked `worker_threads` harness): Disassembler `1.4.4 -> 1.4.5`.
+>
+> - **Data sections dropped on the >64KB path (correctness):** the binary's data sections (`.rdata`/`.rodata`) were set on the MAIN-thread engine but never forwarded to the worker, so `RecoverSwitchTables` silently skipped itself and every `switch (...)` in a LARGE function collapsed to `goto default`. `decompileIrAsync` now forwards `dataSections` to the worker, which calls `addDataSection` before decompiling (mirrors the sync path).
+> - **Worker Promise could hang forever (robustness):** the worker resolved only on `message`/`error`, so a worker that stopped without posting (silent exit / hard native crash) left the decompile awaiting forever. An `exit` handler (with a settle-once guard) now guarantees the Promise always resolves -- with a clear error -- instead of hanging.
+
 ### JobQueueManager lifecycle hardening -- no double-dispatch of a cancelled job, bounded job history, no double-finalize (autonomous audit loop)
 
 > A 22-agent adversarial audit of the pipeline job queue (`hexcore-disassembler/jobQueueManager.ts`) confirmed 7 findings; the high-value lifecycle cluster is fixed here, validated before/after on the compiled artifact (zero regression). Disassembler `1.4.3 -> 1.4.4`.

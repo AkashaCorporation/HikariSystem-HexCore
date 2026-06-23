@@ -336,6 +336,7 @@ export class HelixWrapper {
 				useCastLayer: castLayer,
 				variableRenames: renames,
 				functionStarts,
+				dataSections,
 			});
 		} else {
 			result = this.decompileIrSync(irText, mapping.helixArch);
@@ -497,7 +498,7 @@ export class HelixWrapper {
 	private decompileIrAsync(
 		irText: string,
 		arch: HelixArchValue,
-		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[] },
+		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[]; dataSections?: Array<{ vaStart: bigint; bytes: Buffer }> },
 	): Promise<HelixResult> {
 		return new Promise<HelixResult>((resolve) => {
 			const workerCode = `
@@ -541,6 +542,19 @@ export class HelixWrapper {
 							engine.setFunctionStarts(workerData.functionStarts);
 						}
 
+						// Switch-table recovery needs the binary's data sections; the main
+						// thread set them on its own engine, but this worker builds a fresh
+						// one, so they must be forwarded (previously dropped on the >64KB
+						// path -> every switch collapsed to goto default in large functions).
+						if (workerData.dataSections && workerData.dataSections.length > 0 && typeof engine.addDataSection === 'function') {
+							if (typeof engine.clearDataSections === 'function') {
+								engine.clearDataSections();
+							}
+							for (const ds of workerData.dataSections) {
+								engine.addDataSection(ds.vaStart, ds.bytes);
+							}
+						}
+
 						const result = engine.decompileIr(workerData.irText);
 						engine.dispose();
 						parentPort.postMessage({ result });
@@ -560,21 +574,36 @@ export class HelixWrapper {
 					useCastLayer: flags?.useCastLayer ?? false,
 					variableRenames: flags?.variableRenames ?? [],
 					functionStarts: flags?.functionStarts ?? [],
+					dataSections: flags?.dataSections ?? [],
 				},
 			});
 
+			let settled = false;
+			const settle = (r: HelixResult): void => {
+				if (settled) { return; }
+				settled = true;
+				resolve(r);
+			};
+
 			worker.on('message', (msg: { result?: HelixDecompileResult; error?: string }) => {
 				if (msg.error) {
-					resolve(this.errorResult(`Helix worker error: ${msg.error}`));
+					settle(this.errorResult(`Helix worker error: ${msg.error}`));
 				} else if (msg.result) {
-					resolve(this.wrapResult(msg.result));
+					settle(this.wrapResult(msg.result));
 				} else {
-					resolve(this.errorResult('Helix worker returned empty response'));
+					settle(this.errorResult('Helix worker returned empty response'));
 				}
 			});
 
 			worker.on('error', (err) => {
-				resolve(this.errorResult(`Helix worker thread error: ${err.message}`));
+				settle(this.errorResult(`Helix worker thread error: ${err.message}`));
+			});
+
+			// Guarantee the Promise always settles: if the worker stops without
+			// posting a message or error (silent exit / hard native crash), resolve
+			// an error instead of hanging the decompile forever.
+			worker.on('exit', (code: number) => {
+				settle(this.errorResult(`Helix worker exited without returning a result (code ${code})`));
 			});
 		});
 	}
