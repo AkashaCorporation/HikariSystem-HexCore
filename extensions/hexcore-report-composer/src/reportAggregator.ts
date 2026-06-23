@@ -113,6 +113,17 @@ function slugify(title: string): string {
 		.trim();
 }
 
+/**
+ * Escape a value for safe inclusion in a single Markdown table cell. An
+ * unescaped `|` splits the cell and a literal newline breaks the whole table
+ * row -- both can arrive from untrusted analyzed content (IOC values, file
+ * names). The prior cross-module value escape handled only `|`, and the Sources
+ * table file name was unescaped.
+ */
+export function escapeMarkdownCell(value: string): string {
+	return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
 // ---------------------------------------------------------------------------
 // v3.8.0: Cross-module evidence fusion
 // ---------------------------------------------------------------------------
@@ -368,9 +379,11 @@ export class ReportAggregator {
 					? '—'
 					: f.offsets.slice(0, 5).map(o => `0x${o.toString(16)}`).join(', ')
 						+ (f.offsets.length > 5 ? ` (+${f.offsets.length - 5} more)` : '');
-				// Markdown-escape the value (primarily for `|` which breaks tables)
-				const safeValue = f.value.replace(/\|/g, '\\|');
-				lines.push(`| ${f.kind} | \`${safeValue}\` | ${f.sources.length} (${f.sources.join(', ')}) | ${offsetsStr} |`);
+				// Markdown-escape every untrusted cell (`|` splits the cell and a
+				// newline breaks the row).
+				const safeValue = escapeMarkdownCell(f.value);
+				const safeSources = f.sources.map(escapeMarkdownCell).join(', ');
+				lines.push(`| ${escapeMarkdownCell(f.kind)} | \`${safeValue}\` | ${f.sources.length} (${safeSources}) | ${offsetsStr} |`);
 			}
 			lines.push('');
 		}
@@ -396,7 +409,7 @@ export class ReportAggregator {
 		lines.push('|---|------|------|');
 		for (let i = 0; i < report.sources.length; i++) {
 			const source = report.sources[i];
-			lines.push(`| ${i + 1} | ${source.fileName} | ${source.type} |`);
+			lines.push(`| ${i + 1} | ${escapeMarkdownCell(source.fileName)} | ${escapeMarkdownCell(source.type)} |`);
 		}
 		lines.push('');
 
