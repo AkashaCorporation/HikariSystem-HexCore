@@ -87,6 +87,9 @@ export function parseMinidump(filePath: string): Omit<MinidumpAnalysisResult, 'r
 				continue;
 			}
 
+			// A corrupt/hostile stream must not abort the whole dump analysis;
+			// catch its parse error (bounds/EOF/RangeError) and keep going.
+			try {
 			switch (entry.streamType) {
 				case StreamType.SystemInfoStream:
 					systemInfo = parseSystemInfoStream(fd, entry.rva, entry.dataSize);
@@ -119,6 +122,12 @@ export function parseMinidump(filePath: string): Omit<MinidumpAnalysisResult, 'r
 				case StreamType.ExceptionStream:
 					exception = parseExceptionStream(fd, entry.rva, entry.dataSize);
 					break;
+			}
+			} catch (err) {
+				console.warn(
+					`[minidump] skipped stream type ${entry.streamType} @rva ` +
+					`0x${entry.rva.toString(16)}: ${(err as Error).message}`
+				);
 			}
 		}
 
@@ -276,6 +285,20 @@ function assessThreats(
 
 /** Read exactly `size` bytes from `fd` at `offset`. */
 export function readBytes(fd: number, offset: number, size: number): Buffer {
+	// Validate the requested extent against the real file size BEFORE allocating.
+	// Stream parsers derive `size` from attacker-controlled count*recordSize fields;
+	// a crafted dump can ask for gigabytes the file cannot contain, and Buffer.alloc
+	// would OOM / throw RangeError before the post-read EOF check below. Reject the
+	// impossible read up front so a tiny hostile .dmp cannot exhaust memory.
+	if (!Number.isInteger(offset) || !Number.isInteger(size) || offset < 0 || size < 0) {
+		throw new Error(`Invalid read range (offset=${offset}, size=${size})`);
+	}
+	const fileSize = fs.fstatSync(fd).size;
+	if (offset + size > fileSize) {
+		throw new Error(
+			`Read beyond EOF: offset 0x${offset.toString(16)} + ${size} bytes exceeds file size ${fileSize}`
+		);
+	}
 	const buf = Buffer.alloc(size);
 	const bytesRead = fs.readSync(fd, buf, 0, size, offset);
 	if (bytesRead < size) {

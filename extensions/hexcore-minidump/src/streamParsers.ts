@@ -25,6 +25,27 @@ import {
 import { readBytes } from './mdmpParser';
 
 // ---------------------------------------------------------------------------
+// Bounds helper
+// ---------------------------------------------------------------------------
+
+/**
+ * Clamp an attacker-declared record count to what the stream's own dataSize can
+ * actually hold. The minidump directory gives each stream a byte size; trusting
+ * the in-stream count instead lets a crafted dump (a) over-allocate
+ * `count * recordSize` bytes (OOM/RangeError DoS) or (b) read past the stream
+ * boundary into adjacent bytes and decode them as fabricated records. The real
+ * capacity is floor((streamSize - headerBytes) / recordSize); for a well-formed
+ * stream this equals the declared count, so legitimate dumps are unaffected.
+ */
+function boundCount(rawCount: number, recordSize: number, headerBytes: number, streamSize: number): number {
+	if (!Number.isFinite(rawCount) || rawCount <= 0 || recordSize <= 0 || streamSize <= headerBytes) {
+		return 0;
+	}
+	const capacity = Math.floor((streamSize - headerBytes) / recordSize);
+	return Math.max(0, Math.min(rawCount, capacity));
+}
+
+// ---------------------------------------------------------------------------
 // ThreadListStream (StreamType 3)
 // ---------------------------------------------------------------------------
 
@@ -42,13 +63,13 @@ import { readBytes } from './mdmpParser';
  *   MINIDUMP_MEMORY_DESCRIPTOR Stack (16 bytes: uint64 startAddr + uint32 dataSize + uint32 rva)
  *   MINIDUMP_LOCATION_DESCRIPTOR ThreadContext (8 bytes: uint32 dataSize + uint32 rva)
  */
-export function parseThreadListStream(fd: number, rva: number, _size: number): ThreadInfo[] {
+export function parseThreadListStream(fd: number, rva: number, size: number): ThreadInfo[] {
 	const headerBuf = readBytes(fd, rva, 4);
-	const count = headerBuf.readUInt32LE(0);
+	const THREAD_SIZE = 48;
+	const count = boundCount(headerBuf.readUInt32LE(0), THREAD_SIZE, 4, size);
 
 	if (count === 0) { return []; }
 
-	const THREAD_SIZE = 48;
 	const dataBuf = readBytes(fd, rva + 4, count * THREAD_SIZE);
 	const threads: ThreadInfo[] = [];
 
@@ -93,11 +114,11 @@ export function parseThreadListStream(fd: number, rva: number, _size: number): T
  *   uint64 StartAddress
  *   uint64 Affinity
  */
-export function parseThreadInfoListStream(fd: number, rva: number, _size: number): ThreadExInfo[] {
+export function parseThreadInfoListStream(fd: number, rva: number, size: number): ThreadExInfo[] {
 	const headerBuf = readBytes(fd, rva, 12);
 	const sizeOfHeader = headerBuf.readUInt32LE(0);
 	const sizeOfEntry = headerBuf.readUInt32LE(4);
-	const count = headerBuf.readUInt32LE(8);
+	const count = boundCount(headerBuf.readUInt32LE(8), sizeOfEntry, sizeOfHeader, size);
 
 	if (count === 0 || sizeOfEntry === 0) { return []; }
 
@@ -146,13 +167,13 @@ export function parseThreadInfoListStream(fd: number, rva: number, _size: number
  *   uint64 Reserved0
  *   uint64 Reserved1
  */
-export function parseModuleListStream(fd: number, rva: number, _size: number): ModuleInfo[] {
+export function parseModuleListStream(fd: number, rva: number, size: number): ModuleInfo[] {
 	const headerBuf = readBytes(fd, rva, 4);
-	const count = headerBuf.readUInt32LE(0);
+	const MODULE_SIZE = 108;
+	const count = boundCount(headerBuf.readUInt32LE(0), MODULE_SIZE, 4, size);
 
 	if (count === 0) { return []; }
 
-	const MODULE_SIZE = 108;
 	const dataBuf = readBytes(fd, rva + 4, count * MODULE_SIZE);
 	const modules: ModuleInfo[] = [];
 
@@ -208,11 +229,11 @@ export function parseModuleListStream(fd: number, rva: number, _size: number): M
  *   uint32 Type
  *   uint32 __alignment2
  */
-export function parseMemoryInfoListStream(fd: number, rva: number, _size: number): MemoryRegion[] {
+export function parseMemoryInfoListStream(fd: number, rva: number, size: number): MemoryRegion[] {
 	const headerBuf = readBytes(fd, rva, 16);
 	const sizeOfHeader = headerBuf.readUInt32LE(0);
 	const sizeOfEntry = headerBuf.readUInt32LE(4);
-	const count = Number(headerBuf.readBigUInt64LE(8));
+	const count = boundCount(Number(headerBuf.readBigUInt64LE(8)), sizeOfEntry, sizeOfHeader, size);
 
 	if (count === 0 || sizeOfEntry === 0) { return []; }
 
@@ -272,13 +293,13 @@ export function parseMemoryInfoListStream(fd: number, rva: number, _size: number
  *   uint32 DataSize (of MINIDUMP_LOCATION_DESCRIPTOR)
  *   uint32 Rva     (of MINIDUMP_LOCATION_DESCRIPTOR)
  */
-export function parseMemoryListStream(fd: number, rva: number, _size: number): MemoryDescriptor[] {
+export function parseMemoryListStream(fd: number, rva: number, size: number): MemoryDescriptor[] {
 	const headerBuf = readBytes(fd, rva, 4);
-	const count = headerBuf.readUInt32LE(0);
+	const DESCRIPTOR_SIZE = 16;
+	const count = boundCount(headerBuf.readUInt32LE(0), DESCRIPTOR_SIZE, 4, size);
 
 	if (count === 0) { return []; }
 
-	const DESCRIPTOR_SIZE = 16;
 	const dataBuf = readBytes(fd, rva + 4, count * DESCRIPTOR_SIZE);
 	const descriptors: MemoryDescriptor[] = [];
 
@@ -308,13 +329,13 @@ export function parseMemoryListStream(fd: number, rva: number, _size: number): M
  *   uint64 StartOfMemoryRange
  *   uint64 DataSize
  */
-export function parseMemory64ListStream(fd: number, rva: number, _size: number): Memory64Descriptor[] {
+export function parseMemory64ListStream(fd: number, rva: number, size: number): Memory64Descriptor[] {
 	const headerBuf = readBytes(fd, rva, 16);
-	const count = Number(headerBuf.readBigUInt64LE(0));
+	const DESCRIPTOR_SIZE = 16;
+	const count = boundCount(Number(headerBuf.readBigUInt64LE(0)), DESCRIPTOR_SIZE, 16, size);
 
 	if (count === 0) { return []; }
 
-	const DESCRIPTOR_SIZE = 16;
 	const dataBuf = readBytes(fd, rva + 16, count * DESCRIPTOR_SIZE);
 	const descriptors: Memory64Descriptor[] = [];
 
