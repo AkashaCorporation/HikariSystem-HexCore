@@ -40,8 +40,11 @@ export function hexDumpRange(
 	}
 
 	const stats = fs.statSync(filePath);
-	if (offset < 0) {
-		throw new Error(`Invalid offset: ${offset}. Offset must be non-negative.`);
+	if (!Number.isInteger(offset) || offset < 0) {
+		throw new Error(`Invalid offset: ${offset}. Offset must be a non-negative integer.`);
+	}
+	if (!Number.isInteger(size) || size < 0) {
+		throw new Error(`Invalid size: ${size}. Size must be a non-negative integer.`);
 	}
 	if (offset >= stats.size) {
 		throw new Error(
