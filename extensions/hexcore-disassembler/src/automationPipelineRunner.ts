@@ -1472,6 +1472,37 @@ function parseJsonFile(content: string, jobFilePath: string): unknown {
 	}
 }
 
+/**
+ * CWE-22 containment for the top-level job `outDir`. A *.hexcore_job.json is
+ * attacker-controllable and AUTO-RUN, and the runner mkdir()s + writes
+ * status.json / the .log / every step output into outDir. resolveStepOutput
+ * already confines each step's output INSIDE outDir, but outDir itself was
+ * unconstrained (toAbsolutePath returns any absolute / UNC path verbatim), so a
+ * hostile job could write outside the workspace. Require outDir to resolve
+ * inside the job-file directory or a workspace folder, unless the user opts in
+ * via `hexcore.pipeline.allowExternalOutDir`.
+ */
+function assertOutDirAllowed(outDir: string, baseDir: string, jobFilePath: string): void {
+	const allowExternal = vscode.workspace
+		.getConfiguration('hexcore')
+		.get<boolean>('pipeline.allowExternalOutDir', false);
+	if (allowExternal) {
+		return;
+	}
+	const resolved = path.resolve(outDir);
+	const roots = [path.resolve(baseDir)];
+	for (const folder of vscode.workspace.workspaceFolders ?? []) {
+		roots.push(path.resolve(folder.uri.fsPath));
+	}
+	const within = roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+	if (!within) {
+		throw new Error(
+			`Invalid "outDir" in ${jobFilePath}: '${outDir}' resolves outside the workspace and the job-file directory. ` +
+			`Set "hexcore.pipeline.allowExternalOutDir": true to permit an external output directory.`
+		);
+	}
+}
+
 function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolean): NormalizedPipelineJob {
 	if (!isRecord(data)) {
 		throw new Error(`Invalid job format in ${jobFilePath}: expected JSON object`);
@@ -1480,6 +1511,7 @@ function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolea
 	const baseDir = path.dirname(jobFilePath);
 	const file = toAbsolutePath(baseDir, getStringField(data, 'file'));
 	const outDir = toAbsolutePath(baseDir, getStringField(data, 'outDir'));
+	assertOutDirAllowed(outDir, baseDir, jobFilePath);
 	const rawSteps = data.steps;
 
 	if (!Array.isArray(rawSteps) || rawSteps.length === 0) {

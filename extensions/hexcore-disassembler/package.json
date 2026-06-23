@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.2",
+	"version": "1.4.3",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -505,6 +505,11 @@
 					"minimum": 1,
 					"maximum": 16,
 					"description": "Number of concurrent worker slots in the HexCore pipeline job queue (Issue #25). Each slot runs one .hexcore_job.json job at a time; keepAlive session jobs are pinned to a single worker (sticky routing). Changing this takes effect on the NEXT window reload — the live pool is not resized and in-flight jobs finish on their current workers."
+				},
+				"hexcore.pipeline.allowExternalOutDir": {
+					"type": "boolean",
+					"default": false,
+					"description": "Allow a .hexcore_job.json to write its output (outDir) to a directory OUTSIDE the workspace and the job-file directory. Off by default: a job file is auto-run on workspace open, so an out-of-tree outDir is an arbitrary-write surface. Enable only if you deliberately target an external output directory."
 				},
 				"hexcore.disassembler.defaultArchitecture": {
 					"type": "string",
