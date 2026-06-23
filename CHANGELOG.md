@@ -39,6 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`mkdirSync(outDir)`** -- a job-controlled `outDir` that resolves onto an existing file (ENOTDIR/EEXIST) now yields a labelled error instead of a raw fs throw.
 - Validated before/after on the compiled `out/` artifact with crafted job files (regex `"("` -> was rejected with status frozen on `running`, now clean terminal `error`; goto `NaN` -> was silent `ok`, now `error`; abort -> was `partial`, now `error`; valid 2-step / valid goto / valid skip jobs byte-identical). Follow-ups filed: #43 (outDir arbitrary-directory-write containment, security) and #44 ($step append-order desync, retryDelayMs/timeoutMs clamps, validateJob divergence).
 
+### Helix cleanup: keep 64-bit literal casts -- a 32-bit literal's widening is load-bearing (autonomous audit loop)
+
+> The default-on Pseudo-C cleanup (`hexcore-disassembler/helixCleanupPostProcessor.ts`) stripped a redundant integer-literal cast for ALL widths -- but a bare integer literal is `int` (32-bit), so a 64-bit cast is NOT redundant: dropping it in a width-sensitive context like `(int64_t)1 << 40` makes the shift operate on a 32-bit `int` (UB / wrong value -- e.g. any 64-bit bitmask construction). `stripLiteralCasts` now keeps `int64_t`/`uint64_t` casts and only strips promotion-safe narrow (8/16/32-bit) casts. Validated before/after on the compiled artifact + the full unit suite (26 passing, incl. new shift-context tests). Disassembler `1.4.5 -> 1.4.6`. Filed #46 for a separate width-lossy bit-intrinsic normalization (`ctpop`/`bswap` -> 32-bit builtins regardless of operand width) found in the same module.
+
 ### Helix worker (>64KB async) path -- forward data sections (switch recovery) + always settle the Promise (autonomous audit loop)
 
 > The Helix decompile wrapper (`hexcore-disassembler/helixWrapper.ts`) offloads any IR larger than 64KB to a worker thread that builds its OWN engine. Two gaps on that path, both fixed + validated before/after on the compiled artifact (a mocked `worker_threads` harness): Disassembler `1.4.4 -> 1.4.5`.

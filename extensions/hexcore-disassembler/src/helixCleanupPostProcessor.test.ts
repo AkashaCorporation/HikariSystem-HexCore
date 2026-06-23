@@ -57,6 +57,25 @@ suite('helixCleanupPostProcessor', () => {
 			assert.ok(r.source.includes('(int64_t)'));
 		});
 
+		test('KEEPS (int64_t)1 in a shift -- widening is load-bearing', () => {
+			// (int64_t)1 << 40 must NOT become `1 << 40` (a 32-bit shift is UB).
+			const r = cleanupHelixSource('mask = (int64_t)1 << 40;');
+			assert.ok(r.source.includes('(int64_t)1'));
+			assert.strictEqual(r.stats.redundantCasts, 0);
+		});
+
+		test('KEEPS (uint64_t)1 -- 64-bit literal cast is not redundant', () => {
+			const r = cleanupHelixSource('x = (uint64_t)1;');
+			assert.ok(r.source.includes('(uint64_t)1'));
+			assert.strictEqual(r.stats.redundantCasts, 0);
+		});
+
+		test('still strips narrow casts: (int8_t)5 -> 5', () => {
+			const r = cleanupHelixSource('x = (int8_t)5;');
+			assert.strictEqual(r.source, 'x = 5;');
+			assert.strictEqual(r.stats.redundantCasts, 1);
+		});
+
 		// PBT: for any in-range integer literal, strip leaves the value intact.
 		test('PBT: in-range literals are stripped AND value preserved', () => {
 			fc.assert(
@@ -78,8 +97,15 @@ suite('helixCleanupPostProcessor', () => {
 						// Use decimal literal — avoids hex sign ambiguity.
 						const expr = `x = (${ty})${vRaw.toString()};`;
 						const r = cleanupHelixSource(expr);
-						assert.strictEqual(r.source, `x = ${vRaw.toString()};`);
-						assert.strictEqual(r.stats.redundantCasts, 1);
+						if (ty === 'int64_t' || ty === 'uint64_t') {
+							// 64-bit casts are KEPT now: the widening of a 32-bit literal
+							// can be load-bearing (e.g. in a shift), so it is not redundant.
+							assert.strictEqual(r.source, expr);
+							assert.strictEqual(r.stats.redundantCasts, 0);
+						} else {
+							assert.strictEqual(r.source, `x = ${vRaw.toString()};`);
+							assert.strictEqual(r.stats.redundantCasts, 1);
+						}
 					},
 				),
 				{ seed: 42, numRuns: 500 },

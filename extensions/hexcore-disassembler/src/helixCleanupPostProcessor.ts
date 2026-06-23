@@ -22,7 +22,9 @@
  *     `field = (int32_t)1;`            -> `field = 1;`
  *     `(int8_t)0`                      -> `0`
  *     Cast is dropped when the literal is an untyped decimal/hex integer
- *     and the cast target is an integer width <= 64 bits.
+ *     and the cast target is an integer width <= 32 bits. A 64-bit cast is
+ *     KEPT: a bare literal is `int` (32-bit), so the widening is load-bearing
+ *     (e.g. `(int64_t)1 << 40` must not become a 32-bit `1 << 40`).
  *
  *  2. LLVM intrinsic namespace cleanup
  *     `__unknown_llvm.intr.fabs`       -> `fabs`
@@ -140,6 +142,15 @@ function isLiteralInRange(typeName: string, valueStr: string): boolean {
 function stripLiteralCasts(source: string): { source: string; count: number } {
 	let count = 0;
 	const out = source.replace(INT_CAST_PATTERN, (match, typeName: string, literal: string) => {
+		// A 64-bit cast on a bare integer literal is NOT redundant: an unsuffixed
+		// integer literal is `int` (32-bit), so the widening is load-bearing in a
+		// width-sensitive context like `(int64_t)1 << 40` -- dropping the cast makes
+		// the shift operate on a 32-bit int (UB / wrong value, e.g. a 64-bit bitmask).
+		// Narrow casts (8/16/32) are promotion-safe to drop: the operand promotes to
+		// int before arithmetic either way, so the value is unchanged.
+		if (typeName === 'int64_t' || typeName === 'uint64_t') {
+			return match;
+		}
 		if (isLiteralInRange(typeName, literal)) {
 			count++;
 			// Preserve sign spacing: "(int32_t)- 1" -> "-1" (collapse whitespace)
