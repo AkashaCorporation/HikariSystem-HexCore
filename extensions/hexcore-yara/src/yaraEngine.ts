@@ -602,6 +602,20 @@ function matchTextPattern(content: Buffer, text: string, modifiers: string[]): n
 
 // ── Main Engine ─────────────────────────────────────────────────────────────
 
+/**
+ * Cheap static screen for the classic catastrophic-backtracking ("ReDoS") regex
+ * shape: an unbounded quantifier applied to a group that itself contains an
+ * unbounded quantifier -- e.g. (a+)+, (a*)*, ([a-z]+)*. YARA rule regexes come
+ * from loaded / third-party rule packs (untrusted), and a single such pattern
+ * run against scanned content hangs the engine. Real YARA byte-pattern regexes
+ * are never nested-unbounded, so the false-positive risk is negligible. This is
+ * a heuristic, not a proof -- the complete fix is a linear-time engine (RE2) or
+ * a worker-thread timeout (tracked separately).
+ */
+export function isLikelyCatastrophicRegex(pattern: string): boolean {
+	return /\([^()]*(?:[*+]|\{\d+,\d*\})[^()]*\)(?:[*+]|\{\d+,\d*\})/.test(pattern);
+}
+
 export class YaraEngine {
 	private builtinRules: YaraRule[] = [];
 	private loadedRules: YaraRule[] = [];
@@ -1051,14 +1065,21 @@ export class YaraEngine {
 			} else if (str.type === 'text') {
 				offsets = matchTextPattern(content, str.value, str.modifiers);
 			} else if (str.type === 'regex') {
-				try {
-					const re = new RegExp(str.value, 'g');
-					const text = content.toString('binary');
-					let reMatch;
-					while ((reMatch = re.exec(text)) !== null && offsets.length < 100) {
-						offsets.push(reMatch.index);
-					}
-				} catch { /* invalid regex */ }
+				// Skip rule regexes with a catastrophic-backtracking shape: loaded /
+				// third-party rules are untrusted, and one such pattern run against
+				// scanned content would hang the engine (ReDoS).
+				if (isLikelyCatastrophicRegex(str.value)) {
+					this.log(`[yara] skipped potentially-catastrophic regex in rule "${rule.name}" (${str.identifier})`);
+				} else {
+					try {
+						const re = new RegExp(str.value, 'g');
+						const text = content.toString('binary');
+						let reMatch;
+						while ((reMatch = re.exec(text)) !== null && offsets.length < 100) {
+							offsets.push(reMatch.index);
+						}
+					} catch { /* invalid regex */ }
+				}
 			}
 
 			if (offsets.length > 0) {
