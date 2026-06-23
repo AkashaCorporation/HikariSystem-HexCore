@@ -122,9 +122,14 @@ function renameFields(
 	let result = source.replace(FIELD_PATTERN, (match: string, accessor: string, hexOffset: string, matchOffset: number, fullStr: string) => {
 		const byteOffset = parseInt(hexOffset, 16);
 
-		// Try to find the variable name before the accessor to disambiguate
+		// Try to find the variable name before the accessor to disambiguate.
+		// FIELD_PATTERN already consumed the accessor ('.' or the '>' of '->'), so
+		// beforeMatch ends with the variable name optionally followed by the
+		// residual '-' of '->'. Match that trailing identifier. (The previous
+		// `(?:->|\.)$` could never match -- the accessor is no longer in
+		// beforeMatch -- so param-struct disambiguation was dead code.)
 		const beforeMatch = fullStr.substring(0, matchOffset);
-		const varNameMatch = beforeMatch.match(/(\w+)\s*(?:->|\.)$/);
+		const varNameMatch = beforeMatch.match(/(\w+)\s*-?$/);
 		const varName = varNameMatch?.[1];
 
 		// If we know which struct this variable is, use that directly
