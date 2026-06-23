@@ -2,7 +2,7 @@
 	"name": "hexcore-elfanalyzer",
 	"displayName": "HexCore ELF Analyzer",
 	"description": "Professional ELF (Executable and Linkable Format) analyzer for Linux binary analysis",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

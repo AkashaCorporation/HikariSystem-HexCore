@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### Tier-2 security-hardening wave + 2 new analyzer features (autonomous audit loop, 2026-06-23)
+
+> A self-paced audit loop swept the analyzer extensions for malformed-input / untrusted-content bugs, adversarially verified each finding, validated every fix on the compiled artifact, and shipped them as focused commits. Two new detection features plus a defense-in-depth hardening wave; honest negative results recorded where a module was already safe. Each modified extension's `package.json` patch version was bumped.
+
+**New features:**
+- **(New) Souper surgical auto-activation** (`hexcore-disassembler`, 0a2477c) -- opt-in `souper: "auto"` runs the Z3 superoptimizer only on crypto/MBA-dense IR (a bitwise/shift/rotate op-density heuristic) instead of globally; `false`/`true`/absent paths are byte-identical (zero regression). Threshold-calibration + per-function MLIR pass follow-up: #39.
+- **(New) ChaCha20 / Salsa20 detection** (`hexcore-entropy`, c071bb8) -- a streaming, boundary-safe scan for the sigma/tau constants `expand 32-byte k` / `expand 16-byte k`, surfaced as a `chacha-salsa-constant` crypto signal in the entropy report. Structural ARX (quarter-round) detector follow-up: #40.
+
+**Security hardening (malformed-input / untrusted content):**
+- **hexcore-peanalyzer** (ab408a3) -- PE parser: reset `isPE=false` on a partial-parse throw (a truncated/hostile PE rendered as a clean, import-less PE), close the leaked fd, clamp `NumberOfSections`, reject an unknown optional-header magic.
+- **hexcore-ioc** (2a8ac6a) -- fixed a quadratic ReDoS in the domain IOC regex (unbounded subdomain repetition: ~1.3s at 16k labels, seconds on a 64KB run) by capping the subdomain-label repetition; `validateDomain` still gates the TLD.
+- **hexcore-minidump** (3fa40fa) -- bounds-safe `readBytes` (reject `offset+size>fileSize` before `Buffer.alloc`), clamp every stream record count to the stream's declared dataSize, and a per-stream try/catch so one corrupt stream is skipped, not the whole analysis. A crafted `.dmp` (`NumberOfThreads=0x7FFFFFFF`) drove a ~206GB allocation; 13 confirmed findings from a 26-agent adversarial audit.
+- **hexcore-elfanalyzer** (8cf3ead) -- bounds-safe ELF readers: an undersized `e_phentsize` / `e_shentsize` / `sh_entsize` let a per-entry guard pass while the body read past EOF (RangeError DoS). `getReaders` u16/u32/u64 now return 0 for an out-of-range offset (one central choke point defends all seven entry loops).
+- **hexcore-yara** (194d549) -- pre-screen rule regexes for the classic catastrophic-backtracking shape before running them on scanned content; an untrusted rule's `(a+)+$` hung the engine (~8s on a 24-char input). Complete linear-engine (RE2 / worker-timeout) follow-up: #41.
+- **Headless output-path guards** -- the dump / report writers accepted an arbitrary `options.output.path` from a (possibly untrusted) `.hexcore_job.json`. Added a `path.relative`-based workspace/home guard (rejects sibling-prefix and traversal, unlike the prior `startsWith` prefix check) to `hexcore-filetype` (78f3241), `hexcore-hashcalc` (ba37b07), `hexcore-base64` + `hexcore-debugger` (8591332, 17 write sites), and `hexcore-hexviewer` (ed0c927). DRY-centralization into `hexcore-common` follow-up: #42.
+- **hexcore-report-composer** (159c00d) -- escape Markdown table cells (`|` and newlines) so an untrusted IOC value or file name cannot corrupt the report table (the prior escape handled only `|`; the Sources-table file name was unescaped).
+- **hexcore-hexviewer** (ed0c927) -- also validate the headless dump `offset`/`size` are non-negative integers (a `NaN`/negative size, `typeof NaN === 'number'`, bypassed the bounds check into `Buffer.alloc`).
+- **CI** (e2f50d2) -- compile `hexcore-revenant` in the installer's "Compile HexCore Extensions" step (Windows + Linux) so its `out/` entrypoint ships; the `verify-hexcore-preflight` check was failing.
+
+**Audited clean (no change required):** `hexcore-strings` (exemplary bounds-checks + linear regex, well-tested), `hexcore-revenant/ilspyRunner` (`execFile` + array args, no shell -> no command injection), `hexcore-peanalyzer/apiHashResolver` (bounds-safe PE scan), `hexcore-hexviewer/hexSearch` (validated hex pattern, bounded streaming).
+
 ### .NET-awareness - stop the native pipeline misreading managed (CIL) assemblies (issue #32 Minimum tier + YARA FP + #Strings/#US heaps, High)
 
 > A friend running the toolkit on a real .NET assembly hit three managed-code blind spots, all rooted in the native pipeline treating CIL/metadata bytes as native x86: (1) the decompiler emitted a confident ~85% "stub function" on a .NET entry point (issue #32) -- a fake success that hides the entire managed program; (2) YARA scored benign .NET binaries as CRITICAL because native byte-pattern rules fire against metadata/IL bytes; (3) the strings extractor missed every managed string literal (they live in the #Strings/#US metadata heaps, not contiguous byte runs). All three detect .NET the same canonical way: a nonzero CLR Runtime Header (PE optional-header data directory index 14).

@@ -2,7 +2,7 @@
 	"name": "hexcore-minidump",
 	"displayName": "HexCore Minidump Parser",
 	"description": "Windows Minidump (MDMP) analysis with thread, module, and memory region parsing",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

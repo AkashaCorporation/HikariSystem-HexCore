@@ -2,7 +2,7 @@
 	"name": "hexcore-filetype",
 	"displayName": "HexCore File Type Detector",
 	"description": "Identify true file type using magic bytes signature detection",
-	"version": "1.0.0",
+	"version": "1.0.1",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

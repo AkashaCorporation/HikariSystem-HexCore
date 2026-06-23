@@ -2,7 +2,7 @@
 	"name": "hexcore-yara",
 	"displayName": "HexCore YARA Scanner",
 	"description": "YARA rule scanner with DefenderYara integration for malware detection and threat scoring",
-	"version": "2.1.0",
+	"version": "2.1.1",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It provides security researchers with a unified environment for malware analysis, reverse engineering, and threat hunting — from static analysis to full CPU emulation.
 
-**Latest release:** `v3.8.2` "Callfuscation + Deflattening + Audit-Fix Wave + AArch64 lifting + obfuscated-binary discovery" — the **Helix decompiler leaves nightly at v0.9.2** with the leave-nightly *honesty layer* complete (confidence is capped and located only on a genuine surviving defect, never a clean-looking lie), call-as-jmp **callfuscation** detection plus an opt-in deflattening transform, **AArch64** register recovery and stp/ldp prologue lowering, MSVC chained-unwind **`.pdata`** fragment merging for correct function boundaries, and an expanded refcount audit scanner used across real bug-bounty programs. Builds on `v3.8.1` (Stability + Helix v0.9.1 + Pythia Oracle Hook) and `v3.8.0` (Souper Era + Pathfinder + Project Azoth). See [CHANGELOG](CHANGELOG.md) for the full history.
+**Latest release:** `v3.8.2.2` "Security-Hardening Wave + Surgical Souper + ChaCha Detection" — a defense-in-depth patch over v3.8.2: malformed-input hardening across the binary parsers (PE / ELF / Minidump bounds + allocation caps), a quadratic-ReDoS fix in the IOC domain scanner and a YARA rule-regex ReDoS pre-screen, headless output-path guards (filetype / hashcalc / base64 / debugger / hexviewer), and Markdown table-injection escaping in the report composer; plus two new analyzer features — Souper surgical auto-activation and ChaCha20/Salsa20 detection (see Features). Builds on `v3.8.2` "Callfuscation + Deflattening + Audit-Fix Wave + AArch64 lifting + obfuscated-binary discovery" — the **Helix decompiler leaves nightly at v0.9.2** with the leave-nightly *honesty layer* complete (confidence is capped and located only on a genuine surviving defect, never a clean-looking lie), call-as-jmp **callfuscation** detection plus an opt-in deflattening transform, **AArch64** register recovery and stp/ldp prologue lowering, MSVC chained-unwind **`.pdata`** fragment merging for correct function boundaries, and an expanded refcount audit scanner used across real bug-bounty programs. Builds on `v3.8.1` (Stability + Helix v0.9.1 + Pythia Oracle Hook) and `v3.8.0` (Souper Era + Pathfinder + Project Azoth). See [CHANGELOG](CHANGELOG.md) for the full history.
 
 **What makes HexCore different:**
 - **Agentic-first decompilation** — output designed for both human and LLM consumption; paired with HQL (HikariSystem Query Language) semantic query layer over Helix IR
@@ -54,6 +54,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **Project Azoth** (v3.8.0, NEW) — Clean-room Apache-2.0 Rust+C++23 dynamic analysis framework replacing Qiling. Frida-style Interceptor/Stalker. 5/5 Parity Gates passed on the reference malware corpus (22,921 API calls captured end-to-end on v3 Ashaka). Standalone repo at `AkashaCorporation/HexCore-Elixir`
 - **Perseus Zero-Copy IPC** (v3.8.0) — SPSC `SharedArrayBuffer` ring for Unicorn hook delivery. 1.34× throughput, 100% delivery vs ~35% legacy on heavy hooking workloads
 - **Souper Superoptimizer** (v3.8.0) — First Windows N-API build of Google Souper with Z3 SMT solving. Disabled by default; enable for obfuscated/crypto analysis
+- **Souper Surgical Auto-Activation** (v3.8.2.2, NEW) — opt-in `souper: "auto"` mode runs the Z3 superoptimizer **only** on crypto/MBA-dense IR (a bitwise/shift/rotate op-density heuristic over the lifted IR), instead of globally-on or off; zero cost on ordinary code, full benefit on obfuscated/crypto routines. `false`/`true`/absent are unchanged (zero regression)
 - **Vulnerability Audit Engine** (v3.8.0) — Refcount pattern scanner with 4 bounty-bug-matching patterns (A: increment-before-error, B: `_force` variant ignoring refcount, C: unconditional op after failed ref-get, E: reachable `BUG_ON` on allocation failure). Used to find 4 real vulnerabilities across Bug bonty Programs
 - **Assembly Patching** — Inline patching with LLVM MC backend, NOP sleds, multi-arch support
 - **PE/ELF Analysis** — Import/export parsing, section analysis, packer detection, PIE support, CodeView PDB path extraction
@@ -63,6 +64,7 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 - **Hash Calculator** — MD5, SHA-1, SHA-256, SHA-512 with VirusTotal integration
 - **String Extraction** — ASCII/UTF-16, auto-categorization, multi-byte XOR deobfuscation (keys 2/3/4/5/6/7/8/12/16 bytes), stack strings (including disp32 addressing), PE section-aware extraction (`.rdata` prioritized), batch queries
 - **Entropy Analysis** — Block-by-block entropy with packer/encryption detection
+- **ChaCha20 / Salsa20 Detection** (v3.8.2.2, NEW) — the entropy analyzer flags the ChaCha20/Salsa20 sigma/tau constants (`expand 32-byte k` / `expand 16-byte k`) via a streaming, boundary-safe byte scan; surfaced as a crypto signal in the report
 - **YARA Scanning** — Rule loading, match highlighting, custom rules, **built-in anti-analysis pack** (55 rules: anti-debug, anti-VM, obfuscation, API hashing, Ashaka v3–v5 family, dynamic imports)
 - **IOC Extraction** — Binary-aware IOC detection (IPs, URLs, domains, pipes, wallets, registry paths with anti-VM/persistence sub-classification)
 - **Minidump Analysis** — Windows crash dump forensics with thread/module/memory parsing
@@ -83,20 +85,20 @@ HikariSystem HexCore is a comprehensive binary analysis IDE built on VS Code. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.2.0 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation, PRNG modes, side-channel analysis |
-| **Disassembler** | 1.5.0 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting, junk filtering, VM detection, callfuscation detection |
-| **Hex Viewer** | 1.2.1 | Professional binary file viewer with virtual scrolling |
-| **PE Analyzer** | 1.1.0 | Comprehensive PE executable analysis with headless mode |
+| **Debugger** | 2.1.1 | PE/ELF emulation with Unicorn Engine, 70+ API hooks, IPC Smart Sync, stdin emulation, PRNG modes, side-channel analysis |
+| **Disassembler** | 1.4.1 | Multi-arch disassembler with inline PE/ELF parsing, function detection, string xrefs, IR lifting, junk filtering, VM detection, callfuscation detection |
+| **Hex Viewer** | 1.2.2 | Professional binary file viewer with virtual scrolling |
+| **PE Analyzer** | 1.1.1 | Comprehensive PE executable analysis with headless mode |
 | **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
-| **Hash Calculator** | 1.1.0 | Fast file hashing with VirusTotal integration |
-| **Entropy Analyzer** | 1.1.0 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
-| **File Type Detector** | 1.0.0 | Magic bytes signature detection |
-| **Base64 Decoder** | 1.0.0 | Detect and decode Base64 strings |
-| **YARA Scanner** | 2.1.0 | YARA scanning with DefenderYara integration and headless pipeline support |
-| **IOC Extractor** | 1.1.0 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
-| **Minidump Parser** | 1.0.0 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
-| **ELF Analyzer** | 1.0.0 | Structural analysis of ELF binaries — sections, segments, symbols, security mitigations (NEW) |
-| **Report Composer** | 1.0.0 | Aggregates pipeline outputs into unified Markdown reports with TOC and evidence links (NEW) |
+| **Hash Calculator** | 1.1.1 | Fast file hashing with VirusTotal integration |
+| **Entropy Analyzer** | 1.1.1 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
+| **File Type Detector** | 1.0.1 | Magic bytes signature detection |
+| **Base64 Decoder** | 2.0.1 | Detect and decode Base64 strings |
+| **YARA Scanner** | 2.1.1 | YARA scanning with DefenderYara integration and headless pipeline support |
+| **IOC Extractor** | 1.1.1 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
+| **Minidump Parser** | 1.0.1 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
+| **ELF Analyzer** | 1.0.1 | Structural analysis of ELF binaries — sections, segments, symbols, security mitigations (NEW) |
+| **Report Composer** | 1.0.1 | Aggregates pipeline outputs into unified Markdown reports with TOC and evidence links (NEW) |
 
 ### Native Engines (Standalone N-API Packages)
 
