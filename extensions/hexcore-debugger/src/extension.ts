@@ -186,6 +186,32 @@ async function runWithOracleSession(
 	return { ...runSummary, decisions };
 }
 
+/**
+ * True if `child` is `parent` or lives inside it (path.relative, not a raw
+ * startsWith prefix that would wrongly accept a sibling dir -- e.g. C:\Users\Bob
+ * passing a C:\Users\Bo guard).
+ */
+export function isWithinDir(parent: string, child: string): boolean {
+	const rel = path.relative(parent, child);
+	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Reject a headless output path that escapes the workspace folders / user home.
+ * The path comes from a (possibly untrusted) .hexcore_job.json; without this an
+ * export could be written to an arbitrary filesystem location.
+ */
+export function assertOutputAllowed(outputPath: string): void {
+	const resolved = path.resolve(outputPath);
+	const roots = [
+		...(vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath),
+		require('os').homedir(),
+	];
+	if (!roots.some(r => isWithinDir(r, resolved))) {
+		throw new Error(`Output path must be within workspace or user home directory: ${resolved}`);
+	}
+}
+
 export function activate(context: vscode.ExtensionContext): void {
 	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
 	if (emulator !== 'debugger' && emulator !== 'both') {
@@ -536,7 +562,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -617,7 +643,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -680,7 +706,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -713,7 +739,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -766,7 +792,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const exportData = { breakpoints: set, generatedAt: new Date().toISOString() };
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -817,7 +843,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -848,7 +874,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -893,7 +919,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -915,7 +941,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const traceExport = traceManager.exportJSON();
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(traceExport, null, 2), 'utf8');
 			}
 
@@ -1156,7 +1182,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1219,7 +1245,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1269,7 +1295,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1302,7 +1328,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1347,7 +1373,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1388,7 +1414,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 
@@ -1549,7 +1575,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
 			}
 

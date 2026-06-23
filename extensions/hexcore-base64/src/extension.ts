@@ -460,6 +460,32 @@ function scanFileForBase64(filePath: string, minConfidence: number = 30): Base64
 // Extension activation
 // ---------------------------------------------------------------------------
 
+/**
+ * True if `child` is `parent` or lives inside it (path.relative, not a raw
+ * startsWith prefix that would wrongly accept a sibling dir -- e.g. C:\Users\Bob
+ * passing a C:\Users\Bo guard).
+ */
+export function isWithinDir(parent: string, child: string): boolean {
+	const rel = path.relative(parent, child);
+	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Reject a headless output path that escapes the workspace folders / user home.
+ * The path comes from a (possibly untrusted) .hexcore_job.json; without this an
+ * export could be written to an arbitrary filesystem location.
+ */
+export function assertOutputAllowed(outputPath: string): void {
+	const resolved = path.resolve(outputPath);
+	const roots = [
+		...(vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath),
+		require('os').homedir(),
+	];
+	if (!roots.some(r => isWithinDir(r, resolved))) {
+		throw new Error(`Output path must be within workspace or user home directory: ${resolved}`);
+	}
+}
+
 export function activate(context: vscode.ExtensionContext) {
 	console.log('HexCore Base64 Decoder v2.0.0 activated (confidence scoring engine)');
 
@@ -537,7 +563,7 @@ export function activate(context: vscode.ExtensionContext) {
 			};
 
 			if (outputOptions?.path) {
-				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				assertOutputAllowed(outputOptions.path); fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
 				fs.writeFileSync(outputOptions.path, JSON.stringify(result, null, 2), 'utf8');
 			}
 
