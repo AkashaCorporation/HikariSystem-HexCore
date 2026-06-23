@@ -331,10 +331,25 @@ const SHT_TYPE_MAP: Record<number, string> = {
  * Creates a set of endian-aware buffer read functions.
  */
 function getReaders(buf: Buffer, isLittle: boolean) {
+	// Bounds-safe reads. A malformed ELF can declare an entry size (e_phentsize /
+	// e_shentsize / sh_entsize) smaller than the real struct it describes, which
+	// lets a loop's `off + entSize <= length` guard pass while the body reads
+	// further into the (larger) struct -- an out-of-bounds read that throws
+	// RangeError and aborts the whole analysis on a crafted file. Returning 0 for
+	// any out-of-range read degrades gracefully (the field reads as 0) instead.
 	return {
-		u16: (offset: number) => isLittle ? buf.readUInt16LE(offset) : buf.readUInt16BE(offset),
-		u32: (offset: number) => isLittle ? buf.readUInt32LE(offset) : buf.readUInt32BE(offset),
+		u16: (offset: number) =>
+			(offset >= 0 && offset + 2 <= buf.length)
+				? (isLittle ? buf.readUInt16LE(offset) : buf.readUInt16BE(offset))
+				: 0,
+		u32: (offset: number) =>
+			(offset >= 0 && offset + 4 <= buf.length)
+				? (isLittle ? buf.readUInt32LE(offset) : buf.readUInt32BE(offset))
+				: 0,
 		u64: (offset: number) => {
+			if (offset < 0 || offset + 8 > buf.length) {
+				return 0n;
+			}
 			if (isLittle) {
 				const lo = buf.readUInt32LE(offset);
 				const hi = buf.readUInt32LE(offset + 4);
