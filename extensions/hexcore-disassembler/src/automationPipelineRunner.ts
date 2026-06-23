@@ -796,12 +796,25 @@ export function evaluateOnResult(rule: OnResultRule, stepOutput: Record<string, 
 
 export function applyOnResultAction(rule: OnResultRule, currentIndex: number, totalSteps: number, logPath: string): number {
 	switch (rule.action) {
-		case 'skip':
-			return currentIndex + 1 + Number(rule.actionValue ?? 1);
+		case 'skip': {
+			// Validate actionValue is a non-negative integer. A non-numeric value
+			// (Number(...) -> NaN) previously produced a NaN next-index, so the main
+			// loop's `while (NaN < steps.length)` fell through and the job silently
+			// ended reporting 'ok' while dropping every remaining step. Fail loud.
+			const n = Number(rule.actionValue ?? 1);
+			if (!Number.isInteger(n) || n < 0) {
+				throw new Error(`onResult skip actionValue must be a non-negative integer, got ${JSON.stringify(rule.actionValue)}`);
+			}
+			return currentIndex + 1 + n;
+		}
 		case 'goto': {
+			// Require an integer in range. The previous `target < 0 || target >= totalSteps`
+			// check let NaN through (both comparisons false -> returned NaN -> the loop
+			// silently exited as 'ok') and let a fractional in-range value through (e.g.
+			// 1.5 -> job.steps[1.5] === undefined -> undefined.cmd TypeError). Reject both.
 			const target = Number(rule.actionValue);
-			if (target < 0 || target >= totalSteps) {
-				throw new Error(`onResult goto target ${target} is out of bounds [0, ${totalSteps - 1}]`);
+			if (!Number.isInteger(target) || target < 0 || target >= totalSteps) {
+				throw new Error(`onResult goto target ${JSON.stringify(rule.actionValue)} must be an integer step index in [0, ${totalSteps - 1}]`);
 			}
 			return target;
 		}
@@ -843,7 +856,15 @@ export class AutomationPipelineRunner {
 	}
 
 	private async run(job: NormalizedPipelineJob, jobFilePath: string, abortSignal?: AbortSignal): Promise<PipelineRunStatus> {
-		fs.mkdirSync(job.outDir, { recursive: true });
+		try {
+			fs.mkdirSync(job.outDir, { recursive: true });
+		} catch (mkdirError: unknown) {
+			// outDir is job-file-controlled; if it resolves onto an existing file or
+			// an ENOTDIR path, surface a clear, contextual error instead of a raw fs
+			// throw. status.json lives inside outDir, so it cannot be written for this
+			// failure - the labelled rejection is the most we can do.
+			throw new Error(`Cannot create job output directory '${job.outDir}': ${toErrorMessage(mkdirError)}`);
+		}
 
 		const logPath = path.join(job.outDir, JOB_LOG_FILENAME);
 		const statusPath = path.join(job.outDir, JOB_STATUS_FILENAME);
@@ -893,7 +914,29 @@ export class AutomationPipelineRunner {
 			const capability = COMMAND_CAPABILITIES.get(resolvedCommand);
 			const validateOutput = shouldValidateOutput(step, capability);
 			const provideOutput = shouldProvideOutput(step, capability);
-			const output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
+			let output: StepOutputPath | undefined;
+			try {
+				output = provideOutput ? resolveStepOutput(job.outDir, step, index) : undefined;
+			} catch (outputError: unknown) {
+				// resolveStepOutput enforces CWE-22 containment and rejects an output.path
+				// that escapes outDir, is absolute, or resolves to the directory itself.
+				// That throw sits before the per-step try blocks, so it previously unwound
+				// run() and froze status.json on 'running'. Record a clean step error and
+				// honour continueOnError instead.
+				const errorMessage = `Invalid step output path: ${toErrorMessage(outputError)}`;
+				const stepStatus = createStepStatus(step, resolvedCommand, new Date(), 1, undefined, 'error', errorMessage);
+				status.steps.push(stepStatus);
+				stepRecords.push({ outputPath: undefined, result: undefined });
+				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
+				writeJson(statusPath, status);
+				failed = true;
+				if (!step.continueOnError) {
+					halted = true;
+					break;
+				}
+				index++;
+				continue;
+			}
 			const timeoutMs = resolveStepTimeout(step, capability);
 			const retryCount = resolveRetryCount(step);
 			const retryDelayMs = resolveRetryDelayMs(step);
@@ -1176,13 +1219,34 @@ export class AutomationPipelineRunner {
 			// Record the completed step result so later steps can reference it via $step[N].
 			stepRecords.push({ outputPath: output?.path, result: stepOutputData });
 
-			// Evaluate onResult conditional branching
+			// Evaluate onResult conditional branching. evaluateOnResult can throw on a
+			// bad RegExp ('regex' operator) and applyOnResultAction throws on an invalid
+			// goto/skip target. This branch was the only step phase with no try/catch, so
+			// such a throw unwound run() and left status.json frozen on 'running'. Catch
+			// it, record a clean step error, and halt to a terminal status instead.
 			if (completed && step.onResult && stepOutputData) {
-				const matched = evaluateOnResult(step.onResult, stepOutputData);
+				let matched = false;
+				let nextIndex = index + 1;
+				try {
+					matched = evaluateOnResult(step.onResult, stepOutputData);
+					if (matched) {
+						nextIndex = applyOnResultAction(step.onResult, index, job.steps.length, logPath);
+					}
+				} catch (onResultError: unknown) {
+					const errorMessage = `onResult evaluation failed: ${toErrorMessage(onResultError)}`;
+					status.steps.push(createStepStatus(step, resolvedCommand, startedAt, 1, output?.path, 'error', errorMessage));
+					appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
+					writeJson(statusPath, status);
+					failed = true;
+					halted = true;
+					break;
+				}
 				if (matched) {
-					const nextIndex = applyOnResultAction(step.onResult, index, job.steps.length, logPath);
 					if (nextIndex === -1) {
+						// 'abort' - stop with an error. Set halted so the terminal
+						// status is 'error' (documented), not 'partial'.
 						failed = true;
+						halted = true;
 						break;
 					}
 					// Only BACKWARD jumps form a loop. A forward `skip N` or a
@@ -1607,10 +1671,15 @@ function resolveStepOutput(outDir: string, step: PipelineStep, index: number): S
 		// arbitrary-file-write primitive).
 		const root = path.resolve(outDir);
 		const resolved = path.resolve(outDir, explicitPath);
+		// Must name a FILE strictly inside outDir: reject absolute paths, ".." escapes,
+		// AND a path that resolves to the outDir directory itself (".", "./", "sub/"),
+		// which would otherwise be handed to the command as a directory and then
+		// mis-recorded as an empty-output failure.
 		const contained = !path.isAbsolute(explicitPath) &&
-			(resolved === root || resolved.startsWith(root + path.sep));
+			resolved !== root &&
+			resolved.startsWith(root + path.sep);
 		if (!contained) {
-			throw new Error(`Invalid "output.path" in step ${index} (${step.cmd}): must be a relative path inside the job output directory (no absolute paths, no ".." escape). Got: ${explicitPath}`);
+			throw new Error(`Invalid "output.path" in step ${index} (${step.cmd}): must be a relative file path inside the job output directory (no absolute paths, no ".." escape, and not the directory itself). Got: ${explicitPath}`);
 		}
 		outputPath = resolved;
 	} else {
