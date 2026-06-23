@@ -9,7 +9,7 @@
 
 import * as assert from 'assert';
 import 'mocha';
-import { parseBtfSection } from './elfBtfLoader';
+import { parseBtfSection, resolveTypeSize } from './elfBtfLoader';
 
 function btfHeader(typeOff: number, typeLen: number, strOff: number, strLen: number): Buffer {
 	const h = Buffer.alloc(24);
@@ -67,5 +67,33 @@ suite('elfBtfLoader.parseBtfSection', () => {
 		// Before the clamp the string loop read past the buffer -> RangeError.
 		const data = parseBtfSection(h);
 		assert.ok(Array.isArray(data.strings));
+	});
+
+	test('extracts INT encoding/bits per the BTF spec (#47)', () => {
+		// A signed int32 has btf_int VAL=0x01000020: encoding=SIGNED(1), nr_bits=32.
+		const h = btfHeader(0, 16, 16, 1);
+		const t = Buffer.alloc(16);
+		t.writeUInt32LE(0, 0);
+		t.writeUInt32LE((1 << 24) >>> 0, 4); // info: kind=1 (INT)
+		t.writeUInt32LE(4, 8);               // sizeOrType
+		t.writeUInt32LE(0x01000020, 12);     // btf_int VAL
+		const data = parseBtfSection(Buffer.concat([h, t, Buffer.alloc(1)]));
+		const ty = data.types.get(1);
+		assert.strictEqual(ty?.encoding, 1); // was 0x20 (32) -- the low byte (nr_bits)
+		assert.strictEqual(ty?.bits, 32);    // was 0x100 (256)
+	});
+
+	test('clamps an oversized ARRAY size to a sane ceiling (#47)', () => {
+		// type 1 = INT (4 bytes); type 2 = ARRAY of type 1 with nelems=0xFFFFFFFF.
+		const h = btfHeader(0, 16 + 24, 16 + 24, 1);
+		const t1 = Buffer.alloc(16);
+		t1.writeUInt32LE(0, 0); t1.writeUInt32LE((1 << 24) >>> 0, 4); t1.writeUInt32LE(4, 8); t1.writeUInt32LE(0x01000020, 12);
+		const t2 = Buffer.alloc(24);
+		t2.writeUInt32LE(0, 0); t2.writeUInt32LE((3 << 24) >>> 0, 4); t2.writeUInt32LE(0, 8); // info: kind=3 (ARRAY)
+		t2.writeUInt32LE(1, 12); t2.writeUInt32LE(0, 16); t2.writeUInt32LE(0xFFFFFFFF, 20);   // elem=1, index=0, nelems=max
+		const data = parseBtfSection(Buffer.concat([h, t1, t2, Buffer.alloc(1)]));
+		const size = resolveTypeSize(2, data);
+		// Before the clamp this was 4 * 0xFFFFFFFF = 17179869180.
+		assert.ok(size <= 0x40000000, `array size ${size} should be clamped to <= 1 GiB`);
 	});
 });

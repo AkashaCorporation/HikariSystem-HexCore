@@ -261,10 +261,10 @@ function parseTypes(
 			case BTF_KIND_INT: {
 				// INT has 4 bytes of extra encoding info
 				if (offset + 16 <= typeEnd) {
-					const encoding = data.readUInt32LE(offset + 12);
-					btfType.encoding = encoding & 0xFF;
-					// bits [8:15] = offset, [16:31] = nr_bits
-					btfType.bits = (encoding >> 16) & 0xFFFF;
+					const intInfo = data.readUInt32LE(offset + 12);
+					// btf_int VAL layout (uapi/linux/btf.h): [0:7]=nr_bits, [16:23]=offset, [24:27]=encoding
+					btfType.encoding = (intInfo >> 24) & 0x0F;
+					btfType.bits = intInfo & 0xFF;
 					entrySize = 16;
 				}
 				break;
@@ -725,7 +725,9 @@ export function resolveTypeSize(typeId: number, btfData: BTFData, pointerSize: n
 		case BTF_KIND_ARRAY: {
 			if (type.elemType !== undefined && type.nelems !== undefined) {
 				const elemSize = resolveTypeSize(type.elemType, btfData, pointerSize, depth + 1);
-				return elemSize * type.nelems;
+				// nelems is an attacker-controlled u32; cap the product to a sane 1 GiB
+				// ceiling so a crafted array can't poison the exported StructFieldInfo.size.
+				return Math.min(elemSize * type.nelems, 0x40000000);
 			}
 			return 0;
 		}
