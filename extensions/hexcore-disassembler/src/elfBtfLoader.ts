@@ -163,7 +163,7 @@ function parseBtfHeader(data: Buffer): BTFHeader {
 function parseStringTable(data: Buffer, strOff: number, strLen: number, hdrLen: number): string[] {
 	const strings: string[] = [];
 	const strStart = hdrLen + strOff;
-	const strEnd = strStart + strLen;
+	const strEnd = Math.min(strStart + strLen, data.length);
 
 	let currentStr = '';
 	for (let i = strStart; i < strEnd; i++) {
@@ -216,7 +216,7 @@ function parseTypes(
 ): Map<number, BTFType> {
 	const types = new Map<number, BTFType>();
 	const typeStart = hdrLen + typeOff;
-	const typeEnd = typeStart + typeLen;
+	const typeEnd = Math.min(typeStart + typeLen, data.length);
 
 	let offset = typeStart;
 	let typeId = 1; // BTF type IDs are 1-based
@@ -342,7 +342,7 @@ function parseTypes(
 					const valHi = data.readUInt32LE(enumOffset + 8);
 
 					// Combine high and low 32-bit values
-					const enumVal = valLo | (valHi << 32);
+					const enumVal = valLo + valHi * 0x100000000;
 
 					enumValues.push({
 						name: stringTable[enumNameOff] || '',
@@ -495,8 +495,8 @@ async function extractBtfSectionFromElf(filePath: string): Promise<Buffer | null
 				: (is64Bit ? Number(shstrEntry.readBigUInt64BE(32)) : shstrEntry.readUInt32BE(20));
 
 			// Read string table
-			const stringTable = Buffer.alloc(Number(shstrSize));
-			fs.readSync(fd, stringTable, 0, Number(shstrSize), Number(shstrAddr));
+			const stringTable = Buffer.alloc(Math.min(Number(shstrSize), fs.fstatSync(fd).size));
+			fs.readSync(fd, stringTable, 0, Math.min(Number(shstrSize), fs.fstatSync(fd).size), Number(shstrAddr));
 
 			// Iterate sections to find .BTF
 			for (let i = 0; i < e_shnum; i++) {
@@ -523,8 +523,8 @@ async function extractBtfSectionFromElf(filePath: string): Promise<Buffer | null
 						? (is64Bit ? Number(shEntry.readBigUInt64LE(32)) : shEntry.readUInt32LE(20))
 						: (is64Bit ? Number(shEntry.readBigUInt64BE(32)) : shEntry.readUInt32BE(20));
 
-					const btfData = Buffer.alloc(Number(shSize));
-					fs.readSync(fd, btfData, 0, Number(shSize), Number(shAddr));
+					const btfData = Buffer.alloc(Math.min(Number(shSize), fs.fstatSync(fd).size));
+					fs.readSync(fd, btfData, 0, Math.min(Number(shSize), fs.fstatSync(fd).size), Number(shAddr));
 
 					fs.closeSync(fd);
 					resolve(btfData);
