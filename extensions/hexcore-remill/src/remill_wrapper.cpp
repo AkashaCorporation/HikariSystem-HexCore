@@ -1180,6 +1180,24 @@ LiftResult RemillLifter::DoLift(
 		// Lift the instruction into its block
 		auto status = instLifter->LiftIntoBlock(di.inst, currentBlock, false);
 		if (status != remill::kLiftedInstruction) {
+			// FIX-105: keep lifting PAST an instruction Remill cannot fully model,
+			// instead of `break`-ing and discarding every instruction after it -- the
+			// bug that collapsed branch-heavy AArch64 functions to ~26%, leaving the
+			// tail stubbed as common.ret. Two cases fall through to the next insn:
+			//   (a) kLiftedUnsupportedInstruction -- Remill RECOGNISED the encoding
+			//       but ships no semantic for it (e.g. AArch64 SIMD STP Qt,Qt2,[Xn],
+			//       or exotic x86 AVX-512/APX). LiftIntoBlock ALREADY emitted a
+			//       HandleUnsupported call modelling the side effect into this block,
+			//       so the block stays well-formed and we just advance the counter.
+			//   (b) a kCategoryNoOp decode-failure stub from FIX-024 (bytes Remill
+			//       could not decode at all) -- no liftable body, so skip it.
+			// A genuine hard error (invalid instruction / internal lifter error) on a
+			// real instruction still aborts exactly as before.
+			if (status == remill::kLiftedUnsupportedInstruction ||
+				di.inst.category == remill::Instruction::kCategoryNoOp) {
+				totalOffset += di.size;
+				continue;
+			}
 			if (totalOffset == 0) {
 				result.error = "Failed to lift instruction at 0x" +
 					std::to_string(di.pc);
