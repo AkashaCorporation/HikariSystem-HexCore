@@ -463,6 +463,11 @@ function parseDwarfInfo(
 ): ParsedCU[] {
 	const cus: ParsedCU[] = [];
 	const c: BufferCursor = { buf: infoData, pos: 0 };
+	// Memoize the parsed abbrev table per abbrev_offset: a hostile .debug_info can
+	// declare thousands of minimal CUs all pointing at one large .debug_abbrev, and
+	// re-parsing it per CU is O(numCUs x abbrevSize) -- a multi-minute event-loop
+	// hang on a few-MB file. Each distinct table is now parsed at most once.
+	const abbrevCache = new Map<number, ReturnType<typeof parseAbbrevTable>>();
 
 	while (c.pos < infoData.length) {
 		const cuStart = c.pos;
@@ -501,8 +506,13 @@ function parseDwarfInfo(
 			addrSize = c.buf[c.pos++];
 		}
 
-		// Parse abbreviation table for this CU
-		const abbrevTable = parseAbbrevTable(abbrevData, abbrevOffset);
+		// Parse (or reuse the memoized) abbreviation table for this CU.
+		let resolvedAbbrev = abbrevCache.get(abbrevOffset);
+		if (!resolvedAbbrev) {
+			resolvedAbbrev = parseAbbrevTable(abbrevData, abbrevOffset);
+			abbrevCache.set(abbrevOffset, resolvedAbbrev);
+		}
+		const abbrevTable = resolvedAbbrev;
 
 		const ctx: FormReadContext = {
 			c,
@@ -977,13 +987,25 @@ function extractDwarfSections(filePath: string): ElfSections {
 			e_shstrndx = headerBuf.readUInt16LE(50);
 		}
 
+		// A section's sh_size is a header field decoupled from the real file size:
+		// a hostile ELF can declare a multi-GB .debug_* / .symtab / .rela while the
+		// body is tiny, driving Buffer.alloc to commit gigabytes (an uncatchable
+		// OOM/abort, since it precedes any parsing). Read every section clamped to
+		// the actual file length, so an oversized sh_size can never over-allocate.
+		const fileSize = fs.fstatSync(fd).size;
+		const readSectionBytes = (off: number, sz: number): Buffer => {
+			const n = Math.max(0, Math.min(sz, fileSize));
+			const b = Buffer.alloc(n);
+			if (n > 0) { fs.readSync(fd, b, 0, n, off); }
+			return b;
+		};
+
 		// Read section header string table
 		const shstrEntry = Buffer.alloc(is64Bit ? 64 : 40);
 		fs.readSync(fd, shstrEntry, 0, shstrEntry.length, e_shoff + e_shstrndx * e_shentsize);
 		const shstrAddr = is64Bit ? Number(shstrEntry.readBigUInt64LE(24)) : shstrEntry.readUInt32LE(16);
 		const shstrSize = is64Bit ? Number(shstrEntry.readBigUInt64LE(32)) : shstrEntry.readUInt32LE(20);
-		const strTable = Buffer.alloc(shstrSize);
-		fs.readSync(fd, strTable, 0, shstrSize, shstrAddr);
+		const strTable = readSectionBytes(shstrAddr, shstrSize);
 
 		// First pass: collect ALL section metadata so we can cross-reference
 		// .rela.X → X mappings via sh_info, and .rela's symbol table via sh_link.
@@ -1037,9 +1059,7 @@ function extractDwarfSections(filePath: string): ElfSections {
 			const s = sections[i];
 			const key = debugTargets.get(s.name);
 			if (key) {
-				const data = Buffer.alloc(s.size);
-				fs.readSync(fd, data, 0, s.size, s.addr);
-				result[key] = data;
+				result[key] = readSectionBytes(s.addr, s.size);
 			}
 		}
 
@@ -1055,9 +1075,8 @@ function extractDwarfSections(filePath: string): ElfSections {
 				const s = sections[i];
 				// SHT_SYMTAB = 2
 				if (s.type === 2 && s.entsize > 0) {
-					const rawSyms = Buffer.alloc(s.size);
-					fs.readSync(fd, rawSyms, 0, s.size, s.addr);
-					const count = s.size / s.entsize;
+					const rawSyms = readSectionBytes(s.addr, s.size);
+					const count = Math.floor(rawSyms.length / s.entsize);
 					symbols = new Array(count);
 					for (let k = 0; k < count; k++) {
 						const off = k * s.entsize;
@@ -1089,9 +1108,8 @@ function extractDwarfSections(filePath: string): ElfSections {
 					const targetBuf = result[debugKey];
 					if (!targetBuf) { continue; }
 
-					const rawRelas = Buffer.alloc(s.size);
-					fs.readSync(fd, rawRelas, 0, s.size, s.addr);
-					const count = s.size / s.entsize;
+					const rawRelas = readSectionBytes(s.addr, s.size);
+					const count = Math.floor(rawRelas.length / s.entsize);
 					const relas: RelaEntry[] = new Array(count);
 					for (let k = 0; k < count; k++) {
 						const off = k * s.entsize;

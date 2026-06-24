@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### DWARF loader hardening - clamp section allocations + memoize the abbrev table (untrusted-ELF DoS)
+
+> A 6-region adversarial parser-bounds audit of `hexcore-disassembler/elfDwarfLoader.ts` (the DWARF struct/signature extractor, parsed from an untrusted ELF's .debug_* sections) confirmed 5 findings, all reproduced on the compiled `out/`. The two MEDIUM ones, both denial-of-service, are fixed here:
+> - **Unclamped section alloc:** every section buffer was `Buffer.alloc(sh_size)` where sh_size is a section-HEADER field decoupled from the real file size. A tiny hostile ELF declaring a multi-GB .debug_str / .debug_info / .symtab / .rela drove an immediate multi-GB zero-fill -- an uncatchable OOM / process-abort, before any DWARF parsing.
+> - **Per-CU abbrev re-parse:** `parseDwarfInfo` re-parsed the entire .debug_abbrev table for EVERY compilation unit with no memoization, so N minimal CUs all pointing at one large abbrev table cost O(N x abbrevSize) -- a multi-minute single-threaded event-loop hang on a few-MB file.
+
+- **Fix:** (1) read every section clamped to the actual file length (`Math.min(sh_size, fs.fstatSync(fd).size)` via a `readSectionBytes` helper, applied to the shstrtab / debug / symtab / rela loads, with the symtab/rela entry counts derived from the clamped buffer); (2) memoize the parsed abbrev table per `abbrev_offset` (each distinct table parsed at most once per file).
+- **Validated** before/after on the compiled `out/` with crafted malicious ELFs: the abbrev quadratic case (3000 CUs x a 30000-entry table) `1989 ms -> 19 ms`; a `.debug_str` declaring 900 MB while the file is tiny `943 MB committed -> ~0 MB`. Both fixes are behaviour-preserving for valid DWARF (the clamp is a no-op when sh_size <= fileSize; the cache returns the identical table). Disassembler `1.4.12 -> 1.4.13`. The audit's 3 LOW findings (uncapped DIE-child recursion, fixed-size readers throwing on a truncated section, a duplicate of the abbrev finding -- all already caught by the loader's top-level try/catch and degrading to a null return) are filed as #49.
+
 ### Job queue - dispatch a freed worker immediately instead of after the ~100 ms poll (#45 item 2)
 
 > Follow-up to #45 item 1. When the queue is non-empty but every worker is busy, the process loop parked on `await this.delay(100)` and `scheduleProcessLoop` no-oped while it was parked, so a worker that freed 5 ms into a park sat idle for the rest of the ~100 ms tick before the next job dispatched -- recoverable scheduling latency, not a stuck job.
