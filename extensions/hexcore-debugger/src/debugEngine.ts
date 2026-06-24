@@ -190,24 +190,7 @@ export class DebugEngine {
 
 		this.targetPath = filePath;
 		this.emulationOptions = options ?? {};
-		this.breakpointSnapshots = [];
-		this.collectedMemoryDumps = [];
-		this.sideChannelData = { basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0 };
-		this._scLastBBAddr = 0n;
-		this._scBBCountMap.clear();
-		this._scBranchMap.clear();
-		this._scTruncated = false;
-
-		// Reset ARM64 state for fresh emulation
-		this._arm64ExitRequested = false;
-		this._arm64SyscallLog = [];
-		this._arm64StdoutBuffer = '';
-		this._arm64StdinBuffer = '';
-		this._arm64StdinOffset = 0;
-		this._arm64MmapOffset = 0;
-
-		// Clear trace for fresh emulation session
-		this._traceManager.clear();
+		this.resetSessionState();
 
 		// Read the file
 		this.fileBuffer = fs.readFileSync(filePath);
@@ -1039,7 +1022,17 @@ export class DebugEngine {
 						const str = (data as Buffer).toString('utf8');
 						console.log(`[arm64 syscall write fd${fd}] ${str}`);
 						if (fd === 1 || fd === 2) {
-							this._arm64StdoutBuffer += str;
+							// Cap cumulative stdout: a write-loop emitting up to ~64 KiB
+							// per call would otherwise grow this string without bound
+							// (the per-continue instruction budget allows enough writes
+							// to reach multi-GiB). Append a one-time marker at the cap.
+							const MAX_STDOUT = 8 * 1024 * 1024;
+							if (this._arm64StdoutBuffer.length < MAX_STDOUT) {
+								this._arm64StdoutBuffer += str;
+								if (this._arm64StdoutBuffer.length >= MAX_STDOUT) {
+									this._arm64StdoutBuffer += '\n[stdout truncated: 8 MiB cap reached]';
+								}
+							}
 						}
 						return BigInt(count);
 					} catch {
@@ -2266,6 +2259,33 @@ export class DebugEngine {
 	}
 
 	/**
+	 * Reset all per-session buffers/state. Called at the start of every
+	 * startEmulation AND at the end of disposeEmulation, so the trace / stdout /
+	 * syscall-log / side-channel getters can never return a torn-down prior
+	 * session's data after a bare dispose.
+	 */
+	private resetSessionState(): void {
+		this.breakpointSnapshots = [];
+		this.collectedMemoryDumps = [];
+		this.sideChannelData = { basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0 };
+		this._scLastBBAddr = 0n;
+		this._scBBCountMap.clear();
+		this._scBranchMap.clear();
+		this._scTruncated = false;
+
+		// Reset ARM64 state for fresh emulation
+		this._arm64ExitRequested = false;
+		this._arm64SyscallLog = [];
+		this._arm64StdoutBuffer = '';
+		this._arm64StdinBuffer = '';
+		this._arm64StdinOffset = 0;
+		this._arm64MmapOffset = 0;
+
+		// Clear trace for fresh emulation session
+		this._traceManager.clear();
+	}
+
+	/**
 	 * Dispose emulator resources
 	 */
 	disposeEmulation(): void {
@@ -2282,5 +2302,7 @@ export class DebugEngine {
 		this.elfLoader = undefined;
 		this.apiHooks = undefined;
 		this.linuxApiHooks = undefined;
+		// Clear session buffers so post-dispose getters don't report stale data.
+		this.resetSessionState();
 	}
 }

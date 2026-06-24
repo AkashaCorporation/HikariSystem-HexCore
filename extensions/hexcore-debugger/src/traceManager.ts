@@ -28,8 +28,21 @@ export interface TraceEntry {
 export interface TraceExport {
 	entries: TraceEntry[];
 	totalEntries: number;
+	/** Entries dropped after the cap was hit (0 unless a crafted binary spammed hooked calls). */
+	dropped: number;
 	generatedAt: string;
 }
+
+/**
+ * Upper bound on retained trace entries. A crafted binary that loops over a
+ * hooked API/syscall would otherwise grow `entries` without bound (it survives
+ * across continue calls within a session), so cap retention and count the
+ * overflow. Env-overridable, mirroring debugEngine's HEXCORE_SC_MAX_ADDRS.
+ */
+const TRACE_MAX_ENTRIES: number = (() => {
+	const raw = Number(process.env.HEXCORE_TRACE_MAX_ENTRIES);
+	return Number.isInteger(raw) && raw > 0 ? raw : 200000;
+})();
 
 /**
  * Centralized manager for API/libc call traces during emulation.
@@ -39,12 +52,20 @@ export interface TraceExport {
 export class TraceManager {
 	private entries: TraceEntry[] = [];
 	private listeners: Array<(entry: TraceEntry) => void> = [];
+	private dropped: number = 0;
 
 	/**
-	 * Record a new trace entry and notify all registered listeners.
+	 * Record a new trace entry and notify all registered listeners. Past the
+	 * retention cap the entry is dropped (keeping the trace's BEGINNING, the most
+	 * useful part) and counted; listeners still fire so real-time streaming
+	 * consumers are unaffected.
 	 */
 	record(entry: TraceEntry): void {
-		this.entries.push(entry);
+		if (this.entries.length < TRACE_MAX_ENTRIES) {
+			this.entries.push(entry);
+		} else {
+			this.dropped++;
+		}
 		for (const listener of this.listeners) {
 			listener(entry);
 		}
@@ -62,6 +83,7 @@ export class TraceManager {
 	 */
 	clear(): void {
 		this.entries = [];
+		this.dropped = 0;
 	}
 
 	/**
@@ -78,6 +100,7 @@ export class TraceManager {
 		return {
 			entries: this.getEntries(),
 			totalEntries: this.entries.length,
+			dropped: this.dropped,
 			generatedAt: new Date().toISOString(),
 		};
 	}
