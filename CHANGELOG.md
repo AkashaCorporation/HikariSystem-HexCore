@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### Pipeline - make the outDir containment guard case-insensitive on Windows (#43 follow-up; fixes a false-positive blocking legit jobs)
+
+> The `assertOutDirAllowed` guard added earlier in 3.8.3 (#43, preventing a hostile `*.hexcore_job.json` from writing outside the workspace) compared paths with a case-SENSITIVE `startsWith`. On Windows `c:\` and `C:\` (and differing segment case) denote the SAME directory, and the file-watcher passes the job-file path with a lowercase drive letter while a user's `outDir` is commonly written uppercase -- so a legitimate `outDir` genuinely INSIDE the job-file directory was falsely rejected with "resolves outside the workspace and the job-file directory". Caught dogfooding a GTA:SA recon job.
+
+- **Fix:** the containment check now uses `path.relative` (case-insensitive on win32) instead of `startsWith` -- a path is allowed iff `path.relative(root, outDir)` is empty or does not escape via `..` / an absolute root. This also closes the sibling-prefix gap (`/a/bc` is not inside `/a/b`) for free.
+- **Validated** on the real win32 path module across 6 cases: the case-mismatched-but-inside outDir is rejected BEFORE / allowed AFTER, the job-file dir itself in a different case is allowed, and a genuinely-external / sibling-prefix / parent-traversal outDir stays rejected AFTER -- the guard is made correct, not weakened. Disassembler `1.4.14 -> 1.4.15` (also syncs the README row, which had drifted to 1.4.13).
+
 ### HQL - harden the C-AST FlatBuffer hydrator against a pathological/crafted buffer (untrusted-binary-derived DoS; hexcore-hql 0.1.1)
 
 > A 3-dimension adversarial parser-bounds audit of the HQL hydrator (`hexcore-hql/adapter/flatbuf.ts`, which rebuilds the C-AST from a FlatBuffer Helix produces by decompiling an UNTRUSTED binary) confirmed the same class as the DWARF loader: the hand-rolled reader trusted attacker-influenced counts/offsets/nesting, and the underlying flatbuffers ByteBuffer does NO bounds-checking (an out-of-range read returns garbage, never throws), so nothing stopped the runaway. The matcher's own recursion was refuted (the hydrator overflows first at depth ~4095, before the matcher at ~9631; the ByteBuffer OOB reads are memory-safe JS `undefined`->0, not an overread).

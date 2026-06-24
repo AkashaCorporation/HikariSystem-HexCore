@@ -1500,7 +1500,16 @@ function assertOutDirAllowed(outDir: string, baseDir: string, jobFilePath: strin
 	for (const folder of vscode.workspace.workspaceFolders ?? []) {
 		roots.push(path.resolve(folder.uri.fsPath));
 	}
-	const within = roots.some(root => resolved === root || resolved.startsWith(root + path.sep));
+	// Use path.relative, which on Windows is case-INSENSITIVE (`c:\` and `C:\`, and
+	// differing segment case, denote the SAME directory). A case-sensitive
+	// `startsWith` falsely rejected a legitimate outDir genuinely inside the
+	// job-file dir when the watcher passed the job-file path with a different
+	// drive-letter case than the outDir was written with -- and path.relative also
+	// closes the sibling-prefix gap (`/a/bc` is not inside `/a/b`) for free.
+	const within = roots.some(root => {
+		const rel = path.relative(root, resolved);
+		return rel === '' || (rel !== '..' && !rel.startsWith('..' + path.sep) && !path.isAbsolute(rel));
+	});
 	if (!within) {
 		throw new Error(
 			`Invalid "outDir" in ${jobFilePath}: '${outDir}' resolves outside the workspace and the job-file directory. ` +
