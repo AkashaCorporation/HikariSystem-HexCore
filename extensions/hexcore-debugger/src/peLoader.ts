@@ -1071,7 +1071,15 @@ export class PELoader {
 		}
 
 		const pageSize = this.emulator.getPageSize();
-		const tlsDataBytes = Math.max(pageSize, Math.ceil((template.length + sizeOfZeroFill) / pageSize) * pageSize);
+		// Clamp to the fixed TLS region size: sizeOfZeroFill is an attacker-controlled
+		// u32 from the TLS directory and feeds BOTH the map below and the Buffer.alloc
+		// that follows, so an absurd value (~4 GiB) would drive a giant host allocation.
+		// The template read above is already bounded to TLS_STORAGE_SIZE, and the rest
+		// of the loader assumes the TLS region is exactly TLS_STORAGE_SIZE, so a larger
+		// declaration is unsupported by design -- degrade to the region size.
+		const tlsDataBytes = Math.min(
+			Math.max(pageSize, Math.ceil((template.length + sizeOfZeroFill) / pageSize) * pageSize),
+			TLS_STORAGE_SIZE);
 		this.emulator.mapMemoryRaw(TLS_STORAGE_BASE, tlsDataBytes, 3); // RW
 		this.memoryManager.trackAllocation(TLS_STORAGE_BASE, tlsDataBytes, 3, 'TLS-data');
 

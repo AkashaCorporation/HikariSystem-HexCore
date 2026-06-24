@@ -1284,6 +1284,7 @@ export class UnicornWrapper {
 	 * Map memory with numeric permissions (Unicorn PROT_* values)
 	 */
 	async mapMemoryRaw(address: bigint, size: number, perms: number): Promise<void> {
+		this.assertMapSize(size);
 		if (this._arm64Worker) {
 			const pageSize = BigInt(this._arm64Worker.getPageSize());
 			const alignedBase = (address / pageSize) * pageSize;
@@ -2974,6 +2975,27 @@ export class UnicornWrapper {
 		if (!Number.isInteger(size) || size < 0 || size > MAX_READ_SIZE) {
 			throw new Error(
 				`readMemory: invalid size ${size} (must be an integer in [0, ${MAX_READ_SIZE}])`);
+		}
+	}
+
+	/**
+	 * Defense-in-depth bound on a memory-MAP size. The size handed to mapMemoryRaw
+	 * derives from attacker-controlled binary-header fields (PE SizeOfImage, ELF
+	 * PT_LOAD p_memsz, the TLS zero-fill) when loading an untrusted sample, and
+	 * flows unvalidated to the native uc.memMap, which commits a `size`-byte host
+	 * region. A crafted ~4 GiB declaration drives a giant (often RWX) allocation
+	 * the loaders never bounded -- a process-abort / OOM that the inline comments
+	 * at the other memMap sites already call "unrecoverable". Reject anything that
+	 * is not a sane integer or exceeds the ceiling BEFORE the native call so the
+	 * load fails cleanly instead of aborting the host. The ceiling sits far above
+	 * every legitimate map in this loader (largest fixed region is 8 MiB; a real
+	 * in-memory image/segment is well under 1 GiB) yet below the multi-GiB abuse.
+	 */
+	private assertMapSize(size: number): void {
+		const MAX_MAP_SIZE = 0x80000000; // 2 GiB
+		if (!Number.isInteger(size) || size <= 0 || size > MAX_MAP_SIZE) {
+			throw new Error(
+				`mapMemoryRaw: invalid size ${size} (must be an integer in (0, ${MAX_MAP_SIZE}])`);
 		}
 	}
 
