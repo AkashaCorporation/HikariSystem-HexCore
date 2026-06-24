@@ -2960,9 +2960,28 @@ export class UnicornWrapper {
 	}
 
 	/**
+	 * Defense-in-depth bound on a memory-read size. The size of a generic read
+	 * comes from a (possibly untrusted) `*.hexcore_job.json` memoryDumps entry and
+	 * flows unvalidated to the native memRead, which allocates a `size`-byte host
+	 * Buffer BEFORE the mapped-range check fails. A negative size (a mis-cast) or
+	 * an absurd one (e.g. 0x40000000) drives a pathological / failing allocation.
+	 * Reject both, matching the 0x10000000 ceiling the heap-alloc hooks already
+	 * enforce elsewhere; legitimate dumps are far below it. Per-call only -- a real
+	 * cap on the total dumped across a job belongs in the pipeline runner.
+	 */
+	private assertReadSize(size: number): void {
+		const MAX_READ_SIZE = 0x10000000; // 256 MiB
+		if (!Number.isInteger(size) || size < 0 || size > MAX_READ_SIZE) {
+			throw new Error(
+				`readMemory: invalid size ${size} (must be an integer in [0, ${MAX_READ_SIZE}])`);
+		}
+	}
+
+	/**
 	 * Read memory
 	 */
 	async readMemory(address: bigint, size: number): Promise<Buffer> {
+		this.assertReadSize(size);
 		if (this._arm64Worker) {
 			return await this._arm64Worker.memRead(address, size);
 		}
@@ -2983,6 +3002,7 @@ export class UnicornWrapper {
 	 * Must NOT be called when using the ARM64 worker.
 	 */
 	readMemorySync(address: bigint, size: number): Buffer {
+		this.assertReadSize(size);
 		if (this._arm64Worker) {
 			throw new Error('readMemorySync cannot be used with ARM64 worker');
 		}

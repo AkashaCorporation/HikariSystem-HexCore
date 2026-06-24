@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### Emulation - clamp the generic memory-read size (defense-in-depth; `unicornWrapper` readMemory / readMemorySync)
+
+> A 6-region adversarial audit of `hexcore-debugger/unicornWrapper.ts` (the Unicorn emulation wrapper) confirmed 2 of ~16 candidates -- the other 14 were refuted after default-refuted verification (memory mapping, stack, loader, and the fault handlers are well-guarded). This is the validatable one: `readMemory` / `readMemorySync` passed the read `size` straight to the native `memRead` (which allocates a `size`-byte host Buffer) with NO upper-bound or integer check. The size of a generic dump comes from a `*.hexcore_job.json` memoryDumps entry and is cast unvalidated; a negative size (a mis-cast) or an absurd one (e.g. `0x40000000`) drove a pathological / failing host allocation. The realistic impact is bounded (an out-of-range read throws `UC_ERR_READ_UNMAPPED` and frees the transient Buffer, and PE emulation runs in a restartable worker), so this is a low-severity hardening, not a retained-memory DoS.
+
+- **Fix:** a private `assertReadSize` guard at the top of both `readMemory` and `readMemorySync` rejects a non-integer / negative / `> 0x10000000` (256 MiB) size before any allocation, matching the `0x10000000` ceiling the heap-alloc hooks (`linuxApiHooks`) already enforce. Legitimate dumps are far below it.
+- **Validated** before/after on the compiled `out/` (mock `uc.memRead`): before, a 1 GiB / `MAX+1` size reached `memRead` unbounded and a negative / `NaN` size threw only AFTER the native call; after, every invalid size is rejected BEFORE `memRead` and valid / boundary (256 MiB) sizes pass unchanged. Debugger `2.1.1 -> 2.1.2`. The audit's other confirmed finding (a PE-worker zero-progress stub-dispatch hang -- medium, reproducible only with the live PE worker) is filed as #48.
+
 ### Job queue - a new keepAlive session no longer hijacks a worker still bound to another live session (#45 item 1)
 
 > `JobQueueManager.pickWorkerFor`'s no-binding fallback (`return this.workers.find(w => !w.busy)`) could return a worker that is `!busy` but still pinned to ANOTHER live keepAlive session -- one whose sibling job is merely QUEUED, so `releaseWorker` kept the binding alive. Binding the brand-new session's job to it overwrote that worker's `sessionId` and destroyed the other session's sticky affinity (the guarantee Issue #26 exists for); the displaced session's queued sibling then silently rebound to a different worker. Reachable only for multi-session keepAlive workloads; the stateless auto-run / watcher path is unaffected.
