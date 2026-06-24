@@ -133,7 +133,15 @@ function readVec(bb: BB, tablePos: number, voff: number): [number, number] | nul
   const o = fieldOff(bb, tablePos, voff);
   if (!o) return null;
   const vecPos = tablePos + o;
-  return [bb.__vector(vecPos), bb.__vector_len(vecPos)];
+  const start = bb.__vector(vecPos);
+  const len = bb.__vector_len(vecPos);
+  // `len` is a raw attacker-influenced int32; reject a vector whose element range
+  // [start, start + len*4) falls outside the buffer (each element is a 4-byte
+  // offset). Without this a huge len drives an unbounded caller loop / OOM -- the
+  // flatbuffers ByteBuffer does NO bounds-checking, so the out-of-range element
+  // reads return garbage instead of throwing and the loop just churns.
+  if (len < 0 || start < 0 || start + len * 4 > bb.capacity()) { return null; }
+  return [start, len];
 }
 
 // ─── DataType → type string ───
@@ -376,8 +384,12 @@ function readStmt(bb: BB, pos: number): CNode {
       } satisfies CReturnStmt;
 
     case 4: { // If
-      // text = number of then-body statements
-      const thenCount = text ? parseInt(text, 10) : children.length;
+      // text = number of then-body statements. parseInt can yield NaN (non-numeric
+      // S_TEXT) or a negative/oversized value; clamp it like the For-case below so
+      // a malformed count cannot silently swap/lose the then vs else bodies.
+      let thenCount = text ? parseInt(text, 10) : children.length;
+      if (!Number.isFinite(thenCount)) { thenCount = children.length; }
+      thenCount = Math.max(0, Math.min(thenCount, children.length));
       const thenBody = children.slice(0, thenCount);
       const elseBody = children.slice(thenCount);
       const thenBlock: CBlockStmt = { kind: 'CBlockStmt', body: thenBody };
@@ -627,7 +639,14 @@ export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader): CFun
     const [start, len] = fv;
     for (let i = 0; i < len; i++) {
       const fPos = bb.__indirect(start + i * 4);
-      functions.push(readFunction(bb, fPos, session));
+      try {
+        functions.push(readFunction(bb, fPos, session));
+      } catch {
+        // Skip a pathological function (deeply-nested or cyclic-offset AST that
+        // overflows the recursive readExpr/readStmt descent -> RangeError, or a
+        // malformed table) so the rest of the module still hydrates instead of
+        // the whole scan aborting.
+      }
     }
   }
 
