@@ -722,7 +722,15 @@ export class JobQueueManager {
 		if (freeUnbound) {
 			return freeUnbound;
 		}
-		return this.workers.find(w => !w.busy);
+		// Issue #45 (item 1): no UNBOUND free worker exists. Do NOT fall back to a
+		// bound-but-free worker -- a slot that is `!busy` but still pinned to ANOTHER
+		// live session (one whose sibling job is merely queued, so releaseWorker kept
+		// the binding). Binding this job to it would overwrite that worker's
+		// `sessionId` and destroy the other session's sticky keepAlive affinity
+		// (Issue #26). Wait instead: the job stays queued and retries on the next
+		// dispatch tick, and the slot becomes a generic free worker once its own
+		// session fully drains. Stateless jobs (handled above) are unaffected.
+		return undefined;
 	}
 
 	/**

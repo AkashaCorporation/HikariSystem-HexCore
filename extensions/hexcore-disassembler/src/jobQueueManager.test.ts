@@ -200,6 +200,40 @@ suite('JobQueueManager #26 — sessionId sticky routing', () => {
 	});
 });
 
+suite('JobQueueManager #45 dispatch refinements', () => {
+	test('(item 1) a new session does NOT hijack a bound-but-free worker reserved for a queued sibling', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		// S1 establishes its binding on one worker; a stateless job fills the other,
+		// so when S1-1 later frees its slot there is NO genuinely-unbound free worker.
+		m.queueJob('S1-1', 'normal', 'S1');
+		m.queueJob('busy', 'normal');
+		await sleep(60);
+		assert.ok(ctl.isRunning('S1-1') && ctl.isRunning('busy'));
+		const s1Worker = m.getAllJobs().find(j => j.filePath.endsWith('S1-1'))!.workerId;
+		// A queued S1 sibling keeps S1's binding alive while S1 has 0 running; a
+		// higher-priority brand-new session S3 is queued AHEAD of it, so S3 is matched
+		// first when S1-1 frees its worker. Before the fix, S3's no-binding fallback
+		// stole S1's bound-but-free worker (overwriting its sessionId).
+		m.queueJob('S1-2', 'low', 'S1');
+		m.queueJob('S3-1', 'high', 'S3');
+		ctl.release('S1-1');
+		await sleep(100);
+		// Fixed: S1's queued sibling reclaims S1's OWN worker (affinity preserved);
+		// the new session waits rather than hijacking a slot pinned to a live session.
+		assert.ok(ctl.isRunning('S1-2'), 'S1 sibling reclaims its reserved worker');
+		const s1bWorker = m.getAllJobs().find(j => j.filePath.endsWith('S1-2'))!.workerId;
+		assert.strictEqual(s1bWorker, s1Worker, 'S1-2 ran on S1\'s original worker');
+		assert.ok(!ctl.isRunning('S3-1'), 'the new session waits; it did not hijack S1\'s worker');
+		ctl.releaseAll();
+		await sleep(50);
+		await m.stop();
+		m.dispose();
+	});
+});
+
 suite('JobQueueManager — stateless regression (unchanged behavior)', () => {
 	test('stateless jobs dispatch within pool and reach done', async () => {
 		const ctl = makeControllable();
