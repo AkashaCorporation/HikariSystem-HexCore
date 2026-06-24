@@ -325,6 +325,15 @@ export class JobQueueManager {
 	private concurrencyLimit: number;
 	private running = false;
 	private processing = false;
+	/**
+	 * Issue #45 (item 2): a one-shot resolver that wakes the processLoop's
+	 * all-busy / no-dispatchable park early. It is set while the loop is parked
+	 * and signalled by scheduleProcessLoop when a worker frees mid-park, so a
+	 * just-freed slot is dispatched immediately instead of after the remaining
+	 * ~100 ms poll. The timer remains as a fail-safe re-poll -- this is purely a
+	 * latency optimization, the dispatch decision is unchanged.
+	 */
+	private wakeup?: () => void;
 	private jobExecutor?: JobExecutor;
 	private readonly onJobStatusChangedEmitter = new vscode.EventEmitter<JobStatusChangeEvent>();
 
@@ -647,7 +656,7 @@ export class JobQueueManager {
 		while (this.running && !this.queue.isEmpty()) {
 			// Stop early if every worker is busy -- nothing can be dispatched.
 			if (!this.workers.some(w => !w.busy)) {
-				await this.delay(100);
+				await this.park();
 				continue;
 			}
 
@@ -667,7 +676,7 @@ export class JobQueueManager {
 			if (!job || !chosenWorker) {
 				// No queued job is dispatchable right now (e.g. all remaining are
 				// session jobs whose workers are busy). Wait and retry.
-				await this.delay(100);
+				await this.park();
 				continue;
 			}
 
@@ -827,6 +836,11 @@ export class JobQueueManager {
 	 */
 	private scheduleProcessLoop(): void {
 		if (this.processing) {
+			// The loop is already running, possibly parked on the ~100 ms poll
+			// timer waiting for a worker. Wake it now so a just-freed slot is
+			// dispatched immediately instead of after the remaining poll (#45 item 2).
+			this.wakeup?.();
+			this.wakeup = undefined;
 			return;
 		}
 		this.processing = true;
@@ -836,6 +850,20 @@ export class JobQueueManager {
 				this.scheduleProcessLoop();
 			}
 		});
+	}
+
+	/**
+	 * Parks the process loop until EITHER the ~100 ms poll timer fires OR a worker
+	 * frees mid-park (signalled via `wakeup` from scheduleProcessLoop -- #45 item 2).
+	 * The timer is the fail-safe re-poll; the wakeup just removes the up-to-100 ms
+	 * dispatch latency when a slot frees while the queue is waiting on a worker.
+	 */
+	private async park(): Promise<void> {
+		await Promise.race([
+			this.delay(100),
+			new Promise<void>(resolve => { this.wakeup = resolve; }),
+		]);
+		this.wakeup = undefined;
 	}
 
 	/**

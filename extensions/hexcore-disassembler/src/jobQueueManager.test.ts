@@ -232,6 +232,33 @@ suite('JobQueueManager #45 dispatch refinements', () => {
 		await m.stop();
 		m.dispose();
 	});
+
+	test('(item 2) a worker freeing mid-park wakes the loop immediately (no ~100ms poll wait)', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(1);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		m.queueJob('A', 'normal');
+		await sleep(60);
+		assert.ok(ctl.isRunning('A'));
+		m.queueJob('B', 'normal');   // queued; the single worker is busy, so the loop parks
+		await sleep(60);             // let the loop reach its poll-timer park
+		assert.ok(!ctl.isRunning('B'));
+		const t0 = Date.now();
+		ctl.release('A');            // frees the worker -> scheduleProcessLoop wakes the park
+		let latency = -1;
+		for (let i = 0; i < 300 && latency < 0; i++) {
+			await sleep(1);
+			if (ctl.isRunning('B')) { latency = Date.now() - t0; }
+		}
+		// With the wakeup B dispatches in ~1-3ms; without it, it waits the ~40-100ms
+		// poll timer. A 30ms threshold cleanly separates the two.
+		assert.ok(latency >= 0 && latency < 30, `B should dispatch via the wakeup, got ${latency}ms`);
+		ctl.releaseAll();
+		await sleep(50);
+		await m.stop();
+		m.dispose();
+	});
 });
 
 suite('JobQueueManager — stateless regression (unchanged behavior)', () => {
