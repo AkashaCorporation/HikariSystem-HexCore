@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### DWARF loader hardening - bound DIE-nesting recursion + tolerate a truncated trailing CU (untrusted-ELF robustness, closes #49)
+
+> Follow-up to the section-alloc / abbrev-memoize fixes below: the same parser-bounds audit's 3 LOW findings on `hexcore-disassembler/elfDwarfLoader.ts`. All three made a malformed trailing region of `.debug_info` throw, and the parser's only backstop was the top-level try/catch -- which returns null for the ENTIRE file, silently discarding every preceding (well-formed) CU's struct and function info. Three causes, one guard each:
+> - **Uncapped DIE-child recursion:** `parseDIEs` recursed once per nesting level with no depth bound. A `.debug_info` can encode a child DIE in a single byte (a has-children abbrev with an empty attribute list), so a long run blew the JS call stack (`RangeError`, caught -> whole file lost).
+> - **Fixed-size readers throwing past EOF:** `readU16` / `readU32` / the 8-byte `readN` called Node's `readUInt16LE` / `readUInt32LE`, which throw `RangeError` on an out-of-bounds offset -- so a CU header or form value cut off at the section boundary aborted the whole parse.
+> - **Unclamped CU span:** `cuEnd = c.pos + unitLength` trusted an attacker-controlled `unitLength`, letting the DIE loop run past the end of the section buffer.
+
+- **Fix:** (1) `parseDIEs` carries a depth counter and bails the current CU gracefully (no throw) once nesting exceeds 256 -- far above any real DWARF (a handful of levels) yet well below the stack limit of every downstream recursive consumer (the parsed tree is also walked by `extractStructsAndFunctions` / `resolveType`, so the cap must protect them, not just the parser -- a higher cap let the parse survive but moved the overflow into the struct walk); (2) the three fixed-size readers bounds-check and degrade to 0 (advancing past EOF so the enclosing loops terminate) instead of throwing; (3) `cuEnd` is clamped to `Math.min(c.pos + unitLength, infoData.length)`.
+- **Validated** before/after on the compiled `out/` with crafted ELF64s, each pairing a VALID leading CU (defining a struct) with a malformed trailing CU: a 200000-deep DIE chain and a truncated-header trailing CU both made the BEFORE loader return null (the leading struct LOST); AFTER, the leading struct survives in both, and a valid-only control is byte-identical -- behaviour-preserving for well-formed DWARF (the guards only fire on malformed input). Disassembler `1.4.13 -> 1.4.14`. Closes #49.
+
 ### DWARF loader hardening - clamp section allocations + memoize the abbrev table (untrusted-ELF DoS)
 
 > A 6-region adversarial parser-bounds audit of `hexcore-disassembler/elfDwarfLoader.ts` (the DWARF struct/signature extractor, parsed from an untrusted ELF's .debug_* sections) confirmed 5 findings, all reproduced on the compiled `out/`. The two MEDIUM ones, both denial-of-service, are fixed here:

@@ -400,13 +400,19 @@ function readFormValue(ctx: FormReadContext, form: number, implicitConst?: numbe
 	}
 }
 
+// #49: these fixed-size readers must not throw on a truncated section -- Node's
+// readUInt16LE/readUInt32LE throw RangeError past EOF, which unwound the whole
+// parse and discarded every prior CU's struct info. Bounds-check and degrade to
+// 0 (advancing past EOF so the enclosing loops terminate) instead.
 function readU16(c: BufferCursor): number {
+	if (c.pos + 2 > c.buf.length) { c.pos = c.buf.length; return 0; }
 	const v = c.buf.readUInt16LE(c.pos);
 	c.pos += 2;
 	return v;
 }
 
 function readU32(c: BufferCursor): number {
+	if (c.pos + 4 > c.buf.length) { c.pos = c.buf.length; return 0; }
 	const v = c.buf.readUInt32LE(c.pos);
 	c.pos += 4;
 	return v;
@@ -418,6 +424,7 @@ function readN(c: BufferCursor, n: number): number {
 		for (let i = 0; i < n; i++) v |= c.buf[c.pos++] << (i * 8);
 		return v >>> 0;
 	}
+	if (c.pos + 8 > c.buf.length) { c.pos = c.buf.length; return 0; }
 	// For 8 bytes, use BigInt then convert (loses precision above 2^53 but fine for offsets)
 	const lo = c.buf.readUInt32LE(c.pos);
 	const hi = c.buf.readUInt32LE(c.pos + 4);
@@ -480,7 +487,9 @@ function parseDwarfInfo(
 			unitLength = readN(c, 8);
 			is64Bit = true;
 		}
-		const cuEnd = c.pos + unitLength;
+		// #49: clamp cuEnd to the section so a CU whose attacker-controlled
+		// unitLength overruns the buffer cannot drive the DIE loop past EOF.
+		const cuEnd = Math.min(c.pos + unitLength, infoData.length);
 
 		const version = readU16(c);
 
@@ -535,8 +544,18 @@ function parseDwarfInfo(
 		const allDies = new Map<number, DIE>();
 
 		// Parse DIE tree recursively
-		function parseDIEs(): DIE[] {
+		function parseDIEs(depth = 0): DIE[] {
 			const result: DIE[] = [];
+			// #49: cap DIE nesting depth -- a malformed .debug_info can encode a
+			// child DIE in a single byte (a has-children abbrev with an empty attr
+			// list), so a long run blew the JS call stack (RangeError, caught ->
+			// whole file's DWARF lost). The produced tree is then walked AGAIN
+			// (recursively) by extractStructsAndFunctions/resolveType, so the cap
+			// must sit well below the stack limit of EVERY downstream consumer, not
+			// just the parser -- 256 is far above any real DWARF nesting (a handful
+			// of levels) yet leaves ample stack headroom for the walk/resolve passes.
+			// Bail this CU gracefully once nesting is pathological.
+			if (depth > 256) { c.pos = cuEnd; return result; }
 
 			while (c.pos < cuEnd) {
 				const dieOffset = c.pos;
@@ -591,7 +610,7 @@ function parseDwarfInfo(
 				allDies.set(dieOffset, die);
 
 				if (abbrev.hasChildren) {
-					die.children = parseDIEs();
+					die.children = parseDIEs(depth + 1);
 				}
 
 				result.push(die);
