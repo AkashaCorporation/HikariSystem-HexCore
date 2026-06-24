@@ -548,6 +548,11 @@ export class LinuxApiHooks {
 		// char *strncpy(char *dest, const char *src, size_t n)
 		this.handlers.set('strncpy', (args) => {
 			const n = Number(args[2]);
+			// Cap n like the sibling mem* handlers: it is an attacker-controlled
+			// size that drives Buffer.alloc(n) directly (the readString read is
+			// already bounded by assertReadSize, but the alloc is not), so an
+			// absurd n would commit a multi-GiB host buffer.
+			if (n <= 0 || n > 0x1000000) { return args[0]; }
 			const src = this.readString(args[1], n);
 			const buf = Buffer.alloc(n);
 			buf.write(src, 'ascii');
@@ -567,6 +572,10 @@ export class LinuxApiHooks {
 		// int strncmp(const char *s1, const char *s2, size_t n)
 		this.handlers.set('strncmp', (args) => {
 			const n = Number(args[2]);
+			// Same cap as memcmp/mem*: n drives two readString(addr, n) reads, each
+			// up to the 256 MiB assertReadSize ceiling -- far above the 16 MiB the
+			// sibling handlers allow. n==0 compares 0 bytes (equal) -> 0n.
+			if (n <= 0 || n > 0x1000000) { return 0n; }
 			const s1 = this.readString(args[0], n).substring(0, n);
 			const s2 = this.readString(args[1], n).substring(0, n);
 			if (s1 < s2) { return BigInt(-1) & 0xFFFFFFFFFFFFFFFFn; }
@@ -639,7 +648,9 @@ export class LinuxApiHooks {
 		// int memcmp(const void *s1, const void *s2, size_t n)
 		this.handlers.set('memcmp', (args) => {
 			const n = Number(args[2]);
-			if (n <= 0) { return 0n; }
+			// Cap n to 16 MiB like memcpy/memmove/memset: without it, memcmp issues
+			// two readMemorySync(addr, n) up to the 256 MiB assertReadSize ceiling.
+			if (n <= 0 || n > 0x1000000) { return 0n; }
 			try {
 				const b1 = this.emulator.readMemorySync(args[0], n);
 				const b2 = this.emulator.readMemorySync(args[1], n);

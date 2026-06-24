@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
 
+### Emulation - cap strncpy/strncmp/memcmp sizes in the Linux API hooks (untrusted-binary memory amplification; debugger 2.1.5)
+
+> A 4-dimension adversarial audit of the debugger API-hook implementations (`winApiHooks.ts` + `linuxApiHooks.ts`, which read attacker-controlled emulated memory to model API/syscall behaviour) confirmed 3 instances of one class: a libc memory-family handler missing the `n > 0x1000000` (16 MiB) clamp its `memcpy`/`memmove`/`memset` siblings already enforce. The format-string parsers and argv/environ walks were refuted (bounded by `readString`'s maxLen / fixed loop caps; scanf/fgets write into the Unicorn guest sandbox from host-supplied stdin, not host memory).
+> - **`strncpy`** took `n = Number(args[2])` straight into `Buffer.alloc(n)` -- the read is bounded by the `assertReadSize` 256 MiB cap but the host allocation is not, so an absurd `n` commits a multi-hundred-MiB/GiB host buffer.
+> - **`strncmp`** and **`memcmp`** issued two `readMemorySync(addr, n)` reads with only an `n <= 0` guard, so each call read up to the 256 MiB `assertReadSize` ceiling -- 16x above what the sibling handlers allow, repeatable in a loop.
+
+- **Fix:** add the sibling `if (n <= 0 || n > 0x1000000) { return ... }` clamp to all three. (The audit found `strncpy` + `memcmp`; re-reading the code surfaced the identical gap in `strncmp`, which the fan-out had missed.) `winApiHooks` does not implement this libc family, so no change there.
+- **Validated** before/after on the compiled `out/` (BEFORE module = the 3 caps stripped from the compiled JS; a mock emulator records the requested read/write sizes): with `n = 64 MiB`, each handler issues a 64 MiB read/alloc BEFORE and is blocked with zero reads/writes AFTER; a legitimate `n = 100` still reads normally. Behaviour-preserving (a >16 MiB strncpy/strncmp/memcmp is pathological; the siblings already cap there). Debugger `2.1.4 -> 2.1.5`.
+
 ### Emulation - bound the debugEngine session buffers + reset them on dispose (untrusted-binary resource hygiene; debugger 2.1.4)
 
 > A 4-dimension adversarial audit of `hexcore-debugger/debugEngine.ts` (the emulation orchestration core) confirmed 3 of 11 candidates -- 8 refuted after default-refuted verification (the unclamped dump size is already gated by the `assertReadSize`/`assertMapSize` guards added in 2.1.2/2.1.3; the "stuck running" / un-notified-load-failure findings honour the caller's crashed/crashError + rejected-promise contract; the breakpoint-snapshot growth is dead code; the syscall-log is bounded by the 250000-instruction continue cap). The 3 confirmed are one session resource/lifecycle cluster, all LOW, all on the untrusted-binary path.
