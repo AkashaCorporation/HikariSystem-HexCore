@@ -22,6 +22,9 @@ static Napi::Value SetErrorConstructor(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 	errorConstructor = Napi::Persistent(info[0].As<Napi::Function>());
+	// This reference has process lifetime. Letting its static destructor call
+	// napi_delete_reference after the environment is gone causes exit-time AVs.
+	errorConstructor.SuppressDestruct();
 	return env.Undefined();
 }
 

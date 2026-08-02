@@ -124,11 +124,7 @@ DatabaseWrapper::DatabaseWrapper(const Napi::CallbackInfo& info)
 
 DatabaseWrapper::~DatabaseWrapper() {
 	if (db_) {
-		// Finalize all tracked statements
-		for (auto* stmt : statements_) {
-			stmt->FinalizeStatement();
-		}
-		statements_.clear();
+		FinalizeAllStatements();
 		sqlite3_close(db_);
 		db_ = nullptr;
 	}
@@ -140,6 +136,14 @@ void DatabaseWrapper::TrackStatement(StatementWrapper* stmt) {
 
 void DatabaseWrapper::UntrackStatement(StatementWrapper* stmt) {
 	statements_.erase(stmt);
+}
+
+void DatabaseWrapper::FinalizeAllStatements() {
+	// FinalizeStatement() removes itself from statements_. Drain from begin()
+	// so no iterator survives that mutation.
+	while (!statements_.empty()) {
+		(*statements_.begin())->FinalizeStatement();
+	}
 }
 
 void DatabaseWrapper::ThrowSqliteError(Napi::Env env) {
@@ -203,10 +207,7 @@ Napi::Value DatabaseWrapper::Prepare(const Napi::CallbackInfo& info) {
 Napi::Value DatabaseWrapper::Close(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
 	if (db_) {
-		for (auto* stmt : statements_) {
-			stmt->FinalizeStatement();
-		}
-		statements_.clear();
+		FinalizeAllStatements();
 		sqlite3_close(db_);
 		db_ = nullptr;
 		open_ = false;

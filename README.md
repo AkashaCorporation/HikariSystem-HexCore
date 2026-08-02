@@ -111,7 +111,7 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-capstone** | 1.3.5 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
 | **hexcore-unicorn** | 1.3.1 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory, and Perseus SAB delivery |
 | **hexcore-llvm-mc** | 1.0.2 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
-| **hexcore-better-sqlite3** | 2.0.2 | SQLite N-API wrapper for IOC persistence and prebuild packaging |
+| **hexcore-better-sqlite3** | 2.0.3 | SQLite N-API wrapper with safe prepared-statement lifecycle for persistent sessions |
 | **hexcore-remill** | 0.5.1 | Patched Remill N-API lifter — machine code to LLVM IR with current call, relocation, preamble, and fallback hardening |
 | **hexcore-helix** | 0.9.3 | Canonical Helix MLIR decompiler with structured control flow and debug-info-guided type recovery |
 | **hexcore-souper** | 0.2.0 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |

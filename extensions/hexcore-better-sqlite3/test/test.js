@@ -87,8 +87,15 @@ console.log('  [PASS] pragma works\n');
 
 // Test close
 console.log('Testing close...');
+// Closing used to erase entries from the native statement registry while a
+// range-for was iterating it, causing intermittent access violations.
+const lifecycleStatements = [];
+for (let i = 0; i < 256; i++) {
+	lifecycleStatements.push(db.prepare('SELECT value FROM kv WHERE id = ?'));
+}
 db.close();
 assert(db.open === false, 'Database should be closed');
+assert.strictEqual(lifecycleStatements.length, 256);
 console.log('  [PASS] close works\n');
 
 // Test error handling

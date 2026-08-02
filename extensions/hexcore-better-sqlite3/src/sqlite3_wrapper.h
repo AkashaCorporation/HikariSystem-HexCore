@@ -37,6 +37,7 @@ public:
 	bool IsOpened() const { return db_ != nullptr; }
 	void TrackStatement(StatementWrapper* stmt);
 	void UntrackStatement(StatementWrapper* stmt);
+	void FinalizeAllStatements();
 
 private:
 	sqlite3* db_;
