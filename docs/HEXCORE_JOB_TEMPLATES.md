@@ -1,4 +1,4 @@
-# HexCore Job Templates — v3.8.0
+# HexCore Job Templates - v3.8.3 RC
 
 Safe default job templates for users and AI agents.
 
@@ -9,9 +9,12 @@ Safe default job templates for users and AI agents.
   - `{name}.hexcore_job.json` — named jobs (auto-detected by watcher + queue picker)
 - Keep job files in the workspace root or subdirectories.
 - Prefer absolute paths for `file` in multi-folder workspaces.
+- Keep `outDir` inside the workspace or the job-file directory. External destinations require the deliberate `hexcore.pipeline.allowExternalOutDir` opt-in.
+- Keep step `output.path` relative and inside `outDir`; absolute paths and `..` escapes are rejected.
 - Set `expectOutput: false` when you do not need step artifacts.
 - Use explicit `output` only for reports you want to keep.
-- Agents can create multiple named jobs — all are auto-detected without manual intervention.
+- Root-level jobs are discovered at startup. The recursive watcher auto-runs later create/change events; it does not replay every pre-existing nested job at startup.
+- Top-level `continueOnError` is inherited by steps unless a step overrides it.
 - See `docs/HEXCORE_AUTOMATION.md` for full command reference and naming convention details.
 
 ---
@@ -255,9 +258,9 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
 
 **Notes:**
 - Replace `0x401000` with the function VA you want to decompile.
-- `liftToIR` and `helix.decompileIR` only support x86/x64 binaries.
+- The current Remill package supports x86, x86-64, and AArch64 lifting. Helix x86/x64 is the qualified route; treat AArch64 output as experimental and retain IR/disassembly for verification.
 - `irPath` uses `$step[3].output` (the 0-based index of the `liftToIR` step) so the IR path resolves at runtime — never hardcode it (a mismatch fails with a masked `Expected output file was not created`; the real error is in the Extension Host console).
-- For Rellic-style output (mnemonic comments, deprecated), swap `hexcore.helix.decompileIR` with `hexcore.rellic.decompile`.
+- Rellic is disabled legacy compatibility. Do not substitute it into new jobs.
 
 ---
 
@@ -820,7 +823,7 @@ Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler usi
 - `$step[N].output` resolves to the `output.path` of step N at runtime, relative to `outDir`. Step indices are zero-based.
 - This eliminates hardcoded paths and makes the template portable across machines and `outDir` values.
 - `size` (bytes) is used instead of `count` (instructions) when the region boundary is known; both are accepted by `liftToIR`.
-- `continueOnError: true` on the decompile step ensures `hexcore-pipeline.status.json` is written even if Helix returns a partial result.
+- `continueOnError: true` continues to later steps after a failed decompile; it does not convert semantic failure into success. Use `allowPartial: true` separately only when a partial result is an accepted input.
 
 ---
 
@@ -1030,8 +1033,10 @@ Queue multiple analysis jobs with different priorities. High-priority jobs execu
 - Use `hexcore.pipeline.queueJob` to submit: `{ "cmd": "hexcore.pipeline.queueJob", "args": { "file": "path/to/job.json", "priority": "high" } }`
 - Monitor with `hexcore.pipeline.jobStatus` — returns `queued`, `running`, `done`, `failed`, or `cancelled`, plus a 1-based `position` in the dispatch order while a job is `queued` (v3.8.2).
 - Cancel with `hexcore.pipeline.cancelJob` using the `jobId` returned by `queueJob`.
-- Concurrency is the `hexcore.pipeline.queue.poolSize` setting (integer, default `2`, range `1`–`16`; v3.8.2). A change applies on the next window reload, not mid-flight.
+- `hexcore.pipeline.queue.poolSize` configures logical slots (default `2`, range `1`–`16`). Stateful jobs are serialized for their whole lifetime because engine state is shared in one Extension Host; audited stateless byte tools can still run concurrently. A change applies on the next window reload.
 - For `keepAlive` emulation jobs that share state across steps, pass a `sessionId` on `queueJob` (v3.8.2) — every job with that id is pinned to ONE worker, so the session is never split across workers.
+- Semantic child failures fail a step even when the command returned normally. Use `allowPartial: true` only for a step whose consumer explicitly tolerates incomplete results; the job remains `partial`.
+- Every artifact receives a `.provenance.json` sidecar. Compare `binarySha256`, `contextGeneration`, and `artifact.sha256` before using cached evidence.
 
 ---
 
@@ -1146,7 +1151,8 @@ Full kernel module reverse engineering with BTF type information from vmlinux fo
 - When the `.ko` file or a linked `vmlinux` contains a `.BTF` section, HexCore automatically parses BTF type data.
 - BTF enables: kernel struct layout recovery, function parameter auto-typing (e.g., `kctx` → `struct kbase_context *`), and struct field naming.
 - `analyzeELFHeadless` output includes `btfData` when BTF is available, plus `confidenceScore` with bonus for BTF/DWARF presence.
-- BTF is standard in modern Linux kernels (5.2+, Ubuntu 20.04+, Fedora 31+). For older kernels, DWARF fallback is planned.
+- BTF and pre-parsed DWARF struct information are both supported by the current analysis path.
+- `hexcore.extractStructInfo` supports the runner's `{ path, format }` contract in Disassembler 1.4.27. Keep it after the ELF/BTF/DWARF analysis step that establishes its debug-type context.
 - Combine with section-aware lifting for complete `.init.text`/`.exit.text` coverage.
 - `yara.scan` `categories` are DefenderYara top-level categories (`Trojan`, `Backdoor`, `Exploit`, `HackTool`, ...) and only load when a DefenderYara catalog is indexed — the 76k+ set is **not bundled** (see `hexcore.yara.scan` in `docs/HEXCORE_AUTOMATION.md`). Without it, the scan runs against the bundled rules and the `categoryLoad.unavailable` field reports the miss; the bundled AntiAnalysis rules still cover anti-debug/anti-VM/API-hashing for kernel modules.
 
@@ -1580,3 +1586,164 @@ After the run, `hexcore-pipeline.status.json` → `summary.slowestStepCmd`
 immediately points at the dominant cost (usually `hexcore.yara.scan` on big
 binaries), and `summary.skippedCount` reports how many steps the entropy gate
 bypassed.
+
+---
+
+## v3.8.3 RC Templates
+
+These templates target release qualification and difficult authorized challenges. They preserve intermediate evidence and avoid treating confidence or successful command completion as proof of semantic correctness.
+
+## Template: Hard / Insane Native Reconnaissance (v3.8.3 RC)
+
+Replace `0x140001000` with a function VA selected from `analyzeAll`. Keep the first run static; add emulation only after defining inputs, breakpoints, and a stop condition.
+
+```json
+{
+  "file": ".\\challenge.exe",
+  "outDir": ".\\hexcore-reports\\hard-insane-recon",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "output": { "path": "00-filetype.json" } },
+    { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" }, "output": { "path": "01-hashes.json" } },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "output": { "path": "02-pe-deep.json" } },
+    { "cmd": "hexcore.disasm.analyzeELFHeadless", "output": { "path": "03-elf-deep.json" } },
+    { "cmd": "hexcore.entropy.analyze", "output": { "path": "04-entropy.json" } },
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "maxFunctions": 5000, "maxFunctionSize": 131072, "forceReload": true, "filterJunk": true, "detectVM": true, "detectPRNG": true },
+      "output": { "path": "05-analysis.json" },
+      "timeoutMs": 600000
+    },
+    { "cmd": "hexcore.disasm.detectPacker", "output": { "path": "06-packer.json" } },
+    { "cmd": "hexcore.strings.extractAdvanced", "output": { "path": "07-strings-advanced.json" }, "timeoutMs": 240000 },
+    { "cmd": "hexcore.disasm.exportASMHeadless", "output": { "path": "08-disassembly.asm" }, "timeoutMs": 300000 },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x140001000", "count": 500, "autoBacktrack": true },
+      "output": { "path": "09-candidate.ll" },
+      "timeoutMs": 240000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[9].output", "souper": "auto" },
+      "output": { "path": "10-candidate.helix.c" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.hql.scanHeadless",
+      "args": { "irPath": "$step[9].output" },
+      "output": { "path": "11-hql.json" },
+      "timeoutMs": 180000
+    },
+    { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "RECON_REPORT.md", "format": "md" } }
+  ]
+}
+```
+
+Because `continueOnError` is inherited, the wrong format-specific analyzer is expected to fail without suppressing later evidence. Before comparing two HexCore versions, keep `file`, function VA, instruction count, architecture, args, and the input hash identical.
+
+## Template: Managed .NET Route - C# + IL (v3.8.3 RC)
+
+This template deliberately runs Helix once to preserve the managed-routing marker, then sends the same target to Revenant.
+
+```json
+{
+  "file": ".\\managed-target.exe",
+  "outDir": ".\\hexcore-reports\\managed-route",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "output": { "path": "00-filetype.json" } },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "output": { "path": "01-pe-deep.json" } },
+    {
+      "cmd": "hexcore.helix.decompile",
+      "args": { "address": "entry", "count": 100 },
+      "output": { "path": "02-helix-routing-marker.c" },
+      "timeoutMs": 180000
+    },
+    { "cmd": "hexcore.revenant.decompile", "output": { "path": "03-recovered.cs" }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.revenant.decompileIL", "output": { "path": "04-recovered.il" }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.strings.extractAdvanced", "output": { "path": "05-strings.json" } },
+    { "cmd": "hexcore.ioc.extract", "output": { "path": "06-iocs.json" } },
+    { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "MANAGED_REPORT.md", "format": "md" } }
+  ]
+}
+```
+
+Expected native-route result for managed input: `managed: true`, `managedFormat: "dotnet-cil"` or `"dotnet-single-file"`, and confidence `0`. That marker is correct behavior. The C#/IL artifacts are the decompilation outputs.
+
+## Template: Sherlock Evidence Workflow (v3.8.3 RC)
+
+This is an artifact-first investigation pass. It does not start an emulator or execute the sample.
+
+```json
+{
+  "file": ".\\evidence\\artifact.bin",
+  "outDir": ".\\hexcore-reports\\sherlock-evidence",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    { "cmd": "hexcore.filetype.detect", "output": { "path": "00-filetype.json" } },
+    { "cmd": "hexcore.hashcalc.calculate", "args": { "algorithms": "all" }, "output": { "path": "01-hashes.json" } },
+    { "cmd": "hexcore.disasm.analyzePEHeadless", "output": { "path": "02-pe.json" } },
+    { "cmd": "hexcore.disasm.analyzeELFHeadless", "output": { "path": "03-elf.json" } },
+    { "cmd": "hexcore.minidump.parse", "output": { "path": "04-minidump.json" } },
+    { "cmd": "hexcore.entropy.analyze", "output": { "path": "05-entropy.json" } },
+    { "cmd": "hexcore.disasm.detectPacker", "output": { "path": "06-packer.json" } },
+    { "cmd": "hexcore.strings.extractAdvanced", "output": { "path": "07-strings.json" }, "timeoutMs": 240000 },
+    { "cmd": "hexcore.base64.decodeHeadless", "output": { "path": "08-base64.json" } },
+    { "cmd": "hexcore.yara.scan", "output": { "path": "09-yara.json" }, "timeoutMs": 240000 },
+    { "cmd": "hexcore.ioc.extract", "output": { "path": "10-iocs.json" } },
+    { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "SHERLOCK_REPORT.md", "format": "md" } }
+  ]
+}
+```
+
+Preserve the original artifact hash and individual JSON files as primary evidence. The Markdown report is a derived summary. A failed PE, ELF, or minidump parser on the wrong format is expected and remains visible in `hexcore-pipeline.status.json`.
+
+## Template: Souper A/B Lab (v3.8.3 RC)
+
+Use this only after selecting a bitwise/MBA/crypto-heavy function. It retains raw IR, optimized IR, and Helix output from both paths.
+
+```json
+{
+  "file": ".\\challenge.exe",
+  "outDir": ".\\hexcore-reports\\souper-ab",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x140001000", "count": 500, "autoBacktrack": true },
+      "output": { "path": "00-raw.ll" },
+      "timeoutMs": 240000
+    },
+    {
+      "cmd": "hexcore.souper.optimize",
+      "args": { "irPath": "$step[0].output", "maxCandidates": 128, "timeoutMs": 30000, "aggressiveMode": false },
+      "output": { "path": "01-souper.ll" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[0].output", "souper": false },
+      "output": { "path": "02-raw.helix.c" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[1].output", "souper": false },
+      "output": { "path": "03-souper.helix.c" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.hql.scanHeadless",
+      "args": { "irPath": "$step[1].output" },
+      "output": { "path": "04-hql-optimized.json" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+Judge the experiment by replacements, runtime, deterministic re-runs, retained semantics, and downstream pseudo-C/HQL differences. Zero replacements is valid and is not a regression.

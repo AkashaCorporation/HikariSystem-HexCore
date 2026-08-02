@@ -280,4 +280,18 @@ suite('JobQueueManager — stateless regression (unchanged behavior)', () => {
 		await m.stop();
 		m.dispose();
 	});
+
+	test('a terminal pipeline error marks the queue job failed', async () => {
+		const m = new JobQueueManager(1);
+		m.setJobExecutor(async () => ({ status: 'error', summary: { errorCount: 1 } }));
+		m.start();
+		const jobId = m.queueJob('semantic-failure');
+		for (let i = 0; i < 100 && m.getJobStatus(jobId)?.status !== 'failed'; i++) {
+			await sleep(5);
+		}
+		assert.strictEqual(m.getJobStatus(jobId)?.status, 'failed');
+		assert.strictEqual(m.getQueueStats().failed, 1);
+		await m.stop();
+		m.dispose();
+	});
 });

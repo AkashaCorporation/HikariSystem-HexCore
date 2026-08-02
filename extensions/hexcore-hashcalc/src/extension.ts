@@ -8,6 +8,7 @@ import * as vscode from 'vscode';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
+import { assertWithinWorkspaceOrHome } from 'hexcore-common';
 
 type HashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
 type OutputFormat = 'json' | 'md';
@@ -334,29 +335,13 @@ async function calculateHashesStreaming(
 	});
 }
 
-/**
- * True if `child` is `parent` or lives inside it. Uses path.relative rather than
- * a raw `startsWith` prefix match -- the prefix form wrongly accepts a sibling
- * directory that shares the textual prefix (e.g. `C:\Users\Bob` passing a
- * `C:\Users\Bo` guard), defeating the "writes must stay in workspace/home" check.
- */
-export function isWithinDir(parent: string, child: string): boolean {
-	const rel = path.relative(parent, child);
-	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
 function writeOutput(result: HashCalculationResult, output: CommandOutputOptions): void {
 	const outputFormat = normalizeOutputFormat(output.path, output.format);
 
-	// Validate output path is within workspace or user home to prevent arbitrary writes
-	const resolvedPath = path.resolve(output.path);
-	const workspaceFolders = vscode.workspace.workspaceFolders;
-	const homeDir = require('os').homedir();
-	const isInWorkspace = workspaceFolders?.some(f => isWithinDir(f.uri.fsPath, resolvedPath)) ?? false;
-	const isInHome = isWithinDir(homeDir, resolvedPath);
-	if (!isInWorkspace && !isInHome) {
-		throw new Error(`Output path must be within workspace or user home directory: ${resolvedPath}`);
-	}
+	const resolvedPath = assertWithinWorkspaceOrHome(
+		output.path,
+		(vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)
+	);
 
 	fs.mkdirSync(path.dirname(resolvedPath), { recursive: true });
 

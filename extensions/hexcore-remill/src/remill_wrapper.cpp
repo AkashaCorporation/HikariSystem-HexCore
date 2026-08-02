@@ -385,6 +385,22 @@ static std::filesystem::path GetSemanticsDir() {
 // RemillLifter
 // ---------------------------------------------------------------------------
 
+static constexpr const char* kPackagedArchs[] = {
+	"x86", "x86_avx", "x86_avx512",
+	"amd64", "amd64_avx", "amd64_avx512",
+	"aarch64",
+	"sparc32",
+};
+
+static bool IsPackagedArch(const std::string& archName) {
+	for (const char* packagedArch : kPackagedArchs) {
+		if (archName == packagedArch) {
+			return true;
+		}
+	}
+	return false;
+}
+
 Napi::Object RemillLifter::Init(Napi::Env env, Napi::Object exports) {
 	Napi::Function func = DefineClass(env, "RemillLifter", {
 		InstanceMethod("liftBytes", &RemillLifter::LiftBytes),
@@ -418,6 +434,17 @@ RemillLifter::RemillLifter(const Napi::CallbackInfo& info)
 	}
 
 	archName_ = info[0].As<Napi::String>().Utf8Value();
+
+	// Remill knows additional architecture names that are not backed by a
+	// semantics module in this package. Reject them before Arch::Get, whose
+	// SPARC64 initialization currently terminates the host process via CHECK.
+	if (!IsPackagedArch(archName_)) {
+		Napi::Error::New(env,
+			"Unsupported or unavailable architecture: " + archName_ +
+			". Use RemillLifter.getSupportedArchs() for packaged names.")
+			.ThrowAsJavaScriptException();
+		return;
+	}
 
 	// Determine OS name — default to linux semantics for lifting
 	std::string osName = "linux";
@@ -590,17 +617,9 @@ Napi::Value RemillLifter::GetSupportedArchs(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
 	Napi::Array result = Napi::Array::New(env);
 
-	const char* archs[] = {
-		"x86", "x86_avx", "x86_avx512",
-		"amd64", "amd64_avx", "amd64_avx512",
-		"aarch64",
-		"sparc32", "sparc64",
-		nullptr
-	};
-
 	uint32_t idx = 0;
-	for (const char** p = archs; *p; ++p) {
-		result.Set(idx++, Napi::String::New(env, *p));
+	for (const char* arch : kPackagedArchs) {
+		result.Set(idx++, Napi::String::New(env, arch));
 	}
 
 	return result;
@@ -681,6 +700,7 @@ LiftResult RemillLifter::DoLift(
 		remill::Instruction inst;
 		uint64_t pc;
 		size_t size;
+		bool terminatesControlFlow = false;
 	};
 	std::vector<DecodedInst> decoded;
 	std::set<uint64_t> leaders;
@@ -878,6 +898,21 @@ LiftResult RemillLifter::DoLift(
 						di.inst.branch_taken_pc = 0;
 						di.inst.branch_not_taken_pc = 0;
 						decoded.push_back(di);
+
+						// FIX-120: Remill does not decode x86 UD2 in this build, so
+						// FIX-024 recovers its length and represents it as a NoOp. UD2 is
+						// nevertheless a CFG terminator. Keep the following bytes in a
+						// separate (normally unreachable) block; otherwise a following
+						// compiler-emitted JMP is appended to the trap block and replaces
+						// its terminal behavior. This is deliberately narrower than
+						// re-injecting every Pathfinder leader.
+						const bool isX86Ud2 = (isAMD64 || isX86) &&
+							insnLen == 2 && p[0] == 0x0F && p[1] == 0x0B;
+						decoded.back().terminatesControlFlow = isX86Ud2;
+						if (isX86Ud2 && scanOffset + insnLen < length) {
+							leaders.insert(scanPC + insnLen);
+						}
+
 						scanOffset += insnLen;
 						scanPC += insnLen;
 						fix024_xedRecovered++;
@@ -905,10 +940,19 @@ LiftResult RemillLifter::DoLift(
 			di.inst = scanInst;
 			di.pc = scanPC;
 			di.size = scanInst.bytes.size();
+			// Some Remill x86 configurations decode UD2 successfully but expose
+			// it as a non-terminating category. Recognize the architectural
+			// encoding independently of the decoder category as well.
+			di.terminatesControlFlow = di.size == 2 &&
+				static_cast<uint8_t>(scanInst.bytes[0]) == 0x0F &&
+				static_cast<uint8_t>(scanInst.bytes[1]) == 0x0B;
 			decoded.push_back(di);
 
 			uint64_t nextPC = scanPC + scanInst.bytes.size();
 			uint64_t endAddr = address + length;
+			if (di.terminatesControlFlow && nextPC < endAddr) {
+				leaders.insert(nextPC);
+			}
 
 			// Check if this instruction is a branch or call
 			// Remill categorizes instructions — check for jumps
@@ -1173,6 +1217,16 @@ LiftResult RemillLifter::DoLift(
 		// block (created from the recovered jump target). Just advance the byte
 		// counter so boundary accounting stays correct.
 		if (currentBlock->getTerminator()) {
+			totalOffset += di.size;
+			continue;
+		}
+
+		// FIX-120: XED-recovered UD2 has no Remill semantic, but it must
+		// terminate this path. Finalize it before the generic NoOp handling can
+		// manufacture a fallthrough edge to the following dead-code block.
+		if (di.terminatesControlFlow) {
+			llvm::IRBuilder<> builder(currentBlock);
+			builder.CreateRet(func->getArg(2));
 			totalOffset += di.size;
 			continue;
 		}

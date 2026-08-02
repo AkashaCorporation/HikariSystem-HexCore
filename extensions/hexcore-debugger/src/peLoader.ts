@@ -87,6 +87,12 @@ const DEFAULT_STACK_SIZE = 0x100000n;
 const DEFAULT_STACK_LIMIT = DEFAULT_STACK_BASE;
 const DEFAULT_STACK_TOP = DEFAULT_STACK_BASE + DEFAULT_STACK_SIZE;
 
+export function addressRangesOverlap(
+	aStart: bigint, aSize: bigint, bStart: bigint, bSize: bigint,
+): boolean {
+	return aSize > 0n && bSize > 0n && aStart < bStart + bSize && bStart < aStart + aSize;
+}
+
 /**
  * v3.8.0-nightly — Detect MSVC C++ data exports by mangled name.
  *
@@ -142,12 +148,15 @@ export class PELoader {
 	 * Load a PE file into the emulator
 	 */
 	load(fileBuffer: Buffer, arch: ArchitectureType): PEInfo {
+		if (fileBuffer.length < 0x40) {
+			throw new Error('Truncated PE file: DOS header requires at least 64 bytes');
+		}
 		if (fileBuffer[0] !== 0x4D || fileBuffer[1] !== 0x5A) {
 			throw new Error('Not a valid PE file');
 		}
 
 		const peOffset = fileBuffer.readUInt32LE(0x3C);
-		if (peOffset + 4 > fileBuffer.length) {
+		if (peOffset + 24 > fileBuffer.length) {
 			throw new Error('Invalid PE offset');
 		}
 
@@ -157,12 +166,21 @@ export class PELoader {
 		}
 
 		const optHeaderOffset = peOffset + 24;
+		if (optHeaderOffset + 2 > fileBuffer.length) {
+			throw new Error('Truncated PE file: missing optional header');
+		}
 		const magic = fileBuffer.readUInt16LE(optHeaderOffset);
 		const is64Bit = magic === 0x20B;
 
 		// Parse COFF header
 		const numberOfSections = fileBuffer.readUInt16LE(peOffset + 6);
 		const sizeOfOptionalHeader = fileBuffer.readUInt16LE(peOffset + 20);
+		const requiredOptionalBytes = is64Bit ? 192 : 176;
+		if (sizeOfOptionalHeader < requiredOptionalBytes ||
+			optHeaderOffset + requiredOptionalBytes > fileBuffer.length) {
+			throw new Error(
+				`Truncated PE optional header: need ${requiredOptionalBytes} bytes`);
+		}
 
 		// Parse optional header
 		const imageBase = is64Bit
@@ -294,6 +312,23 @@ export class PELoader {
 
 		// Map the full image range first (covers headers and gaps between sections)
 		const alignedImageSize = Math.ceil(sizeOfImage / pageSize) * pageSize;
+		const imageSize = BigInt(alignedImageSize);
+		const reserved: Array<[bigint, bigint, string]> = [
+			[STUB_BASE, BigInt(STUB_SIZE), 'api-stubs'],
+			[DATA_IMPORT_BASE, BigInt(DATA_IMPORT_SIZE), 'data-imports'],
+			[SYNTHETIC_DLL_BASE, BigInt(SYNTHETIC_DLL_REGION_SIZE), 'synthetic-dlls'],
+			[TEB_ADDRESS, BigInt(TEB_SIZE), 'TEB'],
+			[PEB_ADDRESS, BigInt(PEB_SIZE), 'PEB'],
+			[KUSER_SHARED_DATA_ADDRESS, BigInt(KUSER_SHARED_DATA_SIZE), 'KUSER_SHARED_DATA'],
+			[TLS_STORAGE_BASE, BigInt(TLS_STORAGE_SIZE), 'TLS storage'],
+			[TLS_VECTOR_ADDRESS, BigInt(TLS_VECTOR_SIZE), 'TLS vector'],
+			[DEFAULT_STACK_LIMIT, DEFAULT_STACK_SIZE, 'default stack'],
+		];
+		for (const [start, size, name] of reserved) {
+			if (addressRangesOverlap(imageBase, imageSize, start, size)) {
+				throw new Error(`PE image range collides with reserved emulator region: ${name}`);
+			}
+		}
 		this.emulator.mapMemoryRaw(imageBase, alignedImageSize, 7); // RWX initially
 		this.memoryManager.trackAllocation(imageBase, alignedImageSize, 7, 'pe-image');
 
@@ -305,6 +340,12 @@ export class PELoader {
 		// Write section data
 		for (const section of sections) {
 			if (section.rawSize > 0 && section.rawOffset + section.rawSize <= buf.length) {
+				const writeEnd = section.virtualAddress + BigInt(section.rawSize);
+				if (section.virtualAddress < imageBase || writeEnd > imageBase + imageSize) {
+					console.warn(
+						`Skipping PE section ${section.name}: destination is outside mapped image`);
+					continue;
+				}
 				const sectionData = buf.subarray(section.rawOffset, section.rawOffset + section.rawSize);
 				this.emulator.writeMemory(section.virtualAddress, sectionData);
 			}

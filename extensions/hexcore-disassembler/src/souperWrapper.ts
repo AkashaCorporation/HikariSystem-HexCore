@@ -146,12 +146,12 @@ export const SOUPER_AUTO_DEFAULT_MIN_OPS = 8;
  * Decide whether to run Souper for a given IR, honoring the tri-state
  * `souper` option:
  *   - `false`          -> never  (forced off)
- *   - `true` / absent  -> always (legacy default-ON, unchanged)
- *   - `'auto'`         -> only when the IR is crypto/MBA-dense enough to
- *                         benefit (surgical activation)
+ *   - `true`           -> always (explicit opt-in)
+ *   - `'auto'`/absent  -> only when the IR is crypto/MBA-dense enough to
+ *                         benefit
  *
- * Any value other than `false` and `'auto'` preserves the historical
- * default-ON behavior, so existing callers are unaffected.
+ * Unknown values follow the conservative auto policy rather than paying the
+ * solver cost unconditionally.
  */
 export function decideSouperGate(
 	souperOption: unknown,
@@ -161,20 +161,20 @@ export function decideSouperGate(
 	if (souperOption === false) {
 		return { run: false, mode: 'forced-off', reason: 'souper:false' };
 	}
-	if (souperOption === 'auto') {
-		const density = computeSouperDensity(irText);
-		const threshold = typeof cfg?.threshold === 'number' ? cfg.threshold : SOUPER_AUTO_DEFAULT_THRESHOLD;
-		const minSignalOps = typeof cfg?.minSignalOps === 'number' ? cfg.minSignalOps : SOUPER_AUTO_DEFAULT_MIN_OPS;
-		const run = density.signalOps >= minSignalOps && density.density >= threshold;
-		return {
-			run,
-			mode: run ? 'auto-run' : 'auto-skip',
-			density,
-			reason: `auto density=${density.density.toFixed(2)} signalOps=${density.signalOps}/${density.totalInsns} (thr=${threshold}, min=${minSignalOps})`,
-		};
+	if (souperOption === true) {
+		return { run: true, mode: 'forced-on', reason: 'souper:true' };
 	}
-	// true, undefined, or anything else -> legacy default-ON.
-	return { run: true, mode: 'forced-on', reason: 'souper default-on' };
+
+	const density = computeSouperDensity(irText);
+	const threshold = typeof cfg?.threshold === 'number' ? cfg.threshold : SOUPER_AUTO_DEFAULT_THRESHOLD;
+	const minSignalOps = typeof cfg?.minSignalOps === 'number' ? cfg.minSignalOps : SOUPER_AUTO_DEFAULT_MIN_OPS;
+	const run = density.signalOps >= minSignalOps && density.density >= threshold;
+	return {
+		run,
+		mode: run ? 'auto-run' : 'auto-skip',
+		density,
+		reason: `auto density=${density.density.toFixed(2)} signalOps=${density.signalOps}/${density.totalInsns} (thr=${threshold}, min=${minSignalOps})`,
+	};
 }
 
 /** Threshold em bytes acima do qual usamos optimizeAsync */

@@ -142,7 +142,7 @@ jobs:
             $version = node -p "require('./package.json').version"
             $tag = "v$version"
             New-Item -ItemType Directory -Force deps/unicorn | Out-Null
-            gh release download $tag --repo LXrdKnowkill/hexcore-unicorn --pattern "unicorn.dll" --dir deps/unicorn/ 2>$null
+            gh release download $tag --repo AkashaCorporation/hexcore-unicorn --pattern "unicorn.dll" --dir deps/unicorn/ 2>$null
             if (Test-Path "deps/unicorn/unicorn.dll") {
               Write-Host "✓ unicorn.dll downloaded successfully"
             } else {
@@ -164,7 +164,7 @@ jobs:
           $version = node -p "require('./package.json').version"
           $tag = "v$version"
           $asset = "hexcore-remill-v$version-semantics-win32-x64.tar.gz"
-          $url = "https://github.com/LXrdKnowkill/hexcore-remill/releases/download/$tag/$asset"
+          $url = "https://github.com/AkashaCorporation/hexcore-remill/releases/download/$tag/$asset"
           Write-Host "Downloading Remill semantics from $url ..."
           Invoke-WebRequest -Uri $url -OutFile $asset
           tar -xzf $asset
@@ -342,7 +342,7 @@ jobs:
           version=$(node -p "require('./package.json').version")
           tag="v${version}"
           asset="hexcore-remill-v${version}-semantics-win32-x64.tar.gz"
-          url="https://github.com/LXrdKnowkill/hexcore-remill/releases/download/${tag}/${asset}"
+          url="https://github.com/AkashaCorporation/hexcore-remill/releases/download/${tag}/${asset}"
           echo "Downloading Remill semantics from ${url} ..."
           curl -fsSL -o "${asset}" "${url}" || { echo "Semantics not available for Linux yet"; exit 0; }
           tar -xzf "${asset}"

@@ -682,7 +682,7 @@ export declare class Unicorn {
     hookAdd(type: number, callback: HookCallback, begin?: bigint | number, end?: bigint | number, extra?: number): number;
 
     /**
-     * v4.0.0 — Add a SharedArrayBuffer-backed CODE hook (Issue #31).
+     * v1.3.0 - Add a SharedArrayBuffer-backed CODE hook (Issue #31).
      *
      * Zero-copy alternative to `hookAdd` for high-frequency CODE hooks. Each
      * hook fire writes a 32-byte event into the SAB ring buffer instead of
@@ -695,7 +695,7 @@ export declare class Unicorn {
      *
      * Target throughput: 10M+ instructions/sec (vs ~50K with `hookAdd`).
      *
-     * @param type Hook type — only `HOOK.CODE` is supported in v4.0.0.
+     * @param type Hook type - only `HOOK.CODE` is supported.
      * @param sabRef SharedArrayBuffer of size >= 64 + slotSize * slotCount.
      *               The buffer header is initialized in place and the ring
      *               buffer is owned by Unicorn until `hookDel` is called.

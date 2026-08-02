@@ -1,4 +1,13 @@
 src/**
+test/**
+rag/**
+out/**/*.test.js
+out/**/*.test.js.map
+out/**/*.map
+**/mlir_debug_dump.txt
+**/helix_dump_*.mlir
+_bug*_stderr.txt
+tsconfig.json
 node_modules/hexcore-capstone/node_modules/**
 node_modules/hexcore-capstone/src/**
 node_modules/hexcore-capstone/deps/**

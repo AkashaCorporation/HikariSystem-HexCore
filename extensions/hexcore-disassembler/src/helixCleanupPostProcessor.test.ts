@@ -125,12 +125,33 @@ suite('helixCleanupPostProcessor', () => {
 			assert.strictEqual(r.stats.intrinsicsNormalized, 1);
 		});
 
-		test('rewrites bit intrinsics to __builtin_* equivalents', () => {
+		test('rewrites bit intrinsics to __builtin_* equivalents (default 32-bit)', () => {
 			const src = 'a = __unknown_llvm.intr.ctpop(r1); b = __unknown_llvm.intr.bswap(r2);';
 			const r = cleanupHelixSource(src);
 			assert.ok(r.source.includes('__builtin_popcount(r1)'));
 			assert.ok(r.source.includes('__builtin_bswap32(r2)'));
 			assert.strictEqual(r.stats.intrinsicsNormalized, 2);
+		});
+
+		// Issue #46: width-lossy rewrite was always 32-bit even for i64 operands.
+		test('#46: i64 ctpop/ctlz/cttz/bswap map to *ll / bswap64', () => {
+			const src = [
+				'a = __unknown_llvm.intr.ctpop.i64(x);',
+				'b = __unknown_llvm.intr.ctlz.i64(x);',
+				'c = __unknown_llvm.intr.cttz.i64(x);',
+				'd = __unknown_llvm.intr.bswap.i64(x);',
+			].join(' ');
+			const r = cleanupHelixSource(src);
+			assert.ok(r.source.includes('__builtin_popcountll(x)'), r.source);
+			assert.ok(r.source.includes('__builtin_clzll(x)'), r.source);
+			assert.ok(r.source.includes('__builtin_ctzll(x)'), r.source);
+			assert.ok(r.source.includes('__builtin_bswap64(x)'), r.source);
+			assert.strictEqual(r.stats.intrinsicsNormalized, 4);
+		});
+
+		test('#46: i16 bswap maps to bswap16', () => {
+			const r = cleanupHelixSource('y = __unknown_llvm.intr.bswap.i16(w);');
+			assert.ok(r.source.includes('__builtin_bswap16(w)'));
 		});
 
 		test('leaves unknown intrinsics alone', () => {

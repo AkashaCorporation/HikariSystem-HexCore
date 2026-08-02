@@ -39,10 +39,24 @@ export interface ArchMapResult {
  * stp/mov/add/ldp/ret prologue, and a bl+cbz+ret function now lift to complete,
  * valid aarch64 LLVM IR. (Helix structuring of ARM64 IR is a separate downstream
  * concern and may still stub.)
+ *
+ * NOTE (FIX-106): 'x64' -> 'amd64_avx' (was 'amd64'). The plain 'amd64' Remill
+ * arch lacks AVX/AVX2 (VEX-encoded YMM) semantics, so every VZEROUPPER / VMOVUPS /
+ * VFMADD231PS / VMULPS etc. in a real-world x64 binary failed with "requires the
+ * amd64_avx architecture semantics to lift but was decoded using the amd64
+ * architecture" and was stubbed -> silently dropped vector code. A benchmark sweep
+ * (LOP/WWZ/ROTTR/SOTTR, 42 fns) showed ~24% of functions hit this. Switching to
+ * the 'amd64_avx' superset arch (already shipped + listed by getSupportedArchs)
+ * cut HandleUnsupported on AVX functions from 174->12 and 47->12, recovered the
+ * dropped vector bodies, and is a NO-OP on non-AVX functions (byte-identical
+ * output, e.g. a plain fn stayed L20/95%). 'amd64_avx512' was tried and is NOT
+ * better (same residual 12, slightly worse structuring), so avx (not avx512) is
+ * the sweet spot; the residual ~12 are a separate, smaller exotic-insn gap.
+ * x86 -> 'x86_avx' is the analogous follow-up (not yet validated; left as 'x86').
  */
 const ARCH_MAP: Record<string, string> = {
 	'x86': 'x86',
-	'x64': 'amd64',
+	'x64': 'amd64_avx',
 	'arm64': 'aarch64',
 };
 
@@ -52,10 +66,10 @@ const ARCH_MAP: Record<string, string> = {
  * @param os Sistema operacional opcional (auto-detectado se omitido)
  */
 export function mapCapstoneToRemill(arch: ArchitectureConfig, os?: string): ArchMapResult {
-	const remillArch = ARCH_MAP[arch];
-	if (!remillArch) {
+	if (!Object.prototype.hasOwnProperty.call(ARCH_MAP, arch)) {
 		return { supported: false, remillArch: '' };
 	}
+	const remillArch = ARCH_MAP[arch];
 	return {
 		supported: true,
 		remillArch,
@@ -67,7 +81,7 @@ export function mapCapstoneToRemill(arch: ArchitectureConfig, os?: string): Arch
  * Verifica se uma arquitetura Capstone possui suporte no Remill.
  */
 export function isArchSupported(arch: ArchitectureConfig): boolean {
-	return arch in ARCH_MAP;
+	return Object.prototype.hasOwnProperty.call(ARCH_MAP, arch);
 }
 
 /**

@@ -1,6 +1,6 @@
 {
   "name": "hexcore-llvm-mc",
-  "version": "1.0.0",
+	"version": "1.0.2",
   "description": "LLVM MC-based assembler bindings for Node.js - Part of HikariSystem HexCore",
   "main": "index.js",
   "module": "index.mjs",
@@ -62,12 +62,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/LXrdKnowkill/hexcore-llvm-mc"
+    "url": "https://github.com/AkashaCorporation/hexcore-llvm-mc.git"
   },
   "bugs": {
-    "url": "https://github.com/LXrdKnowkill/hexcore-llvm-mc/issues"
+    "url": "https://github.com/AkashaCorporation/hexcore-llvm-mc/issues"
   },
-  "homepage": "https://github.com/LXrdKnowkill/hexcore-llvm-mc#readme",
+  "homepage": "https://github.com/AkashaCorporation/hexcore-llvm-mc#readme",
   "gypfile": true,
   "binary": {
     "napi_versions": [

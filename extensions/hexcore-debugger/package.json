@@ -2,9 +2,9 @@
 	"name": "hexcore-debugger",
 	"displayName": "HexCore Debugger",
 	"description": "Emulation-based debugger using Unicorn Engine for PE/ELF binary analysis",
-	"version": "2.1.5",
+	"version": "2.1.9",
 	"publisher": "hikarisystem",
-	"license": "MIT",
+	"license": "GPL-2.0-only",
 	"engines": {
 		"vscode": "^1.75.0"
 	},
@@ -33,6 +33,7 @@
 		"onCommand:hexcore.debug.restoreSnapshot",
 		"onCommand:hexcore.debug.unicornStatus",
 		"onCommand:hexcore.debug.emulateHeadless",
+		"onCommand:hexcore.debug.emulateFullHeadless",
 		"onCommand:hexcore.debug.continueHeadless",
 		"onCommand:hexcore.debug.stepHeadless",
 		"onCommand:hexcore.debug.readMemoryHeadless",
@@ -43,6 +44,10 @@
 		"onCommand:hexcore.debug.restoreSnapshotHeadless",
 		"onCommand:hexcore.debug.exportTraceHeadless",
 		"onCommand:hexcore.debug.searchMemoryHeadless",
+		"onCommand:hexcore.debug.writeMemoryHeadless",
+		"onCommand:hexcore.debug.setRegisterHeadless",
+		"onCommand:hexcore.debug.setStdinHeadless",
+		"onCommand:hexcore.debug.disposeHeadless",
 		"onView:hexcore.debugger.view",
 		"onView:hexcore.debugger.trace"
 	],

@@ -1,6 +1,10 @@
-# HexCore Automation — v3.8.0
+# HexCore Automation - v3.8.3 RC
 
 HexCore supports running analysis pipelines from workspace job files.
+
+This document describes the `3.8.3` release-candidate contract. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
+
+Relevant integrated versions: disassembler `1.4.27`, debugger `2.1.9`, Revenant `0.4.0`, Capstone `1.3.5`, Remill `0.5.1`, Unicorn `1.3.1`, Souper `0.2.0`, and Helix `0.9.3`. The Elixir IDE wrapper remains `1.0.0`, while its native engine and dependency release are `1.0.3`.
 
 ## How It Works
 
@@ -13,7 +17,7 @@ HexCore recognizes any file matching the pattern `*.hexcore_job.json`:
 | `.hexcore_job.json` | `.hexcore_job.json` | **Canonical** — default for `Run Job`, auto-detected first |
 | `{name}.hexcore_job.json` | `sotr-triage.hexcore_job.json` | **Named** — auto-detected by watcher + queue picker |
 
-Agents can create multiple named jobs in a workspace and ALL will be auto-detected:
+Agents can create multiple named jobs in a workspace. Root-level jobs are discovered at startup; the recursive watcher handles later create/change events anywhere under the workspace:
 
 ```
 my-project/
@@ -25,8 +29,9 @@ my-project/
 
 ### Execution
 
-- **Auto-run:** HexCore watches `**/*.hexcore_job.json` and runs automatically on create/change.
-- Auto-run serializes repeated triggers to avoid overlapping runs.
+- **Startup auto-run:** HexCore discovers root-level canonical and named jobs.
+- **Watcher auto-run:** HexCore watches `**/*.hexcore_job.json` recursively and runs automatically on later create/change events.
+- Watch events use a 350 ms debounce, content deduplication, a 2500 ms content-hash cooldown, and an output-directory loop breaker.
 - **Manual run:** `Run HexCore Automation Job` (`hexcore.pipeline.runJob`) — finds canonical `.hexcore_job.json` first, then any named `*.hexcore_job.json`.
 - **Queue job:** `Queue Job` (`hexcore.pipeline.queueJob`) — file picker shows ALL `*.hexcore_job.json` files in workspace. **(v3.8.0)**
 - **Cancel job:** `Cancel Queued Job` (`hexcore.pipeline.cancelJob`) — cancel by job ID. **(v3.8.0)**
@@ -40,13 +45,20 @@ my-project/
 - Diagnose health: `Run HexCore Pipeline Doctor` (`hexcore.pipeline.doctor`).
 - Schema validation via `hexcore-disassembler/schemas/hexcore-job.schema.json`.
 - Job execution writes `hexcore-pipeline.log` and `hexcore-pipeline.status.json` to `outDir`.
+- Execution has a mandatory preflight. Validation errors write `hexcore-pipeline.validation.json` and a terminal error status; no command is dispatched.
+
+### Output Directory Security
+
+By default, `outDir` must resolve inside either a workspace folder or the directory containing the job file. Each step's `output.path` must also remain strictly inside `outDir`; absolute step-output paths and `..` escapes are rejected.
+
+Set `hexcore.pipeline.allowExternalOutDir` to `true` only when the user deliberately needs an external destination. Job files can auto-run, so this setting expands their write authority. Windows containment is case-insensitive: drive-letter or segment-case differences do not make an in-workspace path external.
 
 ## Example Job
 
 ```json
 {
   "file": "C:\\samples\\target.exe",
-  "outDir": "C:\\reports\\target",
+  "outDir": ".\\hexcore-reports\\target",
   "priority": "normal",
   "quiet": true,
   "steps": [
@@ -88,6 +100,8 @@ Each step supports optional controls:
 | `retryDelayMs` | `1000` | Delay between retries (ms) |
 | `expectOutput` | `true` | Validate output file existence |
 | `continueOnError` | `false` | Continue remaining steps after failure |
+
+The top-level `continueOnError` value is inherited by every step that does not set its own value. A step-level value always wins.
 
 ---
 
@@ -195,7 +209,7 @@ Steps can reference outputs from previously-completed steps using `$step[N]` tok
       "output": { "path": "function.ll" }
     },
     {
-      "cmd": "hexcore.helix.decompile",
+      "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[0].output" }
     }
   ]
@@ -209,7 +223,7 @@ Steps can reference outputs from previously-completed steps using `$step[N]` tok
   "steps": [
     { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "test.exe" } },
     {
-      "cmd": "hexcore.helix.decompile",
+      "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[0].result.irOutputPath" }
     }
   ]
@@ -250,16 +264,22 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
 | `hexcore.disasm.analyzeAll` | 180s | Deep analysis: prolog scan, function discovery, xrefs | x86, x64, ARM, ARM64, MIPS |
+| `hexcore.disasm.detectPacker` | 60s | Detect UPX, Themida, VMProtect, ASPack, Enigma, MPRESS, or unknown packing evidence. Detection only: no unpacking and no external UPX dependency. | All |
 | `hexcore.disasm.buildFormula` | 90s | Symbolic expression extraction from instruction chains | x86, x64, ARM, ARM64 |
 | `hexcore.disasm.checkConstants` | 90s | Validate numeric annotations against instruction immediates | All |
 | `hexcore.disasm.searchStringHeadless` | 120s | Search string references (headless variant) | All |
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
 | `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble N instructions starting at a given address | x86, x64, ARM, ARM64, MIPS |
 | `hexcore.disasm.liftToIR` | 120s | Lift machine code to LLVM IR via Remill engine | x86, x64 |
-| `hexcore.rellic.decompile` | 180s | ~~Decompile binary to pseudo-C via Rellic~~ **(DEPRECATED — use `hexcore.helix.decompile`)** | x86, x64 |
-| `hexcore.rellic.decompileIR` | 120s | ~~Decompile pre-lifted LLVM IR text to pseudo-C via Rellic~~ **(DEPRECATED — use `hexcore.helix.decompileIR`)** | x86, x64 |
-| `hexcore.helix.decompile` | 180s | **Decompile binary to pseudo-C via Helix MLIR pipeline** (lift + full pass pipeline in one step) | x86, x64 |
-| `hexcore.helix.decompileIR` | 180s | **Decompile pre-lifted .ll file to pseudo-C via Helix MLIR pipeline** — use `irPath` to specify the IR file | x86, x64 |
+| `hexcore.rellic.decompile` | 180s | Legacy compatibility surface. Rellic is disabled for new development; use Helix. | x86, x64 |
+| `hexcore.rellic.decompileIR` | 120s | Legacy compatibility surface for pre-lifted IR; use Helix. | x86, x64 |
+| `hexcore.helix.decompile` | 180s | Decompile a **native** binary through Remill and the Helix MLIR pipeline. Managed inputs return an honesty marker instead of fake native pseudo-C. | x86, x64; experimental ARM64 route |
+| `hexcore.helix.decompileIR` | 180s | Decompile a pre-lifted `.ll` file through Helix; pass the producer path in `irPath`. | IR produced by a supported lift |
+| `hexcore.revenant.decompile` | 180s | Recover C# from classic CLR PE or a supported .NET single-file apphost via the bundled ICSharpCode.Decompiler route. | Managed .NET |
+| `hexcore.revenant.decompileIL` | 180s | Recover IL from classic CLR PE or a supported .NET single-file apphost. | Managed .NET |
+| `hexcore.hql.scanHeadless` | 180s | Decompile one or more functions and evaluate semantic signatures over Helix HAST. | Helix-supported targets / IR |
+| `hexcore.souper.optimize` | 60s | Optimize LLVM IR with Souper/Z3. Intended for explicit `.ll` experiments, MBA, crypto, and bitwise-heavy code. | LLVM IR |
+| `hexcore.extractStructInfo` | 30s | Export BTF/DWARF struct and function type information from the loaded ELF analysis. | ELF with BTF or DWARF |
 | `hexcore.disasm.rttiScanHeadless` | 120s | Scan PE binary for MSVC RTTI Type Descriptors, returns class names and offsets **(v3.7.3)** | PE only |
 | `hexcore.disasm.searchBytesHeadless` | 120s | AOB scan with wildcard support — finds byte patterns across the entire binary **(v3.7.3)** | All |
 | `hexcore.disasm.extractStrings` | 180s | Section-filtered string extraction with PE/ELF section selection **(v3.7.4)** | All |
@@ -269,6 +289,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.disasm.retypeFunction` | 10s | Change function return type in the session DB **(v3.7.4)** | All |
 | `hexcore.disasm.setBookmark` | 10s | Set a named bookmark at an address in the session DB **(v3.7.4)** | All |
 | `hexcore.disasm.getSessionDbPath` | 10s | Returns the path to the `.hexcore_session.db` for the current binary **(v3.7.4)** | All |
+
+`hexcore.hql.scanFunction` and `hexcore.elfanalyzer.analyzeActive` are registered but interactive-only. They are not substitutes for the headless commands in jobs.
 
 ### Hex Viewer
 
@@ -453,13 +475,23 @@ The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command t
 | `hexcore.pipeline.cancelJob` | 30s | Cancel a queued or running job by ID **(v3.8.0)** |
 | `hexcore.pipeline.jobStatus` | 30s | Get status of a specific job or all jobs **(v3.8.0)** |
 
+### Oracle Preview Commands
+
+| Command | Timeout | Status |
+|---------|---------|--------|
+| `hexcore.oracle.inspectConfig` | 10s | `v3.9.0-preview.oracle`, gated by `hexcore.oracle.enabled` |
+| `hexcore.oracle.listSessions` | 10s | `v3.9.0-preview.oracle`, gated by `hexcore.oracle.enabled` |
+| `hexcore.oracle.demoHeadless` | 30s | `v3.9.0-preview.oracle`, gated by `hexcore.oracle.enabled` |
+
+These commands are declared pipeline capabilities so preview work can be validated, but they are not part of the stable `3.8.3` release workflow. Do not make a release-validation job depend on them.
+
 ### Pipeline Job Queue — v3.8.0
 
 HexCore v3.8.0 introduces a job queue system for managing multiple automation jobs with priority levels.
 
 **Named job files:** The queue picker and watcher accept any file matching `*.hexcore_job.json`. Agents can create descriptive names like `sotr-strings.hexcore_job.json` and they will be auto-detected without manual intervention.
 
-**Worker pool size (v3.8.2):** how many jobs run concurrently is the **`hexcore.pipeline.queue.poolSize`** VS Code setting (integer, default `2`, range `1`–`16`). Higher = more throughput but more memory/CPU. A change applies on the **next window reload** — the live pool is not resized and in-flight jobs finish on their current workers.
+**Worker pool size (v3.8.3 RC):** `hexcore.pipeline.queue.poolSize` configures logical queue slots (integer, default `2`, range `1`–`16`). The extensions and native wrappers share one Extension Host and active-engine state, so every job containing a stateful command is serialized for its complete lifetime. Only commands on the audited stateless allowlist can use parallel slots. A change applies on the **next window reload**.
 
 **Session affinity (v3.8.2):** a job tagged with a `sessionId` (see `queueJob` below) is pinned to a single worker for the life of that `keepAlive` emulation session, so session state is never split across workers. A session job waits for *its* worker if that worker is busy (it never steals a free one); stateless jobs (no `sessionId`) keep the original any-free-worker behavior.
 
@@ -606,6 +638,8 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.debug.emulateWithArch` | Opens prompts and UI |
 | `hexcore.rellic.decompileUI` | Opens decompile panel with editor integration **(DEPRECATED)** |
 | `hexcore.helix.decompileUI` | Opens Helix decompile panel with editor integration |
+| `hexcore.hql.scanFunction` | Scans the function in the active disassembler editor and shows UI notifications |
+| `hexcore.elfanalyzer.analyzeActive` | Analyzes the active editor file |
 | `hexcore.pipeline.runJob` | Recursive pipeline invocation is not supported |
 | `hexcore.elixir.version` | Shows VS Code toast with engine version — use `hexcore.elixir.smokeTestHeadless` for pipelines **(v3.8.0)** |
 | `hexcore.emulator.switch` | Opens the QuickPick switcher for `hexcore.emulator` setting — status-bar UX only **(v3.8.0)** |
@@ -630,10 +664,22 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.decompile` | `hexcore.helix.decompile` |
 | `hexcore.decompile.ir` | `hexcore.helix.decompileIR` |
 | `hexcore.liftir` | `hexcore.disasm.liftToIR` |
+| `hexcore.souper` | `hexcore.souper.optimize` |
+| `hexcore.optimize` | `hexcore.souper.optimize` |
+| `hexcore.superoptimize` | `hexcore.souper.optimize` |
+| `hexcore.dotnet.decompile` | `hexcore.revenant.decompile` |
+| `hexcore.decompile.dotnet` | `hexcore.revenant.decompile` |
+| `hexcore.revenant.decompileCSharp` | `hexcore.revenant.decompile` |
+| `hexcore.dotnet.decompileIL` | `hexcore.revenant.decompileIL` |
+| `hexcore.decompile.il` | `hexcore.revenant.decompileIL` |
 | `hexcore.disasm.disassembleAt` | `hexcore.disasm.disassembleAtHeadless` |
+| `hexcore.hql.scan` | `hexcore.hql.scanHeadless` |
+| `hexcore.hql.scanFunctions` | `hexcore.hql.scanHeadless` |
 | `hexcore.debug.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
 | `hexcore.unicorn.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
 | `hexcore.unicorn.searchMemoryHeadless` | `hexcore.debug.searchMemoryHeadless` |
+| `hexcore.struct` | `hexcore.extractStructInfo` |
+| `hexcore.structInfo` | `hexcore.extractStructInfo` |
 | `hexcore.disasm.rttiScan` | `hexcore.disasm.rttiScanHeadless` |
 | `hexcore.disasm.scanRtti` | `hexcore.disasm.rttiScanHeadless` |
 | `hexcore.disasm.searchBytes` | `hexcore.disasm.searchBytesHeadless` |
@@ -683,7 +729,26 @@ When `helix.decompile` runs, it consults the session DB and applies renames/rety
 
 ### HQL Integration
 
-The HQL matcher reads the session DB via `SessionDbReader` to apply analyst-defined names/types to the HAST before running pattern queries.
+The HQL matcher reads the session DB via `SessionDbReader` to apply analyst-defined names/types to the HAST before running pattern queries. `hexcore.hql.scanHeadless` evaluates the built-in signature library over Helix HAST, not regex over rendered pseudo-C.
+
+Use one of these input forms:
+
+- Binary target plus `address` or `addresses`.
+- `irPath` for one retained LLVM IR artifact.
+- `irText` for one inline IR target.
+
+The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`, and per-target results. Each finding contains `signatureId`, `confidence`, and `matchCount`.
+
+```json
+{
+  "cmd": "hexcore.hql.scanHeadless",
+  "args": {
+    "addresses": ["0x140001000", "0x140002000"]
+  },
+  "output": { "path": "hql-findings.json" },
+  "timeoutMs": 180000
+}
+```
 
 ### Schema
 
@@ -854,9 +919,11 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 - **PE Analyzer** is PE-format only. Use `hexcore.elfanalyzer.analyze` for ELF binaries.
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
-- **Remill IR Lifter** requires x86/x64 machine code. ARM/ARM64 lifting is not yet supported.
-- **Rellic Decompiler** **(DEPRECATED -- still present as of v3.8.2; removal deferred)** -- Walks LLVM IR and emits pseudo-C with mnemonic annotations. Superseded by Helix in v3.7.0. The `hexcore.rellic.decompile` / `hexcore.rellic.decompileIR` commands remain registered and functional for backward compatibility (the planned v3.8.0 removal did not happen). Use `hexcore.helix.decompile` / `hexcore.helix.decompileIR` instead. v3.7.1 adds `optimizationPasses` (DCE, ConstFold); the `optimizerStep: 'souper'` hook on the **Rellic** path is a **no-op stub** (it logs a warning and falls through without optimizing). Souper is actually implemented for **Helix** (default-on `souper` arg), not Rellic.
-- **Helix Decompiler** (v0.4+) runs a full MLIR pass pipeline on Remill IR: type propagation, calling convention recovery, structured control flow reconstruction, and PseudoC emission with confidence scoring. Output is substantially higher quality than Rellic. Requires x86/x64 machine code. Use `hexcore.helix.decompile` (one-step) or `liftToIR` + `hexcore.helix.decompileIR` (two-step). Pass `optimizeIR: false` to skip MLIR optimization passes when debugging pass pipeline issues.
+- **Remill IR Lifter** supports x86, x86-64, and AArch64 in the current `0.5.1` package. ISA-extension coverage is not uniform; low AArch64 coverage is reported rather than hidden.
+- **Rellic Decompiler** is a disabled legacy compatibility surface. Its commands remain directly addressable for old jobs, but new work must use Helix. Do not claim a removal date that has not been scheduled.
+- **Helix Decompiler** runs the MLIR lowering/pass pipeline on Remill IR: type propagation, calling-convention recovery, structured control-flow reconstruction, and PseudoC emission with confidence scoring. x86/x64 is the qualified route; AArch64 remains experimental and must be judged against retained IR/disassembly. Use `hexcore.helix.decompile` or `liftToIR` + `hexcore.helix.decompileIR`. Pass `optimizeIR: false` only when isolating pass-pipeline behavior.
+- **Managed routing** is explicit: classic CLR PE and detected .NET single-file apphosts are not native Helix inputs. Helix emits `managed: true`, `managedFormat`, and `confidence: 0`; use Revenant for C# or IL.
+- **Souper** is tri-state on the Helix route in `3.8.3`: omitted or `"auto"` runs only on sufficiently bitwise/rotate-heavy IR, `true` forces it, and `false` disables it. The standalone `hexcore.souper.optimize` command is for explicit IR experiments.
 - **Auto-backtrack** (v3.7.3+) — `disassembleAtHeadless`, `helix.decompile`, and `liftToIR` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. v3.7.4 adds `forceProbe` mode, Capstone backward disassembly, ftrace preamble skip, and `endbr64` recognition. Disable with `autoBacktrack: false`.
 - **Section-filtered strings** (v3.7.4) — `hexcore.disasm.extractStrings` accepts `sections: [".rdata", ".data"]` to scan only specific PE/ELF sections. Eliminates noise from `.text`.
 - **Session persistence** (v3.7.4) — `.hexcore_session.db` stores function renames, variable retypes, comments, bookmarks, and `analyzeAll` cache across sessions. Keyed by binary SHA-256.
@@ -1099,7 +1166,7 @@ Decompile binary to pseudo-C in one step: lifts machine code via Remill, then de
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `100` | Number of instructions to lift before decompiling. |
-| `optimizerStep` | `string` | `'llvm-passes'` | Optimizer: `'none'`, `'llvm-passes'` (DCE + ConstFold), `'souper'` (**no-op stub on the Rellic path** — logs a warning and falls through). Souper is implemented for **Helix** instead, via the default-on `souper` arg on `hexcore.helix.decompile` / `decompileIR`. **(v3.7.1)** |
+| `optimizerStep` | `string` | `'llvm-passes'` | Optimizer: `'none'`, `'llvm-passes'` (DCE + ConstFold), `'souper'` (**no-op stub on the Rellic path**). Souper is implemented for Helix with the `3.8.3` tri-state gate. **(v3.7.1)** |
 | `optimizationPasses` | `string[]` | — | Specific LLVM passes to run: `'dce'`, `'constfold'`, `'simplifycfg'`. Only used when `optimizerStep` is `'llvm-passes'`. **(v3.7.1)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
@@ -1158,8 +1225,10 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `150` | Number of instructions to lift before decompiling. |
 | `optimizeIR` | `boolean` | `true` | When `false`, skips MLIR optimization passes and emits IR as-is. Useful for debugging pass pipeline issues. **(v3.7.3)** |
-| `souper` | `boolean` | `true` | Run the **Souper superoptimizer** (Google Souper + Z3 SMT) on the Remill IR *before* Helix decompiles it — proves and collapses semantically-equivalent-but-simpler sequences (e.g. `sub x,x -> 0`). **On by default** when the `hexcore-souper` native module is present; pass `false` to skip. Near-zero effect on unprotected binaries (e.g. games like ROTTR), valuable on obfuscated / MBA / crypto targets. **(v3.8.0)** |
+| `souper` | `boolean \| "auto"` | `"auto"` | Tri-state gate: omitted/`"auto"` runs only when IR signal density justifies solver cost; `true` forces optimization; `false` disables it. |
 | `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
+| `souperAutoThreshold` | `number` | `0.25` | Minimum bitwise/rotate signal density used by the automatic gate. |
+| `souperAutoMinOps` | `number` | `8` | Minimum number of signal operations used by the automatic gate. |
 | `autoBacktrack` | `boolean` | `true` | Auto-detects function boundaries and backtracks to the real function start if the address is mid-function. Set to `false` to disable. **(v3.7.3)** |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. |
 
@@ -1176,6 +1245,8 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 ```
 
 > **Note:** Helix requires LLVM IR from `liftToIR` internally. For large functions, prefer the two-step variant (`liftToIR` + `helix.decompileIR`) so you can inspect the IR separately.
+
+For detected managed inputs, a successful command can intentionally return `{ "managed": true, "managedFormat": "dotnet-cil" | "dotnet-single-file", "confidence": 0 }` and write an explanatory marker. This is correct engine routing, not native pseudo-C. Follow with Revenant.
 
 ---
 
@@ -1197,8 +1268,10 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `irPath` | `string` | *(required)* | Path to a `.ll` LLVM IR file. Relative paths are resolved from the workspace root. Absolute paths are used as-is. |
-| `souper` | `boolean` | `true` | Run the **Souper superoptimizer** (Google Souper + Z3 SMT) on the IR before decompiling. **On by default** when `hexcore-souper` is present; pass `false` to skip. Near-zero effect on unprotected binaries, valuable on obfuscated / MBA / crypto targets. **(v3.8.0)** |
+| `souper` | `boolean \| "auto"` | `"auto"` | Tri-state gate: automatic density-based selection, forced on with `true`, or off with `false`. |
 | `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
+| `souperAutoThreshold` | `number` | `0.25` | Minimum bitwise/rotate signal density used by the automatic gate. |
+| `souperAutoMinOps` | `number` | `8` | Minimum number of signal operations used by the automatic gate. |
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. Relative to `outDir`. |
 
 > **Important:** `irPath` must be the **path to the `.ll` file**, not inline IR text. The pipeline runner always sets `options.file` to the binary target, so `irPath` is the dedicated arg for specifying the IR file path.
@@ -1228,6 +1301,87 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 ```
 
 > **Tip:** Prefer `"irPath": "$step[N].output"` (N = the 0-based index of the `liftToIR` step) over a hardcoded path. The runner resolves it to the exact file the lift step wrote, so it cannot drift if `outDir` or the lift's `output.path` changes. A mismatched hardcoded `irPath` makes `decompileIR` fail with `IR file not found`, which the pipeline surfaces only as the generic `Expected output file was not created` — the real error is in the Extension Host console (Help > Toggle Developer Tools > Console).
+
+---
+
+### `hexcore.disasm.detectPacker`
+
+Detect-only packer triage. It does not unpack a sample and does not call a user-installed UPX executable.
+
+```json
+{
+  "cmd": "hexcore.disasm.detectPacker",
+  "output": { "path": "packer.json" },
+  "timeoutMs": 60000
+}
+```
+
+The result exposes flat `packed`, `family`, and `confidence` fields suitable for `onResult`, plus markers, detected families, recommendation, capability tags, file size, and an optional UPX version hint. Known families are `upx`, `themida`, `vmprotect`, `aspack`, `enigma`, `mpress`, `unknown`, and `none`. Run after `analyzeAll` when richer loaded-section/string evidence is useful; direct raw-file detection also works.
+
+### `hexcore.revenant.decompile` / `hexcore.revenant.decompileIL`
+
+Use Revenant for managed .NET inputs. C# mode optionally accepts `type` to target a specific type. Both commands accept the pipeline-injected `file`, `quiet`, and `output` contract.
+
+```json
+{
+  "file": ".\\managed-target.exe",
+  "outDir": ".\\hexcore-reports\\managed",
+  "steps": [
+    {
+      "cmd": "hexcore.revenant.decompile",
+      "output": { "path": "target.cs" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.revenant.decompileIL",
+      "output": { "path": "target.il" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+The bundled self-contained engine is preferred. A system `ilspycmd` fallback can handle classic assemblies, but single-file apphosts require the bundled route. Revenant parses the managed artifact; it does not execute the sample.
+
+### `hexcore.hql.scanHeadless`
+
+Pass binary `address`/`addresses`, or one `irPath`/`irText` target. The output is a semantic HAST-signature report.
+
+```json
+{
+  "cmd": "hexcore.hql.scanHeadless",
+  "args": { "addresses": ["0x140001000", "0x140002000"] },
+  "output": { "path": "hql-findings.json" },
+  "timeoutMs": 180000
+}
+```
+
+The report declares `status: "ok" | "partial" | "failed"`, `completedTargetCount`, and `failedTargetCount`. A partial child result fails the pipeline step by default. Add step-level `"allowPartial": true` only when downstream logic explicitly accepts incomplete semantic coverage; the step and terminal job remain visibly `partial`.
+
+### `hexcore.souper.optimize`
+
+Optimize LLVM IR supplied through `irPath`, `irText`, or the job `file` when that file is itself `.ll`. Options are `maxCandidates`, `timeoutMs`, and `aggressiveMode`.
+
+```json
+{
+  "file": ".\\function.ll",
+  "outDir": ".\\hexcore-reports\\souper",
+  "steps": [
+    {
+      "cmd": "hexcore.souper.optimize",
+      "args": { "maxCandidates": 128, "timeoutMs": 30000, "aggressiveMode": false },
+      "output": { "path": "function.optimized.ll" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+The result reports `candidatesFound`, `candidatesReplaced`, and `optimizationTimeMs`. Zero replacements is a valid result, especially for ordinary non-MBA code.
+
+### `hexcore.extractStructInfo`
+
+After loading/analyzing an ELF containing BTF or DWARF, this command exports struct/function type data and optionally scopes it with `functionName`. Both direct string outputs and the runner's `{ path, format }` output contract are supported; parent directories are created before writing.
 
 ---
 
@@ -1314,7 +1468,7 @@ If no DefenderYara catalog is indexed, `catalogIndexed` is `0`, every requested 
 
 Unified single-shot emulation: loads the binary, optionally configures STDIN and breakpoints, runs emulation up to the instruction budget, collects full state, and disposes the session.
 
-> **Note on IPC Smart Sync:** Emulation of x64 and ARM64 ELFs occurs in an isolated Node.js Worker process. To ensure the headless pipeline has perfect visibility of dynamically allocated memory (for `__printf_chk`, `puts`, `getline`), HexCore uses an aggressive Smart Sync strategy that seamlessly mirrors the Worker's stack and heap back to the host engine prior to any API interception. This guarantees flawless automated solving of complex VMs.
+> **Note on IPC Smart Sync:** Emulation of x64 and ARM64 ELFs occurs in an isolated Node.js worker process. Smart Sync mirrors relevant worker stack/heap state back to the host before API interception so hooks such as `__printf_chk`, `puts`, and `getline` can inspect dynamic buffers. This improves observability but does not guarantee that an unsupported VM, syscall, or anti-emulation path will execute correctly.
 
 ```json
 {
@@ -1607,7 +1761,7 @@ Any step can specify custom output path and format:
   }
 }
 ```
-Relative output paths are resolved from `outDir`.
+Output paths must be relative to and contained inside `outDir`. Absolute paths, `..` escapes, and paths resolving to the directory itself fail preflight.
 
 ---
 
@@ -1615,7 +1769,10 @@ Relative output paths are resolved from `outDir`.
 
 - Every step runs in headless mode (`quiet: true`) and receives `file`.
 - If a step does not define `output`, HexCore auto-generates output files inside `outDir`.
+- The complete job is validated before the first command executes. Invalid targets, capabilities, references, or output paths stop the job at preflight.
 - Before each step, the runner verifies command registration and attempts to activate the owner extension when needed.
+- PE-only, ELF-only, and minidump-only parsers are skipped from header metadata when the target format is incompatible.
+- A command that returns transport success but reports semantic failure (`success:false`, `terminatedWithError`, child errors, or `status:failed`) fails the step. Partial results require `allowPartial:true`.
 - If command activation fails, `hexcore-pipeline.status.json` includes owner-extension diagnostics.
 - `outputPath` is only reported for steps that actually request/provide output.
 - Commands marked as interactive are blocked with a clear error.
@@ -1625,17 +1782,15 @@ Relative output paths are resolved from `outDir`.
 `hexcore-pipeline.status.json` exposes extra metrics for dashboards and report
 composers (all backward compatible — missing on older runs):
 
-- **Per-step** — `outputBytes` (size of the artifact written by the step, or
-  `undefined` if no output). Lets you spot empty/truncated outputs without
-  opening the file.
+- **Per-step** — `attemptCount`, `outputBytes`, and `artifactProvenancePath`. Each existing output receives a `.provenance.json` sidecar containing artifact SHA-256, binary identity, command, semantic status, context generation, worker/job identity, and owner-extension versions.
+- **Run-level `provenance`** — `executionId`, optional queue/session IDs, `contextGeneration`, `binaryPath`, `binarySha256`, detected `binaryFormat`, architecture, and PE image base when available.
 - **Run-level `summary`** (populated on terminal status — `ok` / `error` /
   `partial`):
-  - `totalSteps`, `okCount`, `errorCount`, `skippedCount`
+  - `totalSteps`, `okCount`, `partialCount`, `errorCount`, `skippedCount`
   - `totalDurationMs` — wall-clock from `startedAt` to `finishedAt`
   - `slowestStepCmd` / `slowestStepMs` — slowest successful step (skip
     budgeting and retries dominate the honest timings)
-  - `queueSnapshot` — `{queued, running, done, failed, cancelled}` from the
-    `JobQueueManager` singleton if one is active.
+  - `queueSnapshot` — `{queued, running, done, failed, cancelled, includesCurrentJob:false}` from the `JobQueueManager` singleton if one is active.
 
 The runner writes `status.json` after every step (progressive observability),
 so a watcher tailing the file sees each transition live.
@@ -1645,7 +1800,7 @@ so a watcher tailing the file sees each transition live.
 ## Troubleshooting
 
 ### `Command '...' not found`
-- Confirm you are on HexCore v3.5.2+.
+- Confirm the installed build matches the HexCore `3.8.3` RC command surface.
 - Run `hexcore.pipeline.listCapabilities` and confirm the command appears.
 - Reload window after update to refresh extension activation.
 
@@ -1672,9 +1827,23 @@ so a watcher tailing the file sees each transition live.
 - Check step status in `hexcore-pipeline.status.json`.
 - If step failed/timed out, output file will not be created.
 
+### `Invalid "outDir"` / output resolves outside the allowed directory
+- Keep `outDir` under the workspace or the job-file directory.
+- Keep every step `output.path` relative and inside `outDir`; absolute paths and `..` escapes are rejected.
+- Only enable `hexcore.pipeline.allowExternalOutDir` for a deliberate external destination. This is a workspace security boundary, not a path-format workaround.
+
+### Helix returns `managed: true` and confidence `0`
+- The input is classic CLR or a detected .NET single-file apphost, so native Remill -> Helix is intentionally not applicable.
+- Run `hexcore.revenant.decompile` for C# and/or `hexcore.revenant.decompileIL` for IL.
+- Do not report the marker as a zero-quality native decompilation; it is routing evidence.
+
+### `hexcore.extractStructInfo` produces no output file
+- Confirm an earlier ELF analysis loaded BTF or DWARF and inspect the semantic error in `hexcore-pipeline.status.json`.
+- The runner object-output contract is supported in Disassembler 1.4.27; an older installed extension still needs to be upgraded.
+
 ### `hexcore.helix.decompileIR` fails / `Expected output file was not created`
-- **Use `"irPath": "$step[N].output"`** (N = the 0-based index of the `liftToIR` step) so the IR path always matches what the lift wrote. A hardcoded `irPath` that does not exactly match `outDir` + the lift step's `output.path` (drive casing, separators, every subfolder) makes `decompileIR` report `IR file not found`, which the pipeline surfaces only as the generic `Expected output file was not created`.
-- The true error is logged to the Extension Host console (Help > Toggle Developer Tools > Console), not to `hexcore-pipeline.status.json` — check there when a step "produced no output" for no obvious reason.
+- **Use `"irPath": "$step[N].output"`** (N = the 0-based index of the `liftToIR` step) so the IR path always matches what the lift wrote. A hardcoded path can drift from the actual artifact.
+- Disassembler 1.4.27 propagates the command's semantic error into `hexcore-pipeline.status.json`; the Extension Host console remains useful for native diagnostics.
 - Ensure `liftToIR` ran successfully (check its status in `hexcore-pipeline.status.json`); if it failed, no `.ll` exists for this step.
 - A relative `irPath` is resolved from the workspace root folder, not from `outDir` — another reason to prefer `$step[N].output`.
 
@@ -1732,10 +1901,11 @@ queue-launcher.hexcore_job.json ← orchestrator job
 
 ### Detection Priority
 
-1. **FileSystemWatcher** — watches `**/*.hexcore_job.json` for create/change events → auto-runs
-2. **Run Job** (`hexcore.pipeline.runJob`) — finds `.hexcore_job.json` first, then first `*.hexcore_job.json`
-3. **Queue Job** (`hexcore.pipeline.queueJob`) — file picker shows ALL `*.hexcore_job.json` in workspace
-4. **Validate Workspace** — scans ALL `*.hexcore_job.json`
+1. **Startup discovery** — auto-runs root-level canonical/named jobs; it does not recursively replay every pre-existing nested job
+2. **FileSystemWatcher** — watches `**/*.hexcore_job.json` recursively for later create/change events → auto-runs
+3. **Run Job** (`hexcore.pipeline.runJob`) — finds `.hexcore_job.json` first, then first `*.hexcore_job.json`
+4. **Queue Job** (`hexcore.pipeline.queueJob`) — file picker shows ALL `*.hexcore_job.json` in workspace
+5. **Validate Workspace** — scans ALL `*.hexcore_job.json`
 
 ### For Agents
 
@@ -1749,7 +1919,7 @@ workspace/
 └── hexcore-reports/                   ← output directory
 ```
 
-The agent does NOT need to ask the user to manually "Run Job" — the watcher picks up new files automatically.
+New or changed jobs are picked up by the watcher. For a pre-existing nested job after window startup, use Run Job/Queue Job or touch the file deliberately rather than assuming startup discovery executed it.
 
 ### Multi-Job Orchestration
 
@@ -1785,7 +1955,7 @@ A job can enqueue other jobs via `hexcore.pipeline.queueJob`:
 }
 ```
 
-Priority levels: `high` > `normal` > `low`. Default: `normal`. Concurrent workers: default `2`, configurable `1`–`16` via the `hexcore.pipeline.queue.poolSize` setting (v3.8.2).
+Priority levels: `high` > `normal` > `low`. Default: `normal`. Logical queue slots default to `2` and are configurable from `1`–`16`; stateful jobs still execute under the whole-job isolation gate.
 
 ### Built-in Presets
 

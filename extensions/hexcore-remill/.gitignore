@@ -1,5 +1,11 @@
 node_modules/
 build/
+__pycache__/
+*.pyc
+*.zip
+*.tar.gz
+*.log
+Logs.txt
 prebuilds/
 *.node
 *.obj
@@ -12,3 +18,13 @@ prebuilds/
 *.exp
 *.pdb
 .vs/
+
+# Dependency payloads are release assets, not source-tree commits.
+deps/*
+!deps/README.md
+!deps/manifest.json
+
+# Local probes and generated Helix diagnostics.
+src/shared_buffer_poc.ts
+helix_dump_*.mlir
+mlir_debug_dump.txt

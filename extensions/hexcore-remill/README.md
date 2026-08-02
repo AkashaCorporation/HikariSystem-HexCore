@@ -2,7 +2,7 @@
 
 Modern N-API bindings for [Remill](https://github.com/lifting-bits/remill) — lifts machine code to LLVM IR bitcode.
 
-Part of [HikariSystem HexCore](https://github.com/LXrdKnowkill/HikariSystem-HexCore).
+Part of [HikariSystem HexCore](https://github.com/AkashaCorporation/HikariSystem-HexCore).
 
 ## Supported Architectures
 
@@ -11,7 +11,10 @@ Part of [HikariSystem HexCore](https://github.com/LXrdKnowkill/HikariSystem-HexC
 | x86 (32-bit) | `x86`, `x86_avx`, `x86_avx512` |
 | x86-64 | `amd64`, `amd64_avx`, `amd64_avx512` |
 | AArch64 | `aarch64` |
-| SPARC | `sparc32`, `sparc64` |
+| SPARC | `sparc32` |
+
+`ARCH.SPARC64` remains exported for source compatibility, but construction is
+rejected because this package does not ship SPARC64 semantics.
 
 ## Usage
 
@@ -85,7 +88,8 @@ Returns list of supported architecture names.
 ## Building from Source
 
 ```bash
-# Prerequisites: LLVM 15+, CMake 3.21+, Ninja, clang-cl (Windows)
+# Prerequisites: Node 20.17+ (or 22.9+), LLVM 18, CMake 3.21+,
+# Ninja, clang-cl (Windows)
 
 # Build Remill deps first (see deps/README.md)
 npm run build
@@ -94,7 +98,9 @@ npm test
 
 ## Dependencies
 
-- [Remill](https://github.com/lifting-bits/remill) — static library
+- [Remill 6.0.1](https://github.com/lifting-bits/remill/releases/tag/v6.0.1)
+  (`0e324aee8c67a63ec759ef379dcfafa0b3cb1448`) — static library
+- [Sleigh](https://github.com/lifting-bits/sleigh) — static library and public headers
 - [LLVM 18](https://llvm.org/) — static libraries (Core, Support, BitReader, BitWriter, IRReader, etc.)
 - [Intel XED](https://github.com/intelxed/xed) — x86 instruction decoder (used by Remill)
 

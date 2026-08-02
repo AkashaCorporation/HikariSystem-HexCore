@@ -76,7 +76,7 @@ rule AntiVM_Generic_Virtual_Strings
         $s5 = "bochs" nocase
         $s6 = "KVM" nocase
     condition:
-        any of them
+        2 of them
 }
 
 rule AntiVM_Registry_VBox
@@ -121,6 +121,8 @@ rule AntiVM_CPUID_Opcode
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiVM"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         // cpuid: 0F A2
         $cpuid = { 0F A2 }
@@ -136,6 +138,8 @@ rule AntiVM_VMCALL_Opcode
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiVM"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         // vmcall: 0F 01 C1
         $vmcall = { 0F 01 C1 }

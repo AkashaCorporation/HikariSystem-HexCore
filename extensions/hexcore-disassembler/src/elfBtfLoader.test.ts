@@ -9,7 +9,15 @@
 
 import * as assert from 'assert';
 import 'mocha';
-import { parseBtfSection, resolveTypeSize } from './elfBtfLoader';
+import {
+	exportStructInfoJson,
+	getStructLayout,
+	parseBtfSection,
+	resolveTypeSize,
+	shouldPreferFunctionSignature,
+	type BTFData,
+	type BTFType,
+} from './elfBtfLoader';
 
 function btfHeader(typeOff: number, typeLen: number, strOff: number, strLen: number): Buffer {
 	const h = Buffer.alloc(24);
@@ -95,5 +103,122 @@ suite('elfBtfLoader.parseBtfSection', () => {
 		const size = resolveTypeSize(2, data);
 		// Before the clamp this was 4 * 0xFFFFFFFF = 17179869180.
 		assert.ok(size <= 0x40000000, `array size ${size} should be clamped to <= 1 GiB`);
+	});
+
+	test('preserves high member-offset bits when struct kflag is clear (#47)', () => {
+		const memberOffset = 0x01000008; // >2 MiB in bits; old unconditional mask produced 8
+		const scalar: BTFType = {
+			id: 1, kind: 1, kindName: 'int', name: 'int', sizeOrType: 4,
+		};
+		const owner: BTFType = {
+			id: 2, kind: 4, kindName: 'struct', name: 'huge',
+			sizeOrType: 0x300000, kflag: false,
+			members: [{ name: 'tail', typeId: 1, offset: memberOffset }],
+		};
+		const data: BTFData = {
+			types: new Map([[1, scalar], [2, owner]]),
+			namedTypes: new Map([['huge', owner]]),
+			typeCount: 2, version: 1, strings: [],
+		};
+
+		assert.strictEqual(getStructLayout('huge', data)?.members[0].offset, memberOffset);
+		assert.strictEqual(
+			exportStructInfoJson(data).structs.huge.fields[0].offset,
+			'0x200001',
+		);
+	});
+
+	test('masks bitfield-size bits only when struct kflag is set (#47)', () => {
+		const scalar: BTFType = {
+			id: 1, kind: 1, kindName: 'int', name: 'int', sizeOrType: 4,
+		};
+		const owner: BTFType = {
+			id: 2, kind: 4, kindName: 'struct', name: 'bits',
+			sizeOrType: 4, kflag: true,
+			members: [{ name: 'flag', typeId: 1, offset: 0x05000008 }],
+		};
+		const data: BTFData = {
+			types: new Map([[1, scalar], [2, owner]]),
+			namedTypes: new Map([['bits', owner]]),
+			typeCount: 2, version: 1, strings: [],
+		};
+
+		assert.strictEqual(getStructLayout('bits', data)?.members[0].offset, 8);
+		assert.strictEqual(exportStructInfoJson(data).structs.bits.fields[0].offset, '0x1');
+	});
+
+	test('exports a BTF type-id-zero tail as variadic metadata, not a parameter', () => {
+		const scalar: BTFType = {
+			id: 1, kind: 1, kindName: 'int', name: 'int', sizeOrType: 4,
+		};
+		const proto: BTFType = {
+			id: 2, kind: 13, kindName: 'func_proto', name: '', sizeOrType: 1,
+			params: [
+				{ name: 'format', typeId: 1 },
+				{ name: '', typeId: 0 },
+			],
+		};
+		const func: BTFType = {
+			id: 3, kind: 12, kindName: 'func', name: 'print_value', sizeOrType: 2,
+		};
+		const data: BTFData = {
+			types: new Map([[1, scalar], [2, proto], [3, func]]),
+			namedTypes: new Map(),
+			typeCount: 3, version: 1, strings: [],
+		};
+
+		const signature = exportStructInfoJson(data).functions.print_value;
+		assert.strictEqual(signature.variadic, true);
+		assert.strictEqual(signature.params.length, 1);
+		assert.strictEqual(signature.params[0].name, 'format');
+	});
+
+	test('prefers named definition parameters over an equal-arity declaration', () => {
+		const declaration = {
+			returnType: 'void',
+			params: [
+				{ index: 0, name: 'param_0', type: 'struct queue *' },
+				{ index: 1, name: 'param_1', type: 'bool' },
+			],
+		};
+		const definition = {
+			returnType: 'void',
+			params: [
+				{ index: 0, name: 'queue', type: 'struct queue *' },
+				{ index: 1, name: 'drain_queue', type: 'bool' },
+			],
+		};
+
+		assert.strictEqual(shouldPreferFunctionSignature(declaration, definition), true);
+		assert.strictEqual(shouldPreferFunctionSignature(definition, declaration), false);
+	});
+
+	test('preserves the existing signature when equal arity has fewer named parameters', () => {
+		const existing = {
+			returnType: 'void',
+			params: [{ index: 0, name: 'queue', type: 'struct queue *' }],
+		};
+		const candidate = {
+			returnType: 'void',
+			params: [{ index: 0, name: 'param_0', type: 'struct queue *' }],
+		};
+
+		assert.strictEqual(shouldPreferFunctionSignature(existing, candidate), false);
+	});
+
+	test('still prefers a signature with more parameters', () => {
+		const existing = {
+			returnType: 'void',
+			params: [{ index: 0, name: 'queue', type: 'struct queue *' }],
+		};
+		const candidate = {
+			returnType: 'void',
+			params: [
+				{ index: 0, name: 'param_0', type: 'struct queue *' },
+				{ index: 1, name: 'param_1', type: 'bool' },
+			],
+		};
+
+		assert.strictEqual(shouldPreferFunctionSignature(existing, candidate), true);
 	});
 });

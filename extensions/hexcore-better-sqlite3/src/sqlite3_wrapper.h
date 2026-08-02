@@ -91,6 +91,7 @@ private:
 	bool safeIntegers_;
 	bool rawMode_;
 	bool expandMode_;
+	bool pluckMode_;
 
 	static Napi::FunctionReference constructor;
 	friend class DatabaseWrapper;
@@ -105,6 +106,7 @@ private:
 	Napi::Value SafeIntegers(const Napi::CallbackInfo& info);
 	Napi::Value Raw(const Napi::CallbackInfo& info);
 	Napi::Value Expand(const Napi::CallbackInfo& info);
+	Napi::Value Pluck(const Napi::CallbackInfo& info);
 
 	// Property getters
 	Napi::Value GetSource(const Napi::CallbackInfo& info);

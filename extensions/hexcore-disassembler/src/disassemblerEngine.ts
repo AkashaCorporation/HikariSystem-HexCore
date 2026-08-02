@@ -9,6 +9,10 @@ import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
 import { SessionStore } from './sessionStore';
 import { lookupApi, formatApiSignature, formatApiSignatureCompact, ApiSignature, ApiCategory, CATEGORY_LABELS } from './peApiDatabase';
+import {
+	isX86PcRelativeDataRelocation,
+	x86PcRelativeDataSectionOffset,
+} from './elfTextRelocation';
 
 // Types
 export interface Instruction {
@@ -590,6 +594,10 @@ export class DisassemblerEngine {
 	// cost tens of MB, not the 6 GB an eager body-disassembly of every one would).
 	private unmaterializedStubs: Set<number> = new Set<number>();
 	private maxStubFunctions: number = 250000;
+	/** One-shot .pdata reconciliation shared by analyzeAll and lift hot paths. */
+	private pdataReconcilePromise?: Promise<void>;
+	/** Reconciled AMD64 .pdata ranges, including contiguous chained-unwind fragments. */
+	private authoritativePdataRanges: Array<{ begin: number; end: number }> = [];
 
 	// Cache for text section byte-pattern scan results
 	private _textScanCache?: Map<number, number[]>;
@@ -759,6 +767,8 @@ export class DisassemblerEngine {
 			this._pltSymbolMap.clear();
 			this._gotSymbolMap.clear();
 			this.trapHandlerGate = false;
+			this.pdataReconcilePromise = undefined;
+			this.authoritativePdataRanges = [];
 
 			// v3.7.4: Initialize persistent session store
 			try {
@@ -874,8 +884,16 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// v3.8.3: normalize exact ELF STT_FUNC entries to their authoritative
+		// st_size. Linear discovery can stop at an interior ud2/ret or run into
+		// neighbouring functions; the reconciliation also rebuilds the call graph
+		// after trimming an over-wide discovery.
+		this.reconcileFunctionsWithElfSymbols();
+
 		// v3.8.3 Gap-A: anchor the function table to authoritative PE64 .pdata
 		// boundaries (no-op when .pdata is absent: ELF/x86/ARM64 stay byte-identical).
+		// analyzeAll has just discovered/rebuilt functions, so reconcile again
+		// even if a prior lift already ran the one-shot hot-path barrier.
 		await this.reconcileFunctionsWithPdata();
 
 		// v3.8.3 Gap-K: add tail-call / trampoline edges (unconditional jmp/B to another
@@ -2775,28 +2793,18 @@ export class DisassemblerEngine {
 	 * (3) PE export table. Returns 0 if unknown.
 	 */
 	getSymbolSizeAt(address: number): number {
-		// 1. Function table (from analyzeAll)
+		// 1. Exact ELF STT_FUNC symbol. This must outrank the inferred function
+		// table in both directions: a linear scan may stop early or continue into
+		// neighbouring functions.
 		const func = this.functions.get(address);
-		if (func && func.size > 0) {
-			return func.size;
+		const elfSymbol = this.getExactElfFunctionSymbol(address, func?.name);
+		if (elfSymbol) {
+			return elfSymbol.size;
 		}
 
-		// 2. ELF symbol table: search for FUNC symbol at this address
-		if (this.elfAnalysis) {
-			for (const sym of this.elfAnalysis.symbols) {
-				if (sym.type === 'FUNC' && sym.value === address && sym.size > 0) {
-					return sym.size;
-				}
-			}
-			// Also try with PIE adjustment
-			if (this.fileInfo?.characteristics?.includes('PIE')) {
-				const rawAddr = address - this.baseAddress;
-				for (const sym of this.elfAnalysis.symbols) {
-					if (sym.type === 'FUNC' && sym.value === rawAddr && sym.size > 0) {
-						return sym.size;
-					}
-				}
-			}
+		// 2. Function table (from analyzeAll)
+		if (func && func.size > 0) {
+			return func.size;
 		}
 
 		// 3. Scan nearby function table entries to find the gap
@@ -2822,6 +2830,154 @@ export class DisassemblerEngine {
 		}
 
 		return 0;
+	}
+
+	/**
+	 * Resolve a defined ELF function symbol at an exact runtime address.
+	 *
+	 * ET_REL sections share section-relative addresses, so prefer the function
+	 * table's name and otherwise accept only .text for address-based analysis.
+	 * Callers that need another ET_REL section use findFunctionSymbolByName(),
+	 * which also has the section/file-offset context needed to disambiguate it.
+	 */
+	private getExactElfFunctionSymbol(
+		address: number,
+		preferredName?: string
+	): ELFSymbolEntry | undefined {
+		if (!this.elfAnalysis) {
+			return undefined;
+		}
+
+		const isPIE = this.fileInfo?.characteristics?.includes('PIE') === true;
+		const isRelocatable = this.fileInfo?.isRelocatable === true;
+		const candidates = this.elfAnalysis.symbols.filter(sym => {
+			if (sym.type !== 'FUNC' || sym.isImport || sym.size <= 0) {
+				return false;
+			}
+			const runtimeAddress = isPIE && sym.value > 0 && sym.value < this.baseAddress
+				? sym.value + this.baseAddress
+				: sym.value;
+			return runtimeAddress === address;
+		});
+		if (candidates.length === 0) {
+			return undefined;
+		}
+
+		if (preferredName) {
+			const named = candidates
+				.filter(sym => sym.name === preferredName)
+				.sort((a, b) => b.size - a.size);
+			if (named.length > 0) {
+				return named[0];
+			}
+		}
+
+		const addressSafe = isRelocatable
+			? candidates.filter(sym => sym.sectionName === '.text')
+			: candidates;
+		return addressSafe.sort((a, b) => b.size - a.size)[0];
+	}
+
+	/**
+	 * Normalize heuristic ELF bounds to exact non-zero STT_FUNC/st_size bounds.
+	 *
+	 * Growing updates the authoritative lift extent while preserving the decoded
+	 * prefix. Shrinking also trims decoded instructions and then rebuilds the
+	 * call graph from the surviving streams, so an over-wide discovery cannot
+	 * retain callers/callees originating in a neighbouring function.
+	 */
+	private reconcileFunctionsWithElfSymbols(): void {
+		if (!this.elfAnalysis) {
+			return;
+		}
+
+		const discardedInstructionAddresses = new Set<number>();
+		let changed = false;
+		for (const func of this.functions.values()) {
+			const sym = this.getExactElfFunctionSymbol(func.address, func.name);
+			if (!sym || sym.size === func.size) {
+				continue;
+			}
+			const symbolEnd = func.address + sym.size;
+			if (func.endAddress > symbolEnd) {
+				const kept: Instruction[] = [];
+				for (const inst of func.instructions) {
+					const address = typeof inst.address === 'bigint'
+						? Number(inst.address)
+						: inst.address;
+					if (address >= func.address && address < symbolEnd) {
+						kept.push(inst);
+					} else {
+						discardedInstructionAddresses.add(address);
+					}
+				}
+				func.instructions = kept;
+			}
+			func.size = sym.size;
+			func.endAddress = symbolEnd;
+			changed = true;
+		}
+
+		if (!changed) {
+			return;
+		}
+
+		// A discarded address may still belong to another surviving function on
+		// malformed/overlapping input. Only remove xrefs whose source disappeared
+		// from every normalized instruction stream.
+		if (discardedInstructionAddresses.size > 0) {
+			const liveInstructionAddresses = new Set<number>();
+			for (const func of this.functions.values()) {
+				for (const inst of func.instructions) {
+					liveInstructionAddresses.add(
+						typeof inst.address === 'bigint' ? Number(inst.address) : inst.address
+					);
+				}
+			}
+			for (const [target, refs] of this.xrefs) {
+				const kept = refs.filter(ref =>
+					!discardedInstructionAddresses.has(ref.from) ||
+					liveInstructionAddresses.has(ref.from)
+				);
+				if (kept.length > 0) {
+					this.xrefs.set(target, kept);
+				} else {
+					this.xrefs.delete(target);
+				}
+			}
+		}
+
+		// Rebuild direct-call edges. Tail edges are added by addTailCallEdges()
+		// immediately after this pass in analyzeAll.
+		for (const func of this.functions.values()) {
+			func.callers = [];
+			func.callees = [];
+		}
+		for (const func of this.functions.values()) {
+			const seenCallees = new Set<number>();
+			for (const inst of func.instructions) {
+				if (!inst.isCall || inst.targetAddress === undefined) {
+					continue;
+				}
+				const targetAddress = typeof inst.targetAddress === 'bigint'
+					? Number(inst.targetAddress)
+					: inst.targetAddress;
+				const target = this.functions.get(targetAddress);
+				if (!target) {
+					continue;
+				}
+				if (!seenCallees.has(targetAddress)) {
+					seenCallees.add(targetAddress);
+					func.callees.push(targetAddress);
+				}
+				const callSite = typeof inst.address === 'bigint'
+					? Number(inst.address)
+					: inst.address;
+				if (!target.callers.includes(callSite)) {
+					target.callers.push(callSite);
+				}
+			}
+		}
 	}
 
 	/**
@@ -3367,6 +3523,31 @@ export class DisassemblerEngine {
 							}
 						}
 
+						const symbolTargetSec = (stShndx > 0 && stShndx < elfSections.length)
+							? elfSections[stShndx] : undefined;
+
+						// FIX-136: R_X86_64_PC32 is not intrinsically control flow.
+						// Kernel modules also use it for RIP-relative loads of named
+						// STT_OBJECT values in .rodata. Keep those operands on the data
+						// path and account for x86 evaluating them from P + 4.
+						if (isX86 && isX86PcRelativeDataRelocation({
+							relocationType: relType,
+							symbolType: stType,
+							symbolValue: stValue,
+							addend: rAddend,
+							targetSectionFlags: symbolTargetSec?.flags,
+						})) {
+							const secName = symbolTargetSec?.name ?? symName;
+							if (secName.length > 0) {
+								this.dataRelocations.set(sectionBase + rOffset, {
+									sectionName: secName,
+									type: relType,
+									addend: x86PcRelativeDataSectionOffset(stValue, rAddend),
+								});
+							}
+							continue;
+						}
+
 						// FIX-097: DATA relocations (R_X86_64_32=10 / R_X86_64_32S=11)
 						// are absolute references into a data section — overwhelmingly a
 						// string/constant load (`mov rdi, .rodata.str1.1+OFF`). They point
@@ -3376,12 +3557,10 @@ export class DisassemblerEngine {
 						// the TARGET section name + effective in-section offset, so liftToIR
 						// can read the bytes and feed the string to the decompiler.
 						if (relType === 10 || relType === 11) {
-							const targetSec = (stShndx > 0 && stShndx < elfSections.length)
-								? elfSections[stShndx] : undefined;
 							// STT_SECTION(3): st_value is 0, the addend is the full offset.
 							// Named data object: in-section offset = st_value + addend.
 							const inSecOff = (stType === 3 ? 0 : stValue) + rAddend;
-							const secName = targetSec?.name ?? symName;
+							const secName = symbolTargetSec?.name ?? symName;
 							if (secName && secName.length > 0) {
 								this.dataRelocations.set(sectionBase + rOffset, {
 									sectionName: secName,
@@ -4358,6 +4537,47 @@ export class DisassemblerEngine {
 	}
 
 	/**
+	 * Ensure chained-unwind .pdata fragments have been reconciled into logical
+	 * functions before a caller asks for a lift extent. This is deliberately
+	 * idempotent: analyzeAll and headless liftToIR may both request it for the
+	 * same loaded binary, but the expensive table pass must run only once.
+	 */
+	async ensurePdataFunctionsReconciled(): Promise<void> {
+		if (!this.pdataReconcilePromise) {
+			this.pdataReconcilePromise = this.reconcileFunctionsWithPdata().catch(error => {
+				this.pdataReconcilePromise = undefined;
+				this.authoritativePdataRanges = [];
+				throw error;
+			});
+		}
+		await this.pdataReconcilePromise;
+	}
+
+	/**
+	 * Return the reconciled AMD64 RUNTIME_FUNCTION range containing `address`.
+	 *
+	 * Callers must cross ensurePdataFunctionsReconciled() first. Unlike a
+	 * prologue-scan hit, this interval is authoritative even when `address`
+	 * points into the middle of an instruction.
+	 */
+	findAuthoritativePdataRangeContaining(address: number): { begin: number; end: number } | undefined {
+		let lo = 0;
+		let hi = this.authoritativePdataRanges.length - 1;
+		while (lo <= hi) {
+			const mid = lo + ((hi - lo) >> 1);
+			const range = this.authoritativePdataRanges[mid];
+			if (address < range.begin) {
+				hi = mid - 1;
+			} else if (address >= range.end) {
+				lo = mid + 1;
+			} else {
+				return { ...range };
+			}
+		}
+		return undefined;
+	}
+
+	/**
 	 * Scan code sections for function prologs.
 	 * Supports x86/x64 and ARM64/ARM32 prolog patterns.
 	 */
@@ -4385,6 +4605,7 @@ export class DisassemblerEngine {
 	 * another function's range).
 	 */
 	private async reconcileFunctionsWithPdata(): Promise<void> {
+		this.authoritativePdataRanges = [];
 		// .pdata begin/end is the AMD64 RUNTIME_FUNCTION layout only (see header note).
 		if (this.architecture !== 'x64') {
 			return;
@@ -4504,6 +4725,7 @@ export class DisassemblerEngine {
 			ranges.push({ begin: r.begin, end: r.end });
 			coverEnd = r.end;
 		}
+		this.authoritativePdataRanges = ranges.map(range => ({ ...range }));
 		const begins = new Set<number>(ranges.map(r => r.begin));
 		const beginsArr = ranges.map(r => r.begin); // sorted ascending (rawRanges was sorted)
 
@@ -5559,6 +5781,14 @@ export class DisassemblerEngine {
 			if (address > func.address && address < func.endAddress) {
 				return func.address;
 			}
+		}
+
+		// ET_REL code in fileBuffer is not relocation-patched. Native prologue
+		// probing here can select an internal/adjacent function and any caller
+		// that widens its lift window would then discard its patched bytes.
+		// Known symbol/function ranges above remain authoritative and usable.
+		if (this.fileInfo?.isRelocatable === true) {
+			return undefined;
 		}
 
 		// 3. Try native function boundary detection via Capstone

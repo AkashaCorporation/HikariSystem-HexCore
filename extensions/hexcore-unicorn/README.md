@@ -29,7 +29,7 @@ npm install hexcore-unicorn
 ### Building from source
 
 ```bash
-git clone https://github.com/LXrdKnowkill/hexcore-unicorn.git
+git clone https://github.com/AkashaCorporation/hexcore-unicorn.git
 cd hexcore-unicorn
 npm install
 npm run build
@@ -294,7 +294,13 @@ brew install unicorn
 
 ## License
 
-MIT License - See [LICENSE](LICENSE) for details.
+**GPL-2.0-only** - See [LICENSE](LICENSE) for details.
+
+This component links the [Unicorn Engine](https://www.unicorn-engine.org/) (GPL-2.0),
+so the bindings themselves are licensed GPL-2.0-only. This does **not** make the rest of
+the HexCore IDE GPL: HexCore consumes this module across a process boundary (the emulation
+worker runs out-of-process over IPC), so the core IDE and the other `hexcore-*` extensions
+remain MIT. Only this binding and `hexcore-debugger` (which embeds it) carry GPL-2.0.
 
 ## Contributing
 

@@ -1,7 +1,7 @@
 {
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"title": "HexCore Automation Job",
-	"description": "Schema for .hexcore_job.json pipeline jobs (v3.8.0).",
+	"description": "Schema for .hexcore_job.json pipeline jobs (v3.8.3 RC).",
 	"type": "object",
 	"additionalProperties": false,
 	"required": [
@@ -72,7 +72,7 @@
 							"path": {
 								"type": "string",
 								"minLength": 1,
-								"description": "Output file path (absolute or relative to outDir)."
+								"description": "Output file path relative to and contained inside outDir. Absolute paths and parent-directory escapes are rejected during preflight."
 							},
 							"format": {
 								"type": "string",
@@ -88,6 +88,11 @@
 						"type": "boolean",
 						"default": false,
 						"description": "Continue pipeline execution after this step fails."
+					},
+					"allowPartial": {
+						"type": "boolean",
+						"default": false,
+						"description": "Explicitly accept a command result that reports partial semantic success. Without this opt-in, partial child results fail the step."
 					},
 					"timeoutMs": {
 						"type": "integer",

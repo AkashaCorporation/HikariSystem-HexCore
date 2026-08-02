@@ -59,14 +59,14 @@ suite('snapshotHeadless and restoreSnapshotHeadless', () => {
 
 	// --- restoreSnapshotHeadless error: no snapshot saved ---
 
-	test('restoreSnapshot throws when emulator has no saved snapshot', () => {
+	test('restoreSnapshot rejects when emulator has no saved snapshot', async () => {
 		// DebugEngine.restoreSnapshot() throws 'Emulator not initialized' when no emulator.
 		// The headless command catches any restoreSnapshot error and re-throws as
 		// 'No snapshot available. Call snapshotHeadless first.'
-		assert.throws(
-			() => {
+		await assert.rejects(
+			async () => {
 				try {
-					engine.restoreSnapshot();
+					await engine.restoreSnapshot();
 				} catch {
 					throw new Error('No snapshot available. Call snapshotHeadless first.');
 				}

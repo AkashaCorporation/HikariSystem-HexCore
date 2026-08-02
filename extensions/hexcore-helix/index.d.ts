@@ -55,6 +55,11 @@ export declare class HelixEngine {
    */
   setFunctionStarts(starts: Array<number>): void
   /**
+   * Provide versioned function signatures and nominal struct layouts from
+   * DWARF/BTF/PDB. Pass an empty string to clear metadata between files.
+   */
+  setDebugTypeInfoJson(json: string): void
+  /**
    * Register a virtual-address range with the engine's data-section
    * store.  REQUIRED for switch-table recovery — without at least one
    * section, `RecoverSwitchTables` skips itself and every `switch (...)`
@@ -133,20 +138,6 @@ export interface DecompileResult {
   astBuffer?: Buffer
   /** Which pipeline was used: "mlir" or "rust" */
   pipeline: string
-}
-
-/** Pipeline metrics exposed to JavaScript. */
-export interface PipelineMetricsResult {
-  /** Total pipeline duration in milliseconds. */
-  totalMs: number
-  /** Instructions decoded. */
-  instructionsDecoded: number
-  /** Functions recovered. */
-  functionsRecovered: number
-  /** Throughput in instructions per millisecond. */
-  throughput: number
-  /** Number of warnings. */
-  warningCount: number
 }
 
 /**

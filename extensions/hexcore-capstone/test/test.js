@@ -5,14 +5,19 @@
 
 'use strict';
 
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+
 // This will fail until the native module is built
 let capstone;
+const builtAddon = path.join(__dirname, '..', 'build', 'Release', 'hexcore_capstone.node');
 try {
-	capstone = require('..');
+	capstone = fs.existsSync(builtAddon) ? require(builtAddon) : require('..');
 } catch (e) {
 	console.log('Native module not built yet. Run `npm run build` first.');
 	console.log('Error:', e.message);
-	process.exit(0);
+	process.exit(1);
 }
 
 const { Capstone, ARCH, MODE, OPT, OPT_VALUE, version, support } = capstone;
@@ -22,20 +27,20 @@ console.log('=== HexCore Capstone Test Suite ===\n');
 // Test version
 console.log('Testing version()...');
 const ver = version();
-console.log(`  Capstone version: ${ver.string}`);
-console.assert(ver.major >= 4, 'Expected Capstone 4.x or higher');
+console.log(`  Capstone version: ${ver.fullString}`);
+assert.equal(ver.fullString, '5.0.9', 'Expected vendored Capstone 5.0.9');
 console.log('  [PASS] version() works\n');
 
 // Test support
 console.log('Testing support()...');
-console.assert(support(ARCH.X86) === true, 'x86 should be supported');
-console.assert(support(ARCH.ARM) === true, 'ARM should be supported');
+assert.ok(support(ARCH.X86) === true, 'x86 should be supported');
+assert.ok(support(ARCH.ARM) === true, 'ARM should be supported');
 console.log('  [PASS] support() works\n');
 
 // Test x86-64 disassembly
 console.log('Testing x86-64 disassembly...');
 const cs64 = new Capstone(ARCH.X86, MODE.MODE_64);
-console.assert(cs64.isOpen() === true, 'Handle should be open');
+assert.ok(cs64.isOpen() === true, 'Handle should be open');
 
 // push rbp; mov rbp, rsp; sub rsp, 0x20; ret
 const code64 = Buffer.from([
@@ -52,37 +57,37 @@ for (const insn of insns64) {
 	console.log(`    0x${insn.address.toString(16)}: ${bytes.padEnd(20)} ${insn.mnemonic} ${insn.opStr}`);
 }
 
-console.assert(insns64.length === 4, 'Expected 4 instructions');
-console.assert(insns64[0].mnemonic === 'push', 'First instruction should be push');
-console.assert(insns64[1].mnemonic === 'mov', 'Second instruction should be mov');
-console.assert(insns64[3].mnemonic === 'ret', 'Last instruction should be ret');
+assert.ok(insns64.length === 4, 'Expected 4 instructions');
+assert.ok(insns64[0].mnemonic === 'push', 'First instruction should be push');
+assert.ok(insns64[1].mnemonic === 'mov', 'Second instruction should be mov');
+assert.ok(insns64[3].mnemonic === 'ret', 'Last instruction should be ret');
 console.log('  [PASS] x86-64 disassembly works\n');
 
 // Test detail mode (sync)
 console.log('Testing detail mode (sync)...');
 cs64.setOption(OPT.DETAIL, OPT_VALUE.ON);
 const detailInsns = cs64.disasm(code64, 0x401000);
-console.assert(detailInsns[0].detail !== undefined, 'Detail should be present');
-console.assert(detailInsns[0].detail.x86 !== undefined, 'x86 detail should be present');
+assert.ok(detailInsns[0].detail !== undefined, 'Detail should be present');
+assert.ok(detailInsns[0].detail.x86 !== undefined, 'x86 detail should be present');
 console.log(`  First instruction has ${detailInsns[0].detail.x86.operands.length} operand(s)`);
 
 // Verify x86 detail structure
 const x86Detail = detailInsns[0].detail.x86;
-console.assert(Array.isArray(x86Detail.operands), 'operands should be an array');
-console.assert(x86Detail.operands.length === 1, 'push rbp should have 1 operand');
-console.assert(x86Detail.operands[0].type === 1, 'operand type should be REG (1)');
-console.assert(x86Detail.operands[0].reg !== undefined, 'operand should have reg field');
+assert.ok(Array.isArray(x86Detail.operands), 'operands should be an array');
+assert.ok(x86Detail.operands.length === 1, 'push rbp should have 1 operand');
+assert.ok(x86Detail.operands[0].type === 1, 'operand type should be REG (1)');
+assert.ok(x86Detail.operands[0].reg !== undefined, 'operand should have reg field');
 console.log('  [PASS] detail mode (sync) works\n');
 
 // Test register/instruction names
 console.log('Testing name functions...');
 const regName = cs64.regName(detailInsns[0].detail.x86.operands[0].reg);
 console.log(`  Register name for first operand: ${regName}`);
-console.assert(regName !== null, 'Register name should not be null');
+assert.ok(regName !== null, 'Register name should not be null');
 console.log('  [PASS] name functions work\n');
 
 cs64.close();
-console.assert(cs64.isOpen() === false, 'Handle should be closed');
+assert.ok(cs64.isOpen() === false, 'Handle should be closed');
 
 // Test x86-32 disassembly
 console.log('Testing x86-32 disassembly...');
@@ -101,7 +106,7 @@ for (const insn of insns32) {
 	console.log(`    0x${insn.address.toString(16)}: ${insn.mnemonic} ${insn.opStr}`);
 }
 
-console.assert(insns32.length === 3, 'Expected 3 instructions');
+assert.ok(insns32.length === 3, 'Expected 3 instructions');
 cs32.close();
 console.log('  [PASS] x86-32 disassembly works\n');
 
@@ -125,13 +130,15 @@ if (support(ARCH.ARM)) {
 
 // Test error handling
 console.log('Testing error handling...');
+let invalidArchitectureRejected = false;
 try {
-	const csBad = new Capstone(999, 0);
-	console.assert(false, 'Should have thrown on invalid arch');
+	new Capstone(999, 0);
 } catch (e) {
+	invalidArchitectureRejected = true;
 	console.log(`  Caught expected error: ${e.message}`);
-	console.log('  [PASS] error handling works\n');
 }
+assert.ok(invalidArchitectureRejected, 'Invalid architecture must throw');
+console.log('  [PASS] error handling works\n');
 
 // Test async disassembly (basic)
 console.log('Testing async disassembly (disasmAsync - basic)...');
@@ -154,9 +161,9 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 	try {
 		const insnsAsync = await csAsync.disasmAsync(codeAsync, 0x401000);
 		console.log(`  Async disassembled ${insnsAsync.length} instructions`);
-		console.assert(insnsAsync.length === 9, 'Expected 9 instructions from async');
-		console.assert(Array.isArray(insnsAsync), 'Result should be an array');
-		console.assert(insnsAsync[0].mnemonic === 'push', 'First should be push');
+		assert.ok(insnsAsync.length === 9, 'Expected 9 instructions from async');
+		assert.ok(Array.isArray(insnsAsync), 'Result should be an array');
+		assert.ok(insnsAsync[0].mnemonic === 'push', 'First should be push');
 		console.log('  [PASS] disasmAsync (basic) works\n');
 	} catch (e) {
 		console.error(`  [FAIL] disasmAsync failed: ${e.message}`);
@@ -177,33 +184,33 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 		console.log(`  Async (detail) disassembled ${detailAsync.length} instructions`);
 
 		// Verify detail is present
-		console.assert(detailAsync[0].detail !== undefined, 'Detail should be present in async result');
-		console.assert(detailAsync[0].detail.x86 !== undefined, 'x86 detail should be present in async result');
+		assert.ok(detailAsync[0].detail !== undefined, 'Detail should be present in async result');
+		assert.ok(detailAsync[0].detail.x86 !== undefined, 'x86 detail should be present in async result');
 
 		// Verify x86 detail structure in async
 		const asyncX86 = detailAsync[0].detail.x86;
-		console.assert(Array.isArray(asyncX86.operands), 'async operands should be an array');
-		console.assert(asyncX86.operands.length === 1, 'async push rbp should have 1 operand');
-		console.assert(asyncX86.operands[0].type === 1, 'async operand type should be REG (1)');
-		console.assert(asyncX86.operands[0].reg !== undefined, 'async operand should have reg field');
+		assert.ok(Array.isArray(asyncX86.operands), 'async operands should be an array');
+		assert.ok(asyncX86.operands.length === 1, 'async push rbp should have 1 operand');
+		assert.ok(asyncX86.operands[0].type === 1, 'async operand type should be REG (1)');
+		assert.ok(asyncX86.operands[0].reg !== undefined, 'async operand should have reg field');
 
 		// Verify all instructions have details
 		for (let i = 0; i < detailAsync.length; i++) {
-			console.assert(detailAsync[i].detail !== undefined, `Instruction ${i} should have detail`);
-			console.assert(detailAsync[i].detail.x86 !== undefined, `Instruction ${i} should have x86 detail`);
+			assert.ok(detailAsync[i].detail !== undefined, `Instruction ${i} should have detail`);
+			assert.ok(detailAsync[i].detail.x86 !== undefined, `Instruction ${i} should have x86 detail`);
 		}
 
 		// Check mov [rbp-8], rdi (instruction 3) - has memory operand
 		const movInsn = detailAsync[3]; // mov [rbp-8], rdi
-		console.assert(movInsn.mnemonic === 'mov', 'Instruction 3 should be mov');
-		console.assert(movInsn.detail.x86.operands.length === 2, 'mov should have 2 operands');
+		assert.ok(movInsn.mnemonic === 'mov', 'Instruction 3 should be mov');
+		assert.ok(movInsn.detail.x86.operands.length === 2, 'mov should have 2 operands');
 
 		// First operand should be memory
 		const memOp = movInsn.detail.x86.operands[0];
-		console.assert(memOp.type === 3, 'First operand should be MEM (3)');
-		console.assert(memOp.mem !== undefined, 'Memory operand should have mem field');
-		console.assert(memOp.mem.base !== undefined, 'mem should have base field');
-		console.assert(memOp.mem.disp !== undefined, 'mem should have disp field');
+		assert.ok(memOp.type === 3, 'First operand should be MEM (3)');
+		assert.ok(memOp.mem !== undefined, 'Memory operand should have mem field');
+		assert.ok(memOp.mem.base !== undefined, 'mem should have base field');
+		assert.ok(memOp.mem.disp !== undefined, 'mem should have disp field');
 
 		console.log(`  Verified x86 detail structure:`);
 		console.log(`    - Operands array: OK`);
@@ -236,9 +243,9 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 		try {
 			const armAsync = await csArmAsync.disasmAsync(codeArmAsync, 0x1000);
 			console.log(`  ARM async (detail) disassembled ${armAsync.length} instructions`);
-			console.assert(armAsync[0].detail !== undefined, 'ARM detail should be present');
-			console.assert(armAsync[0].detail.arm !== undefined, 'arm detail object should be present');
-			console.assert(Array.isArray(armAsync[0].detail.arm.operands), 'ARM operands should be array');
+			assert.ok(armAsync[0].detail !== undefined, 'ARM detail should be present');
+			assert.ok(armAsync[0].detail.arm !== undefined, 'arm detail object should be present');
+			assert.ok(Array.isArray(armAsync[0].detail.arm.operands), 'ARM operands should be array');
 			console.log('  [PASS] ARM async with detail works\n');
 		} catch (e) {
 			console.error(`  [FAIL] ARM async failed: ${e.message}`);
@@ -267,21 +274,21 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 		const syncResult = csSync.disasm(testCode, 0x1000);
 		const asyncResult = await csAsyncCmp.disasmAsync(testCode, 0x1000);
 
-		console.assert(syncResult.length === asyncResult.length, 'Same number of instructions');
+		assert.ok(syncResult.length === asyncResult.length, 'Same number of instructions');
 
 		for (let i = 0; i < syncResult.length; i++) {
 			const s = syncResult[i];
 			const a = asyncResult[i];
 
-			console.assert(s.address === a.address, `Instruction ${i}: address should match`);
-			console.assert(s.mnemonic === a.mnemonic, `Instruction ${i}: mnemonic should match`);
-			console.assert(s.opStr === a.opStr, `Instruction ${i}: opStr should match`);
-			console.assert(s.detail.x86.operands.length === a.detail.x86.operands.length,
+			assert.ok(s.address === a.address, `Instruction ${i}: address should match`);
+			assert.ok(s.mnemonic === a.mnemonic, `Instruction ${i}: mnemonic should match`);
+			assert.ok(s.opStr === a.opStr, `Instruction ${i}: opStr should match`);
+			assert.ok(s.detail.x86.operands.length === a.detail.x86.operands.length,
 				`Instruction ${i}: operand count should match`);
 
 			// Compare operand types
 			for (let j = 0; j < s.detail.x86.operands.length; j++) {
-				console.assert(s.detail.x86.operands[j].type === a.detail.x86.operands[j].type,
+				assert.ok(s.detail.x86.operands[j].type === a.detail.x86.operands[j].type,
 					`Instruction ${i}, operand ${j}: type should match`);
 			}
 		}
@@ -309,11 +316,11 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 		const syncSyntaxResult = csSyncSyntax.disasm(testCode, 0x1000);
 		const asyncSyntaxResult = await csAsyncSyntax.disasmAsync(testCode, 0x1000);
 
-		console.assert(syncSyntaxResult.length === asyncSyntaxResult.length, 'Same number of instructions for syntax test');
+		assert.ok(syncSyntaxResult.length === asyncSyntaxResult.length, 'Same number of instructions for syntax test');
 		for (let i = 0; i < syncSyntaxResult.length; i++) {
-			console.assert(syncSyntaxResult[i].mnemonic === asyncSyntaxResult[i].mnemonic,
+			assert.ok(syncSyntaxResult[i].mnemonic === asyncSyntaxResult[i].mnemonic,
 				`Syntax instruction ${i}: mnemonic should match`);
-			console.assert(syncSyntaxResult[i].opStr === asyncSyntaxResult[i].opStr,
+			assert.ok(syncSyntaxResult[i].opStr === asyncSyntaxResult[i].opStr,
 				`Syntax instruction ${i}: opStr should match`);
 		}
 

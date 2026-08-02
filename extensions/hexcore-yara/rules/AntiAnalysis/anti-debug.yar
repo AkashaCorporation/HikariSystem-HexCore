@@ -86,6 +86,8 @@ rule AntiDebug_PEB_Access_X64
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiDebug"
+        architecture = "x86_64"
+        requires_executable = "true"
     strings:
         // mov rax, gs:[0x60] — full encoding
         $peb64_a = { 65 48 8B 04 25 60 00 00 00 }
@@ -103,6 +105,8 @@ rule AntiDebug_PEB_Access_X86
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiDebug"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         // mov eax, fs:[0x30]
         $peb32 = { 64 A1 30 00 00 00 }
@@ -118,6 +122,8 @@ rule AntiDebug_Timing_RDTSC
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiAnalysis"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         // rdtsc: 0F 31
         $rdtsc = { 0F 31 }
@@ -135,6 +141,8 @@ rule AntiDebug_INT_2D
         author = "HexCore"
         category = "anti-analysis"
         family = "AntiDebug"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         $int2d = { CD 2D }
     condition:

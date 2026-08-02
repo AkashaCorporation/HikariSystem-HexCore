@@ -1,6 +1,6 @@
 {
   "name": "hexcore-souper",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "HexCore Souper — LLVM IR superoptimizer via Z3 SMT solving",
   "main": "./index.js",
   "module": "./index.mjs",

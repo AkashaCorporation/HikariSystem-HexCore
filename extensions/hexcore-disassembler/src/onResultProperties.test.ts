@@ -190,10 +190,10 @@ suite('Property P11–P14: onResult evaluation, actions, normalizeStep, loop pro
 				fc.integer({ min: 1, max: 20 }),
 				(totalSteps) => {
 					const rule: OnResultRule = { field: 'f', operator: 'equals', value: 1, action: 'goto', actionValue: totalSteps };
-					assert.throws(() => applyOnResultAction(rule, 0, totalSteps, tempLogPath), /out of bounds/);
+					assert.throws(() => applyOnResultAction(rule, 0, totalSteps, tempLogPath), /must be an integer step index/);
 
 					const ruleNeg: OnResultRule = { field: 'f', operator: 'equals', value: 1, action: 'goto', actionValue: -1 };
-					assert.throws(() => applyOnResultAction(ruleNeg, 0, totalSteps, tempLogPath), /out of bounds/);
+					assert.throws(() => applyOnResultAction(ruleNeg, 0, totalSteps, tempLogPath), /must be an integer step index/);
 				}
 			),
 			{ numRuns: 50 }

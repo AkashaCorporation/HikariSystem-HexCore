@@ -8,7 +8,14 @@
 'use strict';
 
 const assert = require('assert');
-const { RemillLifter, ARCH, OS, version } = require('../index.js');
+const {
+	RemillLifter,
+	ARCH,
+	OS,
+	version,
+	upstreamVersion,
+	upstreamCommit,
+} = require('../index.js');
 
 let passed = 0;
 let failed = 0;
@@ -50,8 +57,9 @@ test('module exports OS constants', () => {
 });
 
 test('module exports version string', () => {
-	assert.strictEqual(typeof version, 'string');
-	assert.ok(version.length > 0);
+	assert.strictEqual(version, '0.5.1');
+	assert.strictEqual(upstreamVersion, '6.0.1');
+	assert.strictEqual(upstreamCommit, '0e324aee8c67a63ec759ef379dcfafa0b3cb1448');
 });
 
 // --- Static methods ---
@@ -63,6 +71,7 @@ test('getSupportedArchs returns array', () => {
 	assert.ok(archs.includes('amd64'));
 	assert.ok(archs.includes('x86'));
 	assert.ok(archs.includes('aarch64'));
+	assert.ok(!archs.includes('sparc64'));
 });
 
 // --- Constructor ---
@@ -86,8 +95,20 @@ test('constructor with OS parameter', () => {
 	lifter.close();
 });
 
+test('every advertised architecture has packaged semantics', () => {
+	for (const arch of RemillLifter.getSupportedArchs()) {
+		const lifter = new RemillLifter(arch);
+		assert.ok(lifter.isOpen(), arch);
+		lifter.close();
+	}
+});
+
 test('constructor rejects invalid arch', () => {
 	assert.throws(() => new RemillLifter('invalid_arch'), /[Uu]nsupported/);
+});
+
+test('constructor rejects unpackaged SPARC64 without terminating the process', () => {
+	assert.throws(() => new RemillLifter(ARCH.SPARC64), /[Uu]navailable/);
 });
 
 test('constructor rejects missing argument', () => {
@@ -128,13 +149,27 @@ test('liftBytes accepts Uint8Array', () => {
 	lifter.close();
 });
 
-test('liftBytes preserves named SSE semantics by default', () => {
+test('liftBytes keeps a JMP after UD2 out of the trap block', () => {
+	// ud2; jmp -4. Remill rejects UD2 and FIX-024 recovers it through XED.
+	// The JMP is dead code and must not replace the trap block terminator.
+	const code = Buffer.from([0x0f, 0x0b, 0xeb, 0xfc]);
+	for (const arch of [ARCH.AMD64, ARCH.AMD64_AVX]) {
+		const lifter = new RemillLifter(arch);
+		const result = lifter.liftBytes(code, 0x401000);
+		assert.strictEqual(result.success, true, `${arch}: ${result.error}`);
+		assert.ok(!/call .*JMPI/.test(result.ir), `${arch}: dead JMP after UD2 must not survive`);
+		lifter.close();
+	}
+});
+
+test('liftBytes inlines SSE semantics by default', () => {
 	const lifter = new RemillLifter(ARCH.AMD64);
 	const code = Buffer.from([0x0f, 0x58, 0xc1, 0xc3]);  // addps xmm0, xmm1; ret
 	const result = lifter.liftBytes(code, 0x401000);
 
 	assert.strictEqual(result.success, true);
-	assert.match(result.ir, /call .*ADDPS/);
+	assert.doesNotMatch(result.ir, /call .*ADDPS/);
+	assert.match(result.ir, /fadd <2 x float>/);
 
 	lifter.close();
 });
@@ -146,6 +181,29 @@ test('liftBytes can inline semantics when requested', () => {
 
 	assert.strictEqual(result.success, true);
 	assert.doesNotMatch(result.ir, /call .*ADDPS/);
+
+	lifter.close();
+});
+
+test('liftBytes models Remill 6.0.1 BMI and CRC32 semantics', () => {
+	const vectors = {
+		POPCNT: [0xf3, 0x0f, 0xb8, 0xc1],
+		PEXT: [0xc4, 0xe2, 0x72, 0xf5, 0xc2],
+		PDEP: [0xc4, 0xe2, 0x73, 0xf5, 0xc2],
+		BZHI: [0xc4, 0xe2, 0x68, 0xf5, 0xc1],
+		BEXTR: [0xc4, 0xe2, 0x68, 0xf7, 0xc1],
+		SHLX: [0xc4, 0xe2, 0x69, 0xf7, 0xc1],
+		CRC32: [0xf2, 0x0f, 0x38, 0xf0, 0xc1],
+	};
+	const lifter = new RemillLifter(ARCH.AMD64_AVX);
+
+	for (const [name, instruction] of Object.entries(vectors)) {
+		const result = lifter.liftBytes(
+			Buffer.from([...instruction, 0xc3]), 0x401000);
+		assert.strictEqual(result.success, true, `${name}: ${result.error}`);
+		assert.doesNotMatch(
+			result.ir, /HandleUnsupported/, `${name}: fell back to unsupported`);
+	}
 
 	lifter.close();
 });

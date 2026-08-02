@@ -182,22 +182,60 @@ const INTRINSIC_MAP: Record<string, string> = {
 	exp: 'exp',
 	log: 'log',
 	pow: 'pow',
-	// Bit intrinsics that Helix sometimes leaks
-	ctpop: '__builtin_popcount',
-	ctlz: '__builtin_clz',
-	cttz: '__builtin_ctz',
-	bswap: '__builtin_bswap32',
+	// Math only here — bit intrinsics are width-aware (issue #46).
 };
 
-const INTRINSIC_PATTERN = /__unknown_llvm\.intr\.([a-zA-Z_][a-zA-Z0-9_]*)/g;
+/**
+ * Map Helix-leaked LLVM bit intrinsics to the correct GCC/Clang builtin.
+ * FIX #46: bare `ctpop`/`bswap` → 32-bit builtins was width-lossy on i64
+ * operands (wrong result for 64-bit popcount / byteswap). Honour an optional
+ * `.iN` / `_iN` suffix from the emitter; default remains 32-bit only when no
+ * width is present (legacy Helix emit path).
+ */
+function mapBitIntrinsic(name: string, widthBits: number | undefined): string | undefined {
+	const base = name.replace(/[._]?i\d+$/i, '').toLowerCase();
+	// Parse width from suffix: ctpop.i64 / ctpop_i64 / llvm.ctpop.i64 style tail
+	let w = widthBits;
+	if (w === undefined) {
+		const m = name.match(/[._]i(\d+)$/i);
+		if (m) { w = Number.parseInt(m[1], 10); }
+	}
+	const width = (w !== undefined && Number.isFinite(w) && w > 0) ? w : 32;
+
+	switch (base) {
+		case 'ctpop':
+			return width > 32 ? '__builtin_popcountll' : '__builtin_popcount';
+		case 'ctlz':
+			return width > 32 ? '__builtin_clzll' : '__builtin_clz';
+		case 'cttz':
+			return width > 32 ? '__builtin_ctzll' : '__builtin_ctz';
+		case 'bswap':
+			if (width <= 16) { return '__builtin_bswap16'; }
+			if (width >= 64) { return '__builtin_bswap64'; }
+			return '__builtin_bswap32';
+		default:
+			return undefined;
+	}
+}
+
+// Captures: name + optional `.i64` / `_i64` width suffix
+const INTRINSIC_PATTERN = /__unknown_llvm\.intr\.([a-zA-Z_][a-zA-Z0-9_.]*)/g;
 
 function normalizeIntrinsics(source: string): { source: string; count: number } {
 	let count = 0;
 	const out = source.replace(INTRINSIC_PATTERN, (match, name: string) => {
-		const replacement = INTRINSIC_MAP[name];
-		if (replacement) {
+		// Math map first (fabs, sqrt, …)
+		const simple = name.replace(/[._]i\d+$/i, '');
+		const math = INTRINSIC_MAP[simple] ?? INTRINSIC_MAP[name];
+		if (math) {
 			count++;
-			return replacement;
+			return math;
+		}
+		// Width-aware bit ops (#46)
+		const bit = mapBitIntrinsic(name, undefined);
+		if (bit) {
+			count++;
+			return bit;
 		}
 		return match;
 	});

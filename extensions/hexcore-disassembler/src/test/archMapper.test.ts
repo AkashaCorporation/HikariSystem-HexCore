@@ -33,11 +33,11 @@ suite('archMapper', () => {
 			});
 		});
 
-		test('maps x64 → amd64', () => {
+		test('maps x64 → amd64_avx', () => {
 			const result = mapCapstoneToRemill('x64' as ArchitectureConfig, 'linux');
 			assert.deepStrictEqual(result, {
 				supported: true,
-				remillArch: 'amd64',
+				remillArch: 'amd64_avx',
 				remillOs: 'linux',
 			});
 		});
@@ -78,9 +78,18 @@ suite('archMapper', () => {
 		test('auto-detects OS when not provided', () => {
 			const result = mapCapstoneToRemill('x64' as ArchitectureConfig);
 			assert.strictEqual(result.supported, true);
-			assert.strictEqual(result.remillArch, 'amd64');
+			assert.strictEqual(result.remillArch, 'amd64_avx');
 			// OS should be a non-empty string (platform-specific)
 			assert.ok(typeof result.remillOs === 'string' && result.remillOs.length > 0);
+		});
+
+		test('rejects inherited Object prototype keys', () => {
+			const result = mapCapstoneToRemill('__proto__' as ArchitectureConfig);
+			assert.deepStrictEqual(result, {
+				supported: false,
+				remillArch: '',
+			});
+			assert.strictEqual(isArchSupported('__proto__' as ArchitectureConfig), false);
 		});
 	});
 
@@ -134,7 +143,7 @@ suite('archMapper', () => {
 			// Known supported architectures must be present
 			assert.deepStrictEqual(deserialized, {
 				'x86': 'x86',
-				'x64': 'amd64',
+				'x64': 'amd64_avx',
 				'arm64': 'aarch64',
 			});
 		});

@@ -240,5 +240,5 @@ MIT
 
 ## Related Projects
 
-- [hexcore-capstone](https://github.com/hikarisystem/hexcore-capstone) - Disassembler bindings
-- [hexcore-unicorn](https://github.com/hikarisystem/hexcore-unicorn) - CPU emulator bindings
+- [hexcore-capstone](https://github.com/AkashaCorporation/hexcore-capstone) - Disassembler bindings
+- [hexcore-unicorn](https://github.com/AkashaCorporation/hexcore-unicorn) - CPU emulator bindings

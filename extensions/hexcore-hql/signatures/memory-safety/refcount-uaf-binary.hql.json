@@ -1,0 +1,42 @@
+{
+  "id": "memory-safety.refcount_free_no_invalidate_binary",
+  "name": "Refcount-zero free without invalidation (lowered-decrement variant)",
+  "description": "Companion to memory-safety.refcount_free_no_invalidate for the common case where Helix/Remill lowers the atomic refcount decrement to a plain RMW on the struct field rather than keeping an atomic intrinsic call -- i.e. it appears in the C-AST as 'obj->refcount -= 1' (CBinaryExpr operator '-=' whose left operand is a '->' field access) instead of a call. Query 1 is the same free-of-a-'->'-field as the primary rule. Same over-approximation caveat: function-scoped co-occurrence only; no ordering / same-object / no-invalidation proof. A '--obj->refcount' (CUnaryExpr operator '--') form would need an additional variant since HQL signatures are AND-of-queries with no intra-signature OR.",
+  "severity": "medium",
+  "mitre": ["T1068"],
+  "queries": [
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^(k?free|vfree|kvfree|kfree_rcu|free|HeapFree|ExFreePool|ExFreePoolWithTag|RtlFreeHeap|LocalFree|GlobalFree)$" }
+      ],
+      "operands": [
+        {
+          "position": 0,
+          "query": {
+            "target": "CFieldAccessExpr",
+            "attributes": [ { "field": "arrow", "value": true } ]
+          }
+        }
+      ]
+    },
+    {
+      "target": "CBinaryExpr",
+      "attributes": [
+        { "field": "operator", "value": "-=" }
+      ],
+      "operands": [
+        {
+          "position": 0,
+          "query": {
+            "target": "CFieldAccessExpr",
+            "attributes": [
+              { "field": "arrow", "value": true },
+              { "field": "field", "value": "re:.*([Rr]ef|[Cc]ount|[Uu]sage|cnt).*" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

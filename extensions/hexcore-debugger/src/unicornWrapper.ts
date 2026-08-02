@@ -153,6 +153,18 @@ export interface EmulationState {
 	lastError?: string;
 }
 
+export const PE32_MAX_STAGNANT_BATCHES = 5000;
+
+/** #48: update the PE worker's zero-progress guard deterministically. */
+export function nextPe32StagnantBatchCount(
+	previous: number,
+	pcBefore: bigint,
+	pcAfter: bigint,
+	instructionsExecuted: number,
+): number {
+	return instructionsExecuted > 0 || pcAfter !== pcBefore ? 0 : previous + 1;
+}
+
 // Register state for different architectures
 export interface X86_64Registers {
 	rax: bigint; rbx: bigint; rcx: bigint; rdx: bigint;
@@ -833,6 +845,22 @@ export class UnicornWrapper {
 		let totalExecuted = 0;
 		let isFirstInstruction = true;
 		let currentPc = startAddress;
+		let stagnantBatches = 0;
+		const recordWorkerProgress = (
+			pcBefore: bigint,
+			pcAfter: bigint,
+			instructionsExecuted: number,
+		): void => {
+			stagnantBatches = nextPe32StagnantBatchCount(
+				stagnantBatches, pcBefore, pcAfter, instructionsExecuted);
+			if (stagnantBatches >= PE32_MAX_STAGNANT_BATCHES) {
+				const message =
+					`PE32 worker stalled at 0x${pcAfter.toString(16)} for ` +
+					`${stagnantBatches} zero-progress batches`;
+				this.state.lastError = message;
+				throw new Error(message);
+			}
+		};
 
 		try {
 			while (totalExecuted < maxInstructions) {
@@ -977,12 +1005,7 @@ export class UnicornWrapper {
 						}
 
 						// Sync deferred memory writes to worker
-						for (const { address, data } of this.deferredMemoryWrites) {
-							try {
-								await this._pe32Worker.memWrite(address, data);
-							} catch { /* best-effort */ }
-						}
-						this.deferredMemoryWrites = [];
+						await this.flushPe32DeferredMemoryWrites();
 
 						// Apply deferred register writes
 						if (this.deferredRegisterWrites.size > 0) {
@@ -1065,20 +1088,29 @@ export class UnicornWrapper {
 
 				if (result.stubHit && result.stubAddress !== null) {
 					// Worker hit a WinAPI stub address — dispatch on the host side.
+					let nextPc = result.pc;
 					if (this._pe32StubCallback) {
 						const dispatchResult = await this._pe32StubCallback(result.stubAddress);
+						// WinAPI output buffers are written through the in-process mirror.
+						// Propagate them before the worker resumes from the API return site.
+						await this.flushPe32DeferredMemoryWrites();
 						if (dispatchResult) {
 							// Set return value (RAX for x64, EAX for x86) in worker
 							const retRegId = isX64 ? X86_REG.RAX : X86_REG.EAX;
 							await this._pe32Worker.regWrite(retRegId, dispatchResult.returnValue);
 							// Set new PC (after RET from stub)
 							await this._pe32Worker.regWrite(pcRegId, dispatchResult.newPc);
+							nextPc = dispatchResult.newPc;
 						}
 					} else {
 						// No callback — fire code hooks as fallback (same as ELF worker)
 						// Pull registers and fire hooks so the host-side API interceptor can handle it
+						recordWorkerProgress(
+							currentPc, nextPc, result.instructionsExecuted);
 						continue;
 					}
+					recordWorkerProgress(
+						currentPc, nextPc, result.instructionsExecuted);
 					// Continue execution from the new PC
 					continue;
 				}
@@ -1087,6 +1119,8 @@ export class UnicornWrapper {
 					// Terminal address reached (e.g. program exit)
 					break;
 				}
+				recordWorkerProgress(
+					currentPc, result.pc, result.instructionsExecuted);
 			}
 		} finally {
 			// Sync the final PC
@@ -1099,6 +1133,22 @@ export class UnicornWrapper {
 				}
 			}
 			this.state.isPaused = true;
+		}
+	}
+
+	private async flushPe32DeferredMemoryWrites(): Promise<void> {
+		const pendingWrites = this.deferredMemoryWrites;
+		this.deferredMemoryWrites = [];
+		if (!this._pe32Worker) {
+			return;
+		}
+
+		for (const { address, data } of pendingWrites) {
+			try {
+				await this._pe32Worker.memWrite(address, data);
+			} catch {
+				// A failed best-effort write is surfaced later by the emulated access.
+			}
 		}
 	}
 

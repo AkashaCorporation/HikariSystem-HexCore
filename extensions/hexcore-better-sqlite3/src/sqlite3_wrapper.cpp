@@ -376,6 +376,7 @@ Napi::Object StatementWrapper::Init(Napi::Env env, Napi::Object exports) {
 		InstanceMethod("safeIntegers", &StatementWrapper::SafeIntegers),
 		InstanceMethod("raw", &StatementWrapper::Raw),
 		InstanceMethod("expand", &StatementWrapper::Expand),
+		InstanceMethod("pluck", &StatementWrapper::Pluck),
 		InstanceAccessor("source", &StatementWrapper::GetSource, nullptr),
 		InstanceAccessor("reader", &StatementWrapper::GetReader, nullptr),
 		InstanceAccessor("busy", &StatementWrapper::GetBusy, nullptr),
@@ -395,6 +396,7 @@ StatementWrapper::StatementWrapper(const Napi::CallbackInfo& info)
 	, safeIntegers_(false)
 	, rawMode_(false)
 	, expandMode_(false)
+	, pluckMode_(false)
 {
 	Napi::Env env = info.Env();
 
@@ -605,9 +607,11 @@ Napi::Value StatementWrapper::Get(const Napi::CallbackInfo& info) {
 
 	int rc = sqlite3_step(stmt_);
 	if (rc == SQLITE_ROW) {
-		Napi::Value result = rawMode_
-			? static_cast<Napi::Value>(RowToArray(env))
-			: static_cast<Napi::Value>(RowToObject(env));
+		Napi::Value result = pluckMode_
+			? ColumnToJS(env, 0)
+			: rawMode_
+				? static_cast<Napi::Value>(RowToArray(env))
+				: static_cast<Napi::Value>(RowToObject(env));
 		sqlite3_reset(stmt_);
 		return result;
 	}
@@ -635,7 +639,9 @@ Napi::Value StatementWrapper::All(const Napi::CallbackInfo& info) {
 	uint32_t idx = 0;
 	int rc;
 	while ((rc = sqlite3_step(stmt_)) == SQLITE_ROW) {
-		if (rawMode_) {
+		if (pluckMode_) {
+			rows.Set(idx++, ColumnToJS(env, 0));
+		} else if (rawMode_) {
 			rows.Set(idx++, RowToArray(env));
 		} else {
 			rows.Set(idx++, RowToObject(env));
@@ -707,6 +713,10 @@ Napi::Value StatementWrapper::Raw(const Napi::CallbackInfo& info) {
 	} else {
 		rawMode_ = true;
 	}
+	if (rawMode_) {
+		expandMode_ = false;
+		pluckMode_ = false;
+	}
 	return info.This();
 }
 
@@ -715,6 +725,23 @@ Napi::Value StatementWrapper::Expand(const Napi::CallbackInfo& info) {
 		expandMode_ = info[0].As<Napi::Boolean>().Value();
 	} else {
 		expandMode_ = true;
+	}
+	if (expandMode_) {
+		rawMode_ = false;
+		pluckMode_ = false;
+	}
+	return info.This();
+}
+
+Napi::Value StatementWrapper::Pluck(const Napi::CallbackInfo& info) {
+	if (info.Length() >= 1 && info[0].IsBoolean()) {
+		pluckMode_ = info[0].As<Napi::Boolean>().Value();
+	} else {
+		pluckMode_ = true;
+	}
+	if (pluckMode_) {
+		rawMode_ = false;
+		expandMode_ = false;
 	}
 	return info.This();
 }

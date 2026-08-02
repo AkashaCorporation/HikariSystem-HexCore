@@ -1,6 +1,6 @@
 {
   "name": "hexcore-remill",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "HikariSystem fork of Remill N-API bindings — customized for the HexCore-Helix decompiler pipeline",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -44,12 +44,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LXrdKnowkill/hexcore-remill.git"
+      "url": "https://github.com/AkashaCorporation/hexcore-remill.git"
   },
   "bugs": {
-    "url": "https://github.com/LXrdKnowkill/hexcore-remill/issues"
+    "url": "https://github.com/AkashaCorporation/hexcore-remill/issues"
   },
-  "homepage": "https://github.com/LXrdKnowkill/hexcore-remill#readme",
+  "homepage": "https://github.com/AkashaCorporation/hexcore-remill#readme",
   "engines": {
     "vscode": "^1.75.0",
     "node": ">=18.0.0"
@@ -59,6 +59,9 @@
     "src/",
     "deps/remill/include/",
     "deps/remill/lib/",
+    "deps/remill/share/",
+    "deps/sleigh/include/",
+    "deps/manifest.json",
     "deps/llvm/include/",
     "deps/llvm/lib/",
     "prebuilds/",
@@ -66,6 +69,7 @@
     "index.js",
     "index.mjs",
     "index.d.ts",
+    "CHANGELOG.md",
     "README.md"
   ],
   "binary": {

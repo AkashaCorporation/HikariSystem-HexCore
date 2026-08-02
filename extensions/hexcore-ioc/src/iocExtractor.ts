@@ -290,7 +290,7 @@ const IOC_PATTERNS: IOCPattern[] = [
 		// Keeping both under one category preserves backwards compat (the
 		// reportGenerator already labels the section "Mutexes / GUIDs").
 		// Filtering of well-known Windows CLSIDs is done in the validator.
-		regex: /(?:\\(?:Global|Local|Session\\\d+)\\BaseNamedObjects\\[A-Za-z0-9_.\-]{3,128}|(?:Global|Local)\\[A-Za-z0-9_.\-]{3,128}|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})/g,
+		regex: /(?:\\Sessions\\\d+\\BaseNamedObjects\\[A-Za-z0-9_.\-]{3,128}|(?:Global|Local)\\[A-Za-z0-9_.\-]{3,128}|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})/g,
 		validate: validateMutex,
 	},
 

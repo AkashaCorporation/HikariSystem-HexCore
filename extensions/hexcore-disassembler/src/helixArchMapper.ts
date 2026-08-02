@@ -37,6 +37,9 @@ const ARCH_MAP: Partial<Record<ArchitectureConfig, HelixArchValue>> = {
 };
 
 export function mapCapstoneToHelix(arch: ArchitectureConfig): { supported: boolean; helixArch: HelixArchValue } {
+	if (!Object.prototype.hasOwnProperty.call(ARCH_MAP, arch)) {
+		return { supported: false, helixArch: HelixArch.X86_64 };
+	}
 	const helixArch = ARCH_MAP[arch];
 	if (helixArch === undefined) {
 		return { supported: false, helixArch: HelixArch.X86_64 };
@@ -45,5 +48,5 @@ export function mapCapstoneToHelix(arch: ArchitectureConfig): { supported: boole
 }
 
 export function isHelixArchSupported(arch: ArchitectureConfig): boolean {
-	return arch in ARCH_MAP;
+	return Object.prototype.hasOwnProperty.call(ARCH_MAP, arch);
 }

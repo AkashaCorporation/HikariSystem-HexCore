@@ -7,6 +7,8 @@ running prebuildify. The archive contains:
   - deps/remill/lib/*.lib        (12 remill/sleigh libs)
   - deps/remill/include/         (remill headers)
   - deps/remill/share/semantics/ (.bc bitcode files)
+  - deps/sleigh/include/         (sleigh public/generated headers)
+  - deps/manifest.json           (pinned upstream/build metadata)
   - deps/llvm/lib/*.lib          (152 LLVM libs)
   - deps/llvm/include/           (LLVM headers)
   - deps/xed/lib/*.lib           (XED libs)
@@ -41,10 +43,10 @@ def pack_deps(output_path):
             # Skip README and other non-essential files at deps root
             for f in files:
                 fpath = os.path.join(root, f)
-                # Include: .lib, .h, .hpp, .hh, .inc, .def, .td, .bc, .gen
+                # Include native inputs plus the dependency provenance manifest.
                 ext = os.path.splitext(f)[1].lower()
                 if ext in ('.lib', '.h', '.hpp', '.hh', '.inc', '.def',
-                           '.td', '.bc', '.gen', '.modulemap'):
+                           '.td', '.bc', '.gen', '.modulemap', '.json'):
                     arcname = os.path.relpath(fpath, SCRIPT_DIR)
                     zf.write(fpath, arcname)
                     size = os.path.getsize(fpath)

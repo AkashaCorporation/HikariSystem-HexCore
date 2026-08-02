@@ -6,6 +6,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { encodeX86PcRelativeDataDisplacement } from './elfTextRelocation';
 import { DisassemblyEditorProvider } from './disassemblyEditor';
 import { FunctionTreeProvider } from './functionTree';
 import { StringRefProvider } from './stringRefTree';
@@ -33,7 +34,11 @@ import { QueuedJob, QueueStats, JobStatusReport } from './jobQueueManager';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions } from './remillWrapper';
-import { runPathfinder, getPdataFunctionCount, resolveReanchorWindow } from './pathfinder';
+import {
+	runPathfinder,
+	getPdataFunctionCount,
+	isBacktrackContinuityValid,
+} from './pathfinder';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
 import {
@@ -47,7 +52,7 @@ import {
 } from './hqlScanner';
 import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
 import { SouperWrapper, decideSouperGate } from './souperWrapper';
-import { getStructInfoForFunction, exportStructInfoJson, type StructInfoJson, type StructInfo } from './elfBtfLoader';
+import { getStructInfoForFunction, exportStructInfoJson, scopeStructInfoForFunctions, type StructInfoJson } from './elfBtfLoader';
 import { auditRefcount, type RefcountAuditReport } from './refcountAuditScanner';
 import { mapCapstoneToRemill } from './archMapper';
 import {
@@ -60,6 +65,23 @@ import {
 	normalizeJobTemplateFromExistingJob,
 	saveWorkspacePipelinePreset
 } from './pipelineProfiles';
+import {
+	buildHelixFunctionStarts,
+	resolveHelixBaseOptions,
+	wantsHelixFunctionStarts,
+	resolveLiftByteSize,
+	coercePositiveInt,
+	getAuthoritativeFunctionExtent,
+	shouldHonorExplicitLiftWindow,
+	hasHeadlessHelixIrInput,
+} from './helixPackaging';
+import {
+	buildImportSymbolMap,
+	applyImportSymbolNamesToSource,
+} from './importSymbolNames';
+import { applyHonestyConfidenceCap, type HonestyEvidence } from './honestyConfidenceCap';
+import { detectPacker, packerCapabilityTags } from './packerDetect';
+import { isSingleFileBundle } from './managedDotNetDetector';
 
 type OutputFormat = 'json' | 'md';
 
@@ -637,14 +659,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	// fake reads as success and hides the entire managed program, so the native path must
 	// instead surface an honest "not applicable; use an IL decompiler" signal (D4 honesty).
 	//
-	// Returns the parsed CLR header when the target is managed, else undefined. Loads the
-	// file into the engine if a `file` option is supplied and it isn't loaded yet, so a
-	// standalone call (not just the analyze pipeline) detects it too. The CLR data
-	// directory is parsed in `loadFile`→`parsePEStructure`, so this is reliable post-load.
+	type ManagedDotNetTarget =
+		| { kind: 'clr'; clr: import('./disassemblerEngine').CLRHeader }
+		| { kind: 'single-file' };
+
+	// Returns the target shape when the input is managed, else undefined. Classic managed
+	// assemblies are identified by PE data directory 14. Self-contained single-file apps
+	// are native apphosts without that directory, so they require the bundle-marker probe.
 	const detectManagedDotNet = async (
 		options: Record<string, unknown>
-	): Promise<import('./disassemblerEngine').CLRHeader | undefined> => {
+	): Promise<ManagedDotNetTarget | undefined> => {
 		const filePath = typeof options.file === 'string' ? options.file : undefined;
+		const candidatePath = filePath ?? engine.getFilePath();
+		if (candidatePath && isSingleFileBundle(candidatePath)) {
+			return { kind: 'single-file' };
+		}
 		if (filePath) {
 			try {
 				if (!engine.isFileLoaded() || engine.getFilePath() !== filePath) {
@@ -655,21 +684,30 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 		}
-		return engine.getPEDataDirectories().clr;
+		const clr = engine.getPEDataDirectories().clr;
+		return clr ? { kind: 'clr', clr } : undefined;
 	};
 
 	// Issue #32: the honest managed-code marker written in place of the native stub. Plain
 	// C comments so it round-trips through the .helix.c consumers without a fake function.
-	const buildManagedDotNetMarker = (clr: import('./disassemblerEngine').CLRHeader): string => {
-		const ver = `${clr.majorRuntimeVersion}.${clr.minorRuntimeVersion}`;
+	const buildManagedDotNetMarker = (target: ManagedDotNetTarget): string => {
+		const detail = target.kind === 'clr'
+			? [
+				'// This target carries a CLR Runtime Header (PE data directory 14), so its',
+				`// .text section holds CIL bytecode + .NET metadata (runtime v${target.clr.majorRuntimeVersion}.${target.clr.minorRuntimeVersion}), not`,
+				'// native machine code. The native Remill→Helix pipeline cannot decompile it;',
+			]
+			: [
+				'// This target is a .NET single-file bundle: its native apphost wraps one or',
+				'// more managed assemblies in an appended payload. Decompiling only the apphost',
+				'// would hide the actual application, so the native pipeline is not applicable;',
+			];
 		return [
 			'// ─────────────────────────────────────────────────────────────',
 			'// Managed .NET (CIL) assembly — native x86 decompile not applicable',
 			'// ─────────────────────────────────────────────────────────────',
 			'//',
-			'// This target carries a CLR Runtime Header (PE data directory 14), so its',
-			`// .text section holds CIL bytecode + .NET metadata (runtime v${ver}), not`,
-			'// native machine code. The native Remill→Helix pipeline cannot decompile it;',
+			...detail,
 			'// disassembling the entry point yields the _CorExeMain thunk followed by',
 			'// metadata bytes that mis-decode as "add byte ptr [eax], al".',
 			'//',
@@ -2162,29 +2200,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				// Auto-backtrack: if address is mid-function, find the real start (FEAT-DISASM-004 / BUG-HELIX-002)
 				backtrackOriginalAddress = startAddress;
 				if (options.autoBacktrack !== false) {
-					// v3.7.5 FIX-022: For PE files, try function table FIRST (forceProbe=false).
-					// Only fall back to byte-level probe for ET_REL (.ko) where the function
-					// table may have incorrect entries. forceProbe=true was causing regressions
-					// on PE64 (ROTTR) by backtracking into adjacent functions' prologues.
-					const isRelocatable = engine.getFileInfo()?.isRelocatable === true;
-					const funcStart = await engine.findFunctionStartForAddress(startAddress, isRelocatable);
-					if (funcStart !== undefined && funcStart !== startAddress) {
-						// FIX-022c: Validate backtrack with Capstone linear sweep.
-						// Decode instructions from candidate to original address. If we hit
-						// a RET, INT3 padding, or decode failure before reaching the original,
-						// the candidate is a DIFFERENT function — discard the backtrack.
-						const dist = startAddress - funcStart;
-						if (dist > 0 && dist <= 4096) {
-							const valid = await validateBacktrackCandidate(engine, funcStart, startAddress);
-							if (valid) {
-								startAddress = funcStart;
-								didBacktrack = true;
-							} else {
-								console.log(`[HexCore] liftToIR FIX-022c: Backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} REJECTED (linear sweep found function boundary in ${dist}-byte gap)`);
-							}
-						} else if (dist > 4096) {
-							console.log(`[HexCore] liftToIR FIX-022c: Discarding backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} (${dist} bytes > 4096 limit)`);
-						}
+					const backtrack = await resolveAutoBacktrack(engine, startAddress);
+					if (backtrack) {
+						console.log(
+							`[HexCore] liftToIR auto-backtrack (${backtrack.source}): ` +
+							`0x${startAddress.toString(16)} -> 0x${backtrack.start.toString(16)}`
+						);
+						startAddress = backtrack.start;
+						didBacktrack = true;
 					}
 				}
 				// v3.8.0-nightly — Trampoline follow (Milestone 4.1). After
@@ -2202,37 +2225,61 @@ export function activate(context: vscode.ExtensionContext): void {
 						startAddress = trampoline.target;
 					}
 				}
-				if (typeof options.size === 'number') {
-					size = options.size;
-				} else if (typeof options.count === 'number') {
-					// v3.7.5 FIX: Use the larger of count*15 and the actual symbol size.
-					const countEstimate = options.count * 15;
-					const symbolSize = engine.getRecommendedLiftSize(startAddress, 0);
-					size = symbolSize > 0 ? Math.max(countEstimate, symbolSize) : countEstimate;
-				} else {
-					size = engine.getBufferSize();
+				// FIX-027c: loadFile alone does not run analyzeAll's .pdata
+				// reconciliation. Without this barrier, a chained-unwind function
+				// is sized from its first raw RUNTIME_FUNCTION fragment and that
+				// short end is passed to Remill as knownFunctionEnds. The PE64 scan
+				// then stops before the remaining fragments (SOTTR HealthData:
+				// 137/701 bytes). The engine method is one-shot per loaded file.
+				await engine.ensurePdataFunctionsReconciled();
+				// FIX-QUALITY-002 / 002d: coerce stringy job args + clamp using
+				// AUTHORITATIVE extent (.pdata preferred over prologue-scan size).
+				// Log proof: knownSize=4800 from table but pdata end=0x140027e85
+				// (6761). Clamping to the short size permanently under-lifts.
+				{
+					const extent = getAuthoritativeFunctionExtent(engine, startAddress);
+					// Heal undersized table entries so later primaryEnd matches.
+					const knownFn = engine.getFunctionAt(startAddress);
+					if (knownFn && extent.size > knownFn.size) {
+						knownFn.size = extent.size;
+						knownFn.endAddress = extent.end;
+						console.log(
+							`[HexCore] liftToIR FIX-QUALITY-002d: healed fn table size ` +
+							`${knownFn.size} → ${extent.size} via ${extent.source} ` +
+							`end=0x${extent.end.toString(16)}`
+						);
+					}
+					const resolved = resolveLiftByteSize({
+						size: options.size,
+						count: options.count,
+						knownFunctionSize: extent.size,
+						bufferSize: engine.getBufferSize(),
+						// FIX-QUALITY-002e: ET_REL symbol/analyzeAll sizes may cover
+						// only a hot fragment. Preserve an explicit job byte window;
+						// PE keeps the authoritative `.pdata` clamp.
+						allowOversizedLift: shouldHonorExplicitLiftWindow(
+							options, engine.getFileInfo()?.isRelocatable === true),
+					});
+					size = resolved.size;
+					console.log(
+						`[HexCore] liftToIR FIX-QUALITY-002: size=${size} reason=${resolved.reason}` +
+						(resolved.clampedFrom !== undefined ? ` (was ${resolved.clampedFrom})` : '') +
+						` knownSize=${extent.size} src=${extent.source} @0x${startAddress.toString(16)}`
+					);
 				}
 			} else if (isHeadless && options.functionAddress !== undefined) {
 				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
 				// Auto-backtrack: find real function start if address is mid-function
 				backtrackOriginalAddress = startAddress;
 				if (options.autoBacktrack !== false) {
-					// v3.7.5 FIX-022: forceProbe only for ET_REL (see address path above)
-					const isRelocatable2 = engine.getFileInfo()?.isRelocatable === true;
-					const funcStart = await engine.findFunctionStartForAddress(startAddress, isRelocatable2);
-					if (funcStart !== undefined && funcStart !== startAddress) {
-						const dist2 = startAddress - funcStart;
-						if (dist2 > 0 && dist2 <= 4096) {
-							const valid2 = await validateBacktrackCandidate(engine, funcStart, startAddress);
-							if (valid2) {
-								startAddress = funcStart;
-								didBacktrack = true;
-							} else {
-								console.log(`[HexCore] liftToIR FIX-022c: Backtrack 0x${startAddress.toString(16)} -> 0x${funcStart.toString(16)} REJECTED (linear sweep found boundary in ${dist2}-byte gap)`);
-							}
-						} else if (dist2 > 4096) {
-							console.log(`[HexCore] liftToIR FIX-022c: Discarding backtrack (${dist2} bytes > 4096 limit)`);
-						}
+					const backtrack = await resolveAutoBacktrack(engine, startAddress);
+					if (backtrack) {
+						console.log(
+							`[HexCore] liftToIR auto-backtrack (${backtrack.source}): ` +
+							`0x${startAddress.toString(16)} -> 0x${backtrack.start.toString(16)}`
+						);
+						startAddress = backtrack.start;
+						didBacktrack = true;
 					}
 				}
 				const func = engine.getFunctionAt(startAddress);
@@ -2501,9 +2548,21 @@ export function activate(context: vscode.ExtensionContext): void {
 						nextBase += 0x00100000; // 1 MiB spacing per section
 						sectionFakeBase.set(dreloc.sectionName, base);
 					}
-					// Absolute 32-bit value (32S sign-extends cleanly for < 0x80000000)
-					const value = (base + dreloc.addend) & 0xFFFFFFFF;
-					patchedBytes.writeInt32LE(value | 0, patchOffset);
+					const targetAddress = base + dreloc.addend;
+					if (dreloc.type === 2) {
+						// R_X86_64_PC32 is consumed by a RIP-relative operand.
+						// Encode from the end of its four-byte displacement so
+						// Remill observes the synthetic .rodata address exactly.
+						const relocVA = textSectionVA + textOffset;
+						const displacement = encodeX86PcRelativeDataDisplacement(
+							targetAddress,
+							relocVA,
+						);
+						patchedBytes.writeInt32LE(displacement, patchOffset);
+					} else {
+						// R_X86_64_32/32S store an absolute 32-bit value.
+						patchedBytes.writeInt32LE(targetAddress | 0, patchOffset);
+					}
 					dataPatchCount++;
 				}
 
@@ -2539,98 +2598,108 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const liftOpts: RemillLiftOptions = {};
 
+			// FIX-QUALITY-002 / 002c / 002d: single-function lift scope.
+			// Primary end MUST come from .pdata when larger than the function
+			// table (prologue-scan undersize = 4800 vs pdata 6761).
+			// Do NOT flood additionalLeaders — Remill discovers BBs itself.
+			const extent = getAuthoritativeFunctionExtent(engine, startAddress);
+			const primaryFn = engine.getFunctionAt(startAddress);
+			if (primaryFn && extent.size > primaryFn.size) {
+				primaryFn.size = extent.size;
+				primaryFn.endAddress = extent.end;
+			}
+			const primaryEnd = extent.end > startAddress
+				? extent.end
+				: (startAddress + bytes.length);
+			const knownFnSize = extent.size > 0
+				? extent.size
+				: (primaryEnd - startAddress);
+
 			if (fmt === 'PE' || fmt === 'PE64') {
 				liftOpts.liftMode = 'pe64';
-				// Collect function end addresses from .pdata for the lifted range
-				const allFuncs = engine.getFunctions();
-				const endAddr = startAddress + bytes.length;
-				const knownEnds: number[] = [];
-				const nearbyLeaders: number[] = [];
-				for (const fn of allFuncs) {
-					if (fn.endAddress > startAddress && fn.address < endAddr) {
-						if (fn.endAddress > startAddress && fn.endAddress <= endAddr) {
-							knownEnds.push(fn.endAddress);
-						}
-						// Function starts within our range are additional leaders
-						if (fn.address > startAddress && fn.address < endAddr) {
-							nearbyLeaders.push(fn.address);
-						}
-					}
-				}
-				if (knownEnds.length > 0) { liftOpts.knownFunctionEnds = knownEnds; }
-				if (nearbyLeaders.length > 0) { liftOpts.additionalLeaders = nearbyLeaders; }
+				// Only the primary function end (absolute VA).
+				liftOpts.knownFunctionEnds = [primaryEnd];
 			} else if (fileInfo?.isRelocatable) {
 				liftOpts.liftMode = 'elf_relocatable';
-				// ELF symtab: function addresses within lift range as additional leaders
-				const allFuncs = engine.getFunctions();
-				const endAddr = startAddress + bytes.length;
-				const symLeaders: number[] = [];
-				for (const fn of allFuncs) {
-					if (fn.address > startAddress && fn.address < endAddr) {
-						symLeaders.push(fn.address);
-					}
-				}
-				if (symLeaders.length > 0) { liftOpts.additionalLeaders = symLeaders; }
 			}
 
-			// v3.8.0 Pathfinder: inject .pdata function boundaries as CFG hints
-			// This gives the Remill lifter EXACT function boundaries from PE64 metadata,
-			// dramatically improving basic block discovery and tail call detection.
+			// Pathfinder: #51 inject ONLY jump-table case targets as Remill
+			// additionalLeaders (not the full BB leader flood — that races
+			// maxBasicBlocks and under-lifts). Full leader injection remains
+			// opt-in via allowOversizedLift.
 			try {
 				const cfgHints = await runPathfinder(engine, startAddress, bytes);
-				if (cfgHints.confidence > 0) {
-					// Merge Pathfinder hints with existing leaders
-					const existingLeaders = liftOpts.additionalLeaders ?? [];
-					const existingEnds = liftOpts.knownFunctionEnds ?? [];
+				const rangeHi = Math.min(primaryEnd, startAddress + bytes.length);
+				const jtTargets = (cfgHints.indirectJumps ?? [])
+					.filter(j => j.type === 'jump_table')
+					.flatMap(j => j.targets ?? [])
+					.filter(t => t > startAddress && t < rangeHi);
+				const uniqueJt = [...new Set(jtTargets)].sort((a, b) => a - b);
 
-					// Add Pathfinder leaders (other function starts near our target)
-					const mergedLeaders = new Set([...existingLeaders, ...cfgHints.leaders]);
-					liftOpts.additionalLeaders = [...mergedLeaders].sort((a, b) => a - b);
+				if (uniqueJt.length > 0) {
+					// Selective injection: case bodies only (#51)
+					liftOpts.additionalLeaders = uniqueJt;
+					console.log(
+						`[HexCore] liftToIR #51: injecting ${uniqueJt.length} jump-table case leaders ` +
+						`(sample: [${uniqueJt.slice(0, 8).map(t => '0x' + t.toString(16)).join(', ')}${uniqueJt.length > 8 ? '...' : ''}])`
+					);
+				}
 
-					// Add function end boundaries from .pdata
-					if (cfgHints.functionEnds.length > 0) {
-						const mergedEnds = new Set([...existingEnds, ...cfgHints.functionEnds]);
-						liftOpts.knownFunctionEnds = [...mergedEnds].sort((a, b) => a - b);
-					}
-
-					if (!quiet) {
-						const pdataCount = getPdataFunctionCount(engine);
-						console.log(`[pathfinder] CFG hints: ${cfgHints.leaders.length} leaders, ${cfgHints.functionEnds.length} ends, ${cfgHints.tailCalls.length} tail-calls, ${cfgHints.instructionsDecoded} insns decoded, confidence=${cfgHints.confidence}% (.pdata: ${pdataCount} functions)`);
-					}
+				if (cfgHints.confidence > 0 && !quiet) {
+					const pdataCount = getPdataFunctionCount(engine);
+					const inFn = (cfgHints.leaders ?? []).filter(
+						(a: number) => a > startAddress && a < primaryEnd
+					).length;
+					console.log(
+						`[pathfinder] CFG hints: ${inFn}/${cfgHints.leaders.length} leaders in-fn, ` +
+						`jtCases=${uniqueJt.length}, primaryEnd=0x${primaryEnd.toString(16)}, ` +
+						`tail-calls=${cfgHints.tailCalls.length}, insns=${cfgHints.instructionsDecoded}, ` +
+						`confidence=${cfgHints.confidence}% (.pdata: ${pdataCount} functions)`
+					);
+				}
+				// Oversized multi-fn experimental window: full leader injection.
+				if (options.allowOversizedLift === true && cfgHints.confidence > 0) {
+					const pfLeaders = (cfgHints.leaders ?? []).filter(
+						(a: number) => a >= startAddress && a < startAddress + bytes.length
+					);
+					liftOpts.additionalLeaders = [...new Set([
+						startAddress,
+						...pfLeaders,
+						...uniqueJt,
+					])].sort((a, b) => a - b);
 				}
 			} catch (pfErr) {
-				// Non-fatal: Pathfinder failure doesn't block lifting
 				console.warn('[pathfinder] CFG analysis failed, continuing without hints:', pfErr);
 			}
 
-			// FIX-052: Adaptive lift caps so large intra-function chains lift
-			// whole. The native defaults (maxInstructions=2000, maxBasicBlocks=500,
-			// maxBytes=32768) silently truncate callfuscation-deflattened bodies
-			// (e.g. the Callfuscated `main`: ~2832 instrs / ~937 leaders), which
-			// drops the tail of the function and starves Helix. When the caller
-			// has not pinned these explicitly, size them to the actual buffer and
-			// the number of leaders Pathfinder discovered.
+			// FIX-052 + FIX-QUALITY-002c: caps MUST leave headroom above any
+			// pre-injected leaders. Floor is intentionally high so a future
+			// leader injection cannot re-introduce silent max_blocks truncates.
 			{
 				const leaderCount = liftOpts.additionalLeaders?.length ?? 0;
 				if (liftOpts.maxBytes === undefined) {
-					// Cover the whole provided buffer (cap at 8 MiB for safety).
-					liftOpts.maxBytes = Math.min(Math.max(bytes.length, 32768), 4 * 1024 * 1024);
+					liftOpts.maxBytes = Math.min(
+						Math.max(bytes.length, knownFnSize + 64, 32768),
+						4 * 1024 * 1024,
+					);
 				}
 				if (liftOpts.maxInstructions === undefined) {
-					// ~1 instr / 2 bytes worst case, plus headroom; floor at 2000.
-					const est = Math.ceil(bytes.length / 2) + leaderCount;
-					liftOpts.maxInstructions = Math.min(Math.max(est, 2000), 256_000);
+					const est = Math.ceil(bytes.length / 2) + leaderCount + 4096;
+					liftOpts.maxInstructions = Math.min(Math.max(est, 8000), 256_000);
 				}
 				if (liftOpts.maxBasicBlocks === undefined) {
-					// Allow one block per leader plus generous headroom; floor 500.
-					const est = Math.max(Math.ceil(leaderCount * 1.5) + 512,
-					                     Math.ceil(bytes.length / 8));
-					liftOpts.maxBasicBlocks = Math.min(Math.max(est, 2048), 64_000);
+					// CRITICAL: floor well above pre-injected leaders (leaderCount+2048).
+					const est = Math.max(
+						Math.ceil(leaderCount * 1.5) + 2048,
+						Math.ceil(bytes.length / 4) + 1024,
+						4096,
+					);
+					liftOpts.maxBasicBlocks = Math.min(est, 64_000);
 				}
 			}
 
 			// Perform lifting with progress indicator
-			const liftResult = await vscode.window.withProgress(
+			let liftResult = await vscode.window.withProgress(
 				{
 					location: vscode.ProgressLocation.Notification,
 					title: '[Experimental] Lifting to LLVM IR...',
@@ -2640,6 +2709,56 @@ export function activate(context: vscode.ExtensionContext): void {
 					return remillWrapper.liftBytes(bytes, startAddress, arch, targetOs, liftOpts);
 				}
 			);
+
+			// FIX-QUALITY-002c: silent under-lift detector + engine-direct retry.
+			// If Remill consumed << known function size, retry once with harness
+			// opts (no leader flood, generous caps). Closes the 4800/6761 gap.
+			if (
+				liftResult.success &&
+				knownFnSize > 256 &&
+				typeof liftResult.bytesConsumed === 'number' &&
+				liftResult.bytesConsumed > 0 &&
+				liftResult.bytesConsumed < knownFnSize * 0.85 &&
+				options.noLiftRetry !== true
+			) {
+				const short = liftResult.bytesConsumed;
+				console.warn(
+					`[HexCore] liftToIR FIX-QUALITY-002c: under-lift detected ` +
+					`bytesConsumed=${short} < 85% of knownSize=${knownFnSize} — retrying engine-direct style`
+				);
+				const retryOpts: RemillLiftOptions = {
+					...(fmt === 'PE' || fmt === 'PE64'
+						? { liftMode: 'pe64' as const, knownFunctionEnds: [primaryEnd] }
+						: fileInfo?.isRelocatable
+							? { liftMode: 'elf_relocatable' as const }
+							: {}),
+					maxBytes: Math.max(knownFnSize + 64, bytes.length, 32768),
+					maxInstructions: 256_000,
+					maxBasicBlocks: 64_000,
+				};
+				const retryBuf = bytes.length >= knownFnSize
+					? bytes
+					: (engine.getBytes(startAddress, knownFnSize + 64) ?? bytes);
+				const retry = await remillWrapper.liftBytes(
+					retryBuf, startAddress, arch, targetOs, retryOpts
+				);
+				if (
+					retry.success &&
+					typeof retry.bytesConsumed === 'number' &&
+					retry.bytesConsumed > short
+				) {
+					console.log(
+						`[HexCore] liftToIR FIX-QUALITY-002c: retry improved ` +
+						`${short} → ${retry.bytesConsumed} bytes, ir ${(retry.ir || '').split('\n').length} lines`
+					);
+					liftResult = retry;
+				} else {
+					console.warn(
+						`[HexCore] liftToIR FIX-QUALITY-002c: retry did not improve ` +
+						`(kept ${short} bytes)`
+					);
+				}
+			}
 
 			// Clear after lift
 			if (symbolMap && symbolMap.size > 0) {
@@ -2961,6 +3080,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					architecture: mapping.remillArch,
 					functionName,
 					backtracked: didBacktrack,
+					// FIX-QUALITY-001: surface Remill callTargets so helix.decompile
+					// can enrich the D2 functionStarts registry (plus IR parse).
+					callTargets: liftResult.callTargets,
 					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 					...(trampolineChain.length > 0 ? {
 						trampolineFollowed: true,
@@ -2985,6 +3107,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					architecture: mapping.remillArch,
 					functionName,
 					backtracked: didBacktrack,
+					// FIX-QUALITY-001: see headless return above.
+					callTargets: liftResult.callTargets,
 					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 					...(trampolineChain.length > 0 ? {
 						trampolineFollowed: true,
@@ -3026,6 +3150,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				architecture: mapping.remillArch,
 				functionName,
 				backtracked: didBacktrack,
+				callTargets: liftResult.callTargets,
+				internalCallTargets,
 				...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 			};
 		})
@@ -3092,15 +3218,20 @@ export function activate(context: vscode.ExtensionContext): void {
 				startAddress = parseAddressValue(options.address as string | number | undefined)
 					?? parseAddressValue(options.startAddress as string | number | undefined)
 					?? engine.getBaseAddress();
-				if (typeof options.size === 'number') {
-					size = options.size;
-				} else if (typeof options.count === 'number') {
-					// v3.7.5 FIX: Use the larger of count*15 and the actual symbol size.
-					const countEstimate = options.count * 15;
-					const symbolSize = engine.getRecommendedLiftSize(startAddress, 0);
-					size = symbolSize > 0 ? Math.max(countEstimate, symbolSize) : countEstimate;
-				} else {
-					size = engine.getBufferSize();
+				// FIX-QUALITY-002: same sizing policy as liftToIR (rellic path).
+				{
+					const knownFn = engine.getFunctionAt(startAddress);
+					const knownSize = (knownFn && knownFn.size > 0)
+						? knownFn.size
+						: engine.getRecommendedLiftSize(startAddress, 0);
+					const resolved = resolveLiftByteSize({
+						size: options.size,
+						count: options.count,
+						knownFunctionSize: knownSize,
+						bufferSize: engine.getBufferSize(),
+						allowOversizedLift: options.allowOversizedLift === true,
+					});
+					size = resolved.size;
 				}
 			} else if (isHeadless && options.functionAddress !== undefined) {
 				startAddress = typeof options.functionAddress === 'number' ? options.functionAddress : 0;
@@ -3109,14 +3240,14 @@ export function activate(context: vscode.ExtensionContext): void {
 					size = func.endAddress - func.address;
 					functionName = func.name;
 				} else {
-					// v3.7.5 FIX: Smart sizing — symbol table → count → 4096 (was 256)
-					if (typeof options.size === 'number') {
-						size = options.size;
-					} else if (typeof options.count === 'number') {
-						size = options.count * 15;
-					} else {
-						size = engine.getRecommendedLiftSize(startAddress, 4096);
-					}
+					const resolved = resolveLiftByteSize({
+						size: options.size,
+						count: options.count,
+						knownFunctionSize: engine.getRecommendedLiftSize(startAddress, 0),
+						bufferSize: 4096,
+						allowOversizedLift: options.allowOversizedLift === true,
+					});
+					size = resolved.size;
 				}
 			} else {
 				const addrInput = await vscode.window.showInputBox({
@@ -3159,34 +3290,23 @@ export function activate(context: vscode.ExtensionContext): void {
 			// D-scanrange: auto-backtrack a mid-function hit to the real prologue
 			// BEFORE fetching bytes, so the lift buffer starts at the function entry
 			// and Remill sees the full CFG (no use-before-def from a mid-function
-			// lift). Mirrors the liftToIR path's backtrack and reuses BOTH FIX-022c
-			// guards: the 4096-byte cap (in resolveReanchorWindow) and the Capstone
-			// continuity check (validateBacktrackCandidate). FIX-011 guard: the
-			// relocatable case is rejected inside resolveReanchorWindow, so this
-			// path never re-fetches an unpatched .ko window.
+			// lift). Authoritative AMD64 .pdata containment wins even when the
+			// requested address is mid-instruction. Heuristic candidates retain
+			// FIX-022c's distance and exact-continuity guards. ET_REL remains
+			// excluded so this path never re-fetches an unpatched .ko window.
 			if (options.autoBacktrack !== false) {
-				const isRelocatableDecomp = engine.getFileInfo()?.isRelocatable === true;
-				const funcStartDecomp = await engine.findFunctionStartForAddress(startAddress, isRelocatableDecomp);
-				const reWindow = resolveReanchorWindow(
-					startAddress,
-					size,
-					funcStartDecomp,
-					engine.getFunctionAt(funcStartDecomp ?? startAddress)?.endAddress,
-					isRelocatableDecomp,
-				);
-				if (reWindow.scanStart !== undefined && reWindow.scanStart !== startAddress) {
-					const validReanchor = await validateBacktrackCandidate(engine, reWindow.scanStart, startAddress);
-					if (validReanchor) {
-						size += (startAddress - reWindow.scanStart);
-						startAddress = reWindow.scanStart;
-						const reFunc = engine.getFunctionAt(startAddress);
-						if (reFunc && reFunc.endAddress - reFunc.address > size) {
-							size = reFunc.endAddress - reFunc.address;
-						}
-						console.log(`[HexCore] rellic.decompile D-scanrange: re-anchored to prologue 0x${startAddress.toString(16)} (size now ${size})`);
-					} else {
-						console.log(`[HexCore] rellic.decompile D-scanrange: backtrack to 0x${reWindow.scanStart.toString(16)} REJECTED by continuity check`);
-					}
+				const originalEnd = startAddress + size;
+				const backtrack = await resolveAutoBacktrack(engine, startAddress);
+				if (backtrack) {
+					startAddress = backtrack.start;
+					size = Math.max(
+						originalEnd - startAddress,
+						(backtrack.end ?? startAddress) - startAddress
+					);
+					console.log(
+						`[HexCore] rellic.decompile D-scanrange (${backtrack.source}): ` +
+						`re-anchored to 0x${startAddress.toString(16)} (size now ${size})`
+					);
 				}
 			}
 
@@ -3207,50 +3327,38 @@ export function activate(context: vscode.ExtensionContext): void {
 				: (fmtForOs === 'PE' || fmtForOs === 'PE64') ? 'windows'
 					: undefined;
 
+			// FIX-QUALITY-002: same single-function scope as liftToIR
 			const decompLiftOpts: RemillLiftOptions = {};
+			const primaryFnDecomp = engine.getFunctionAt(startAddress);
+			const primaryEndDecomp = (primaryFnDecomp && primaryFnDecomp.endAddress > startAddress)
+				? primaryFnDecomp.endAddress
+				: (startAddress + bytes.length);
+			const withinPrimaryDecomp = (a: number): boolean =>
+				a > startAddress && a < primaryEndDecomp;
+
 			if (fmtForOs === 'PE' || fmtForOs === 'PE64') {
 				decompLiftOpts.liftMode = 'pe64';
-				const allFuncs = engine.getFunctions();
-				const endAddr = startAddress + bytes.length;
-				const knownEnds: number[] = [];
-				const nearbyLeaders: number[] = [];
-				for (const fn of allFuncs) {
-					if (fn.endAddress > startAddress && fn.address < endAddr) {
-						if (fn.endAddress > startAddress && fn.endAddress <= endAddr) {
-							knownEnds.push(fn.endAddress);
-						}
-						if (fn.address > startAddress && fn.address < endAddr) {
-							nearbyLeaders.push(fn.address);
-						}
-					}
-				}
-				if (knownEnds.length > 0) { decompLiftOpts.knownFunctionEnds = knownEnds; }
-				if (nearbyLeaders.length > 0) { decompLiftOpts.additionalLeaders = nearbyLeaders; }
+				decompLiftOpts.knownFunctionEnds = [primaryEndDecomp];
 			} else if (fileInfoDecomp?.isRelocatable) {
 				decompLiftOpts.liftMode = 'elf_relocatable';
-				const allFuncs = engine.getFunctions();
-				const endAddr = startAddress + bytes.length;
 				const symLeaders: number[] = [];
-				for (const fn of allFuncs) {
-					if (fn.address > startAddress && fn.address < endAddr) {
+				for (const fn of engine.getFunctions()) {
+					if (withinPrimaryDecomp(fn.address)) {
 						symLeaders.push(fn.address);
 					}
 				}
 				if (symLeaders.length > 0) { decompLiftOpts.additionalLeaders = symLeaders; }
 			}
 
-			// v3.8.0 Pathfinder: inject .pdata CFG hints (same as liftToIR path)
+			// v3.8.0 Pathfinder: BB leaders inside primary only (mirror liftToIR)
 			try {
 				const cfgHints = await runPathfinder(engine, startAddress, bytes);
 				if (cfgHints.confidence > 0) {
-					const existingLeaders = decompLiftOpts.additionalLeaders ?? [];
-					const existingEnds = decompLiftOpts.knownFunctionEnds ?? [];
-					const mergedLeaders = new Set([...existingLeaders, ...cfgHints.leaders]);
+					const existingLeaders = (decompLiftOpts.additionalLeaders ?? []).filter(withinPrimaryDecomp);
+					const pfLeaders = (cfgHints.leaders ?? []).filter(withinPrimaryDecomp);
+					const mergedLeaders = new Set([...existingLeaders, ...pfLeaders, startAddress]);
 					decompLiftOpts.additionalLeaders = [...mergedLeaders].sort((a, b) => a - b);
-					if (cfgHints.functionEnds.length > 0) {
-						const mergedEnds = new Set([...existingEnds, ...cfgHints.functionEnds]);
-						decompLiftOpts.knownFunctionEnds = [...mergedEnds].sort((a, b) => a - b);
-					}
+					decompLiftOpts.knownFunctionEnds = [primaryEndDecomp];
 				}
 			} catch {
 				// Non-fatal
@@ -3455,6 +3563,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		eng: DisassemblerEngine,
 		functionAddress?: number,
 		functionName?: string,
+		irText?: string,
 	): { structInfo: StructInfoJson; functionName: string } | null {
 		// Resolve function name from address if not provided
 		let funcName = functionName;
@@ -3493,43 +3602,27 @@ export function activate(context: vscode.ExtensionContext): void {
 		// Strip sub_ prefix — debug info stores real symbol names
 		if (funcName.startsWith('sub_')) { return null; }
 
-		// 1. Try BTF first (fast, compact)
-		if (elfAnalysis.btfData) {
-			const scoped = getStructInfoForFunction(funcName, elfAnalysis.btfData);
-			if (scoped && Object.keys(scoped.structs).length > 0) {
-				return { structInfo: scoped, functionName: funcName };
+		const fullInfo = elfAnalysis.btfData
+			? exportStructInfoJson(elfAnalysis.btfData)
+			: elfAnalysis.dwarfStructInfo;
+		if (!fullInfo || !fullInfo.functions[funcName]) { return null; }
+
+		// FIX-121: include signatures for callees present in this lifted IR so
+		// the MLIR type lattice can seed call results (for example
+		// find_reasonable_region -> struct kbase_va_region*). Keep the database
+		// scoped; serializing every DWARF struct for every function is wasteful.
+		const functionNames = new Set<string>([funcName]);
+		if (irText) {
+			// Remill passes the real callee as `ptr @symbol` to a semantic
+			// helper, so it is not necessarily the direct LLVM call target.
+			// Filtering through DWARF/BTF keeps LLVM globals out of the scope.
+			const symbolPattern = /@([A-Za-z_.$][\w.$]*)/g;
+			for (const match of irText.matchAll(symbolPattern)) {
+				if (fullInfo.functions[match[1]]) { functionNames.add(match[1]); }
 			}
 		}
-
-		// 2. Fallback to DWARF (pre-loaded by engine during analyzeELF)
-		if (elfAnalysis.dwarfStructInfo) {
-			const cache = elfAnalysis.dwarfStructInfo;
-			const funcSig = cache.functions[funcName];
-			if (!funcSig) { return null; }
-
-			const relevantStructs: Record<string, StructInfo> = {};
-			for (const param of funcSig.params) {
-				if (param.structName && cache.structs[param.structName]) {
-					relevantStructs[param.structName] = cache.structs[param.structName];
-					// One level of nested structs
-					for (const field of cache.structs[param.structName].fields) {
-						const nestedMatch = field.type.match(/^struct\s+(\w+)$/);
-						if (nestedMatch && cache.structs[nestedMatch[1]]) {
-							relevantStructs[nestedMatch[1]] = cache.structs[nestedMatch[1]];
-						}
-					}
-				}
-			}
-
-			if (Object.keys(relevantStructs).length === 0) { return null; }
-
-			return {
-				structInfo: { structs: relevantStructs, functions: { [funcName]: funcSig } },
-				functionName: funcName,
-			};
-		}
-
-		return null;
+		const scoped = scopeStructInfoForFunctions(fullInfo, functionNames);
+		return { structInfo: scoped, functionName: funcName };
 	}
 
 	// -----------------------------------------------------------------------
@@ -3575,6 +3668,34 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 		}
 		return result;
+	}
+
+	// #52 (option a): post-process Helix C with engine import/PLT map.
+	// Pure logic lives in importSymbolNames.ts — see regression tests there.
+	function applyImportSymbolNames(source: string): string {
+		if (!engine.isFileLoaded()) { return source; }
+		let functions: Array<{ address: number; name?: string }> = [];
+		let imports: Array<{ functions?: Array<{ address: number; name?: string }> }> = [];
+		try { functions = engine.getFunctions(); } catch { /* engine too old */ }
+		try { imports = engine.getImports(); } catch { /* engine too old */ }
+		const symMap = buildImportSymbolMap(functions, imports);
+		const { source: out, renamed } = applyImportSymbolNamesToSource(source, symMap);
+		if (renamed > 0) {
+			console.log(`[HexCore] helix.decompile: named ${renamed} sub_/g_ call target(s) via engine symbol map (#52)`);
+		}
+		return out;
+	}
+
+	/** #31: cap Confidence when body still shows damning defects (packaging safety net). */
+	function applyHonestyCap(source: string, evidence: HonestyEvidence = {}): string {
+		const r = applyHonestyConfidenceCap(source, evidence);
+		if (r.capped) {
+			console.log(
+				`[HexCore] helix.decompile #31 honesty cap: ${r.originalScore}% → ${r.newScore}% ` +
+				`(${r.reasons.join('; ')})`,
+			);
+		}
+		return r.source;
 	}
 
 	function applySessionRenames(source: string, funcAddress: number | undefined, originalAddress?: number): string {
@@ -3684,48 +3805,72 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		try {
 			const capstone = eng.getCapstone();
-			if (!capstone) { return true; } // can't validate, assume ok
+			if (!capstone) { return false; }
 
 			const insns = await capstone.disassemble(bytes, candidate, 512);
-			if (!insns || insns.length === 0) { return false; }
-
-			for (const insn of insns) {
-				const insnEnd = insn.address + insn.size;
-
-				// Reached or passed the original address — valid backtrack
-				if (insnEnd >= original) { return true; }
-
-				// RET instruction — function ended before reaching original
-				if (insn.mnemonic === 'ret' || insn.mnemonic === 'retf' ||
-					insn.mnemonic === 'retfq') {
-					return false;
-				}
-
-				// INT3 (0xCC) — padding between functions
-				if (insn.mnemonic === 'int3') {
-					// Check if next byte is also INT3 (CC CC = inter-function padding)
-					const nextOff = insnEnd - candidate;
-					if (nextOff < bytes.length && bytes[nextOff] === 0xCC) {
-						return false;
-					}
-				}
-
-				// Unconditional JMP to outside the [candidate, original] range
-				if (insn.mnemonic === 'jmp') {
-					// If it's a short/near jump, check target
-					const target = insn.targetAddress;
-					if (target !== undefined && (target < candidate || target > original + 64)) {
-						return false;
-					}
-				}
-			}
-
-			// Ran out of instructions without reaching original — suspicious
-			return false;
+			return isBacktrackContinuityValid(insns ?? [], bytes, candidate, original);
 		} catch {
 			// Capstone error — can't validate, be conservative and reject
 			return false;
 		}
+	}
+
+	interface AutoBacktrackResolution {
+		start: number;
+		end?: number;
+		source: 'pdata' | 'heuristic';
+	}
+
+	/**
+	 * Resolve a mid-function request without conflating unwind metadata with
+	 * prologue heuristics. AMD64 .pdata is authoritative containment data and
+	 * remains valid for a request in the middle of an instruction. Heuristic
+	 * candidates must still land exactly on the requested instruction boundary.
+	 */
+	async function resolveAutoBacktrack(
+		eng: DisassemblerEngine,
+		original: number
+	): Promise<AutoBacktrackResolution | undefined> {
+		if (eng.getFileInfo()?.isRelocatable === true) {
+			return undefined;
+		}
+
+		await eng.ensurePdataFunctionsReconciled();
+		const pdataRange = eng.findAuthoritativePdataRangeContaining(original);
+		if (pdataRange && pdataRange.begin < original) {
+			return {
+				start: pdataRange.begin,
+				end: pdataRange.end,
+				source: 'pdata'
+			};
+		}
+
+		const candidate = await eng.findFunctionStartForAddress(original, false);
+		if (candidate === undefined || candidate >= original) {
+			return undefined;
+		}
+
+		const distance = original - candidate;
+		if (distance > 4096) {
+			console.log(
+				`[HexCore] auto-backtrack: discarding heuristic 0x${original.toString(16)} -> ` +
+				`0x${candidate.toString(16)} (${distance} bytes > 4096 limit)`
+			);
+			return undefined;
+		}
+		if (!await validateBacktrackCandidate(eng, candidate, original)) {
+			console.log(
+				`[HexCore] auto-backtrack: heuristic 0x${original.toString(16)} -> ` +
+				`0x${candidate.toString(16)} rejected by continuity check`
+			);
+			return undefined;
+		}
+
+		return {
+			start: candidate,
+			end: eng.getFunctionAt(candidate)?.endAddress,
+			source: 'heuristic'
+		};
 	}
 
 	function escapeRegex(s: string): string {
@@ -3840,9 +3985,8 @@ export function activate(context: vscode.ExtensionContext): void {
 	// -----------------------------------------------------------------------
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.helix.decompileIR', async (arg?: unknown) => {
-			const isHeadless = arg !== null && arg !== undefined && typeof arg === 'object'
-				&& !((arg as any) instanceof vscode.Uri)
-				&& ('file' in (arg as Record<string, unknown>) || 'irText' in (arg as Record<string, unknown>));
+			const isHeadless = !((arg as any) instanceof vscode.Uri)
+				&& hasHeadlessHelixIrInput(arg);
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
@@ -3902,21 +4046,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				irText = activeEditor.document.getText();
 			}
 
-			// Pass optimizeIR + useCastLayer options to Helix (v3.7.4)
-			// NOTE: must be `let` — sessionRenames and structInfo may promote it from undefined → {}
+			// FIX-QUALITY-001: cast layer ON by default; functionStarts enriched below.
+			// NOTE: must be `let` — sessionRenames and structInfo may promote fields.
 			let helixIROptions: {
 				optimizeIR?: boolean; useCastLayer?: boolean;
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 				functionStarts?: number[];
-			} | undefined =
-				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
-					? {
-						...(options.optimizeIR !== undefined ? { optimizeIR: options.optimizeIR !== false } : {}),
-						...(options.useCastLayer !== undefined ? { useCastLayer: options.useCastLayer === true } : {}),
-					}
-					: undefined;
+			} = { ...resolveHelixBaseOptions(options) };
 
 			// v3.7.5 P3: Collect session variable renames for this function and pass
 			// them to the Helix engine so the C AST walker can apply them surgically.
@@ -3946,7 +4084,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 			const structResult = options.structInfo !== false
-				? extractStructInfoForFunction(engine, funcAddr, explicitFuncName)
+				? extractStructInfoForFunction(engine, funcAddr, explicitFuncName, irText)
 				: null;
 			if (structResult) {
 				helixIROptions = helixIROptions ?? {};
@@ -3971,8 +4109,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// v3.8.0: Souper superoptimization — optimize IR before Helix decompilation
 			let irForHelix = irText;
-			// v3.9.x: tri-state Souper gate -- 'auto' runs Souper only on
-			// crypto/MBA-dense IR; true/absent keep legacy default-ON; false off.
+			// v3.8.3: tri-state Souper gate -- absent/'auto' runs Souper only on
+			// crypto/MBA-dense IR; true is explicit force-on; false is off.
 			const souperGate = decideSouperGate(options.souper, irText, {
 				threshold: typeof options.souperAutoThreshold === 'number' ? options.souperAutoThreshold : undefined,
 				minSignalOps: typeof options.souperAutoMinOps === 'number' ? options.souperAutoMinOps : undefined,
@@ -4011,19 +4149,33 @@ export function activate(context: vscode.ExtensionContext): void {
 				}));
 			}
 
-			// vX: pass the COMPLETE function-start table (engine.getFunctions() is
-			// the full analyzeAll discovery) so Helix's function table is
-			// authoritative and the D2 callee gate + #30 registry-miss fire
-			// honestly.  Full table or nothing -- a partial table mis-gates.
-			const allFunctionStarts = engine.getFunctions().map(f => f.address);
-			if (allFunctionStarts.length > 0) {
-				helixIROptions = helixIROptions ?? {};
-				helixIROptions.functionStarts = allFunctionStarts;
+			// FIX-QUALITY-001: D2 registry is OPT-IN (functionStarts:true / honesty:true).
+			// Default omit → non-authoritative, engine-direct quality parity.
+			if (wantsHelixFunctionStarts(options)) {
+				const starts = buildHelixFunctionStarts(engine, {
+					irText: irForHelix,
+					entryAddress: funcAddr,
+				});
+				if (starts && starts.length > 0) {
+					helixIROptions.functionStarts = starts;
+					if (!quiet) {
+						console.log(
+							`[helix] functionStarts: ${starts.length} entries ` +
+							`(honesty mode: analyzeAll+IR CALLI+imports/exports)`
+						);
+					}
+				}
+			} else if (!quiet) {
+				console.log('[helix] functionStarts: omitted (default quality path; set functionStarts:true for D2 honesty)');
 			}
 
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
-				async () => helixWrapper.decompileIr(irForHelix, arch, helixIROptions ?? (sessionRenames.length > 0 ? { variableRenames: sessionRenames } : undefined))
+				// FIX-QUALITY-002b: headless/quiet → forceSync (no Electron worker)
+				async () => helixWrapper.decompileIr(irForHelix, arch, {
+					...helixIROptions,
+					forceSync: quiet || isHeadless || options.forceSync === true,
+				})
 			);
 
 			if (!decompileResult.success) {
@@ -4043,6 +4195,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			const decompileAddr = parseAddressValue(options.functionAddress as string | number | undefined)
 				?? parseAddressValue(options.address as string | number | undefined);
 			let fullCode = applySessionRenames(decompileResult.source, decompileAddr);
+				// #52: name imported/PLT call targets (sub_<pltVA> → dlopen, …) via the engine symbol map.
+				fullCode = applyImportSymbolNames(fullCode);
+				fullCode = applyHonestyCap(fullCode);
 
 			// v3.8.0: Replace Helix-generated sub_<hex> with real function name.
 			// Helix ignores the IR function name and generates sub_<hex> from the
@@ -4159,9 +4314,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			// of mis-decoded zero padding and a confident 85% "stub function". Short-circuit
 			// with an honest marker (managed:true, confidence 0) so the analyze/decompile
 			// output reads as "can't, use IL tooling" instead of a fake success (D4).
-			const clrHeader = await detectManagedDotNet(options);
-			if (clrHeader) {
-				const markerCode = buildManagedDotNetMarker(clrHeader);
+			const managedTarget = await detectManagedDotNet(options);
+			if (managedTarget) {
+				const markerCode = buildManagedDotNetMarker(managedTarget);
 				if (isHeadless && options.output) {
 					const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
 					fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -4172,7 +4327,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				const managedResult = {
 					success: true,
 					managed: true,
-					managedFormat: 'dotnet-cil',
+					managedFormat: managedTarget.kind === 'clr' ? 'dotnet-cil' : 'dotnet-single-file',
 					confidence: 0,
 					code: markerCode,
 					functionCount: 0,
@@ -4221,21 +4376,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			// Pass optimizeIR + useCastLayer options to Helix
-			// NOTE: must be `let` — sessionRenames and structInfo may promote it from undefined → {}
+			// FIX-QUALITY-001: cast layer ON by default (engine-direct parity).
+			// NOTE: must be `let` — sessionRenames and structInfo may promote fields.
 			let helixOptions: {
 				optimizeIR?: boolean; useCastLayer?: boolean;
 				variableRenames?: Array<{ oldName: string; newName: string }>;
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 				functionStarts?: number[];
-			} | undefined =
-				isHeadless && (options.optimizeIR !== undefined || options.useCastLayer !== undefined)
-					? {
-						...(options.optimizeIR !== undefined ? { optimizeIR: options.optimizeIR !== false } : {}),
-						...(options.useCastLayer !== undefined ? { useCastLayer: options.useCastLayer === true } : {}),
-					}
-					: undefined;
+			} = { ...resolveHelixBaseOptions(options) };
 
 			// v3.7.5 P3: Collect session variable renames and pass to Helix engine
 			const sessionRenames2 = collectSessionVariableRenames(options, engine);
@@ -4249,7 +4398,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				?? parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined);
 			const structResult2 = options.structInfo !== false
-				? extractStructInfoForFunction(engine, funcAddr2, typeof options.functionName === 'string' ? options.functionName : undefined)
+				? extractStructInfoForFunction(engine, funcAddr2, typeof options.functionName === 'string' ? options.functionName : undefined, liftResult.ir)
 				: null;
 			if (structResult2) {
 				helixOptions = helixOptions ?? {};
@@ -4273,8 +4422,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// v3.8.0: Souper superoptimization — optimize lifted IR before Helix
 			let irForHelix2 = liftResult.ir;
-			// v3.9.x: tri-state Souper gate -- 'auto' runs Souper only on
-			// crypto/MBA-dense IR; true/absent keep legacy default-ON; false off.
+			// v3.8.3: tri-state Souper gate -- absent/'auto' runs Souper only on
+			// crypto/MBA-dense IR; true is explicit force-on; false is off.
 			const souperGate2 = decideSouperGate(options.souper, liftResult.ir, {
 				threshold: typeof options.souperAutoThreshold === 'number' ? options.souperAutoThreshold : undefined,
 				minSignalOps: typeof options.souperAutoMinOps === 'number' ? options.souperAutoMinOps : undefined,
@@ -4311,18 +4460,39 @@ export function activate(context: vscode.ExtensionContext): void {
 				}));
 			}
 
-			// vX: pass the COMPLETE function-start table (analyzeAll discovery) so
-			// Helix's function table is authoritative and the D2 callee gate +
-			// #30 registry-miss fire honestly.  Full table or nothing.
-			const allFunctionStarts2 = engine.getFunctions().map(f => f.address);
-			if (allFunctionStarts2.length > 0) {
-				helixOptions = helixOptions ?? {};
-				helixOptions.functionStarts = allFunctionStarts2;
+			// FIX-QUALITY-001: D2 registry is OPT-IN (functionStarts:true / honesty:true).
+			// Default omit → non-authoritative (engine-direct quality). Enriched
+			// table when requested so analyzeAll-only mis-gates do not return.
+			if (wantsHelixFunctionStarts(options)) {
+				const lrAny = liftResult as LiftResult & { internalCallTargets?: number[] };
+				const starts = buildHelixFunctionStarts(engine, {
+					callTargets: Array.isArray(lrAny.callTargets) ? lrAny.callTargets : undefined,
+					internalCallTargets: Array.isArray(lrAny.internalCallTargets)
+						? lrAny.internalCallTargets : undefined,
+					irText: irForHelix2,
+					entryAddress: typeof liftResult.address === 'number' ? liftResult.address : funcAddr2,
+				});
+				if (starts && starts.length > 0) {
+					helixOptions.functionStarts = starts;
+					if (!quiet) {
+						console.log(
+							`[helix] functionStarts: ${starts.length} entries ` +
+							`(honesty mode: analyzeAll+IR CALLI+imports/exports)`
+						);
+					}
+				}
+			} else if (!quiet) {
+				console.log('[helix] functionStarts: omitted (default quality path; set functionStarts:true for D2 honesty)');
 			}
 
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
-				async () => helixWrapper.decompileIr(irForHelix2, arch, helixOptions ?? (sessionRenames2.length > 0 ? { variableRenames: sessionRenames2 } : undefined))
+				// FIX-QUALITY-002b: headless/quiet → forceSync (engine-direct parity;
+				// avoids Electron worker_threads + native .node double-load quirks)
+				async () => helixWrapper.decompileIr(irForHelix2, arch, {
+					...helixOptions,
+					forceSync: quiet || isHeadless || options.forceSync === true,
+				})
 			);
 
 			if (!decompileResult.success) {
@@ -4343,7 +4513,49 @@ export function activate(context: vscode.ExtensionContext): void {
 			const origAddr = parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined)
 				?? parseAddressValue(options.functionAddress as string | number | undefined);
-			const fullCode = applySessionRenames(decompileResult.source, funcAddr, origAddr);
+			let fullCode = applySessionRenames(decompileResult.source, funcAddr, origAddr);
+				// #52: name imported/PLT call targets (sub_<pltVA> → dlopen, …) via the engine symbol map.
+				fullCode = applyImportSymbolNames(fullCode);
+
+			// FIX-QUALITY-002: stamp lift diagnostics into the C header so job
+			// outputs self-describe whether Remill under-lifted (silent gap).
+			{
+				const irLines = (liftResult.ir || '').split('\n').length;
+				const cLines = fullCode.split('\n').length;
+				const consumed = typeof liftResult.bytesConsumed === 'number' ? liftResult.bytesConsumed : -1;
+				const knownSz = (() => {
+					const a = typeof liftResult.address === 'number'
+						? liftResult.address
+						: (funcAddr ?? origAddr ?? 0);
+					if (!a) { return 0; }
+					return getAuthoritativeFunctionExtent(engine, a).size;
+				})();
+				const under = knownSz > 0 && consumed > 0 && consumed < knownSz * 0.85;
+				// #56: apply the honesty gate while lift coverage is still
+				// structured data. Parsing the later LiftDiag comment is both late
+				// and fragile, and previously made UNDERLIFT invisible to the cap.
+				fullCode = applyHonestyCap(fullCode, {
+					bytesConsumed: consumed,
+					knownFunctionSize: knownSz,
+					cLines,
+				});
+				const diag =
+					`// LiftDiag: addr=0x${(typeof liftResult.address === 'number' ? liftResult.address : 0).toString(16)} ` +
+					`bytesConsumed=${consumed}/${knownSz || '?'} irLines=${irLines} cLines=${cLines} ` +
+					`cast=${helixOptions.useCastLayer !== false} ` +
+					`fnStarts=${helixOptions.functionStarts?.length ?? 0}` +
+					(under ? ' UNDERLIFT' : '');
+				console.log(`[HexCore] ${diag}`);
+				// Insert after the Confidence header line when present, else prepend.
+				if (/Confidence:\s*[\d.]+%/.test(fullCode)) {
+					fullCode = fullCode.replace(
+						/(Confidence:\s*[\d.]+%[^\n]*\n)/,
+						`$1${diag}\n`,
+					);
+				} else {
+					fullCode = diag + '\n' + fullCode;
+				}
+			}
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
@@ -4478,9 +4690,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (targets.length === 0) {
 				const report = {
 					success: false,
+					status: 'failed' as const,
 					command: 'hexcore.hql.scanHeadless' as const,
 					file,
 					targetCount: 0,
+					completedTargetCount: 0,
+					failedTargetCount: 0,
 					matchedFunctionCount: 0,
 					totalFindings: 0,
 					results: [],
@@ -4553,15 +4768,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const jsonText = JSON.stringify(result, null, 2);
 
-			// Output to file if path specified
-			if (typeof options.output === 'string') {
-				fs.writeFileSync(options.output, jsonText, 'utf-8');
+			// The pipeline injects output as { path, format }; direct callers may
+			// still pass a string. Honour both forms under the same contract.
+			const outputPath = resolveOptionalOutputPath(options.output as string | { path?: string } | undefined);
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, jsonText, 'utf-8');
 				if (!quiet) {
 					vscode.window.showInformationMessage(
-						`Struct info exported: ${Object.keys(result.structs).length} structs, ${Object.keys(result.functions).length} functions → ${options.output}`
+						`Struct info exported: ${Object.keys(result.structs).length} structs, ${Object.keys(result.functions).length} functions → ${outputPath}`
 					);
 				}
-				return { success: true, path: options.output, structCount: Object.keys(result.structs).length, functionCount: Object.keys(result.functions).length };
+				return { success: true, path: outputPath, structCount: Object.keys(result.structs).length, functionCount: Object.keys(result.functions).length };
 			}
 
 			if (quiet) {
@@ -4708,13 +4926,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			let effectiveAddress = params.address;
 			const autoBacktrack = (arg as any)?.autoBacktrack !== false; // enabled by default
 			if (autoBacktrack) {
-				const existingFunc = engine.getFunctionAt(params.address);
-				if (!existingFunc) {
-					// Address not recognized as a function start — try to find one
-					const funcStart = await engine.findFunctionStartForAddress(params.address);
-					if (funcStart !== undefined && funcStart !== params.address) {
-						effectiveAddress = funcStart;
-					}
+				const backtrack = await resolveAutoBacktrack(engine, params.address);
+				if (backtrack) {
+					effectiveAddress = backtrack.start;
 				}
 			}
 
@@ -4871,6 +5085,60 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			return result;
 		})
+	);
+
+	context.subscriptions.push(
+		/**
+		 * Issue #55 — detect packer (UPX/etc.). MIT-only, no external PATH tools.
+		 * args: { file?, output?, quiet? }
+		 * Does NOT unpack (no bundled UPX / no user PATH dependency).
+		 */
+		vscode.commands.registerCommand('hexcore.disasm.detectPacker', async (arg?: Record<string, unknown>) => {
+			const filePath = typeof arg?.file === 'string' ? arg.file : engine.getFilePath();
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as AnalyzeAllOutputOptions | undefined;
+
+			if (!filePath || !fs.existsSync(filePath)) {
+				throw new Error('detectPacker requires a readable args.file (or a loaded engine file).');
+			}
+
+			// Prefer engine tables when this file is already loaded (richer section/string signals).
+			let sections: Array<{ name: string; isCode?: boolean; rawSize?: number; virtualSize?: number }> = [];
+			let strings: Array<{ string?: string }> = [];
+			try {
+				if (engine.getFilePath() === filePath) {
+					sections = engine.getSections().map(s => ({
+						name: s.name, isCode: s.isCode, rawSize: s.rawSize, virtualSize: s.virtualSize,
+					}));
+					strings = engine.getStrings().map(s => ({ string: s.string }));
+				}
+			} catch { /* engine empty */ }
+
+			const bytes = fs.readFileSync(filePath);
+			const detect = detectPacker(bytes, { sections, strings });
+
+			const exportData = {
+				...detect,
+				capabilities: packerCapabilityTags(detect),
+				file: filePath,
+				fileSize: bytes.length,
+				// Flat fields for onResult
+				ok: true,
+				generatedAt: new Date().toISOString(),
+			};
+
+			if (outputOptions?.path) {
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+			if (!quietMode) {
+				const msg = detect.packed
+					? `Packer: ${detect.family} (conf ${detect.confidence}%) — ${detect.recommendation.slice(0, 120)}`
+					: 'No packer markers detected.';
+				vscode.window.showInformationMessage(msg);
+			}
+			return exportData;
+		}),
 	);
 
 	context.subscriptions.push(
@@ -6937,15 +7205,27 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 	if (rwxSection || (has('virtualprotect') >= 1 && has('virtualalloc') >= 1)) {
 		caps.push('self-modifying-or-rwx');
 	}
-	const packerSection = engine.getSections().some(s =>
-		/upx|\.themida|\.vmp|\.enigma|\.aspack|\.petite|\.mpress|\.nsp/i.test(s.name) ||
-		(s.isCode && s.rawSize === 0 && s.virtualSize > 0));
-	// String-based packer signal: catches UPX-packed ELF (no PE-style packer section names)
-	// e.g. exatlon, whose strings carry "This file is packed with the UPX..." and "UPX!".
-	const packerString = engine.getStrings().some(s =>
-		/UPX!|packed with the UPX|\bthemida\b|vmprotect|\baspack\b|enigma protector|\bmpress\b/i.test(s.string || ''));
-	if (packerSection || packerString) {
-		caps.push('packed');
+	// Issue #55: structured packer detect (UPX magic/banner + section heuristics).
+	// Keeps legacy tag `packed` and adds `packed:upx` when family is UPX.
+	try {
+		const filePath = engine.getFilePath?.();
+		const raw = filePath && fs.existsSync(filePath)
+			? fs.readFileSync(filePath)
+			: undefined;
+		const packer = detectPacker(raw, {
+			sections: engine.getSections().map(s => ({
+				name: s.name,
+				isCode: s.isCode,
+				rawSize: s.rawSize,
+				virtualSize: s.virtualSize,
+			})),
+			strings: engine.getStrings().map(s => ({ string: s.string })),
+		});
+		for (const t of packerCapabilityTags(packer)) {
+			caps.push(t);
+		}
+	} catch {
+		// fall through — capabilities stay without packer tags
 	}
 	if (has('socket', 'connect', 'wsastartup', 'internetopen', 'internetconnect', 'winhttpopen', 'httpsendrequest', 'urldownloadtofile', 'send', 'recv') >= 1) {
 		caps.push('networking');

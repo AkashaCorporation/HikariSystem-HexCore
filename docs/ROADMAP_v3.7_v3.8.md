@@ -1,7 +1,7 @@
 # HexCore Roadmap — v3.7 & v3.8
 
 > **Data**: 2026-02-22
-> **Autor**: Mazum + Kiro
+> **Autor**: Knowkill + Kiro
 > **Contexto**: Baseado nos relatórios do Kiro-CLI (Callfuscated HTB Insane challenge), backlog existente, e decisões de arquitetura.
 
 ---
@@ -169,6 +169,13 @@ Capstone → Remill → Souper → Rellic = decompilação limpa mesmo em binár
 
 ## Backlog Status Após v3.7
 
+> **⚠️ Correction (2026-06-28):** the `DONE (v3.7)` cells below were *projected* at planning
+> time (2026-02-22) and were over-optimistic. Verified reality:
+> - **#6 PRNG** — genuinely `DONE` (`prng.ts` + VM-PRNG detection + tests). ✅
+> - **#30 VM heuristics** — `IN_PROGRESS`, not done: `detectVM` + `vmPrngDetection` shipped and were made honest, but commercial-grade VM coverage is still open (GitHub #33).
+> - **#28 Runtime Memory Disassembly** / **#29 Breakpoint Snapshots** — did **NOT** land in v3.7; the 2026-04-19 FEATURE_BACKLOG snapshot lists the v3.5.4 VVM audit at **1/5** (only #31 SAB done). Still PENDING.
+> - **Strategic note:** this roadmap is Rellic-centric (`Capstone→Remill→Souper→Rellic`). That inverted during v3.7→v3.8 — **Helix** (custom MLIR decompiler) became the flagship and Rellic was superseded. See FEATURE_BACKLOG's 2026-06-28 snapshot.
+
 | Item | Descrição | Status |
 |------|-----------|--------|
 | #6 | PRNG Analysis Helper | `DONE` (v3.7) |
@@ -177,7 +184,7 @@ Capstone → Remill → Souper → Rellic = decompilação limpa mesmo em binár
 | #28 | Runtime Memory Disassembly | `DONE` (v3.7) |
 | #29 | Headless Breakpoint Snapshots | `DONE` (v3.7) |
 | #30 | VM Pattern Heuristics | `DONE` (v3.7) |
-| #31 | Zero-Copy IPC SharedArrayBuffer | `PENDING` (v4.0) |
+| #31 | Zero-Copy IPC SharedArrayBuffer | `Done` (v3.8) |
 | #32 | Basic Symbolic Execution | `PENDING` (v4.0+) |
 | Sleigh | hexcore-sleigh | `DROPPED` |
 

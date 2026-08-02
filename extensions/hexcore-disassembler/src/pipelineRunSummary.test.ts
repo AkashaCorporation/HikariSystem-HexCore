@@ -40,7 +40,7 @@ interface PipelineStepStatus {
 	startedAt: string;
 	finishedAt?: string;
 	durationMs: number;
-	status: 'ok' | 'error' | 'skipped' | 'running';
+	status: 'ok' | 'partial' | 'error' | 'skipped' | 'running';
 	outputBytes?: number;  // v3.8.0 — optional
 	error?: string;
 }
@@ -48,6 +48,7 @@ interface PipelineStepStatus {
 interface PipelineRunSummary {
 	totalSteps: number;
 	okCount: number;
+	partialCount: number;
 	errorCount: number;
 	skippedCount: number;
 	totalDurationMs: number;
@@ -85,13 +86,14 @@ function buildSummary(status: PipelineRunStatus): PipelineRunSummary {
 	const summary: PipelineRunSummary = {
 		totalSteps: status.steps.length,
 		okCount: status.steps.filter(s => s.status === 'ok').length,
+		partialCount: status.steps.filter(s => s.status === 'partial').length,
 		errorCount: status.steps.filter(s => s.status === 'error').length,
 		skippedCount: status.steps.filter(s => s.status === 'skipped').length,
 		totalDurationMs: new Date(status.finishedAt).getTime() - new Date(status.startedAt).getTime()
 	};
 	let slowest: PipelineStepStatus | undefined;
 	for (const s of status.steps) {
-		if (s.status === 'ok' && (!slowest || s.durationMs > slowest.durationMs)) {
+		if ((s.status === 'ok' || s.status === 'partial') && (!slowest || s.durationMs > slowest.durationMs)) {
 			slowest = s;
 		}
 	}
@@ -133,6 +135,7 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 			const s = buildSummary(status);
 			assert.strictEqual(s.totalSteps, 0);
 			assert.strictEqual(s.okCount, 0);
+			assert.strictEqual(s.partialCount, 0);
 			assert.strictEqual(s.errorCount, 0);
 			assert.strictEqual(s.skippedCount, 0);
 			assert.strictEqual(s.totalDurationMs, 5000);
@@ -140,20 +143,21 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 			assert.strictEqual(s.slowestStepMs, undefined);
 		});
 
-		test('counts partition cleanly across ok/error/skipped', () => {
+		test('counts partition cleanly across ok/partial/error/skipped', () => {
 			const status: PipelineRunStatus = {
 				jobFile: 'j.json', file: 't.exe', outDir: 'out',
 				status: 'partial', startedAt: STARTED, finishedAt: FINISHED,
 				steps: [
 					mkStep({ index: 1, status: 'ok', durationMs: 100 }),
-					mkStep({ index: 2, status: 'ok', durationMs: 200 }),
+					mkStep({ index: 2, status: 'partial', durationMs: 200 }),
 					mkStep({ index: 3, status: 'error', durationMs: 50, error: 'boom' }),
 					mkStep({ index: 4, status: 'skipped', durationMs: 0 })
 				]
 			};
 			const s = buildSummary(status);
 			assert.strictEqual(s.totalSteps, 4);
-			assert.strictEqual(s.okCount, 2);
+			assert.strictEqual(s.okCount, 1);
+			assert.strictEqual(s.partialCount, 1);
 			assert.strictEqual(s.errorCount, 1);
 			assert.strictEqual(s.skippedCount, 1);
 		});
@@ -247,10 +251,10 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 	// -----------------------------------------------------------------------
 
 	suite('PBT: count invariants', () => {
-		test('okCount + errorCount + skippedCount ≤ totalSteps', () => {
+		test('okCount + partialCount + errorCount + skippedCount ≤ totalSteps', () => {
 			const stepArb = fc.record({
 				index: fc.integer({ min: 1, max: 100 }),
-				status: fc.constantFrom<'ok' | 'error' | 'skipped' | 'running'>('ok', 'error', 'skipped', 'running'),
+				status: fc.constantFrom<'ok' | 'partial' | 'error' | 'skipped' | 'running'>('ok', 'partial', 'error', 'skipped', 'running'),
 				durationMs: fc.integer({ min: 0, max: 60000 }),
 				resolvedCmd: fc.constantFrom('hexcore.a', 'hexcore.b', 'hexcore.c')
 			});
@@ -268,10 +272,10 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 						};
 						const s = buildSummary(status);
 						assert.strictEqual(s.totalSteps, rows.length);
-						assert.ok(s.okCount + s.errorCount + s.skippedCount <= s.totalSteps,
+						assert.ok(s.okCount + s.partialCount + s.errorCount + s.skippedCount <= s.totalSteps,
 							`counts overflow totalSteps: ${JSON.stringify(s)}`);
 						// If no ok step, slowest fields must be undefined.
-						if (s.okCount === 0) {
+						if (s.okCount + s.partialCount === 0) {
 							assert.strictEqual(s.slowestStepMs, undefined);
 							assert.strictEqual(s.slowestStepCmd, undefined);
 						} else {
@@ -324,14 +328,14 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 			const s = buildSummary(status);
 			const keys = Object.keys(s).sort();
 			const allowed = new Set([
-				'totalSteps', 'okCount', 'errorCount', 'skippedCount',
+				'totalSteps', 'okCount', 'partialCount', 'errorCount', 'skippedCount',
 				'totalDurationMs', 'slowestStepCmd', 'slowestStepMs', 'queueSnapshot'
 			]);
 			for (const k of keys) {
 				assert.ok(allowed.has(k), `unexpected summary key: ${k}`);
 			}
 			// Required keys must be present.
-			for (const k of ['totalSteps', 'okCount', 'errorCount', 'skippedCount', 'totalDurationMs']) {
+			for (const k of ['totalSteps', 'okCount', 'partialCount', 'errorCount', 'skippedCount', 'totalDurationMs']) {
 				assert.ok(keys.includes(k), `missing required key: ${k}`);
 			}
 		});

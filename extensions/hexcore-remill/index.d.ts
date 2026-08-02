@@ -31,7 +31,7 @@ export const ARCH: {
 	readonly AARCH64: 'aarch64';
 	/** 32-bit SPARC (SPARCv8) */
 	readonly SPARC32: 'sparc32';
-	/** 64-bit SPARC (SPARCv9) */
+	/** @deprecated SPARC64 semantics are not packaged; construction throws. */
 	readonly SPARC64: 'sparc64';
 };
 
@@ -238,5 +238,11 @@ export class RemillLifter {
  * Module version string.
  */
 export const version: string;
+
+/** Embedded upstream Remill release. */
+export const upstreamVersion: string;
+
+/** Full Git commit used to build the embedded Remill libraries. */
+export const upstreamCommit: string;
 
 export default RemillLifter;

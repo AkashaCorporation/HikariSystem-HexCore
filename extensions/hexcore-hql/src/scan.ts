@@ -4,7 +4,7 @@
 
 import { hydrateHAST } from './adapter/flatbuf.js';
 import { HQLMatcher } from './engine/matcher.js';
-import { BUILTIN_SIGNATURES } from './signatures/builtin.js';
+import { getDefaultSignatures } from './signatures/loader.js';
 import type { SessionDbReader } from './adapter/sessionDb.js';
 import type { HQLSignature, HQLMatchResult } from './types/hql.js';
 
@@ -25,15 +25,16 @@ export interface HQLFunctionFindings {
  */
 export function scanHAST(
   astBuffer: Uint8Array,
-  signatures: HQLSignature[] = BUILTIN_SIGNATURES,
+  signatures?: HQLSignature[],
   session?: SessionDbReader,
 ): HQLFunctionFindings[] {
+  const activeSignatures = signatures ?? getDefaultSignatures();
   const fns = hydrateHAST(astBuffer, session);
   const matcher = new HQLMatcher();
   const out: HQLFunctionFindings[] = [];
   for (const fn of fns) {
     const findings: HQLMatchResult[] = [];
-    for (const sig of signatures) {
+    for (const sig of activeSignatures) {
       const r = matcher.evaluate(fn, sig);
       if (r) { findings.push(r); }
     }

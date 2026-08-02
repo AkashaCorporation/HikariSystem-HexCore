@@ -114,13 +114,37 @@ export interface HqlAddressResult {
 
 export interface HqlHeadlessReport {
 	success: boolean;
+	status: 'ok' | 'partial' | 'failed';
 	command: 'hexcore.hql.scanHeadless';
 	file?: string;
 	targetCount: number;
+	completedTargetCount: number;
+	failedTargetCount: number;
 	matchedFunctionCount: number;
 	totalFindings: number;
 	results: HqlAddressResult[];
 	error?: string;
+}
+
+export function summarizeHqlResults(results: readonly HqlAddressResult[]): {
+	status: 'ok' | 'partial' | 'failed';
+	success: boolean;
+	completedTargetCount: number;
+	failedTargetCount: number;
+} {
+	const failedTargetCount = results.filter(result => typeof result.error === 'string' && result.error.length > 0).length;
+	const completedTargetCount = results.length - failedTargetCount;
+	const status = failedTargetCount === 0
+		? 'ok'
+		: completedTargetCount === 0 ? 'failed' : 'partial';
+	return {
+		status,
+		// `success` retains the transport-level convention for partial batches;
+		// `status` carries the stricter semantic outcome consumed by the runner.
+		success: status !== 'failed',
+		completedTargetCount,
+		failedTargetCount,
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -204,9 +228,12 @@ export async function runHqlScanBatch(
 	if (!loadHql()) {
 		return {
 			success: false,
+			status: 'failed',
 			command: 'hexcore.hql.scanHeadless',
 			file,
 			targetCount: targets.length,
+			completedTargetCount: 0,
+			failedTargetCount: targets.length,
 			matchedFunctionCount: 0,
 			totalFindings: 0,
 			results: [],
@@ -221,15 +248,22 @@ export async function runHqlScanBatch(
 
 	const matchedFunctionCount = results.filter(r => r.findings.length > 0).length;
 	const totalFindings = results.reduce((acc, r) => acc + r.findings.length, 0);
+	const outcome = summarizeHqlResults(results);
 
 	return {
-		success: true,
+		success: outcome.success,
+		status: outcome.status,
 		command: 'hexcore.hql.scanHeadless',
 		file,
 		targetCount: targets.length,
+		completedTargetCount: outcome.completedTargetCount,
+		failedTargetCount: outcome.failedTargetCount,
 		matchedFunctionCount,
 		totalFindings,
 		results,
+		...(outcome.status === 'failed'
+			? { error: `All ${outcome.failedTargetCount} HQL target(s) failed; first error: ${results.find(result => result.error)?.error}` }
+			: {}),
 	};
 }
 

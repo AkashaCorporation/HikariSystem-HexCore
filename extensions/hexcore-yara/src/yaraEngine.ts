@@ -7,6 +7,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
+import { RE2 } from 're2-wasm';
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -14,7 +15,14 @@ export interface RuleMatch {
 	ruleName: string;
 	namespace: string;
 	meta: Record<string, string>;
-	strings: Array<{ identifier: string; offset: number; data: string }>;
+	strings: Array<{
+		identifier: string;
+		offset: number;
+		data: string;
+		section?: string;
+		executable?: boolean;
+		virtualAddress?: string;
+	}>;
 	severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
 	score: number;  // 0-100 threat score
 	/**
@@ -25,6 +33,21 @@ export interface RuleMatch {
 	 * headline threat score. See GAP #3 / .NET false-positive fix.
 	 */
 	advisoryOnly?: boolean;
+	advisoryReason?: string;
+}
+
+export interface BinaryScanSection {
+	name: string;
+	fileOffset: number;
+	size: number;
+	virtualAddress: bigint;
+	executable: boolean;
+}
+
+export interface BinaryScanContext {
+	format: 'pe' | 'elf' | 'unknown';
+	architecture?: string;
+	sections: BinaryScanSection[];
 }
 
 export interface YaraRule {
@@ -55,6 +78,16 @@ export interface ScanResult {
 	scanTime: number;         // ms
 	fileSize: number;
 	categories: Record<string, number>; // category -> match count
+	binaryContext?: {
+		format: 'pe' | 'elf' | 'unknown';
+		architecture?: string;
+		executableSectionCount: number;
+	};
+	heuristicAdvisory?: {
+		suppressedRuleMatches: number;
+		retainedRuleMatches: number;
+		note: string;
+	};
 	/** Number of YARA rules loaded in the engine at scan time. Used to
 	 * diagnose zero-match results (0 rules = packaging issue). */
 	activeRules?: number;
@@ -174,7 +207,7 @@ const BUILTIN_RULES: YaraRule[] = [
 		condition: 'any of them', source: 'builtin', category: 'Packer', platform: 'Any', family: 'Themida'
 	},
 	{
-		name: 'Suspicious_API', meta: { description: 'Detects suspicious API calls', severity: 'high' },
+		name: 'Suspicious_API', meta: { description: 'Multiple generic APIs associated with suspicious behavior', severity: 'medium' },
 		strings: [
 			{ identifier: '$api1', type: 'text', value: 'VirtualAlloc', modifiers: [], weight: 1 },
 			{ identifier: '$api2', type: 'text', value: 'WriteProcessMemory', modifiers: [], weight: 1 },
@@ -182,7 +215,7 @@ const BUILTIN_RULES: YaraRule[] = [
 			{ identifier: '$api4', type: 'text', value: 'InternetOpen', modifiers: [], weight: 1 },
 			{ identifier: '$api5', type: 'text', value: 'URLDownloadToFile', modifiers: [], weight: 1 },
 		],
-		condition: 'any of them', source: 'builtin', category: 'Behavior', platform: 'Win32', family: 'SuspiciousAPI'
+		condition: '2 of them', source: 'builtin', category: 'Behavior', platform: 'Win32', family: 'SuspiciousAPI'
 	},
 	{
 		name: 'Base64_Executable', meta: { description: 'Detects base64 encoded executables' },
@@ -609,11 +642,334 @@ function matchTextPattern(content: Buffer, text: string, modifiers: string[]): n
  * from loaded / third-party rule packs (untrusted), and a single such pattern
  * run against scanned content hangs the engine. Real YARA byte-pattern regexes
  * are never nested-unbounded, so the false-positive risk is negligible. This is
- * a heuristic, not a proof -- the complete fix is a linear-time engine (RE2) or
- * a worker-thread timeout (tracked separately).
+ * a heuristic retained for diagnostics. Rule execution itself uses RE2 below,
+ * so safety no longer depends on this pre-screen recognizing every shape.
  */
 export function isLikelyCatastrophicRegex(pattern: string): boolean {
 	return /\([^()]*(?:[*+]|\{\d+,\d*\})[^()]*\)(?:[*+]|\{\d+,\d*\})/.test(pattern);
+}
+
+/** Execute an untrusted YARA regex with RE2's linear-time matcher. */
+export function matchRegexOffsets(pattern: string, text: string, limit: number = 100): number[] {
+	const offsets: number[] = [];
+	const regex = new RE2(pattern, 'gu');
+	let match = regex.exec(text);
+	while (offsets.length < limit && match !== null) {
+		offsets.push(match.index);
+		// Global RegExp semantics do not advance after an empty match.
+		if ((match[0] ?? '').length === 0) {
+			regex.lastIndex++;
+		}
+		match = regex.exec(text);
+	}
+	return offsets;
+}
+
+function readUInt16(buffer: Buffer, offset: number, littleEndian: boolean): number {
+	return littleEndian ? buffer.readUInt16LE(offset) : buffer.readUInt16BE(offset);
+}
+
+function readUInt32(buffer: Buffer, offset: number, littleEndian: boolean): number {
+	return littleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset);
+}
+
+function readUInt64Number(buffer: Buffer, offset: number, littleEndian: boolean): number {
+	const value = littleEndian ? buffer.readBigUInt64LE(offset) : buffer.readBigUInt64BE(offset);
+	return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : 0;
+}
+
+function readCString(buffer: Buffer, offset: number): string {
+	if (offset < 0 || offset >= buffer.length) { return ''; }
+	const end = buffer.indexOf(0, offset);
+	return buffer.toString('utf8', offset, end === -1 ? buffer.length : end);
+}
+
+/** Parse enough PE/ELF metadata to qualify raw YARA byte matches. */
+export function inspectBinaryScanContext(content: Buffer): BinaryScanContext {
+	try {
+		if (content.length >= 0x40 && content.readUInt16LE(0) === 0x5a4d) {
+			const peOffset = content.readUInt32LE(0x3c);
+			if (peOffset + 24 <= content.length && content.readUInt32LE(peOffset) === 0x00004550) {
+				const sectionCount = content.readUInt16LE(peOffset + 6);
+				const optionalSize = content.readUInt16LE(peOffset + 20);
+				const machine = content.readUInt16LE(peOffset + 4);
+				const architecture = new Map<number, string>([
+					[0x14c, 'x86'], [0x1c0, 'arm'], [0x1c4, 'armv7'], [0x8664, 'x86_64'], [0xaa64, 'aarch64'],
+				]).get(machine);
+				const optionalOffset = peOffset + 24;
+				const optionalMagic = optionalOffset + 2 <= content.length ? content.readUInt16LE(optionalOffset) : 0;
+				const imageBase = optionalMagic === 0x20b && optionalOffset + 32 <= content.length
+					? content.readBigUInt64LE(optionalOffset + 24)
+					: optionalMagic === 0x10b && optionalOffset + 32 <= content.length
+						? BigInt(content.readUInt32LE(optionalOffset + 28)) : 0n;
+				const sections: BinaryScanSection[] = [];
+				const sectionTable = optionalOffset + optionalSize;
+				for (let i = 0; i < sectionCount; i++) {
+					const offset = sectionTable + i * 40;
+					if (offset + 40 > content.length) { break; }
+					const rawName = content.subarray(offset, offset + 8);
+					const nul = rawName.indexOf(0);
+					const name = rawName.toString('ascii', 0, nul === -1 ? 8 : nul) || `section#${i}`;
+					const virtualAddress = content.readUInt32LE(offset + 12);
+					const size = content.readUInt32LE(offset + 16);
+					const fileOffset = content.readUInt32LE(offset + 20);
+					const characteristics = content.readUInt32LE(offset + 36);
+					sections.push({
+						name, fileOffset, size,
+						virtualAddress: imageBase + BigInt(virtualAddress),
+						executable: (characteristics & 0x20000000) !== 0,
+					});
+				}
+				return { format: 'pe', ...(architecture ? { architecture } : {}), sections };
+			}
+		}
+
+		if (content.length >= 64 && content[0] === 0x7f && content[1] === 0x45 && content[2] === 0x4c && content[3] === 0x46) {
+			const is64 = content[4] === 2;
+			const littleEndian = content[5] !== 2;
+			const machine = readUInt16(content, 18, littleEndian);
+			const architecture = new Map<number, string>([
+				[3, 'x86'], [8, 'mips'], [40, 'arm'], [62, 'x86_64'], [183, 'aarch64'], [243, 'riscv'],
+			]).get(machine);
+			const sectionTable = is64
+				? readUInt64Number(content, 40, littleEndian)
+				: readUInt32(content, 32, littleEndian);
+			const sectionEntrySize = readUInt16(content, is64 ? 58 : 46, littleEndian);
+			const sectionCount = readUInt16(content, is64 ? 60 : 48, littleEndian);
+			const stringTableIndex = readUInt16(content, is64 ? 62 : 50, littleEndian);
+			let stringTable = content.subarray(0, 0);
+			if (stringTableIndex < sectionCount && sectionEntrySize > 0) {
+				const stringHeader = sectionTable + stringTableIndex * sectionEntrySize;
+				if (stringHeader + sectionEntrySize <= content.length) {
+					const stringOffset = is64
+						? readUInt64Number(content, stringHeader + 24, littleEndian)
+						: readUInt32(content, stringHeader + 16, littleEndian);
+					const stringSize = is64
+						? readUInt64Number(content, stringHeader + 32, littleEndian)
+						: readUInt32(content, stringHeader + 20, littleEndian);
+					if (stringOffset + stringSize <= content.length) {
+						stringTable = content.subarray(stringOffset, stringOffset + stringSize);
+					}
+				}
+			}
+			const sections: BinaryScanSection[] = [];
+			for (let i = 0; i < sectionCount && sectionEntrySize > 0; i++) {
+				const offset = sectionTable + i * sectionEntrySize;
+				if (offset + sectionEntrySize > content.length) { break; }
+				const nameOffset = readUInt32(content, offset, littleEndian);
+				const flags = is64
+					? readUInt64Number(content, offset + 8, littleEndian)
+					: readUInt32(content, offset + 8, littleEndian);
+				const virtualAddress = is64
+					? BigInt(readUInt64Number(content, offset + 16, littleEndian))
+					: BigInt(readUInt32(content, offset + 12, littleEndian));
+				const fileOffset = is64
+					? readUInt64Number(content, offset + 24, littleEndian)
+					: readUInt32(content, offset + 16, littleEndian);
+				const size = is64
+					? readUInt64Number(content, offset + 32, littleEndian)
+					: readUInt32(content, offset + 20, littleEndian);
+				sections.push({
+					name: readCString(stringTable, nameOffset) || `section#${i}`,
+					fileOffset, size, virtualAddress,
+					executable: (flags & 0x4) !== 0,
+				});
+			}
+			return { format: 'elf', ...(architecture ? { architecture } : {}), sections };
+		}
+	} catch {
+		return { format: 'unknown', sections: [] };
+	}
+	return { format: 'unknown', sections: [] };
+}
+
+function architectureMatches(required: string, actual: string | undefined): boolean {
+	if (!actual) { return true; }
+	const normalized = required.toLowerCase();
+	if (normalized === 'x86') { return actual === 'x86' || actual === 'x86_64'; }
+	if (normalized === 'arm') { return actual === 'arm' || actual === 'armv7' || actual === 'aarch64'; }
+	return normalized === actual.toLowerCase();
+}
+
+function qualifyMatch(match: RuleMatch, context: BinaryScanContext): void {
+	for (const evidence of match.strings) {
+		const section = context.sections.find(candidate =>
+			evidence.offset >= candidate.fileOffset && evidence.offset < candidate.fileOffset + candidate.size);
+		if (section) {
+			evidence.section = section.name;
+			evidence.executable = section.executable;
+			evidence.virtualAddress = `0x${(section.virtualAddress + BigInt(evidence.offset - section.fileOffset)).toString(16)}`;
+		}
+	}
+
+	const requiredArchitecture = match.meta.architecture;
+	if (requiredArchitecture && !architectureMatches(requiredArchitecture, context.architecture)) {
+		match.advisoryOnly = true;
+		match.advisoryReason = `Rule requires ${requiredArchitecture}; binary architecture is ${context.architecture ?? 'unknown'}.`;
+		return;
+	}
+	if (match.meta.requires_executable === 'true' && !match.strings.some(evidence => evidence.executable === true)) {
+		match.advisoryOnly = true;
+		match.advisoryReason = 'Opcode rule matched only outside executable sections.';
+	}
+}
+
+export interface YaraConditionEvaluation {
+	supported: boolean;
+	result: boolean;
+	error?: string;
+}
+
+type ConditionToken = { kind: 'word' | 'identifier' | 'count' | 'number' | 'operator' | 'punctuation'; value: string };
+
+function tokenizeCondition(condition: string): ConditionToken[] {
+	const normalized = condition.replace(/\/\/.*$/gm, ' ').replace(/\s+/g, ' ').trim();
+	const tokens: ConditionToken[] = [];
+	const tokenPattern = /\s*(>=|<=|==|!=|>|<|\(|\)|,|#[A-Za-z0-9_]+|\$[A-Za-z0-9_*]+|\d+|[A-Za-z_][A-Za-z0-9_]*)/gy;
+	let offset = 0;
+	while (offset < normalized.length) {
+		tokenPattern.lastIndex = offset;
+		const match = tokenPattern.exec(normalized);
+		if (!match || match.index !== offset) {
+			throw new Error(`unsupported token near ${JSON.stringify(normalized.slice(offset, offset + 24))}`);
+		}
+		const value = match[1];
+		const kind: ConditionToken['kind'] = value.startsWith('$') ? 'identifier'
+			: value.startsWith('#') ? 'count'
+				: /^\d+$/.test(value) ? 'number'
+					: /^(?:>=|<=|==|!=|>|<)$/.test(value) ? 'operator'
+						: /^(?:\(|\)|,)$/.test(value) ? 'punctuation' : 'word';
+		tokens.push({ kind, value });
+		offset = tokenPattern.lastIndex;
+	}
+	return tokens;
+}
+
+/**
+ * Evaluate the boolean/count subset used by the bundled rules. Unknown YARA
+ * syntax is rejected instead of falling back to "any matched string".
+ */
+export function evaluateYaraCondition(
+	condition: string,
+	matchCounts: Readonly<Record<string, number>>,
+	allIdentifiers: readonly string[],
+): YaraConditionEvaluation {
+	try {
+		const tokens = tokenizeCondition(condition);
+		let index = 0;
+		const peek = (): ConditionToken | undefined => tokens[index];
+		const consume = (value?: string): ConditionToken => {
+			const token = tokens[index++];
+			if (!token || (value !== undefined && token.value.toLowerCase() !== value)) {
+				throw new Error(`expected ${value ?? 'token'} at token ${index}`);
+			}
+			return token;
+		};
+		const isWord = (value: string): boolean => peek()?.kind === 'word' && peek()!.value.toLowerCase() === value;
+		const countFor = (identifier: string): number => matchCounts[identifier] || 0;
+		const expand = (patterns: readonly string[]): string[] => {
+			const expanded = new Set<string>();
+			for (const pattern of patterns) {
+				if (pattern.endsWith('*')) {
+					const prefix = pattern.slice(0, -1);
+					for (const identifier of allIdentifiers) {
+						if (identifier.startsWith(prefix)) { expanded.add(identifier); }
+					}
+				} else {
+					expanded.add(pattern);
+				}
+			}
+			return [...expanded];
+		};
+		const parseGroup = (): string[] => {
+			if (isWord('them')) {
+				consume('them');
+				return [...allIdentifiers];
+			}
+			consume('(');
+			const patterns: string[] = [];
+			while (true) {
+				const token = consume();
+				if (token.kind !== 'identifier') { throw new Error('expected identifier in of-group'); }
+				patterns.push(token.value);
+				if (peek()?.value === ',') { consume(','); continue; }
+				break;
+			}
+			consume(')');
+			return expand(patterns);
+		};
+
+		let parseOr: () => boolean;
+		const parsePrimary = (): boolean => {
+			if (peek()?.value === '(') {
+				consume('(');
+				const value = parseOr();
+				consume(')');
+				return value;
+			}
+			if (peek()?.kind === 'identifier') {
+				return countFor(consume().value) > 0;
+			}
+			if (peek()?.kind === 'count') {
+				const count = countFor(`$${consume().value.slice(1)}`);
+				const operator = consume();
+				const expected = consume();
+				if (operator.kind !== 'operator' || expected.kind !== 'number') {
+					throw new Error('count expression requires a comparison and integer');
+				}
+				const rhs = Number(expected.value);
+				switch (operator.value) {
+					case '>': return count > rhs;
+					case '>=': return count >= rhs;
+					case '<': return count < rhs;
+					case '<=': return count <= rhs;
+					case '==': return count === rhs;
+					case '!=': return count !== rhs;
+					default: throw new Error(`unsupported comparison ${operator.value}`);
+				}
+			}
+			if (isWord('any') || isWord('all') || peek()?.kind === 'number') {
+				const quantifier = consume().value.toLowerCase();
+				consume('of');
+				const identifiers = parseGroup();
+				const matched = identifiers.filter(identifier => countFor(identifier) > 0).length;
+				if (quantifier === 'any') { return matched > 0; }
+				if (quantifier === 'all') { return identifiers.length > 0 && matched === identifiers.length; }
+				return matched >= Number(quantifier);
+			}
+			throw new Error(`unsupported primary ${peek()?.value ?? '<eof>'}`);
+		};
+		const parseUnary = (): boolean => {
+			if (isWord('not')) { consume('not'); return !parseUnary(); }
+			return parsePrimary();
+		};
+		const parseAnd = (): boolean => {
+			let value = parseUnary();
+			while (isWord('and')) {
+				consume('and');
+				const rhs = parseUnary();
+				value = value && rhs;
+			}
+			return value;
+		};
+		parseOr = (): boolean => {
+			let value = parseAnd();
+			while (isWord('or')) {
+				consume('or');
+				const rhs = parseAnd();
+				value = value || rhs;
+			}
+			return value;
+		};
+
+		const result = parseOr();
+		if (index !== tokens.length) {
+			throw new Error(`unexpected trailing token ${tokens[index].value}`);
+		}
+		return { supported: true, result };
+	} catch (error) {
+		return { supported: false, result: false, error: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 export class YaraEngine {
@@ -946,6 +1302,13 @@ export class YaraEngine {
 	async scanFileWithResult(filePath: string): Promise<ScanResult> {
 		const startTime = Date.now();
 		const matches = await this.scanFile(filePath);
+		let binaryContext: BinaryScanContext = { format: 'unknown', sections: [] };
+		try {
+			binaryContext = inspectBinaryScanContext(fs.readFileSync(filePath));
+		} catch { /* unreadable target already produces an empty scan */ }
+		for (const match of matches) {
+			qualifyMatch(match, binaryContext);
+		}
 
 		// GAP #3: detect a .NET / managed assembly so native byte-pattern rules
 		// don't inflate the threat score against metadata/IL bytes. Reading the
@@ -962,16 +1325,21 @@ export class YaraEngine {
 		const categories: Record<string, number> = {};
 		let maxScore = 0;
 		let scoredMatches = 0;       // matches that count toward the headline score
-		let suppressed = 0;          // native-heuristic matches reclassified as advisory
+		const heuristicSuppressed = matches.filter(match => match.advisoryOnly).length;
+		let managedSuppressed = 0;
 
 		for (const m of matches) {
 			categories[m.namespace] = (categories[m.namespace] || 0) + 1;
+			if (m.advisoryOnly) {
+				continue;
+			}
 			// On a .NET target, only .NET-aware rules are reliable. Native
 			// byte-pattern matches are flagged advisory and excluded from the
 			// score (but still reported in `matches`).
 			if (isDotNet && !this.isManagedAwareMatch(m)) {
 				m.advisoryOnly = true;
-				suppressed++;
+				m.advisoryReason = 'Native byte-pattern rule is not managed-code aware.';
+				managedSuppressed++;
 				continue;
 			}
 			scoredMatches++;
@@ -984,10 +1352,19 @@ export class YaraEngine {
 		const result: ScanResult = {
 			file: filePath,
 			matches,
-			threatScore: Math.min(100, maxScore + (scoredMatches > 5 ? 10 : 0)),
+			// Correlated rules frequently describe the same primitive. Counting
+			// their quantity as an automatic +10 promoted normal runtimes to a
+			// higher severity; headline score now reflects the strongest retained
+			// evidence while matchCount preserves breadth.
+			threatScore: Math.min(100, maxScore),
 			scanTime: Date.now() - startTime,
 			fileSize: stat?.size || 0,
 			categories,
+			binaryContext: {
+				format: binaryContext.format,
+				...(binaryContext.architecture ? { architecture: binaryContext.architecture } : {}),
+				executableSectionCount: binaryContext.sections.filter(section => section.executable).length,
+			},
 			// v3.8.0-nightly diagnostic: surface how many rules the engine had
 			// active during this scan. `threatScore: 0` + `activeRules: 0` is
 			// a packaging/activation issue, not a miss; `activeRules > 0` + 0
@@ -996,13 +1373,21 @@ export class YaraEngine {
 			ruleLoadDiagnostics: this.getLoadDiagnostics()
 		};
 
+		if (heuristicSuppressed > 0) {
+			result.heuristicAdvisory = {
+				suppressedRuleMatches: heuristicSuppressed,
+				retainedRuleMatches: scoredMatches,
+				note: `${heuristicSuppressed} rule match(es) were retained as advisory evidence but excluded from threatScore because architecture or executable-section requirements were not met.`,
+			};
+		}
+
 		if (isDotNet) {
 			result.isDotNet = true;
 			result.dotNetAdvisory = {
-				suppressedRuleMatches: suppressed,
+				suppressedRuleMatches: managedSuppressed,
 				retainedRuleMatches: scoredMatches,
-				note: suppressed > 0
-					? `.NET/managed assembly: ${suppressed} native byte-pattern match(es) reclassified as advisory ` +
+				note: managedSuppressed > 0
+					? `.NET/managed assembly: ${managedSuppressed} native byte-pattern match(es) reclassified as advisory ` +
 					  `(they hit managed metadata/IL, not native code) and excluded from the threat score. ` +
 					  `Score reflects ${scoredMatches} .NET-aware match(es).`
 					: `.NET/managed assembly: threat score derived from .NET-aware rules only.`
@@ -1065,20 +1450,10 @@ export class YaraEngine {
 			} else if (str.type === 'text') {
 				offsets = matchTextPattern(content, str.value, str.modifiers);
 			} else if (str.type === 'regex') {
-				// Skip rule regexes with a catastrophic-backtracking shape: loaded /
-				// third-party rules are untrusted, and one such pattern run against
-				// scanned content would hang the engine (ReDoS).
-				if (isLikelyCatastrophicRegex(str.value)) {
-					this.log(`[yara] skipped potentially-catastrophic regex in rule "${rule.name}" (${str.identifier})`);
-				} else {
-					try {
-						const re = new RegExp(str.value, 'g');
-						const text = content.toString('binary');
-						let reMatch;
-						while ((reMatch = re.exec(text)) !== null && offsets.length < 100) {
-							offsets.push(reMatch.index);
-						}
-					} catch { /* invalid regex */ }
+				try {
+					offsets = matchRegexOffsets(str.value, content.toString('binary'));
+				} catch (error) {
+					this.log(`[yara] skipped unsupported or invalid regex in rule "${rule.name}" (${str.identifier}): ${(error as Error).message}`);
 				}
 			}
 
@@ -1123,25 +1498,9 @@ export class YaraEngine {
 	private evaluateCondition(rule: YaraRule, matchCounts: Record<string, number>): boolean {
 		const cond = rule.condition.trim();
 
-		// "any of them" — at least one string matched
-		if (cond === 'any of them') {
-			return Object.keys(matchCounts).length > 0;
-		}
-
-		// "all of them" — all strings matched
-		if (cond === 'all of them') {
-			return Object.keys(matchCounts).length === rule.strings.length;
-		}
-
-		// "N of them" — at least N strings matched
-		const nOfThem = cond.match(/^(\d+)\s+of\s+them$/);
-		if (nOfThem) {
-			return Object.keys(matchCounts).length >= parseInt(nOfThem[1], 10);
-		}
-
 		// DefenderYara weighted condition: ((#a_81_0 & 1)*3 + ...) >= threshold
 		const weightedMatch = cond.match(/>=\s*(\d+)\s*$/);
-		if (weightedMatch && cond.includes('#')) {
+		if (weightedMatch && /#[A-Za-z0-9_]+\s*&\s*1/.test(cond)) {
 			const threshold = parseInt(weightedMatch[1], 10);
 			let totalScore = 0;
 			for (const str of rule.strings) {
@@ -1154,8 +1513,15 @@ export class YaraEngine {
 			return totalScore >= threshold;
 		}
 
-		// Fallback: any match
-		return Object.keys(matchCounts).length > 0;
+		const evaluation = evaluateYaraCondition(
+			cond,
+			matchCounts,
+			rule.strings.map(item => item.identifier),
+		);
+		if (!evaluation.supported) {
+			this.log(`[yara] condition for rule "${rule.name}" was not evaluated: ${evaluation.error}`);
+		}
+		return evaluation.result;
 	}
 
 	// ── Rule Management ─────────────────────────────────────────────────

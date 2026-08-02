@@ -1,5 +1,5 @@
 /**
- * test_sab_benchmark.js — v4.0.0 throughput benchmark for SAB CODE hook.
+ * test_sab_benchmark.js - v1.3.0 throughput benchmark for SAB CODE hook.
  *
  * Compares legacy TSFN hookAdd vs SAB hookAddSAB on a tight NOP loop.
  * Target: SAB ≥ 20× legacy. Stretch goal: 200× toward 10M inst/sec.

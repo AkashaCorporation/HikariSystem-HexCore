@@ -23,6 +23,7 @@ deps/llvm/**
 deps/xed/**
 deps/remill/include/**
 deps/remill/lib/**
+deps/sleigh/**
 # Keep: deps/remill/share/semantics/*.bc (runtime requirement)
 
 # Prebuilds: force include (overrides .gitignore)

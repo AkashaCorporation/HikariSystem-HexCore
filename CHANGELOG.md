@@ -5,7 +5,359 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.3] - Unreleased - "String recovery: relocated .rodata literals in ET_REL decompiles"
+## [3.8.3] - Unreleased - "Honest Analysis at Scale"
+
+### Automation/YARA - close autonomous-analysis blockers (Disassembler 1.4.27; Debugger 2.1.9; YARA 2.1.3)
+
+- Stateful jobs now hold a whole-job exclusive engine gate. Queue workers are logical slots in one Extension Host, so binary context can no longer be replaced between dependent steps. A 100-pair/200-job adversarial stress test with distinct paths, hashes, image bases, architectures, strings and sessions has zero cross-context results.
+- Validation is a mandatory execution preflight. Invalid output containment writes a validation report and terminal error without dispatching a command. PE/ELF/minidump format gates skip incompatible parsers before expensive initialization.
+- Pipeline success now follows semantic outcomes, not only `executeCommand` transport completion. HQL child failures and debugger terminal faults propagate as `failed`; mixed HQL results require explicit `allowPartial:true` and remain terminal `partial`. Queue jobs inherit terminal pipeline failure instead of becoming `done`.
+- Headless Helix decompilation now recognizes `irPath` as a complete input contract, matching the HQL adapter and avoiding false `decompile failed` results when a preceding pipeline step supplies LLVM IR by path.
+- Debugger activation now defaults consistently to the declared `both` emulator mode and exposes all advanced headless commands as activation events. Direct automation can reach Unicorn even when the Elixir configuration contribution has not loaded first.
+- Every artifact receives a provenance sidecar binding its SHA-256 to the target SHA-256, detected format/architecture/image base, context generation, queue identity, command and owner-extension versions. Terminal queue snapshots exclude the job currently being finalized.
+- `hexcore.extractStructInfo` now accepts both direct string output and the runner's `{path,format}` contract. Named `*.hexcore_job.json` files receive the same editor schema validation as the canonical job.
+- YARA opcode evidence is qualified by binary ISA and executable section. The condition evaluator now implements the bundled boolean/group/count subset and fails closed on unsupported syntax instead of treating any fragment as a satisfied rule. On the RC benchmark, Poly AArch64 changes from `threatScore:100` to `0` while retaining three x86 collisions as advisory evidence in `.flag`; Dudidudida changes from `100` to `75` after false composite matches and correlated-count inflation are removed.
+- The final post-hardening IDE rerun completes eight of nine original Dudidudida/Poly jobs as `ok`; only the emulation job is `partial`, with two explicit `UC_ERR_WRITE_UNMAPPED` results and three successful lifecycle steps. All five HQL scans pass. The audit verifies 75/75 provenance sidecars, zero cross-target engine-artifact tokens, no negative `newFunctions`, Poly's corrected 72-function result, eight byte-identical Helix C outputs and eight timestamp-normalized identical LLVM IR outputs.
+- Release component packages exclude tests, source maps, RAG/scratch files and MLIR dumps. The YARA package includes its `re2-wasm` runtime and built-in rules; Disassembler and Debugger audit packages intentionally rely on the full application's sibling built-in dependency topology.
+- Segmented gates: Disassembler and Debugger compile; Helix packaging/input contract **17/17**; automation/HQL reliability **10/10**; Debugger advanced activation events **5/5**; YARA condition/architecture/section coverage **8/8** plus RE2 safety **7/7**. The monolithic HexCore build remains a GitHub Actions-only gate on this workstation.
+
+### Release-candidate hardening - architecture maps, pipeline ownership, IOC namespaces
+
+- Remill and Helix architecture lookups now accept only own mapping entries. Prototype-inherited names such as `__proto__` can no longer be reported as supported architectures or leak non-string/non-enum values into native-engine configuration.
+- FIX-106 regression coverage now reflects the shipping `x64 -> amd64_avx` contract, while retaining property tests for deterministic supported/unsupported classification.
+- Oracle Hook commands now declare `hikarisystem.hexcore-disassembler` as their owning extension, so capability listing and pipeline doctor checks can verify their provider.
+- IOC 1.1.2 mutex extraction now recognizes the real Windows object-manager namespace `\Sessions\<id>\BaseNamedObjects\<name>`; the previous singular `\Session` expression missed valid session-scoped mutexes.
+- Release-gate tests were repaired where their assumptions no longer matched the product contract: Remill SSE semantics are intentionally inlined for Helix, XRef storage is a `Map`, async snapshot failures use rejection assertions, and `onResult` bounds diagnostics use the current precise message.
+- Segmented validation on the release worktree: all ten changed TypeScript extensions compile independently; disassembler focused suite **113/113** and broad sweep **36/36 test files**, debugger loader/progress suite **10/10**, HQL **20/20**, common output guard **6/6**, YARA regex safety **7/7**, and Remill smoke suite **23/23**. The full monorepo compile is intentionally not a local gate on the constrained development machine because it exhausts available memory; the complete installer build runs in GitHub Actions after standalone engine publication.
+- Helix v2 release hardening gates temporary P0/calling-convention/lift/SCF telemetry behind explicit environment flags. The rebuilt candidate is stable across the fixed NUCLEO `K=10` oracle (10/10 addresses, zero unstable) and emits zero temporary debug markers by default.
+- Souper remains an active engine: version metadata is synchronized at 0.2.0, the native addon rebuilds, and its suite passes **32/32**. Rellic is disabled legacy scope and is not rebuilt or republished for this candidate.
+
+### Disassembler/Revenant - route .NET single-file apphosts honestly (Disassembler 1.4.26; Revenant 0.4.0)
+
+- The native Remill->Helix command now applies the same managed-target boundary as Revenant: classic CLR-header assemblies and native .NET single-file apphosts are both intercepted before machine-code lifting. Previously only PE data directory 14 was checked, so a single-file apphost could still produce plausible-looking native pseudocode for the wrapper while hiding the bundled application.
+- Apphost detection uses the validated .NET bundle signature plus its nonzero in-file manifest offset. A bounded 64 MiB, 1 MiB-chunk scan with overlap catches boundary-split markers without loading a large appended payload into the extension host.
+- Headless results remain explicit and machine-readable: `managed:true`, confidence 0, and `managedFormat` distinguishes `dotnet-cil` from `dotnet-single-file`. Interactive runs offer the owning Revenant command instead of treating the native wrapper as the program.
+- Real boundary gate: `AudioServices_FOR_DNSPY.exe` is classified as classic CLR; the controlled NFS/Harpy apphost and its 264 MB `update.exe` stage are classified as single-file bundles; Windows `notepad.exe` remains native. Disassembler routing/capability tests pass **44/44** and the Revenant suite passes **18/18**.
+- Full IDE jobs pass **4/4 managed steps**. The CLR target produces the native honesty marker plus 391 lines of real C# through Revenant. The NFS/Harpy single-file target is intercepted by the native command in 33 ms and Revenant recovers the Defender exclusion, `audioupdate.online/update.zip`, extraction, and hidden `update.exe` launch in 118 lines without executing the sample.
+
+### Debugger - preserve WinAPI output buffers across the PE worker boundary (2.1.8)
+
+- Direct PE stub dispatch now flushes deferred memory writes before the worker resumes. APIs could previously return success while their output buffers existed only in the host-side Unicorn mirror; `QueryPerformanceFrequency`, file/path queries, debugger probes, and any other out-parameter API were therefore semantically wrong in worker mode.
+- Windows emulation now supplies bounded contracts for loader, critical-section, TLS/FLS, debugger-context, exception, and timing APIs. `Sleep` remains non-blocking but advances both millisecond tick time and the advertised 10 MHz performance counter.
+- The Harpy/XMRig native sample exposed the defect without native execution: its cached QPC frequency became stack residue (`31` instead of `10,000,000`) and trapped `sleep_until`. After the fix, a constrained Unicorn run advances through 1,000,000 instructions and 19,751 API calls without crash or the false timing loop; the next observed behavior is repeated virtual filesystem probing.
+- Focused PE progress/coherence and anti-analysis contract tests pass **8/8**. The full HexCore build remains a GitHub Actions gate to avoid local OOM.
+
+### Revenant - recover .NET single-file apphosts in memory (0.4.0)
+
+- Revenant now recognizes the official .NET single-file bundle marker even when the native apphost has no CLR data directory. ILSpy 10's bundle reader selects the entry assembly from runtime/deps metadata and resolves bundled dependencies lazily in memory.
+- Bundle parsing is bounded by manifest count, entry range, per-assembly size, and total decompressed size. Embedded assemblies are neither executed nor materialized as temporary executables or DLLs.
+- On the owned NFS/Harpy sample, the outer apphost exposes the Defender exclusion and `audioupdate.online/update.zip` chain. Its 264 MB `update.exe` stage becomes 115 lines of entry-assembly C# instead of the previous 320,088-line runtime-heavy report, recovering the `%APPDATA%\\Sound` resource drop and hidden `uninstall.bat` launch.
+- The standalone engine publishes self-contained and the full Revenant suite passes **18/18**, including marker boundary cases and an opt-in real-malware gate. The validated win-x64 engine and 0.4.0 runner are installed in the IDE extension.
+
+### Helix - preserve source parameters and fold identical SCF yields (FIX-141/142)
+
+- FIX-141 separates a fixed debug-signature parameter from later reuse of its
+  ABI register inside a structured region. On the current Mali CSF target,
+  `queue` and `drain_queue` retain their source identities and are never
+  assigned by nested RDI/RSI traffic.
+- FIX-142 combines nested conditions only when both successful arms yield the
+  exact same typed `scf_*` assignment tuple. The rewrite uses short-circuit
+  `||`; it does not merge loop-carried storage or weaken the FIX-132 guard.
+- Native tests pass **202/202**. The debug-aware CSF output remains 79.5% and
+  falls by 48 lines. A fresh NUCLEO 80-function A/B has zero failures and zero
+  confidence regressions; 52 outputs become smaller, 28 are byte-identical,
+  and the corpus loses 1,759 lines. Both the real target and standard NUCLEO
+  oracle are deterministic at K=10.
+- FIX-142 is installed in the IDE runtime with a hash matching the validated
+  standalone candidate. The isolated three-step IDE job passes 3/3; the
+  debug-aware result remains 79.5%, preserves the exact `queue` /
+  `drain_queue` signature with zero parameter assignments, and drops 48 lines.
+  Normalized diff auditing finds only six combined `||` conditions and the
+  removal of 30 duplicate SCF assignments plus obsolete branch structure.
+
+### Disassembler - restore authoritative PE auto-backtrack (1.4.25)
+
+- Auto-backtrack now distinguishes authoritative AMD64 `.pdata` containment
+  from heuristic Capstone prologue candidates. A requested PE address inside a
+  `RUNTIME_FUNCTION` re-anchors to its reconciled start even when the request
+  lands in the middle of an instruction; heuristic candidates still require an
+  exact contiguous decode and retain the 4096-byte distance cap.
+- Reconciled chained-unwind ranges are persisted by the disassembler engine and
+  queried through one provenance-aware path shared by lift, decompile, and
+  disassembly commands. ET_REL remains excluded so `.ko` relocation patches are
+  never discarded by a wider re-fetch.
+- Full IDE validation on ROTTR completes **41/41** pipeline steps and the
+  companion health-focus job completes **8/8**. Thirteen of twenty requested
+  lifts re-anchor through authoritative `.pdata`; the other seven retain
+  byte-identical normalized IR and C. Nine recovered bodies are byte-identical
+  to the earlier July lifts, including `0x14046ddda -> 0x14046d790` and
+  `0x140852532 -> 0x1408523c0`; four additional requests now recover their
+  full containing functions. Focused pathfinder and synthetic `.pdata`
+  coverage passes **19/19**, including mid-instruction containment, chained
+  ranges, adjacent exclusive boundaries, and the ARM64 gate.
+
+### Disassembler - prefer complete duplicate debug signatures (1.4.24)
+
+- DWARF and BTF loaders now use one deterministic duplicate-signature policy:
+  prefer more parameters, then prefer non-generic source parameter names at
+  equal arity. An early declaration with `param_0`/`param_1` can no longer
+  mask a later definition carrying the real names.
+- Variadic metadata remains explicit: DWARF unspecified parameters and the BTF
+  type-id-zero sentinel prevent a fixed parameter-count claim.
+- On the current Mali kernel module,
+  `kbase_csf_kcpu_queue_process` now resolves as
+  `void (struct kbase_kcpu_command_queue* queue, bool drain_queue)`. Together
+  with Helix FIX-141, the full IDE output retains that exact source signature
+  and never assigns into either parameter.
+- TypeScript compilation is clean and the focused BTF/debug-loader suite
+  passes **11/11**.
+
+### Disassembler - normalize exact ELF function bounds (1.4.23)
+
+- Exact non-zero ELF `STT_FUNC/st_size` now replaces heuristic function-table
+  extents in both directions before Pathfinder consumers and Remill lift
+  sizing read them. Linear discovery can stop at an interior `ud2`/`ret` or
+  run into neighbouring functions. Mali `kbase_jit_allocate` grows from the
+  false 997-byte discovery to 2121 bytes, while `kbase_regmap_term` shrinks
+  from a false 7543-byte span to its 84-byte symbol extent.
+- ET_REL section-relative address collisions are disambiguated by matching the
+  discovered function name first and otherwise restricting address-based
+  fallback to `.text`. Named lifting remains the path for `.init.text`,
+  `.text.unlikely`, and other overlapping sections.
+- Shrinking trims decoded instructions and removes stale xrefs from discarded
+  addresses, then rebuilds callers/callees from the surviving streams. Ftrace
+  `__pfx_` symbols remain distinct from their adjacent bodies. Synthetic
+  regression coverage passes **5/5**; the neighbouring ELF/PE boundary suites
+  pass **29/29**.
+- The corrected kernel gate selects ELF `.text` functions from authoritative
+  `STT_FUNC/st_size`, not heuristic sizes or colliding ET_REL sections.
+  Fresh Remill + Helix processing completes **128/128** across two ELF modules
+  and four Windows drivers with zero lift/decompile failures. IDA 9.3 confirms
+  all 26 shared pseudocode references at exact function starts after mapping
+  ET_REL addresses as `IDA section base + st_value`.
+- Fresh Mali validation reports exact sizes of 2121 bytes for
+  `kbase_jit_allocate`, 16 for `__pfx_kbase_regmap_term`, 84 for
+  `kbase_regmap_term`, and 6780 for `kbase_csf_kcpu_queue_process`.
+
+### Capstone/Disassembler - upgrade to 5.0.9 and harden auto-backtrack (Capstone 1.3.5; disassembler 1.4.21)
+
+The vendored Capstone core is now the official `5.0.9` source at commit
+`022575848782a4801fd150fdbc927effcbca0864`. The static library is built with
+`BUILD_STATIC_RUNTIME=ON` to match the addon's `/MT` runtime; all **24/24**
+upstream CTest cases and the hardened N-API wrapper suite pass. Version metadata
+now exposes `patch` and `fullString` while retaining the compatible `string:
+"5.0"` field.
+
+The 5.0.1/5.0.9 A/B corpus covered eight PE/ELF binaries across x86, x64 and
+AArch64, 12 executable sections and 7,360 detected functions. Detailed decode
+and global function discovery were identical. Three local-window probes in one
+PE driver and eight in a relocatable x86-64 `.ko` selected internal or adjacent
+prologues under 5.0.9; production backtracking is therefore verified by an
+exact contiguous decode, rejects terminal/gapped/overshooting candidates, and
+is disabled for ET_REL where a wider re-fetch would also discard relocation
+patches. Pathfinder focused tests pass **12/12**.
+
+Fresh downstream A/B runs generated Remill IR directly from NUCLEO and an
+AArch64 shared library, without consuming stored `.ll`. Three x64 and three
+AArch64 functions produced byte-identical IR and Helix C on 5.0.1 and 5.0.9;
+the AArch64 samples were deterministic **2/2**. This establishes the upgrade as
+output-neutral on the measured pipeline while retaining the upstream security
+and maintenance fixes.
+
+### Remill - upgrade to 6.0.1 and make packaged capabilities honest (Remill wrapper 0.5.1)
+
+The embedded engine now uses the official Remill 6.0.1 release at commit
+`0e324aee8c67a63ec759ef379dcfafa0b3cb1448`, 27 upstream commits beyond the
+previous local revision. It is built against LLVM 18.1.8 with the native
+static-CRT support introduced upstream; all Remill, Sleigh, glog, gflags, XED,
+and sampled LLVM libraries verify as `/MT`, with
+`LLVM_ENABLE_ABI_BREAKING_CHECKS=0`.
+
+Directed A/B probes show the functional gain: the previous engine routed
+`POPCNT`, `PEXT`, `PDEP`, `BZHI`, `BEXTR`, `SHLX`, and `CRC32` through
+`HandleUnsupported`, while 6.0.1 emits their real instruction semantics.
+The wrapper now exports its own `version` separately from `upstreamVersion` and
+`upstreamCommit`. It also stops advertising SPARC64 as packaged: the compatibility
+constant remains, but construction is rejected before Remill's native `CHECK`
+can terminate the Node.js process.
+
+Regression gates use fresh lifts rather than historical `.ll`. Three NUCLEO
+x64 functions changed only by -5/+29/-5 IR bytes and retained byte-identical
+Helix C with confidence **89.5/80/75.2**. Three AArch64 functions retained
+byte-identical IR/C, identical residual counts, zero failures, and deterministic
+**2/2** output. Native smoke coverage is **23/23**, including construction of
+every advertised architecture from packaged semantics. The rebuild/package scripts
+pin the upstream commit, build all eight advertised semantics modules, package
+the new Sleigh headers, cap parallelism at four by default, and emit dependency
+provenance through `deps/manifest.json`.
+
+A fresh ET_REL control used `mali_kbase.ko` SHA-256 `05C1D42B...3AC416D`
+and lifted `kbase_jit_allocate@0x3A20` at the authoritative 2,137-byte job
+extent with `amd64_avx/linux`. Remill 6.0.1 changed the IR by only -5 bytes and
+retained byte-identical 472-line Helix C at **73.5%** confidence with zero
+projected defects. The generic function table still reports 997 bytes for this
+entry; the fresh harness now records an explicit size override so the truncated
+13-line/85% probe cannot be mistaken for whole-function quality evidence.
+
+### Disassembler - make Souper surgical by default (issue #39 calibration)
+
+An absent `souper` option now selects the density-based `auto` gate instead of
+forcing Z3 over every lifted function. Explicit `true` still forces Souper and
+`false` disables it. The decision is based on fresh current lifts, not stored
+`.ll`: 78 NUCLEO functions produced zero auto-eligible units (maximum measured
+density 3.50%), and three `amd64_avx` ON/OFF probes spent 29.56-83.65 seconds
+in Souper, replaced zero candidates, and emitted byte-identical C. The gate has four
+focused tests and the disassembler compiles cleanly. The current 25% threshold
+remains conservative until a fresh real crypto/MBA lift satisfies issue #39's
+positive-control acceptance criterion.
+
+### Better SQLite3 - restore `Statement#pluck` compatibility (2.0.2)
+
+`Database.pragma(source, {simple:true})` called `stmt.pluck().get()`, but the clean-room N-API `Statement` wrapper did not expose `pluck`, causing every simple pragma query to throw. The addon now implements chainable `pluck([toggle])` for `get`, `all` and the current array-backed `iterate` path, with mutually exclusive raw/expand/pluck row modes. Development checkouts prefer a fresh `build/Release` addon before packaged prebuilds, matching the other native engines. The SQLite static library and addon were rebuilt from the extension's own amalgamation; all smoke scenarios pass, including pluck get/all/toggle and `pragma('journal_mode', {simple:true})`.
+
+### YARA - execute untrusted rule regexes with linear-time RE2 (issue #41; YARA 2.1.2)
+
+Rule regex evaluation now uses the WASM build of RE2 instead of Node's backtracking `RegExp`, so scan safety no longer depends on the legacy catastrophic-pattern heuristic recognizing every shape. Global match offsets and the 100-match cap are preserved; zero-length matches advance explicitly. Tests cover normal/global/binary/empty matches plus nested-quantifier and overlapping-alternation adversarial patterns over 250 KB input (7/7), and the extension compiles with the packaged pure-WASM dependency.
+
+### Common - centralize headless output-path policy (issue #42; common 1.1.1)
+
+`hexcore-common` now owns the path-relative workspace/home containment rule and returns the normalized absolute path approved for writing. Base64 2.0.2, filetype 1.0.2, hashcalc 1.1.2, hexviewer 1.2.3, and debugger 2.1.7 all consume that single policy; the five copy-pasted implementations are removed. Focused tests cover workspace/home children, sibling-prefix rejection, and traversal rejection (6/6), and all five consumers compile cleanly.
+
+### HQL - load packaged signatures and activate memory-safety rules (issue #53; HQL 0.1.2)
+
+The default `scanHAST` path now recursively loads deterministic `signatures/**/*.hql.json` content, merges it with builtins by ID (builtins win), and isolates malformed files instead of disabling the scan. The six packaged anti-analysis and memory-safety signatures are now active by default; callers can still pass an explicit signature set. Tests cover deduplication, malformed/schema-invalid isolation, both refcount-UAF shapes (intrinsic call and lowered `-=`), and cleanup-only/decrement-only negative controls. HQL reports 6 disk signatures and 12 merged signatures.
+
+### Helix/disassembler - stub and under-lift confidence honesty (FIX-122 / issue #56; disassembler 1.4.20)
+
+Empty or bare-return Helix ASTs are now damning defects capped at 50%. The IDE safety net consumes structured lift evidence before stamping `LiftDiag`: measured coverage below 85% is capped, and a known function of at least 96 bytes collapsed to only call/return is treated as stub-shaped; a genuine small wrapper remains eligible for High. The original HTB `ransom_unpacked` 389-byte call/return fixture now changes **85% High -> 50% Low** with a located reason. Tests: native registry/stub 3/3; packaging honesty 12/12.
+
+### Disassembler - BTF member offsets respect owner kflag (issue #47; 1.4.20)
+
+`BTFType` now preserves the STRUCT/UNION `kflag`. Member offset bits 24..31 are masked only when `kflag=1` (where they encode bitfield size); ordinary `kflag=0` structs retain the complete bit offset instead of wrapping members beyond 2 MiB back near zero. Both layout and debug-JSON export paths use the corrected rule. BTF tests are 7/7 passing, including large-offset and bitfield controls.
+
+### Pipeline - index step results by declared position and capture text honestly (issues #44/#59; 1.4.20)
+
+`$step[N]` records now live at the job's declared step index instead of append order: forward skips leave an explicit hole, backward gotos overwrite stale results, and referencing a step that did not run fails with a precise error. Validation rejects references that an earlier conditional skip/goto can jump over. Artifact capture JSON-parses only explicit/default `.json`; `.md`, `.asm`, `.c`, `.ll`, and other text outputs produce `{path, bytes, kind:'text'}` without false warnings. JSON results remain available to `onResult` and interpolation. Focused tests are 5/5 passing.
+
+### Debugger - abort PE32 worker zero-progress stub loops (issue #48; debugger 2.1.6)
+
+The PE32 host loop now tracks batches where zero instructions execute and PC remains unchanged. Progress or a stub redirect resets the counter; 5000 consecutive stagnant batches abort with a diagnostic containing the stuck PC, matching the ELF fail-safe. The integration test reproduces an unregistered sparse synthetic-DLL stub whose callback returns null and proves the real loop aborts after exactly 5000 batches. Tests are 5/5 passing.
+
+### Debugger - hostile PE/ELF loader bounds cleanup (issue #50; debugger 2.1.6)
+
+PE and ELF loaders now reject truncated fixed headers with explicit diagnostics before any fixed-offset read. ELF program/section tables require their real minimum entry size, cap counts at 4096, and return empty on zero stride; the section-name table header is bounds-checked. PE images are rejected when their mapped range collides with debugger scaffolding, and raw section writes are skipped unless the complete destination lies inside the mapped image. Focused hostile-input tests are 5/5 passing.
+
+### Disassembler + Helix - feed scoped DWARF/BTF/PDB types into MLIR (FIX-121)
+
+Debug metadata is now transported into the native Helix engine for type inference instead of being used only by the final text cleanup. The disassembler scopes signatures to the current function and real `@symbol` references in Remill IR, recursively includes parameter/return/embedded structs, and forwards the JSON through synchronous and worker decompile paths. The native pass applies signature names/types, binds typed returns through the local RAX copy sequence, and resolves nominal embedded fields conservatively. On Mali `kbase_jit_allocate`, the native C output now has the real `kctx/info/ignore_pressure_limit` signature, types `v4` as `kbase_va_region*`, and renders offsets `0x70/0x78` as `jit_node.next/prev`; confidence stays 73.5%. TypeScript compiles cleanly and 5/5 end-to-end DWARF runs are byte-identical. Disassembler `1.4.18 -> 1.4.19`.
+
+### Remill - terminate x86 paths at `ud2` without leader flooding (FIX-120)
+
+Remill can decode x86 `ud2` as a non-terminating category, or recover it through the FIX-024 XED fallback as a `NoOp`. In either case, a compiler-emitted `jmp` immediately after the trap could be appended to the same LLVM block and replace the trap's terminal behavior. On Mali `kbase_jit_allocate`, this created two false CFG edges (`0x3E03 -> 0x3F25` and `0x417A -> 0x3B77`), reduced the recovered CFG from 62 to 61 blocks, and introduced an empty `if` in Helix output.
+
+- Detect the architectural `0F 0B` encoding independently of Remill's category and mark the decoded instruction as control-flow terminating.
+- Start following bytes in a separate block, then finalize the `ud2` path before generic `NoOp` fallthrough wiring.
+- The fix is deliberately local to `ud2`; it does not restore the broad Pathfinder `additionalLeaders` injection that previously raced lift caps and caused under-lifts.
+- Regression: `ud2; jmp -4` now lifts to a terminating entry path with no reachable `JMPI`. Native addon rebuild succeeds; Remill smoke suite is **20 passing** after aligning the legacy SSE expectation with the intentional always-inline SSE/FP contract.
+
+### Disassembler - preserve explicit ET_REL lift windows (FIX-QUALITY-002e; 1.4.18)
+
+The PE-oriented oversized-window clamp from FIX-QUALITY-002 regressed relocatable ELF jobs: `analyzeAll` may register interior/hot fragments whose extent is not an authoritative bound for branches into later cold fragments. A Mali `kbase_jit_allocate` job explicitly requested 2137 bytes at `0x3A20`, but the table reported 997 bytes and the new policy logged `explicit-size|clamped-to-fn (was 2137)`, leaving 1052 bytes after the 9-byte CET/ftrace preamble. Remill then reached a `JNB` targeting `0x3FE2` outside the truncated window and emitted a one-block stub.
+
+- Explicit `size` is now preserved automatically for ET_REL; PE/PE64 retains the authoritative `.pdata` clamp.
+- Implicit ET_REL sizing and `count` heuristics retain the normal safety policy; `allowOversizedLift:true` remains the explicit cross-format override.
+- Regression coverage reproduces `size=2137`, `knownFunctionSize=997` and requires the full 2137-byte window.
+- Validation: TypeScript compile clean; Helix packaging tests **16/16 passing**.
+
+### Disassembler - reconcile chained `.pdata` before hot-path lift extent (FIX-027c; 1.4.18)
+
+`loadFile` did not run the chained-unwind reconciliation previously reached only through `analyzeAll`. A direct/headless `liftToIR` could therefore size an optimized MSVC function from its first raw `RUNTIME_FUNCTION` fragment and pass that short boundary to Remill as `knownFunctionEnds`. The new one-shot `ensurePdataFunctionsReconciled()` barrier runs before the lift extent is selected, resets on each loaded binary, and remains compatible with the later full `analyzeAll` reconciliation.
+
+- **Validated on SOTTR HealthData `0x140253A70`:** extent **137 -> 701 bytes** (`0x140253D2D`), Remill coverage **4 -> 40 blocks** and **19 -> 156 semantic calls**.
+- Synthetic chained/unwind regression: **6/6 passing**, including idempotent double invocation and the non-x64 gate.
+- Disassembler `1.4.17 -> 1.4.18`; Helix v2 FIX-119 `.node` built separately and installed in the IDE extension on 2026-07-11.
+
+### Disassembler/Helix packaging - close IDE job vs engine-direct quality gap (FIX-QUALITY-001/002/002c/002d; mbamchameleon @ 0x14002641c)
+
+> Dogfooding a headless `hexcore.helix.decompile` job on `mbamchameleon.sys` @ `0x14002641c` showed the IDE path decompiling **much worse** than the engine-direct harness on the **same** Helix `.node`: ~891 lines / 53% conf (later a fake 95% on a 95-line stub) vs engine-direct **1597 lines / 64.2%**. Root causes were all in the **disassembler packaging** (`liftToIR` + `helix.decompile`), not the decompiler engine.
+>
+> **001 — D2 honesty mis-gate + cast default:** headless jobs never set `useCastLayer` (fell through to the legacy PseudoCEmitter path) and always passed the incomplete `analyzeAll` function table as `functionStarts`, flipping Helix into authoritative D2 mode. Real PE thunks/JMP tails missing from the table became `(*(void(*)())0xADDR)` + honesty conf cap (~64% → ~49–53%).
+>
+> **002 — oversized lift window + leader soup:** job `size: 65536` on a ~6.7 KB function flooded PE64 `knownFunctionEnds` / Pathfinder `additionalLeaders` with neighbours. Combined with native Remill caps this could silently truncate mid-function.
+>
+> **002c — silent under-lift + Electron worker:** pre-injected hundreds of BB leaders raced `maxBasicBlocks`; headless now forces Helix `forceSync` (no `worker_threads` double-load of the native `.node`); under-lift retry if `bytesConsumed < 85%` of known size.
+>
+> **002d — prologue-scan size 4800 vs .pdata 6761 (the log smoking gun):** after `loadFile` / before full `.pdata` heal (or when the table stayed short), `getFunctionAt` reported **size=4800** while Pathfinder/`.pdata` correctly had `boundary=[0x14002641c,0x140027e85)` (**6761**). The size clamp trusted the short table → `bytesConsumed=4800/4800` with no under-lift flag (looked “complete”) → **95 lines / 95% conf** fake high. Fix: `getAuthoritativeFunctionExtent()` prefers containing RUNTIME_FUNCTION from `.pdata` over the table size and heals the table entry before clamp / `knownFunctionEnds`.
+
+- **Fix (hexcore-disassembler):**
+  - `helixPackaging.ts`: `resolveHelixBaseOptions` (cast ON unless `useCastLayer:false`), `wantsHelixFunctionStarts` (D2 registry opt-in via `functionStarts:true` / `honesty:true`), `resolveLiftByteSize` + `coercePositiveInt`, `getAuthoritativeFunctionExtent` (pdata > table).
+  - `extension.ts` `liftToIR`: clamp oversized windows to authoritative fn size; PE `knownFunctionEnds` = primary end only; no Pathfinder leader injection on single-fn path; under-lift retry; `LiftDiag` stamp on C output.
+  - `extension.ts` `helix.decompile` / `decompileIR`: cast default ON; no default `functionStarts`; headless `forceSync:true`.
+  - `helixWrapper.ts`: `forceSync` option for main-thread decompile on large IR.
+- **Validated** on `mbamchameleon.sys` @ `0x14002641c` after 002d:
+  - IDE job: **1597 lines, conf 64.2%**, `LiftDiag: bytesConsumed=6761/6761 irLines=9514 cLines=1597 cast=true fnStarts=0`
+  - engine-direct harness: **1596 lines, conf 64.2%** (same Issues line; IDE adds `ExAllocatePoolWithTag` import naming + `LiftDiag` — body parity, not a decompiler gap)
+  - unit tests: 14 packaging tests green (`helixPackaging.quality.test.ts`)
+  - Opt-outs: `allowOversizedLift:true`, `functionStarts:true` / `honesty:true`, `useCastLayer:false`, `noLiftRetry:true`
+  - Disassembler `1.4.16 -> 1.4.17` (also mirrored in `extensions/hexcore-disassembler/README.md`)
+
+### Disassembler - Wave A issue hygiene + #46 bit-intrinsic width (#52 closed, #37 partially closed, #32 Minimum+Better documented)
+
+> Pre-3.8.3 ship pass over open GitHub issues that were already largely implemented in tree but still OPEN.
+
+- **#52 (enhancement) — CLOSED:** option (a) `applyImportSymbolNames` post-process is the shipping path (`importSymbolNames.ts` + wiring in `helix.decompile` / `decompileIR`). Renames `sub_<va>` / `g_<va>` only when the full 64-bit VA is in `getImports()` / named `getFunctions()` (PLT). Validated on PE (`ExAllocatePoolWithTag`) and unit suite (`importSymbolNames.test.ts`). Option (b) native `addFunctionName` remains a future optional cleanup, not a blocker.
+- **#32 (bug) — Minimum + Better shipped; leave open only if Better UX polish remains:** honesty short-circuit for managed CIL (`managed:true`, conf 0, no fake stub) + Revenant offer / `hexcore.revenant.decompile` aliases. Documented in earlier 3.8.3 changelog entries; revalidate on `Bypass.exe` before formal close.
+- **#37 (bug) — Bugs 1/3/5 shipped; 2/4 residual:** FIX-102 (per-file engines / concurrent PE cache), FIX-100 (64-bit address no longer truncated in Helix emit), FIX-101 (ModuleID no longer leaks host path). Bugs 2 (block labels without materialization) and 4 (lost back-edge, likely depends on 2) remain the open Remill lift correctness cluster — track as residual under #37 or split to a focused follow-up before claiming full close.
+- **#46 (bug) — FIXED in 1.4.17:** `helixCleanupPostProcessor` bit-intrinsic map is width-aware (`ctpop.i64` → `__builtin_popcountll`, `bswap.i64` → `__builtin_bswap64`, `bswap.i16` → `__builtin_bswap16`; bare names still default to 32-bit). Unit tests added.
+
+### Disassembler - packer/UPX **detect only** for jobs (issue #55; Wave C P0)
+
+> HTB Medium `ransom` dogfood: packed ELF jobs finished in ~2s with weak signals and agents still decompiled UPX stubs. Product rule (same as Unicorn/GPL boundary): HexCore core is **MIT** — do **not** spawn or bundle GPL `upx` from PATH.
+
+- **Fix:**
+  - Pure `packerDetect.ts`: `UPX!` magic, banners, section names, strings → `family`, `confidence`, `markers`, `recommendation`.
+  - Headless `hexcore.disasm.detectPacker` (JSON for `onResult`: `packed|family|confidence`).
+  - `analyzeAll` capabilities: `packed` + **`packed:upx`** when UPX.
+  - **No** `unpackPacker` / PATH `upx` integration (removed — optional external tools are not product surface).
+- **Validated:** `packerDetect.test.ts` 5/5; live HTB ransom detect conf 100.
+- **Job pattern:** detect → if packed, **stop trusting entry decompile**; human/agent unpack offline then re-job on clean image.
+
+### Disassembler/Helix packaging - honesty confidence safety net (issue #31; Wave B partial)
+
+> Helix can still emit Medium/High confidence when the body text carries damning defects (`__helix_unhandled_*`, surviving `(void*)0x…` code leaks, statements after `return`). Engine-side damning is the source of truth; packaging now refuses to present unearned High when those patterns survive in the string (covers pre-rebuild `.node` drift).
+
+- **Fix:** pure `honestyConfidenceCap.ts` rewrites `// Confidence: X% (…)` to **≤50% (Low)** when text damning is present and score > 50; appends an Issues line. Wired into both helix.decompile paths after #52 import rename. Engine (`DamningDefect.h`) also gains category (6) post-return hard-cap for the next Helix `.node` rebuild.
+- **D1 residual (packaging):** clusters of bare `var = 0xBLOCK` assigns (≥3 same high-16 region or PE/ELF-looking bases) also cap — covers #31 `rev_ffmodule` evidence where Helix never tagged `isCodeAddrLeak`. Single magic constants (`0xdeadbeef`) do **not** trip.
+- **Validated:** unit suite `honestyConfidenceCap.test.ts` (unhandled CF, clean no-op, already-≤50, code leak, post-return, bare-addr cluster, single-magic no-op).
+- **Does not close #31 fully** — engine-side bare-imm tagging (FIX-091 expansion), hallucinated callees without registry, and full D3 CFG reachability remain.
+
+### Disassembler/Remill - materialise jump-table case targets as Remill leaders (issue #51; Wave B)
+
+> Indirect `jmp reg` dispatch (MSVC/GCC PIC jump tables) was lifted as a black hole: Remill never added the N case-handler VAs as basic-block leaders, so Helix `RecoverSwitchTables` could read the table but `caseBlocks` stayed empty → `__helix_unhandled_cf_switch` and all menu/switch bodies dropped. The Remill C++ side already accepts `additionalLeaders` (Phase 1.5); Pathfinder’s x86 linear decode never resolved tables or passed those leaders.
+
+- **Fix:**
+  - New pure `jumpTableLeaders.ts`: recover PIC tables from `cmp imm` + `lea [rip+…]` + `jmp reg`, read 32-bit signed entries via `engine.getBytes` (VA-correct for PE/ELF), no 32-bit VA mask.
+  - Pathfinder x86 path after batch decode: populate `CFGHints.indirectJumps` + promote in-range case targets into `leaders`.
+  - `liftToIR`: inject **only** jump-table case targets as `additionalLeaders` (not the full BB flood — that regressed under-lift in FIX-QUALITY-002c). Caps already floor high enough for a few dozen cases.
+- **Validated:**
+  - Unit suite `jumpTableLeaders.test.ts` — 6/6 (classic PIC, CET `notrack jmp` + r12 table base, range filter, direct-jmp ignore, mem-jmp ignore, PIE VAs >4 GiB).
+  - Live `threadweaver` main (`0x555555555310`, 1801 B): recovered 1 dispatch @ `0x555555555524` (`notrack jmp rax`, Capstone `isJump=false`), table `@0x555555556388`, **8/8 case targets** as leaders.
+  - Remill lift with `additionalLeaders`: +7 BB labels / +141 IR lines vs baseline; all 8 case VAs present as `bb_<decimal>` (initially `No predecessors` until Helix `RecoverSwitchTables` wires the cascade — exactly the materialization #51 requires).
+- Disassembler remains `1.4.17` (bundled with Wave A/B packaging ship).
+
+### Licensing - relabel hexcore-unicorn + hexcore-debugger as GPL-2.0-only (license honesty; the rest of HexCore stays MIT)
+
+> A licensing audit confirmed the two `hexcore-*` extensions that link the [Unicorn Engine](https://www.unicorn-engine.org/) (GPL-2.0) were declaring `"license": "MIT"` in their `package.json` -- a mislabel. `hexcore-unicorn` is the N-API binding that statically links libunicorn; `hexcore-debugger` embeds it. Code that links GPL-2.0 is itself GPL-2.0; the MIT label was incorrect, not a relicensing choice. This does NOT make the IDE GPL: HexCore runs Unicorn across a process boundary (the emulation worker is out-of-process over IPC), so the core IDE and every other `hexcore-*` extension remain MIT -- only these two components, which actually link the GPL code, carry the copyleft. The in-process Unicorn path still used by the Oracle Hook (Pythia, sync `memWrite`) is gated on `skipPe32Worker = needSkipWorkerForOracle` and is slated to move out-of-process via the SAB zero-copy IPC (Issue #31) in v4.0, after which these two can return to MIT.
+
+- **Fix:** set `"license": "GPL-2.0-only"` (the valid SPDX id; bare `GPL-2.0` is SPDX/npm-deprecated) in `hexcore-unicorn/package.json` and `hexcore-debugger/package.json`; add the canonical GNU GPL-2.0 text as `LICENSE` to both; add a README "License" note to each explaining the link-boundary rationale (the core IDE stays MIT). No code, no `.node`, no behaviour change -- a label correction only.
+- **Validated** that the two SPDX ids are the only `MIT` -> `GPL-2.0-only` flips, the `LICENSE` files are byte-identical to the official gnu.org GPL-2.0 (17984 bytes), and no other `hexcore-*` extension's license was touched (the MIT core is unchanged).
+
+### Disassembler/Remill - lift x64 with the `amd64_avx` arch, not plain `amd64` (FIX-106; recovers silently-dropped AVX/AVX2 vector code; disassembler 1.4.16)
+
+> A benchmark sweep of 4 real x64 game binaries (LOP/WWZ/ROTTR/SOTTR, 42 functions) found ~24% of functions hit a class of lift failure: Remill emitting "Instruction decode of VFMADD231PS_YMMqq... requires the amd64_avx architecture semantics to lift but was decoded using the amd64 architecture" for every VEX-encoded AVX/AVX2/YMM instruction, which was then stubbed -- the vector body silently vanished from the decompile (one WWZ function dropped 174 instructions). Root cause: `archMapper.ts` mapped the Capstone `'x64'` arch to Remill's plain `'amd64'`, which has no AVX semantics. The native module already ships and lists `amd64_avx` / `amd64_avx512` (`getSupportedArchs`), and the build itself is compiled with `REMILL_ARCH "amd64_avx"` -- only the runtime arch selection was the non-AVX variant. (The XED/Capstone DECODE was fine -- FIX-024 recovered the instruction lengths; the failure was purely at the Remill LIFT stage picking the wrong arch.)
+
+- **Fix:** map `'x64' -> 'amd64_avx'` (the AVX superset) in `archMapper.ts` (+ the compiled `out/archMapper.js`). `amd64_avx` lifts plain amd64 instructions identically and adds the VEX/YMM semantics. `amd64_avx512` was evaluated and rejected -- it gives no further recovery on the sampled functions (same residual ~12 exotic-insn stubs) and structures slightly worse. `x86 -> 'x86_avx'` is the analogous follow-up, left unchanged pending its own validation.
+- **Validated** on a WWZ `--sample 10` re-run before/after: the 8 non-AVX functions are BYTE-IDENTICAL (zero regression -- the superset arch is a no-op for them, e.g. a plain function stayed at 20 lines / 95% confidence), while the 2 AVX functions dropped HandleUnsupported from 47->12 and 174->12 (221 dropped instructions across the two collapsed to 24, -89%) and recovered their vector bodies (84->104 and 315->450 lines). Disassembler `1.4.15 -> 1.4.16`. Note: recovering the larger honest body exposes a separate confidence-model issue (the bigger body reads as LOWER confidence) -- tracked as the next decompiler honesty fix, not addressed here.
 
 ### Pipeline - make the outDir containment guard case-insensitive on Windows (#43 follow-up; fixes a false-positive blocking legit jobs)
 

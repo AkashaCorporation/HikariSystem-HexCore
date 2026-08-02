@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.15",
+	"version": "1.4.27",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -292,6 +292,11 @@
 				"category": "HexCore Automation"
 			},
 			{
+				"command": "hexcore.disasm.detectPacker",
+				"title": "Detect Packer / UPX (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.disasm.exportASMHeadless",
 				"title": "Export Assembly (Headless)",
 				"category": "HexCore Automation"
@@ -491,7 +496,8 @@
 			{
 				"fileMatch": [
 					"/.hexcore_job.json",
-					"**/.hexcore_job.json"
+					"**/.hexcore_job.json",
+					"**/*.hexcore_job.json"
 				],
 				"url": "./schemas/hexcore-job.schema.json"
 			}
@@ -504,7 +510,7 @@
 					"default": 2,
 					"minimum": 1,
 					"maximum": 16,
-					"description": "Number of concurrent worker slots in the HexCore pipeline job queue (Issue #25). Each slot runs one .hexcore_job.json job at a time; keepAlive session jobs are pinned to a single worker (sticky routing). Changing this takes effect on the NEXT window reload — the live pool is not resized and in-flight jobs finish on their current workers."
+					"description": "Number of concurrent logical worker slots in the HexCore pipeline job queue (Issue #25). Jobs that touch shared engine state are serialized for whole-job isolation; proven stateless byte tools may use the remaining parallelism. keepAlive session jobs retain sticky routing. Changing this takes effect on the NEXT window reload."
 				},
 				"hexcore.pipeline.allowExternalOutDir": {
 					"type": "boolean",
@@ -590,7 +596,7 @@
 				},
 				"hexcore.oracle.maxBudgetUsd": {
 					"type": "number",
-					"default": 5.0,
+					"default": 5,
 					"description": "Per-session hard budget cap for Anthropic API spend. Pythia degrades to rehearsal stubs above this."
 				}
 			}

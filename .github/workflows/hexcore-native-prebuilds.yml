@@ -23,17 +23,17 @@ jobs:
       matrix:
         engine:
           - name: hexcore-capstone
-            repo: LXrdKnowkill/hexcore-capstone
+            repo: AkashaCorporation/hexcore-capstone
           - name: hexcore-unicorn
-            repo: LXrdKnowkill/hexcore-unicorn
+            repo: AkashaCorporation/hexcore-unicorn
           - name: hexcore-llvm-mc
-            repo: LXrdKnowkill/hexcore-llvm-mc
+            repo: AkashaCorporation/hexcore-llvm-mc
           - name: hexcore-better-sqlite3
-            repo: LXrdKnowkill/hexcore-better-sqlite3
+            repo: AkashaCorporation/hexcore-better-sqlite3
           - name: hexcore-remill
             repo: AkashaCorporation/hexcore-remill
             deps_asset: remill-deps-win32-x64.zip
-            deps_tag: v0.4.0
+            deps_tag: v0.5.1
           - name: hexcore-souper
             repo: AkashaCorporation/hexcore-souper
             deps_asset: souper-deps-win32-x64.zip
@@ -68,7 +68,7 @@ jobs:
         run: |
           $tag = "v1.0.0"
           $asset = "llvm-win32-x64.zip"
-          $url = "https://github.com/LXrdKnowkill/hexcore-llvm-mc/releases/download/$tag/$asset"
+          $url = "https://github.com/AkashaCorporation/hexcore-llvm-mc/releases/download/$tag/$asset"
           Invoke-WebRequest -Uri $url -OutFile $asset
           New-Item -ItemType Directory -Force engine/deps/llvm | Out-Null
           Expand-Archive -Path $asset -DestinationPath engine/deps/llvm
@@ -102,6 +102,19 @@ jobs:
       - name: Build Prebuilds
         working-directory: engine
         run: npm run prebuild
+
+      - name: Bundle Souper Z3 Runtime
+        if: ${{ matrix.engine.name == 'hexcore-souper' }}
+        working-directory: engine
+        run: |
+          $source = "deps/z3/libz3.dll"
+          $destination = "prebuilds/win32-x64/libz3.dll"
+          if (-not (Test-Path $source)) {
+            throw "Souper runtime DLL not found: $source"
+          }
+          New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          Write-Host "Bundled Souper runtime: $destination"
 
       - name: Read Engine Version
         id: engine-version
@@ -230,8 +243,8 @@ jobs:
           }
           gh release upload $tag $asset --clobber
 
-  # All prebuildify engines (Capstone, Unicorn, LLVM-MC, SQLite, Remill, Rellic)
-  # are in the main prebuild matrix above.
+  # All active prebuildify engines (Capstone, Unicorn, LLVM-MC, SQLite, Remill,
+  # and Souper) are in the main prebuild matrix above. Rellic remains disabled.
 
   # ---------------------------------------------------------------------------
   # Helix — NAPI-RS build (separate job, requires LLVM 18 + MLIR)

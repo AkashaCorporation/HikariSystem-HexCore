@@ -61,6 +61,8 @@ interface HelixEngineInstance {
 	 *  honesty path fire.  Full table or omitted; a partial table wrongly
 	 *  flips the engine authoritative and mis-gates valid calls to indirect. */
 	setFunctionStarts?(starts: number[]): void;
+	/** Versioned DWARF/BTF/PDB signatures and nominal struct layouts. */
+	setDebugTypeInfoJson?(json: string): void;
 }
 
 interface HelixModule {
@@ -239,6 +241,14 @@ export class HelixWrapper {
 		 * flips the engine authoritative and mis-gates valid in-binary calls.
 		 */
 		functionStarts?: number[];
+		/**
+		 * FIX-QUALITY-002b: force the main-thread sync decompile path even when
+		 * IR > 64KB. Headless/pipeline jobs should set this — Electron
+		 * worker_threads + native .node double-load has been a silent quality
+		 * risk (partial C bodies). Interactive UI may keep the worker so the
+		 * editor stays responsive.
+		 */
+		forceSync?: boolean;
 	}): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
@@ -327,8 +337,25 @@ export class HelixWrapper {
 			} catch { /* Native module too old -- proceed without authoritative table */ }
 		}
 
+		// FIX-121: seed nominal debug types inside the MLIR pipeline. Always
+		// replace (including empty) because engine instances are reused.
+		const debugTypeInfoJson = options?.structInfo
+			? JSON.stringify(options.structInfo)
+			: '';
+		try {
+			const engine = this.ensureEngine(mapping.helixArch);
+			if (engine && typeof engine.setDebugTypeInfoJson === 'function') {
+				engine.setDebugTypeInfoJson(debugTypeInfoJson);
+			}
+		} catch { /* Native module too old -- text post-processor remains fallback */ }
+
 		let result: HelixResult;
-		if (irText.length > ASYNC_THRESHOLD) {
+		// FIX-QUALITY-002b: headless/pipeline prefers sync (forceSync) so the
+		// same engine instance that received setUseCastLayer / dataSections /
+		// functionStarts actually runs decompileIr. Worker path still used for
+		// large interactive decompiles to keep the UI responsive.
+		const useWorker = irText.length > ASYNC_THRESHOLD && options?.forceSync !== true;
+		if (useWorker) {
 			// v3.7.4: Pass engine flags to worker — worker creates its own engine
 			// so flags set on the main-thread engine don't propagate automatically
 			result = await this.decompileIrAsync(irText, mapping.helixArch, {
@@ -337,8 +364,15 @@ export class HelixWrapper {
 				variableRenames: renames,
 				functionStarts,
 				dataSections,
+				debugTypeInfoJson,
 			});
 		} else {
+			if (irText.length > ASYNC_THRESHOLD) {
+				console.log(
+					`[helix] FIX-QUALITY-002b: forceSync decompile on main thread ` +
+					`(IR ${irText.length} bytes > ${ASYNC_THRESHOLD})`
+				);
+			}
 			result = this.decompileIrSync(irText, mapping.helixArch);
 		}
 
@@ -368,6 +402,15 @@ export class HelixWrapper {
 				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine && typeof engine.clearVariableRenames === 'function') {
 					engine.clearVariableRenames();
+				}
+			} catch { /* ignore */ }
+		}
+
+		if (!useWorker && debugTypeInfoJson) {
+			try {
+				const engine = this.ensureEngine(mapping.helixArch);
+				if (engine && typeof engine.setDebugTypeInfoJson === 'function') {
+					engine.setDebugTypeInfoJson('');
 				}
 			} catch { /* ignore */ }
 		}
@@ -498,7 +541,7 @@ export class HelixWrapper {
 	private decompileIrAsync(
 		irText: string,
 		arch: HelixArchValue,
-		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[]; dataSections?: Array<{ vaStart: bigint; bytes: Buffer }> },
+		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[]; dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>; debugTypeInfoJson?: string },
 	): Promise<HelixResult> {
 		return new Promise<HelixResult>((resolve) => {
 			const workerCode = `
@@ -541,6 +584,9 @@ export class HelixWrapper {
 						if (workerData.functionStarts && workerData.functionStarts.length > 0 && typeof engine.setFunctionStarts === 'function') {
 							engine.setFunctionStarts(workerData.functionStarts);
 						}
+						if (typeof engine.setDebugTypeInfoJson === 'function') {
+							engine.setDebugTypeInfoJson(workerData.debugTypeInfoJson || '');
+						}
 
 						// Switch-table recovery needs the binary's data sections; the main
 						// thread set them on its own engine, but this worker builds a fresh
@@ -575,6 +621,7 @@ export class HelixWrapper {
 					variableRenames: flags?.variableRenames ?? [],
 					functionStarts: flags?.functionStarts ?? [],
 					dataSections: flags?.dataSections ?? [],
+					debugTypeInfoJson: flags?.debugTypeInfoJson ?? '',
 				},
 			});
 

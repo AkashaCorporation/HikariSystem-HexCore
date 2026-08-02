@@ -58,3 +58,5 @@ module.exports.RemillLifter = binding.RemillLifter;
 module.exports.ARCH = binding.ARCH;
 module.exports.OS = binding.OS;
 module.exports.version = binding.version;
+module.exports.upstreamVersion = binding.upstreamVersion;
+module.exports.upstreamCommit = binding.upstreamCommit;

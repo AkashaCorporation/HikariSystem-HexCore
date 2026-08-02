@@ -7,10 +7,10 @@ Strategy:
      (must match hexcore-llvm-mc LLVM libs)
   2. Rebuild glog + gflags with MSVC cl.exe /MT (not clang-cl)
      to avoid __std_search_1 / __std_remove_8 STL symbol mismatches
-  3. cmake configure remill with clang-cl x64
-  4. Patch build.ninja /MD → /MT
-  5. Build remill libs
-  6. Copy to wrapper deps/ and verify CRT
+  3. Verify the pinned Remill 6.0.1 revision
+  4. Configure Remill with clang-cl x64 and its native static-CRT support
+  5. Build libraries plus the packaged runtime semantics
+  6. Copy libraries, headers and semantics to wrapper deps/ and verify CRT
 
 Prerequisites:
   - Run from VS Developer Command Prompt (vcvarsall x64)
@@ -30,6 +30,7 @@ DEPS_INSTALL = r"C:\remill-build\deps-install"
 REMILL_SRC   = r"C:\remill-build\remill"
 REMILL_INSTALL = r"C:\remill-build\remill-install-mt"
 BUILD_DIR    = r"C:\remill-build\remill-clangcl-mt"
+REMILL_REVISION = "0e324aee8c67a63ec759ef379dcfafa0b3cb1448"
 LLVM_DIR     = os.path.join(DEPS_INSTALL, "lib", "cmake", "llvm")
 WRAPPER_DEPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deps")
 
@@ -37,7 +38,7 @@ WRAPPER_DEPS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "deps")
 CLANG_CL = r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\Llvm\x64\bin\clang-cl.exe"
 
 CMAKE = "cmake"
-JOBS  = str(os.cpu_count() or 4)
+JOBS  = os.environ.get("HEXCORE_REMILL_JOBS", "4")
 
 # Dirs for rebuilding glog/gflags with cl.exe
 GLOG_BUILD   = r"C:\remill-build\glog-mt-cl"
@@ -65,6 +66,19 @@ def force_rmtree(path):
         func(fpath)
     if os.path.isdir(path):
         shutil.rmtree(path, onerror=on_error)
+
+
+def verify_remill_revision():
+    """Refuse to publish dependencies from an unreviewed upstream revision."""
+    result = subprocess.run(
+        ["git", "-C", REMILL_SRC, "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True)
+    actual = result.stdout.strip()
+    if actual != REMILL_REVISION:
+        print(f"ERROR: Remill revision is {actual}")
+        print(f"Expected pinned 6.0.1 revision {REMILL_REVISION}")
+        sys.exit(1)
+    print(f"Remill revision: {actual} (6.0.1)")
 
 
 # ===================================================================
@@ -236,6 +250,7 @@ def rebuild_remill():
         print("Install 'C++ Clang Compiler for Windows' via VS Installer")
         sys.exit(1)
     print(f"Using clang-cl: {CLANG_CL}")
+    verify_remill_revision()
 
     # 1. Clean build dir
     if os.path.isdir(BUILD_DIR):
@@ -268,8 +283,8 @@ def rebuild_remill():
          f"-DXED_DIR={DEPS_INSTALL}/lib/cmake/XED",
 
          "-DREMILL_ENABLE_TESTING=OFF",
+         "-DREMILL_FETCH_SLEIGH=ON",
          "-DREMILL_BUILD_SPARC32_RUNTIME=ON",
-         "-DREMILL_BUILD_SPARC64_RUNTIME=ON",
 
          REMILL_SRC], cwd=BUILD_DIR)
 
@@ -294,6 +309,16 @@ def rebuild_remill():
         if r.returncode != 0:
             print(f"WARNING: target {t} failed, skipping")
 
+    semantics_targets = [
+        "x86", "x86_avx", "x86_avx512",
+        "amd64", "amd64_avx", "amd64_avx512",
+        "aarch64", "sparc32",
+    ]
+    for t in semantics_targets:
+        print(f"\n--- Building semantics target: {t} ---")
+        run([CMAKE, "--build", ".", "--config", "Release",
+             "--target", t, "-j", JOBS], cwd=BUILD_DIR)
+
     # Sleigh targets
     sleigh_candidates = [
         "decomp", "sla", "slaSupport",
@@ -315,7 +340,7 @@ def rebuild_remill():
 # STEP 4: Copy libs to wrapper deps/
 # ===================================================================
 def copy_to_wrapper():
-    """Copy rebuilt libs to extensions/hexcore-remill/deps/."""
+    """Copy rebuilt libraries, public headers and semantics to wrapper deps/."""
     print("\n>>> COPYING LIBS TO WRAPPER DEPS <<<\n")
 
     # --- remill libs (from build dir) ---
@@ -348,6 +373,60 @@ def copy_to_wrapper():
                     print(f"  sleigh: {f}")
                     count += 1
     print(f"  -> {count} remill/sleigh libs copied")
+
+    # --- Remill public headers ---
+    remill_include_src = os.path.join(REMILL_SRC, "include", "remill")
+    remill_include_dst = os.path.join(
+        WRAPPER_DEPS, "remill", "include", "remill")
+    if os.path.isdir(remill_include_dst):
+        shutil.rmtree(remill_include_dst)
+    shutil.copytree(remill_include_src, remill_include_dst)
+    print("  remill: public headers copied")
+
+    # --- Sleigh public and generated headers ---
+    sleigh_include_dst = os.path.join(
+        WRAPPER_DEPS, "sleigh", "include", "sleigh")
+    if os.path.isdir(sleigh_include_dst):
+        shutil.rmtree(sleigh_include_dst)
+    os.makedirs(sleigh_include_dst, exist_ok=True)
+    sleigh_header_dirs = [
+        os.path.join(BUILD_DIR, "_deps", "sleigh-build", "include", "sleigh"),
+        os.path.join(BUILD_DIR, "_deps", "sleigh-src", "support", "include", "sleigh"),
+        os.path.join(BUILD_DIR, "_deps", "sleigh-build", "support", "include", "sleigh"),
+    ]
+    for source_dir in sleigh_header_dirs:
+        if not os.path.isdir(source_dir):
+            print(f"ERROR: missing Sleigh header directory: {source_dir}")
+            sys.exit(1)
+        shutil.copytree(source_dir, sleigh_include_dst, dirs_exist_ok=True)
+    print("  sleigh: public/generated headers copied")
+
+    # --- Runtime semantics required by the supported architecture contract ---
+    semantics_sources = {
+        "x86": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "x86_avx": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "x86_avx512": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "amd64": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "amd64_avx": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "amd64_avx512": os.path.join(BUILD_DIR, "lib", "Arch", "X86", "Runtime"),
+        "aarch64": os.path.join(BUILD_DIR, "lib", "Arch", "AArch64", "Runtime"),
+        "sparc32": os.path.join(BUILD_DIR, "lib", "Arch", "SPARC32", "Runtime"),
+    }
+    semantics_destinations = [
+        os.path.join(WRAPPER_DEPS, "remill", "share", "semantics"),
+        os.path.join(
+            WRAPPER_DEPS, "remill", "share", "remill", "18", "semantics"),
+    ]
+    for destination in semantics_destinations:
+        os.makedirs(destination, exist_ok=True)
+    for name, source_dir in semantics_sources.items():
+        source = os.path.join(source_dir, f"{name}.bc")
+        if not os.path.isfile(source):
+            print(f"ERROR: missing semantics module: {source}")
+            sys.exit(1)
+        for destination in semantics_destinations:
+            shutil.copy2(source, os.path.join(destination, f"{name}.bc"))
+    print(f"  remill: {len(semantics_sources)} semantics modules copied")
 
     # --- glog ---
     glog_dst = os.path.join(WRAPPER_DEPS, "glog", "lib", "glog.lib")
@@ -384,6 +463,8 @@ def verify():
         ("remill_arch",     os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch.lib")),
         ("remill_arch_x86", os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch_x86.lib")),
         ("remill_arch_aarch64", os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch_aarch64.lib")),
+        ("remill_arch_sparc32", os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch_sparc32.lib")),
+        ("remill_arch_sparc64", os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch_sparc64.lib")),
         ("remill_arch_sleigh",  os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_arch_sleigh.lib")),
         ("remill_version",  os.path.join(WRAPPER_DEPS, "remill", "lib", "remill_version.lib")),
         ("decomp",          os.path.join(WRAPPER_DEPS, "remill", "lib", "decomp.lib")),
@@ -444,9 +525,9 @@ def verify_abi():
     for line in r.stdout.split("\n"):
         if "LLVM_ENABLE_ABI_BREAKING_CHECKS" in line:
             print(f"  remill_bc.lib: {line.strip()}")
-            if '"0"' in line:
+            if re.search(r"LLVM_ENABLE_ABI_BREAKING_CHECKS(?:=|,)[\"']?0", line):
                 print("  ABI check: OK (matches LLVM libs)")
-            elif '"1"' in line:
+            elif re.search(r"LLVM_ENABLE_ABI_BREAKING_CHECKS(?:=|,)[\"']?1", line):
                 print("  ABI check: MISMATCH! Remill has 1, LLVM has 0")
                 print("  Did you run patch_abi_breaking() before building?")
             return

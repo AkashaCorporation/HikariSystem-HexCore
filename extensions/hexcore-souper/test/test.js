@@ -30,8 +30,8 @@ try {
     souper = require('..');
 } catch (e) {
     console.error('Failed to load hexcore-souper:', e.message);
-    console.error('(This is expected if native deps are not yet compiled)');
-    process.exit(0); // Don't fail CI if module isn't built yet
+    console.error('Build the native module before running the smoke suite.');
+    process.exit(1);
 }
 
 // ── Module exports ─────────────────────────────────────────────────────
@@ -50,6 +50,7 @@ assert(typeof souper.SouperOptimizer.getSolverInfo === 'function', 'getSolverInf
 
 const ver = souper.SouperOptimizer.getVersion();
 assert(typeof ver === 'string' && ver.length > 0, `getVersion() = "${ver}"`);
+assert(souper.version === ver, 'module and optimizer versions match');
 
 const solverInfo = souper.SouperOptimizer.getSolverInfo();
 assert(typeof solverInfo === 'object', 'getSolverInfo() returns object');

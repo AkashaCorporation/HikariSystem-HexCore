@@ -1,12 +1,12 @@
 {
   "name": "hexcore-hql",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Helix Query Language — Semantic Pattern Matching engine for C-AST analysis",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
-    "test": "tsx test/smoke.ts"
+    "test": "tsx test/smoke.ts && tsx test/signatureLoader.ts"
   },
   "dependencies": {
     "flatbuffers": "^24.3.25",

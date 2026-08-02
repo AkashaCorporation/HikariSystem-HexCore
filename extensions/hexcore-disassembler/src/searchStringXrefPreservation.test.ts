@@ -219,7 +219,7 @@ suite('Property 2: Preservation — Existing Behavior Unchanged for Non-Buggy In
 					(engine as any).strings = stringsMap;
 					(engine as any).instructions = instructionsMap;
 					(engine as any).baseAddress = baseAddress;
-					(engine as any).xrefs = [];
+					(engine as any).xrefs = new Map();
 
 					// Call buildStringXrefs (private method)
 					(engine as any).buildStringXrefs();

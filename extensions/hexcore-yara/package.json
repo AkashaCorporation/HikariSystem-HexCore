@@ -2,7 +2,7 @@
 	"name": "hexcore-yara",
 	"displayName": "HexCore YARA Scanner",
 	"description": "YARA rule scanner with DefenderYara integration for malware detection and threat scoring",
-	"version": "2.1.1",
+	"version": "2.1.3",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -163,7 +163,11 @@
 	},
 	"scripts": {
 		"compile": "tsc -p ./",
+		"test": "npm run compile && node out/regexSafety.test.js",
 		"watch": "tsc -watch -p ./"
+	},
+	"dependencies": {
+		"re2-wasm": "^1.0.2"
 	},
 	"devDependencies": {
 		"@types/node": "^18.0.0",

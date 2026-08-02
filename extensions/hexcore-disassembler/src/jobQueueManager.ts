@@ -310,7 +310,13 @@ class PriorityQueue {
 /**
  * Job executor function type.
  */
-type JobExecutor = (filePath: string, abortSignal: AbortSignal) => Promise<any>;
+export interface JobExecutionContext {
+	jobId: string;
+	workerId: number;
+	sessionId?: string;
+}
+
+type JobExecutor = (filePath: string, abortSignal: AbortSignal, context: JobExecutionContext) => Promise<any>;
 
 /**
  * Job Queue Manager for HexCore pipeline jobs.
@@ -801,14 +807,23 @@ export class JobQueueManager {
 				throw new Error('No job executor configured');
 			}
 
-			const result = await this.jobExecutor(job.filePath, job.abortController.signal);
+			const result = await this.jobExecutor(job.filePath, job.abortController.signal, {
+				jobId: job.jobId,
+				workerId: job.workerId ?? -1,
+				...(job.sessionId ? { sessionId: job.sessionId } : {}),
+			});
 
 			if (job.status === 'cancelled') {
 				return;
 			}
 
 			job.result = result;
-			this.updateJobStatus(job, 'done');
+			if (result && typeof result === 'object' && result.status === 'error') {
+				job.error = 'Pipeline finished with status error';
+				this.updateJobStatus(job, 'failed');
+			} else {
+				this.updateJobStatus(job, 'done');
+			}
 		} catch (error) {
 			if (job.status === 'cancelled') {
 				return;

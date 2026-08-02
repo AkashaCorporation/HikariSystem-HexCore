@@ -1,6 +1,6 @@
 {
   "name": "hexcore-better-sqlite3",
-  "version": "2.0.1",
+  "version": "2.0.2",
   "description": "HexCore N-API wrapper for SQLite (better-sqlite3 fork)",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -32,10 +32,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3.git"
+    "url": "https://github.com/AkashaCorporation/hexcore-better-sqlite3.git"
   },
   "bugs": {
-    "url": "https://github.com/LXrdKnowkill/hexcore-better-sqlite3/issues"
+    "url": "https://github.com/AkashaCorporation/hexcore-better-sqlite3/issues"
   },
   "engines": {
     "vscode": "^1.75.0",

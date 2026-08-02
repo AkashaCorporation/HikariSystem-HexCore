@@ -62,6 +62,7 @@ gyp = {
         "include_dirs": [
             '<!@(node -p "require(\'node-addon-api\').include")',
             "deps/remill/include",
+            "deps/sleigh/include",
             "deps/llvm/include",
             "deps/xed/include",
             "deps/glog/include",

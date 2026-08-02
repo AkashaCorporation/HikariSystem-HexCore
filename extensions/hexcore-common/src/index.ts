@@ -168,3 +168,5 @@ export {
 	SHARED_MEMORY_STATUS
 } from './sharedMemoryBuffer';
 
+export { assertWithinWorkspaceOrHome, isWithinDir } from './outputPathGuard';
+

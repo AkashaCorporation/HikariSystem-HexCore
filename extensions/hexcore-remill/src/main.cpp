@@ -7,6 +7,7 @@
  */
 
 #include <napi.h>
+#include <remill/Version/Version.h>
 #include "remill_wrapper.h"
 
 /**
@@ -46,7 +47,12 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
 
 	exports.Set("ARCH", CreateArchConstants(env));
 	exports.Set("OS", CreateOSConstants(env));
-	exports.Set("version", Napi::String::New(env, "0.1.0"));
+	exports.Set("version", Napi::String::New(env, "0.5.1"));
+	exports.Set("upstreamVersion", Napi::String::New(env, "6.0.1"));
+
+	const auto upstreamCommit = remill::version::GetCommitHash();
+	exports.Set("upstreamCommit", Napi::String::New(
+		env, upstreamCommit.data(), upstreamCommit.size()));
 
 	return exports;
 }

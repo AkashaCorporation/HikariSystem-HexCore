@@ -7,12 +7,14 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { decompile, detectDotNet, isDotNetFile, locateIlspy, locateBundledEngine } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
+const { decompile, detectDotNet, detectSingleFileBundle, isDotNetFile, isSingleFileBundle, locateIlspy, locateBundledEngine } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
 
 const MANAGED = String.raw`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Accessibility.dll`;
 const BYPASS = String.raw`C:\Users\Mazum\Desktop\New-Star\Easy\rev_bypass\Bypass.exe`;
 const MIXED = String.raw`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\System.Data.OracleClient.dll`;
 const NATIVE = String.raw`C:\Windows\System32\notepad.exe`;
+const SINGLE_FILE_SAMPLE = process.env.REVENANT_SINGLE_FILE_SAMPLE;
+const SINGLE_FILE_ENGINE = process.env.REVENANT_SINGLE_FILE_ENGINE;
 
 let pass = 0, fail = 0;
 const results = [];
@@ -27,9 +29,15 @@ async function test(name, fn) {
 	const truncated = path.join(tmp, 'truncated.dll');
 	const garbage = path.join(tmp, 'garbage.bin');
 	const empty = path.join(tmp, 'empty.dll');
+	const bundleMarker = path.join(tmp, 'bundle-marker.exe');
 	fs.writeFileSync(truncated, fs.readFileSync(MANAGED).subarray(0, 2048)); // valid header, body cut
 	fs.writeFileSync(garbage, Buffer.from('this is not a PE file at all, just text.'.repeat(20)));
 	fs.writeFileSync(empty, Buffer.alloc(0));
+	const markerFixture = Buffer.alloc(256);
+	markerFixture.writeUInt16LE(0x5a4d, 0);
+	markerFixture.writeBigInt64LE(64n, 192);
+	Buffer.from('8b1202b96a612038727b930214d7a03213f5b9e6efae3318ee3b2dce24b36aae', 'hex').copy(markerFixture, 200);
+	fs.writeFileSync(bundleMarker, markerFixture);
 
 	await test('a backend is locatable (bundled engine or ilspycmd)', () => {
 		assert.ok(locateBundledEngine() || locateIlspy(), 'neither the bundled revenant-engine nor ilspycmd was found');
@@ -51,6 +59,33 @@ async function test(name, fn) {
 	await test('detectDotNet: garbage/empty => false (no throw)', () => {
 		assert.strictEqual(detectDotNet(Buffer.from('nope')), false);
 		assert.strictEqual(detectDotNet(Buffer.alloc(0)), false);
+	});
+	await test('single-file bundle marker: valid offset detected, zero offset rejected', () => {
+		assert.strictEqual(detectSingleFileBundle(markerFixture), true);
+		const invalid = Buffer.from(markerFixture);
+		invalid.writeBigInt64LE(0n, 192);
+		assert.strictEqual(detectSingleFileBundle(invalid), false);
+		assert.strictEqual(isSingleFileBundle(bundleMarker), true);
+		assert.strictEqual(isDotNetFile(bundleMarker), true);
+	});
+	await test('single-file marker crossing the 1 MiB probe boundary is detected', () => {
+		const boundaryFixture = Buffer.alloc(1024 * 1024 + 64);
+		boundaryFixture.writeUInt16LE(0x5a4d, 0);
+		const markerAt = 1024 * 1024 - 16;
+		boundaryFixture.writeBigInt64LE(128n, markerAt - 8);
+		markerFixture.subarray(200, 232).copy(boundaryFixture, markerAt);
+		const boundaryFile = path.join(tmp, 'bundle-boundary.exe');
+		fs.writeFileSync(boundaryFile, boundaryFixture);
+		assert.strictEqual(isSingleFileBundle(boundaryFile), true);
+	});
+
+	await test('real single-file sample -> malicious entry assembly recovered', async () => {
+		if (!SINGLE_FILE_SAMPLE || !SINGLE_FILE_ENGINE) { return; }
+		const r = await decompile(SINGLE_FILE_SAMPLE, { mode: 'csharp', ilspyPath: SINGLE_FILE_ENGINE, timeoutMs: 120000 });
+		assert.ok(r.ok, `expected ok, got: ${r.error}`);
+		assert.match(r.code, /Add-MpPreference\s+-ExclusionPath/);
+		assert.match(r.code, /audioupdate\.online\/update\.zip/);
+		assert.match(r.code, /Path\.Combine\(pastaDestino,\s*"update\.exe"\)/);
 	});
 
 	await test('managed DLL -> C# (ok, isDotNet, real types)', async () => {

@@ -90,19 +90,19 @@ rule ApiHashing_ROR13_Pattern
 {
     meta:
         description = "Contains ror 13 rotate pattern — Metasploit-style API hashing"
-        severity = "high"
+        severity = "medium"
         author = "HexCore"
         category = "evasion"
         family = "ApiHashing"
+        architecture = "x86"
+        requires_executable = "true"
     strings:
         // ror reg, 13 (0x0D)
         $ror1 = { C1 C? 0D }
         // ror r/m32, 13
         $ror2 = { C1 C? 0D }
-        // 0x0D imm8 variant
-        $ror3 = { D3 C? }
     condition:
-        // ror13 alone is not conclusive; look for combination with loop
+        // Exact imm8 13 only. D3 /1 rotates by CL, not by 13, and was removed.
         any of them
 }
 

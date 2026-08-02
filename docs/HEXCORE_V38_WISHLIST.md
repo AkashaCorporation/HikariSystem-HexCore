@@ -10,6 +10,12 @@
 > - **W5 XOR Brute Force**: a lógica já vive dentro de `hexcore-strings extractAdvanced`. Um comando headless isolado não foi extraído.
 >
 > Os 5 items continuam válidos como pedido de feature — só não bateram o corte da v3.8.0. Próxima minor provável.
+>
+> **⚠️ Status Update (2026-06-28, verified against code):**
+> - **W4 (IAT Resolution)** → **refiled as GitHub #52** ("Helix renders call targets as `sub_<addr>`"). The threadweaver pwn dogfood re-derived this gap from scratch: a build-free addr→name post-process (from `engine.getImports()` + `getFunctions()`) names imported/PLT calls (`dlopen`, `dlsym`, …). Proven in the `pwn_lift.cjs` harness; product wiring (extension.ts) is the small remaining step.
+> - **W1 (xref headless)** + **W2 (emulate-from-address)**: still PENDING — no `xrefHeadless` / `emulateFromAddress` command found in code.
+> - **W3 (TLS callbacks)**: still partial — the `tlsCallbacks` field lives in `peParser.ts`; a dedicated `hexcore.peanalyzer.tlsCallbacks` command still does not exist.
+> - **W5 (XOR brute force)**: effectively delivered via `hexcore-strings` (`rollingXorExt.ts` shipped in the 3.8.1 Echo Mirage antidote), though not as the isolated `xorBruteForceHeadless` command originally specced.
 
 ---
 

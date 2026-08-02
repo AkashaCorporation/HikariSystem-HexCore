@@ -6,6 +6,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import { assertWithinWorkspaceOrHome } from 'hexcore-common';
 import { DebuggerViewProvider } from './debuggerView';
 import { RegisterTreeProvider } from './registerTree';
 import { MemoryTreeProvider } from './memoryTree';
@@ -186,36 +187,19 @@ async function runWithOracleSession(
 	return { ...runSummary, decisions };
 }
 
-/**
- * True if `child` is `parent` or lives inside it (path.relative, not a raw
- * startsWith prefix that would wrongly accept a sibling dir -- e.g. C:\Users\Bob
- * passing a C:\Users\Bo guard).
- */
-export function isWithinDir(parent: string, child: string): boolean {
-	const rel = path.relative(parent, child);
-	return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
-}
-
-/**
- * Reject a headless output path that escapes the workspace folders / user home.
- * The path comes from a (possibly untrusted) .hexcore_job.json; without this an
- * export could be written to an arbitrary filesystem location.
- */
-export function assertOutputAllowed(outputPath: string): void {
-	const resolved = path.resolve(outputPath);
-	const roots = [
-		...(vscode.workspace.workspaceFolders ?? []).map(f => f.uri.fsPath),
-		require('os').homedir(),
-	];
-	if (!roots.some(r => isWithinDir(r, resolved))) {
-		throw new Error(`Output path must be within workspace or user home directory: ${resolved}`);
-	}
-}
+/** Apply the shared policy to the workspace roots visible to this extension. */
+const assertOutputAllowed = (outputPath: string): string => assertWithinWorkspaceOrHome(
+	outputPath,
+	(vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)
+);
 
 export function activate(context: vscode.ExtensionContext): void {
-	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'azoth');
+	// Match the contributed setting and the pipeline gate. During early startup
+	// the Elixir contribution may not be registered yet, so this fallback must
+	// not silently disable commands that the runner considers available.
+	const emulator = vscode.workspace.getConfiguration('hexcore').get<string>('emulator', 'both');
 	if (emulator !== 'debugger' && emulator !== 'both') {
-		console.log(`[hexcore-debugger] activation skipped — hexcore.emulator="${emulator}" (Azoth is the default emulator in v3.8.0; set hexcore.emulator="debugger" or "both" to enable the legacy TypeScript debugger)`);
+		console.log(`[hexcore-debugger] activation skipped — hexcore.emulator="${emulator}" (set hexcore.emulator="debugger" or "both" to enable the legacy TypeScript debugger)`);
 		context.subscriptions.push(
 			vscode.workspace.onDidChangeConfiguration((e) => {
 				if (e.affectsConfiguration('hexcore.emulator')) {
@@ -618,6 +602,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			const faultInfo = engine.getLastFaultInfo();
 
 			const exportData = {
+				success: !crashed && !terminatedWithError,
+				status: !crashed && !terminatedWithError ? 'ok' as const : 'failed' as const,
 				crashed,
 				crashError: crashError || undefined,
 				terminatedWithError,
@@ -1114,6 +1100,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const exportData: Record<string, any> = {
 				file: filePath,
+				success: !crashed && !terminatedWithError,
+				status: !crashed && !terminatedWithError ? 'ok' : 'failed',
 				architecture: engine.getArchitecture(),
 				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),

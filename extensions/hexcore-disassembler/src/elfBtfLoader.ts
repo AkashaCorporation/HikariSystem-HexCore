@@ -79,6 +79,8 @@ export interface BTFType {
 	name: string;
 	/** Size in bytes (for INT, STRUCT, UNION, ENUM) or referenced type ID (for PTR, TYPEDEF, etc.) */
 	sizeOrType: number;
+	/** STRUCT/UNION member offsets encode bitfield size in bits 24..31 when set. */
+	kflag?: boolean;
 	/** Additional data depending on kind */
 	members?: BTFMember[];       // for STRUCT/UNION
 	params?: BTFParam[];         // for FUNC_PROTO
@@ -253,6 +255,7 @@ function parseTypes(
 			kindName,
 			name,
 			sizeOrType,
+			kflag: kflag === 1,
 		};
 
 		let entrySize = 12; // Base size of btf_type
@@ -674,8 +677,10 @@ export function getStructLayout(
 	if (type.members) {
 		for (const member of type.members) {
 			const memberTypeStr = resolveTypeString(member.typeId, btfData);
-			// Extract bit offset (lower 24 bits if kflag is set)
-			const offset = member.offset & 0xFFFFFF;
+			// Bits 24..31 are bitfield size only when the owning type sets kflag.
+			const offset = type.kflag
+				? member.offset & 0xFFFFFF
+				: member.offset;
 
 			members.push({
 				name: member.name,
@@ -768,6 +773,67 @@ export interface FunctionParamInfo {
 export interface FunctionSignatureInfo {
 	returnType: string;
 	params: FunctionParamInfo[];
+	/** True when the source signature ends in an unspecified `...` parameter. */
+	variadic?: boolean;
+}
+
+function meaningfulParameterNameCount(signature: FunctionSignatureInfo): number {
+	return signature.params.filter(
+		param => param.name.length > 0 && !/^param_\d+$/.test(param.name),
+	).length;
+}
+
+/**
+ * Prefer the most complete signature when debug info contains both a
+ * declaration and a definition for the same function.
+ */
+export function shouldPreferFunctionSignature(
+	existing: FunctionSignatureInfo | undefined,
+	candidate: FunctionSignatureInfo,
+): boolean {
+	if (!existing) {
+		return true;
+	}
+	if (candidate.params.length !== existing.params.length) {
+		return candidate.params.length > existing.params.length;
+	}
+	return meaningfulParameterNameCount(candidate) > meaningfulParameterNameCount(existing);
+}
+
+/** Build a compact debug-type database for the requested functions.
+ * Includes parameter/return structs and recursively embedded struct fields. */
+export function scopeStructInfoForFunctions(
+	fullJson: StructInfoJson,
+	functionNames: Iterable<string>,
+): StructInfoJson {
+	const functions: Record<string, FunctionSignatureInfo> = {};
+	const structs: Record<string, StructInfo> = {};
+	const pending: string[] = [];
+	const enqueueType = (type: string): void => {
+		const match = type.match(/\bstruct\s+([A-Za-z_]\w*)/);
+		if (match && fullJson.structs[match[1]] && !structs[match[1]]) {
+			pending.push(match[1]);
+		}
+	};
+
+	for (const name of functionNames) {
+		const signature = fullJson.functions[name];
+		if (!signature) { continue; }
+		functions[name] = signature;
+		enqueueType(signature.returnType);
+		for (const param of signature.params) { enqueueType(param.type); }
+	}
+
+	while (pending.length > 0) {
+		const name = pending.shift()!;
+		if (structs[name]) { continue; }
+		const info = fullJson.structs[name];
+		if (!info) { continue; }
+		structs[name] = info;
+		for (const field of info.fields) { enqueueType(field.type); }
+	}
+
+	return { structs, functions };
 }
 
 /** Function boundary from debug info (DWARF DW_TAG_subprogram low_pc/high_pc). */
@@ -814,7 +880,9 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 			if (!member.name) { continue; }
 
 			// BTF stores bit offsets; for non-bitfield members offset is byte-aligned
-			const bitOffset = member.offset & 0xFFFFFF;
+			const bitOffset = type.kflag
+				? member.offset & 0xFFFFFF
+				: member.offset;
 			const byteOffset = Math.floor(bitOffset / 8);
 			const memberSize = resolveTypeSize(member.typeId, btfData, pointerSize);
 			const memberType = resolveTypeString(member.typeId, btfData);
@@ -844,10 +912,17 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 
 		const returnType = resolveTypeString(protoType.sizeOrType, btfData);
 		const params: FunctionParamInfo[] = [];
+		let variadic = false;
 
 		if (protoType.params) {
 			for (let i = 0; i < protoType.params.length; i++) {
 				const param = protoType.params[i];
+				// BTF encodes a variadic tail as an unnamed parameter whose
+				// type ID is zero. It is metadata, not a source parameter.
+				if (param.typeId === 0) {
+					variadic = true;
+					continue;
+				}
 				const paramType = resolveTypeString(param.typeId, btfData);
 
 				const info: FunctionParamInfo = {
@@ -866,7 +941,10 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 			}
 		}
 
-		functions[type.name] = { returnType, params };
+		const candidate = { returnType, params, variadic };
+		if (shouldPreferFunctionSignature(functions[type.name], candidate)) {
+			functions[type.name] = candidate;
+		}
 	}
 
 	return { structs, functions };
@@ -886,26 +964,7 @@ export function getStructInfoForFunction(
 	const funcSig = fullJson.functions[functionName];
 	if (!funcSig) { return null; }
 
-	// Collect only structs referenced by this function's params
-	const relevantStructs: Record<string, StructInfo> = {};
-	for (const param of funcSig.params) {
-		if (param.structName && fullJson.structs[param.structName]) {
-			relevantStructs[param.structName] = fullJson.structs[param.structName];
-
-			// Also collect nested struct types (one level deep)
-			for (const field of fullJson.structs[param.structName].fields) {
-				const nestedMatch = field.type.match(/^struct\s+(\w+)$/);
-				if (nestedMatch && fullJson.structs[nestedMatch[1]]) {
-					relevantStructs[nestedMatch[1]] = fullJson.structs[nestedMatch[1]];
-				}
-			}
-		}
-	}
-
-	return {
-		structs: relevantStructs,
-		functions: { [functionName]: funcSig },
-	};
+	return scopeStructInfoForFunctions(fullJson, [functionName]);
 }
 
 /**

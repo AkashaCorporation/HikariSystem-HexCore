@@ -30,7 +30,10 @@ export class WinApiHooks {
 	private callLog: ApiCallLog[] = [];
 	private lastError: number = 0;
 	private tickCount: number = 0;
+	private performanceCounter: bigint = 0n;
 	private nextHandle: number = 0x100;
+	private nextTlsIndex: number = 0;
+	private tlsValues: Map<number, bigint> = new Map();
 	private commandLineAPtr: bigint = 0n;
 	private commandLineWPtr: bigint = 0n;
 	private winMainCommandLineWPtr: bigint = 0n;
@@ -70,6 +73,7 @@ export class WinApiHooks {
 		// produces a negative BigInt and `Buffer.writeBigUInt64LE` throws
 		// `"value out of range"` (HEXCORE_DEFEAT_RESULTS.md FAIL 4).
 		this.tickCount = (Date.now() & 0xFFFFFFFF) >>> 0;
+		this.performanceCounter = BigInt(this.tickCount) * 10000n;
 		this.registerAllHandlers();
 	}
 
@@ -557,6 +561,24 @@ export class WinApiHooks {
 			return handle;
 		});
 
+		this.handlers.set('kernel32!LoadLibraryExA', (args) => {
+			const name = this.readStringA(args[0]).toLowerCase();
+			const existing = this.moduleHandles.get(name);
+			if (existing) { return existing; }
+			const handle = this.allocHandle();
+			this.moduleHandles.set(name, handle);
+			return handle;
+		});
+
+		this.handlers.set('kernel32!LoadLibraryExW', (args) => {
+			const name = this.readStringW(args[0]).toLowerCase();
+			const existing = this.moduleHandles.get(name);
+			if (existing) { return existing; }
+			const handle = this.allocHandle();
+			this.moduleHandles.set(name, handle);
+			return handle;
+		});
+
 		this.handlers.set('kernel32!GetProcAddress', (args) => {
 			const [_module, namePtr] = args;
 			// We can't truly resolve this in emulation - return 0 (fail)
@@ -588,6 +610,70 @@ export class WinApiHooks {
 			return 0n; // FALSE - anti-anti-debug
 		});
 
+		this.handlers.set('kernel32!CheckRemoteDebuggerPresent', (args) => {
+			const debuggerPresentPtr = args[1] ?? 0n;
+			if (debuggerPresentPtr !== 0n) {
+				try { this.emulator.writeMemorySync(debuggerPresentPtr, Buffer.alloc(4)); } catch { /* ignore */ }
+			}
+			return 1n; // API succeeded; output flag is FALSE.
+		});
+
+		const getThreadContext = (args: bigint[]): bigint => {
+			const contextPtr = args[1] ?? 0n;
+			if (contextPtr === 0n) { return 0n; }
+			try {
+				if (this.architecture === 'x64') {
+					for (const offset of [0x48n, 0x50n, 0x58n, 0x60n, 0x68n, 0x70n]) {
+						this.emulator.writeMemorySync(contextPtr + offset, Buffer.alloc(8));
+					}
+				} else {
+					this.emulator.writeMemorySync(contextPtr + 4n, Buffer.alloc(24));
+				}
+				return 1n;
+			} catch {
+				return 0n;
+			}
+		};
+		this.handlers.set('kernel32!GetThreadContext', getThreadContext);
+		this.handlers.set('kernelbase!GetThreadContext', getThreadContext);
+
+		// Exception-based debugger probes expect execution to continue when the
+		// synthetic analysis environment consumes their private exception code.
+		this.handlers.set('kernel32!RaiseException', (_args) => 0n);
+		this.handlers.set('kernelbase!RaiseException', (_args) => 0n);
+
+		// MSVC CRT startup requires these success/void contracts. Returning the
+		// generic zero for InitializeCriticalSectionAndSpinCount incorrectly sends
+		// otherwise valid programs into their fatal startup/unwind path.
+		this.handlers.set('kernel32!InitializeCriticalSection', (_args) => 0n);
+		this.handlers.set('kernel32!InitializeCriticalSectionAndSpinCount', (_args) => 1n);
+		this.handlers.set('kernel32!InitializeCriticalSectionEx', (_args) => 1n);
+		this.handlers.set('kernel32!EnterCriticalSection', (_args) => 0n);
+		this.handlers.set('kernel32!LeaveCriticalSection', (_args) => 0n);
+		this.handlers.set('kernel32!DeleteCriticalSection', (_args) => 0n);
+		this.handlers.set('kernel32!TryEnterCriticalSection', (_args) => 1n);
+
+		this.handlers.set('kernel32!TlsAlloc', (_args) => BigInt(this.nextTlsIndex++));
+		this.handlers.set('kernel32!TlsSetValue', (args) => {
+			this.tlsValues.set(Number(args[0]), args[1] ?? 0n);
+			return 1n;
+		});
+		this.handlers.set('kernel32!TlsGetValue', (args) => this.tlsValues.get(Number(args[0])) ?? 0n);
+		this.handlers.set('kernel32!TlsFree', (args) => {
+			this.tlsValues.delete(Number(args[0]));
+			return 1n;
+		});
+		this.handlers.set('kernel32!FlsAlloc', (_args) => BigInt(this.nextTlsIndex++));
+		this.handlers.set('kernel32!FlsSetValue', (args) => {
+			this.tlsValues.set(Number(args[0]), args[1] ?? 0n);
+			return 1n;
+		});
+		this.handlers.set('kernel32!FlsGetValue', (args) => this.tlsValues.get(Number(args[0])) ?? 0n);
+		this.handlers.set('kernel32!FlsFree', (args) => {
+			this.tlsValues.delete(Number(args[0]));
+			return 1n;
+		});
+
 		// ===== Error Handling =====
 		this.handlers.set('kernel32!GetLastError', (_args) => {
 			return BigInt(this.lastError);
@@ -613,21 +699,21 @@ export class WinApiHooks {
 			return BigInt((this.tickCount & 0xFFFFFFFF) >>> 0);
 		});
 
-		this.handlers.set('kernel32!Sleep', (_args) => {
-			// No-op in emulation
+		this.handlers.set('kernel32!Sleep', (args) => {
+			// Do not block the emulator, but advance both Windows time domains.
+			// GetTickCount is milliseconds; QPC below runs at 10 MHz.
+			const milliseconds = Number((args[0] ?? 0n) & 0xFFFFFFFFn);
+			this.tickCount = (this.tickCount + milliseconds) >>> 0;
+			this.performanceCounter += BigInt(milliseconds) * 10000n;
 			return 0n;
 		});
 
 		this.handlers.set('kernel32!QueryPerformanceCounter', (args) => {
 			const [counterPtr] = args;
 			if (counterPtr !== 0n) {
-				this.tickCount += 1000;
+				this.performanceCounter += 10000n; // one virtual millisecond per query
 				const buf = Buffer.alloc(8);
-				// FIX: coerce to unsigned BigInt before writeBigUInt64LE — the
-				// previous `BigInt(this.tickCount)` could be negative when the
-				// constructor seed had bit 31 set, crashing emulation after
-				// ~23 instructions on PE64 MSVC binaries (HEXCORE_DEFEAT FAIL 4).
-				buf.writeBigUInt64LE(BigInt((this.tickCount & 0xFFFFFFFF) >>> 0));
+				buf.writeBigUInt64LE(this.performanceCounter & 0xFFFFFFFFFFFFFFFFn);
 				try {
 					this.emulator.writeMemorySync(counterPtr, buf);
 				} catch { /* ignore */ }

@@ -16,18 +16,20 @@ Usage:
   python _copy_to_standalone.py
   python _copy_to_standalone.py --target C:\path\to\standalone
 """
-import os, sys, shutil, argparse
+import os, sys, shutil, argparse, json
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_TARGET = r"C:\Users\Mazum\Desktop\StandalonePackagesHexCore\hexcore-remill"
 
-EXCLUDE_DIRS = {"deps", "build", "node_modules", ".git"}
+EXCLUDE_DIRS = {"deps", "build", "node_modules", ".git", "__pycache__"}
 EXCLUDE_FILES = {
     "Logs.txt",
     "_rebuild_mt.py",
     "_write_gyp.py",
     "_pack_deps.py",
     "_copy_to_standalone.py",
+    "shared_buffer_poc.ts",
+    "package-lock.json",
 }
 
 
@@ -42,11 +44,13 @@ def copy_to_standalone(target):
         dirs[:] = [d for d in dirs if d not in EXCLUDE_DIRS]
 
         for f in files:
-            if f in EXCLUDE_FILES:
+            if f in EXCLUDE_FILES or f.lower().endswith((".log", ".zip")):
                 continue
 
             src = os.path.join(root, f)
             rel = os.path.relpath(src, SCRIPT_DIR)
+            if rel.startswith("prebuilds" + os.sep) and f != "hexcore_remill.node":
+                continue
             dst = os.path.join(target, rel)
 
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -54,11 +58,27 @@ def copy_to_standalone(target):
             print(f"  {rel}")
             copied += 1
 
+    package_path = os.path.join(target, "package.json")
+    with open(package_path, "r", encoding="utf-8") as f:
+        standalone_package = json.load(f)
+    standalone_package["scripts"]["install"] = (
+        "prebuild-install -r napi || node-gyp rebuild")
+    standalone_package["devDependencies"] = {
+        "node-addon-api": "^8.0.0",
+        "node-gyp": "^12.4.0",
+        "prebuild-install": "^7.1.0",
+        "prebuildify": "^6.0.0",
+    }
+    with open(package_path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(standalone_package, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    package_version = standalone_package["version"]
+
     # Also create a deps/README.md explaining how to get deps
     deps_readme = os.path.join(target, "deps", "README.md")
     os.makedirs(os.path.dirname(deps_readme), exist_ok=True)
     with open(deps_readme, "w", encoding="utf-8") as f:
-        f.write("""# Dependencies
+        f.write(f"""# Dependencies
 
 This directory should contain the pre-compiled native dependencies.
 
@@ -75,7 +95,7 @@ python _rebuild_mt.py
 
 Or download the deps zip from the latest release:
 ```powershell
-gh release download v0.1.0 -p "remill-deps-win32-x64.zip" -R LXrdKnowkill/hexcore-remill
+gh release download v{package_version} -p "remill-deps-win32-x64.zip" -R AkashaCorporation/hexcore-remill
 Expand-Archive remill-deps-win32-x64.zip -DestinationPath .
 ```
 """)
@@ -86,10 +106,9 @@ Expand-Archive remill-deps-win32-x64.zip -DestinationPath .
     print(f"\nNext steps:")
     print(f"  1. cd {target}")
     print(f"  2. npm install")
-    print(f"  3. git add -A && git commit -m 'feat: initial remill N-API wrapper'")
-    print(f"  4. git push origin main")
-    print(f"  5. Pack deps: cd <monorepo>/extensions/hexcore-remill && python _pack_deps.py")
-    print(f"  6. Upload deps zip as release asset: gh release create v0.1.0 remill-deps-win32-x64.zip")
+    print(f"  3. Review the standalone diff and tests before staging anything")
+    print(f"  4. Pack deps: cd <monorepo>/extensions/hexcore-remill && python _pack_deps.py")
+    print(f"  5. Upload the reviewed deps archive with release v{package_version}")
 
 
 if __name__ == "__main__":

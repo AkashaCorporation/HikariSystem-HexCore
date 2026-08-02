@@ -2,9 +2,13 @@
 	"name": "hexcore-revenant",
 	"displayName": "HexCore Revenant (.NET / IL Decompiler)",
 	"description": "Managed .NET (CIL) decompiler. Recovers C# / IL from managed assemblies the native Remill->Helix pipeline cannot decompile, by wrapping ILSpy's ICSharpCode.Decompiler engine. Closes the 'Better' tier of issue #32.",
-	"version": "0.1.0",
+	"version": "0.4.0",
 	"publisher": "hikarisystem",
 	"license": "Apache-2.0",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/AkashaCorporation/hexcore-revenant.git"
+	},
 	"engines": {
 		"vscode": "^1.75.0"
 	},
@@ -60,7 +64,8 @@
 	},
 	"scripts": {
 		"compile": "tsc -p ./",
-		"watch": "tsc -watch -p ./"
+		"watch": "tsc -watch -p ./",
+		"test": "node test/revenant.test.cjs"
 	},
 	"devDependencies": {
 		"@types/node": "^20.0.0",

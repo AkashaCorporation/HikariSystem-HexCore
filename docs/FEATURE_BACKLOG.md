@@ -9,7 +9,39 @@
 - `IN_PROGRESS`: partially implemented
 - `PENDING`: not implemented yet
 
-## Current Snapshot (2026-04-19 — v3.8.0-nightly final polish, pre-release)
+## Current Snapshot (2026-06-28 — v3.8.x line; Helix-centric, post-pivot)
+
+> The center of gravity moved from "CTF reverse-quality helper" to an honest
+> **decompiler-research platform + bounty engine**. The single biggest divergence from the
+> original plan: the decompiler inverted from Rellic to **Helix**.
+
+**Decompiler inversion (the headline).** The backlog planned `Binary → Remill → Rellic → C`
+with Rellic as the decompiler (`NEXT`, v3.6.0). Reality: **Helix** — a custom MLIR decompiler
+(RVSDG/SCF structurer, a confidence/honesty model, ARM64, a dialect the rev.ng core devs
+engaged with) — became the flagship. Rellic shipped but was superseded (its Souper step is a
+no-op stub). Helix was not in the original backlog at all (it first appears as a "v3.8.0
+extra"); it is now the product thesis, leading toward **Aletheia** (semantic query engine).
+
+**Backlog status deltas since 2026-04-19 (verified against code):**
+- #6 PRNG helper: PENDING → **DONE** (`prng.ts` + VM-PRNG detection + property tests; still weak on heavily obfuscated targets).
+- #30 VM dispatcher/handler heuristics: PENDING → **IN_PROGRESS** (`detectVM` + `vmPrngDetection` shipped + made honest; commercial-grade VM coverage tracked as GitHub #33).
+- #32 Symbolic execution: PENDING → **deferred to v4.x via Triton** (selective-taint; not a 1.0 prereq). Z3 ships today only via Souper.
+- #10 Guided Reverse Mode, #11 Formula-to-Script: still **PENDING** (deprioritized in favor of decompiler depth).
+- #28/#29 runtime-mem disasm / breakpoint dumps: emulation matured (Azoth/Elixir); these specific headless-dump features remain to be confirmed.
+
+**Emergent — delivered but never in this backlog:**
+- **Helix maturation**: 0.9.0 → 0.9.2-nightly; v2 SCF-structurer sandbox; the confidence/honesty wave (D4 damning-defect cap + FIX-104…FIX-113); RC4-PRGA JMP fix; ARM64 lift (FIX-105); the intra-block alias/variable-recovery verdict + mini-engines (def-recovery FIX-113).
+- **HQL** (Helix Query Language — semantic YARA over the decompiled C-AST) → the on-ramp to Aletheia.
+- **hexcore-revenant** — managed .NET/CIL decompile via ilspycmd (GitHub #32 "Better" tier).
+- **hexcore-bindiff** (#21), **A-lazy function discovery** (lazy materialization, lifts the maxFunctions cap), **FlatBuffers** compact C-AST/disasm storage.
+- **Bounty/security-audit pivot**: the refcount audit scanner (backlog "v0.1") grew into a real kernel-audit capability + active bounty campaigns.
+- **Scylla** — a web-pentest sibling IDE (new product line).
+- **rev.ng collaboration** — external validation (a Helix talk invite from the rev.ng core devs).
+- Three gaps filed 2026-06-28 from the `threadweaver` pwn dogfood: GitHub **#51** (Remill jump-table materialization), **#52** (Helix symbol naming), **#53** (HQL signature loader + memory-safety category).
+
+---
+
+## Prior Snapshot (2026-04-19 — v3.8.0-nightly final polish, pre-release)
 
 - P0 delivered: **5/5**
 - P1 delivered: **4/5** (#6 PRNG still pending)
@@ -120,7 +152,7 @@
 ## P1 — High Value
 
 ### 6. PRNG Analysis Helper
-- **Status**: `PENDING`
+- **Status**: `DONE` (2026-Q2 — `prng.ts` + VM-PRNG detection + property tests; weak on heavily obfuscated targets)
 - **Feature**: Detect common libc PRNG patterns (`srand`, `rand()%N`) and annotate flow.
 - **Acceptance**:
   - Notes candidate seed sources (`time`, `localtime` fields).

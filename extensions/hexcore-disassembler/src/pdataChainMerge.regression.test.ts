@@ -26,7 +26,41 @@
 
 import * as assert from 'assert';
 import 'mocha';
-import { DisassemblerEngine } from './disassemblerEngine';
+import type { DisassemblerEngine as DisassemblerEngineType } from './disassemblerEngine';
+
+function installVscodeMock(): void {
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const Module = require('module');
+	const originalResolveFilename = Module._resolveFilename;
+	Module._resolveFilename = function (
+		request: string,
+		parent: unknown,
+		isMain: boolean,
+		options: unknown
+	) {
+		if (request === 'vscode') {
+			return '__vscode_mock_pdata_chain__';
+		}
+		return originalResolveFilename.call(this, request, parent, isMain, options);
+	};
+	require.cache['__vscode_mock_pdata_chain__'] = {
+		id: '__vscode_mock_pdata_chain__',
+		filename: '__vscode_mock_pdata_chain__',
+		loaded: true,
+		exports: {
+			workspace: {
+				getConfiguration: () => ({ get: (_key: string, fallback: unknown) => fallback }),
+			},
+		},
+	} as unknown as NodeModule;
+}
+
+installVscodeMock();
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { DisassemblerEngine } = require('./disassemblerEngine') as {
+	DisassemblerEngine: typeof DisassemblerEngineType;
+};
+type DisassemblerEngine = DisassemblerEngineType;
 
 const BASE = 0x140000000;
 
@@ -65,7 +99,7 @@ function buildEngine(frags: Frag[], seed: { address: number; endAddress: number 
 		sections: { name: string; virtualAddress: number; virtualSize: number; rawAddress: number }[];
 		peDataDirectories: { pdata: unknown[] };
 		functions: Map<number, { address: number; name: string; size: number; endAddress: number; instructions: unknown[]; callers: number[]; callees: number[] }>;
-		reconcileFunctionsWithPdata: () => Promise<void>;
+		ensurePdataFunctionsReconciled: () => Promise<void>;
 	};
 	engine.architecture = 'x64';
 	engine.baseAddress = BASE;
@@ -80,7 +114,7 @@ function buildEngine(frags: Frag[], seed: { address: number; endAddress: number 
 		});
 	}
 	engine.functions = map;
-	return { engine: engine as unknown as DisassemblerEngine, reconcile: () => engine.reconcileFunctionsWithPdata() };
+	return { engine: engine as unknown as DisassemblerEngine, reconcile: () => engine.ensurePdataFunctionsReconciled() };
 }
 
 function funcs(engine: DisassemblerEngine): Map<number, { address: number; endAddress: number }> {
@@ -98,10 +132,40 @@ suite('MSVC chained-unwind .pdata fragment merge (v3.8.2 FIX-027 / FIX-027b)', (
 			{ begin: 0x1010, end: 0x1030, chainTo: 0x1000 }
 		]);
 		await reconcile();
+		await reconcile(); // hot lift and a later caller may both cross the barrier
 		const m = funcs(engine);
 		assert.ok(m.has(BASE + 0x1000), 'primary kept');
 		assert.strictEqual(m.get(BASE + 0x1000)!.endAddress, BASE + 0x1030, 'primary spans the merged end');
 		assert.ok(!m.has(BASE + 0x1010), 'continuation fragment is NOT a separate function');
+		assert.deepStrictEqual(
+			engine.findAuthoritativePdataRangeContaining(BASE + 0x1025),
+			{ begin: BASE + 0x1000, end: BASE + 0x1030 },
+			'an address inside a chained continuation resolves to the primary range'
+		);
+	});
+
+	test('authoritative containment includes mid-instruction addresses and excludes the end boundary', async () => {
+		const { engine, reconcile } = buildEngine([
+			{ begin: 0x1000, end: 0x1100 },
+			{ begin: 0x1100, end: 0x1120 }
+		]);
+		await reconcile();
+
+		assert.deepStrictEqual(
+			engine.findAuthoritativePdataRangeContaining(BASE + 0x1082),
+			{ begin: BASE + 0x1000, end: BASE + 0x1100 },
+			'containment does not require an instruction boundary'
+		);
+		assert.deepStrictEqual(
+			engine.findAuthoritativePdataRangeContaining(BASE + 0x1100),
+			{ begin: BASE + 0x1100, end: BASE + 0x1120 },
+			'the exclusive end belongs to the adjacent function when it is its begin'
+		);
+		assert.strictEqual(
+			engine.findAuthoritativePdataRangeContaining(BASE + 0x1120),
+			undefined,
+			'the final end is exclusive'
+		);
 	});
 
 	test('#1 extend-UP: a pre-discovered SHORT primary is grown to the merged .pdata end', async () => {
@@ -162,5 +226,10 @@ suite('MSVC chained-unwind .pdata fragment merge (v3.8.2 FIX-027 / FIX-027b)', (
 		await reconcile();
 		// untouched: the seeded fragment-function is still present, no merge happened
 		assert.ok(funcs(engine).has(BASE + 0x1010), 'ARM64 PE left untouched by the x64-only merge');
+		assert.strictEqual(
+			engine.findAuthoritativePdataRangeContaining(BASE + 0x1015),
+			undefined,
+			'ARM64 packed unwind records are never exposed as AMD64 authoritative ranges'
+		);
 	});
 });

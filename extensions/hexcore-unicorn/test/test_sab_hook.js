@@ -1,5 +1,5 @@
 /**
- * test_sab_hook.js — v4.0.0 SharedArrayBuffer CODE hook tests (Issue #31).
+ * test_sab_hook.js - v1.3.0 SharedArrayBuffer CODE hook tests (Issue #31).
  *
  * Validates the new hookAddSAB() native method end-to-end:
  *   1. Basic ring drain — 16 NOPs lifted into 16 sequential ring slots

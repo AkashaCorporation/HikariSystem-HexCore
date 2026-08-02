@@ -1,5 +1,5 @@
 // Copyright (c) HikariSystem. All rights reserved.
-// Licensed under the MIT License. See LICENSE in the project root.
+// SPDX-License-Identifier: GPL-2.0-only
 'use strict';
 
 const path = require('path');

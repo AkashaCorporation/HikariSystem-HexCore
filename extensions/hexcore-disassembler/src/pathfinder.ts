@@ -21,6 +21,10 @@ import type { DisassemblerEngine } from './disassemblerEngine';
 import type { PdataEntry } from './disassemblerEngine';
 import type { CapstoneWrapper, DisassembledInstruction } from './capstoneWrapper';
 import type { ArchitectureConfig } from './capstoneWrapper';
+import {
+	recoverJumpTableTargets,
+	collectJumpTableLeaders,
+} from './jumpTableLeaders';
 
 // ─── CFGHints Schema ───────────────────────────────────────────────────
 
@@ -1168,12 +1172,46 @@ export async function runPathfinder(
 
 			console.log(`[pathfinder v0.2.0] x86 linear decode: ${allInsns.length} insns, ${leadersSet.size} leaders, ${tailCallsSet.size} tail-calls`);
 
+			// Issue #51: recover PIC jump-table case targets and promote them
+			// to leaders so Remill materialises the case bodies (otherwise
+			// RecoverSwitchTables finds the table but caseBlocks stays empty).
+			try {
+				const jtHits = recoverJumpTableTargets(allInsns, (va, sz) => engine.getBytes(va, sz));
+				if (jtHits.length > 0) {
+					hints.indirectJumps = jtHits.map(h => ({
+						instructionAddress: h.jmpAddress,
+						targets: h.targets,
+						type: 'jump_table' as const,
+						tableAddress: h.tableAddress,
+						tableSize: h.targets.length,
+					}));
+					const jtLeaders = collectJumpTableLeaders(jtHits, {
+						lo: scanStart,
+						hi: scanEnd,
+					});
+					for (const t of jtLeaders) {
+						leadersSet.add(t);
+					}
+					console.log(
+						`[pathfinder v0.2.0] #51 jump-tables: ${jtHits.length} dispatch(es), ` +
+						`${jtLeaders.length} case-target leaders in-range ` +
+						`(sample: [${jtLeaders.slice(0, 8).map(t => '0x' + t.toString(16)).join(', ')}${jtLeaders.length > 8 ? '...' : ''}])`
+					);
+				}
+			} catch (jtErr) {
+				console.warn('[pathfinder v0.2.0] #51 jump-table recovery failed:', jtErr);
+			}
+
 			// Merge into hints
 			const mergedLeaders = new Set([...hints.leaders, ...leadersSet]);
 			hints.leaders = [...mergedLeaders].sort((a, b) => a - b);
 			hints.tailCalls = [...tailCallsSet].sort((a, b) => a - b);
 			hints.instructionsDecoded = allInsns.length;
 			hints.confidence = allInsns.length > 0 ? 90 : 50;
+			if (hints.indirectJumps.length > 0) {
+				// Jump-table recovery raises confidence slightly (structured CFG)
+				hints.confidence = Math.min(95, hints.confidence + 3);
+			}
 
 			// Log a few sample leaders for debugging
 			if (leadersSet.size > 0) {
@@ -1296,6 +1334,79 @@ export function resolveReanchorWindow(
 		? boundaryEnd
 		: originalEnd;
 	return { scanStart: funcStart, scanEnd };
+}
+
+export interface BacktrackInstruction {
+	address: number;
+	size: number;
+	mnemonic: string;
+	isRet?: boolean;
+	targetAddress?: number;
+}
+
+/**
+ * Verify that a linear decode reaches `original` on an exact instruction
+ * boundary without crossing an obvious function terminator.
+ */
+export function isBacktrackContinuityValid(
+	instructions: readonly BacktrackInstruction[],
+	bytes: Uint8Array,
+	candidate: number,
+	original: number,
+): boolean {
+	const distance = original - candidate;
+	if (distance <= 0 || distance > 4096 || instructions.length === 0) {
+		return false;
+	}
+
+	let expectedAddress = candidate;
+	for (const instruction of instructions) {
+		if (
+			!Number.isFinite(instruction.address) ||
+			!Number.isInteger(instruction.size) ||
+			instruction.size <= 0 ||
+			instruction.address !== expectedAddress
+		) {
+			return false;
+		}
+
+		const instructionEnd = instruction.address + instruction.size;
+		if (instructionEnd > original) {
+			return false;
+		}
+
+		const mnemonic = instruction.mnemonic.toLowerCase();
+		if (
+			instruction.isRet === true ||
+			mnemonic === 'ret' ||
+			mnemonic === 'retf' ||
+			mnemonic === 'retfq'
+		) {
+			return false;
+		}
+
+		if (mnemonic === 'int3') {
+			const nextOffset = instructionEnd - candidate;
+			if (nextOffset < bytes.length && bytes[nextOffset] === 0xcc) {
+				return false;
+			}
+		}
+
+		if (
+			mnemonic === 'jmp' &&
+			instruction.targetAddress !== undefined &&
+			(instruction.targetAddress < candidate || instruction.targetAddress > original + 64)
+		) {
+			return false;
+		}
+
+		if (instructionEnd === original) {
+			return true;
+		}
+		expectedAddress = instructionEnd;
+	}
+
+	return false;
 }
 
 // ═══════════════════════════════════════════════════════════════════════

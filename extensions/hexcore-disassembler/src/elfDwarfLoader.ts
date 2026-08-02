@@ -13,6 +13,7 @@
 
 import * as fs from 'fs';
 import type { StructInfoJson, StructInfo, StructFieldInfo, FunctionSignatureInfo, FunctionParamInfo } from './elfBtfLoader';
+import { shouldPreferFunctionSignature } from './elfBtfLoader';
 
 // Re-export the shared types
 export type { StructInfoJson, StructInfo, StructFieldInfo, FunctionSignatureInfo, FunctionParamInfo };
@@ -839,6 +840,9 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 					const retTypeRef = die.attrs.get(DW_AT_type) as number | undefined;
 					const returnType = resolveType(retTypeRef, cu.allDies);
 					const params: FunctionParamInfo[] = [];
+					const variadic = die.children.some(
+						child => child.tag === DW_TAG_unspecified_parameters,
+					);
 
 					let paramIdx = 0;
 					for (const child of die.children) {
@@ -862,12 +866,15 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 							params.push(info);
 							paramIdx++;
 						}
-						// Skip DW_TAG_unspecified_parameters (variadic ...)
+						// DW_TAG_unspecified_parameters is represented by the
+						// function-level `variadic` marker above, not a parameter.
 					}
 
-					// Only store if we got at least the name (params may be empty for void f(void))
-					if (!functions[name] || params.length > (functions[name].params?.length ?? 0)) {
-						functions[name] = { returnType, params };
+					// Definitions often follow an unnamed declaration with the same
+					// arity. Keep the signature carrying the richer parameter names.
+					const candidate = { returnType, params, variadic };
+					if (shouldPreferFunctionSignature(functions[name], candidate)) {
+						functions[name] = candidate;
 					}
 
 					// Extract function boundary (low_pc/high_pc) for Pathfinder CFG feeder.

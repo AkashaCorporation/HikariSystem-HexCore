@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
  *  Copyright (c) Microsoft Corporation. All rights reserved.
- *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *  SPDX-License-Identifier: GPL-2.0-only
  *--------------------------------------------------------------------------------------------*/
 
 /**
@@ -14,7 +14,14 @@
 
 'use strict';
 
-const { Unicorn, ARCH, MODE, PROT, ARM64_REG, version, archSupported } = require('../index.js');
+const { Unicorn, ARCH, MODE, PROT, HOOK, ARM64_REG, version, archSupported } = require('../index.js');
+
+let failures = 0;
+
+function fail(message) {
+	failures++;
+	console.log('  [FAIL]', message);
+}
 
 console.log('Unicorn version:', version().string);
 console.log('ARM64 supported:', archSupported(ARCH.ARM64));
@@ -60,12 +67,12 @@ try {
 	if (BigInt(pcAfter) === 0x10004n) {
 		console.log('  [PASS] ARM64 NOP executed correctly');
 	} else {
-		console.log('  [FAIL] PC not advanced correctly');
+		fail('PC not advanced correctly');
 	}
 
 	uc.close();
 } catch (err) {
-	console.log('  [FAIL]', err.message);
+	fail(err.message);
 }
 
 // ---- Test 2: emuStart with SVC instruction (no hook) ----
@@ -96,43 +103,58 @@ try {
 
 	uc.close();
 } catch (err) {
-	console.log('  [FAIL]', err.message);
+	if (String(err.message).includes('UC_ERR_EXCEPTION')) {
+		console.log('  [PASS] SVC without an interrupt hook raises UC_ERR_EXCEPTION');
+	} else {
+		fail(err.message);
+	}
 }
 
 // ---- Test 3: emuStart with INTR hook (BlockingCall path) ----
 console.log('\n--- Test 3: ARM64 SVC #0 (count=1, sync, WITH INTR hook) ---');
+let interruptUc;
+let interruptHook;
 try {
-	const uc = new Unicorn(ARCH.ARM64, MODE.LITTLE_ENDIAN);
+	interruptUc = new Unicorn(ARCH.ARM64, MODE.LITTLE_ENDIAN);
 
-	uc.memMap(0x10000n, 0x1000, PROT.ALL);
+	interruptUc.memMap(0x10000n, 0x1000, PROT.ALL);
 
 	// Write SVC #0: 0xD4000001
 	const svc = Buffer.alloc(4);
 	svc.writeUInt32LE(0xD4000001);
-	uc.memWrite(0x10000n, svc);
+	interruptUc.memWrite(0x10000n, svc);
 
-	uc.regWrite(ARM64_REG.PC, 0x10000n);
+	interruptUc.regWrite(ARM64_REG.PC, 0x10000n);
 
-	uc.memMap(0x80000n, 0x1000, PROT.ALL);
-	uc.regWrite(ARM64_REG.SP, 0x80FF0n);
+	interruptUc.memMap(0x80000n, 0x1000, PROT.ALL);
+	interruptUc.regWrite(ARM64_REG.SP, 0x80FF0n);
 
 	// Add INTR hook — this uses BlockingCall + condition_variable
 	let hookCalled = false;
-	const hookHandle = uc.hookAdd(4 /* UC_HOOK_INTR */, (intno) => {
+	interruptHook = interruptUc.hookAdd(HOOK.INTR, (intno) => {
 		console.log('  INTR hook fired, intno:', intno);
 		hookCalled = true;
 	});
-	console.log('  INTR hook added, handle:', hookHandle);
+	console.log('  INTR hook added, handle:', interruptHook);
 
-	console.log('  Calling emuStart with SVC + INTR hook (THIS MAY CRASH)...');
-	uc.emuStart(0x10000n, 0n, 0, 1);
+	console.log('  Calling emuStart with SVC + INTR hook...');
+	interruptUc.emuStart(0x10000n, 0n, 0, 1);
 	console.log('  emuStart returned OK! hookCalled:', hookCalled);
 
-	uc.hookDel(hookHandle);
-	uc.close();
-	console.log('  [PASS] SVC with INTR hook did not crash');
+	if (hookCalled) {
+		console.log('  [PASS] SVC with INTR hook completed synchronously');
+	} else {
+		fail('INTR callback was not delivered before emuStart returned');
+	}
 } catch (err) {
-	console.log('  [FAIL]', err.message);
+	fail(err.message);
+} finally {
+	if (interruptUc) {
+		if (interruptHook !== undefined) {
+			interruptUc.hookDel(interruptHook);
+		}
+		interruptUc.close();
+	}
 }
 
 // ---- Test 4: Multiple instructions with memory fault ----
@@ -170,12 +192,15 @@ try {
 	if (BigInt(x0) === 42n && BigInt(x1) === 100n) {
 		console.log('  [PASS] ARM64 MOV instructions executed correctly');
 	} else {
-		console.log('  [FAIL] Incorrect register values');
+		fail('Incorrect register values');
 	}
 
 	uc.close();
 } catch (err) {
-	console.log('  [FAIL]', err.message);
+	fail(err.message);
 }
 
 console.log('\n=== All ARM64 crash tests completed ===');
+if (failures > 0) {
+	process.exitCode = 1;
+}

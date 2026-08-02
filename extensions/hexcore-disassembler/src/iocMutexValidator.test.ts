@@ -54,7 +54,7 @@ function validateMutex(raw: string): string | null {
 }
 
 // The regex from the diff for independent verification.
-const MUTEX_REGEX = /(?:\\(?:Global|Local|Session\\\d+)\\BaseNamedObjects\\[A-Za-z0-9_.\-]{3,128}|(?:Global|Local)\\[A-Za-z0-9_.\-]{3,128}|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})/g;
+const MUTEX_REGEX = /(?:\\Sessions\\\d+\\BaseNamedObjects\\[A-Za-z0-9_.\-]{3,128}|(?:Global|Local)\\[A-Za-z0-9_.\-]{3,128}|\{[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\})/g;
 
 // ---------------------------------------------------------------------------
 // Tests

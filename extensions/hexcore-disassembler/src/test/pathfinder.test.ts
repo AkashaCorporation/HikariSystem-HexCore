@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import 'mocha';
 // eslint-disable-next-line local/code-import-patterns
 import * as fc from 'fast-check';
-import { resolveReanchorWindow } from '../pathfinder';
+import { isBacktrackContinuityValid, resolveReanchorWindow } from '../pathfinder';
 
 suite('pathfinder D-scanrange', () => {
 
@@ -83,6 +83,48 @@ suite('pathfinder D-scanrange', () => {
 				),
 				{ numRuns: 200 }
 			);
+		});
+	});
+
+	suite('isBacktrackContinuityValid', () => {
+		test('accepts an exact, contiguous non-terminal chain', () => {
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 1, mnemonic: 'push' },
+				{ address: 0x1001, size: 3, mnemonic: 'mov' },
+			], Buffer.alloc(68), 0x1000, 0x1004), true);
+		});
+
+		test('rejects an instruction that only overshoots the original address', () => {
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 4, mnemonic: 'mov' },
+			], Buffer.alloc(68), 0x1000, 0x1003), false);
+		});
+
+		test('rejects a return even when it ends exactly at the original address', () => {
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 1, mnemonic: 'ret', isRet: true },
+			], Buffer.alloc(65), 0x1000, 0x1001), false);
+		});
+
+		test('rejects decode gaps before the original address', () => {
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 1, mnemonic: 'push' },
+				{ address: 0x1002, size: 2, mnemonic: 'mov' },
+			], Buffer.alloc(68), 0x1000, 0x1004), false);
+		});
+
+		test('rejects an unconditional jump outside the validation window', () => {
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 2, mnemonic: 'jmp', targetAddress: 0x2000 },
+			], Buffer.alloc(66), 0x1000, 0x1002), false);
+		});
+
+		test('rejects inter-function INT3 padding', () => {
+			const bytes = Buffer.from([0xcc, 0xcc, 0x90]);
+			assert.strictEqual(isBacktrackContinuityValid([
+				{ address: 0x1000, size: 1, mnemonic: 'int3' },
+				{ address: 0x1001, size: 1, mnemonic: 'int3' },
+			], bytes, 0x1000, 0x1002), false);
 		});
 	});
 });

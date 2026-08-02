@@ -154,23 +154,37 @@ Get human-readable names.
 ```javascript
 const { version, support, ARCH } = require('hexcore-capstone');
 
-console.log(`Capstone version: ${version().string}`);  // "5.0"
+console.log(`Capstone version: ${version().fullString}`);  // "5.0.9"
 console.log(`ARM supported: ${support(ARCH.ARM)}`);    // true
 ```
 
 ## Building from Source
 
 ```bash
-git clone --recursive https://github.com/LXrdKnowkill/hexcore-capstone.git
+git clone https://github.com/AkashaCorporation/hexcore-capstone.git
 cd hexcore-capstone
+cmake -S deps/capstone -B deps/capstone/build \
+  -DBUILD_SHARED_LIBS=OFF \
+  -DBUILD_STATIC_LIBS=ON \
+  -DBUILD_STATIC_RUNTIME=ON \
+  -DCAPSTONE_BUILD_TESTS=ON \
+  -DCAPSTONE_BUILD_CSTOOL=OFF
+cmake --build deps/capstone/build --config Release
 npm install
 npm run build
 npm test
 ```
 
-> **Note:** Use `--recursive` to clone the vendored Capstone submodule.
+The static Capstone core and the N-API addon must use the same MSVC runtime.
+`BUILD_STATIC_RUNTIME=ON` matches the `/MT` runtime selected by `node-gyp`.
 
 ## Changelog
+
+### v1.3.5
+- Vendor the official Capstone 5.0.9 source.
+- Expose `patch` and `fullString` from `version()` without changing the legacy `string` field.
+- Build the static core with the `/MT` runtime required by the N-API addon.
+- Make the native test suite fail on assertion or addon-loading errors.
 
 ### v1.1.0
 -  Add `disasmAsync()` for non-blocking disassembly

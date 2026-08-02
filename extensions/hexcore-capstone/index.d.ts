@@ -449,7 +449,9 @@ export interface Instruction {
 export interface Version {
 	major: number;
 	minor: number;
+	patch: number;
 	string: string;
+	fullString: string;
 }
 
 /**

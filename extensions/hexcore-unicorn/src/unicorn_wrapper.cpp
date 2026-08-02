@@ -1,5 +1,5 @@
 // Copyright (c) HikariSystem. All rights reserved.
-// Licensed under the MIT License. See LICENSE in the project root.
+// SPDX-License-Identifier: GPL-2.0-only
 #include "unicorn_wrapper.h"
 #include "emu_async_worker.h"
 #include <unicorn/x86.h>
@@ -8,7 +8,7 @@
 #include <cstring>
 #include <sstream>
 
-// v4.0.0 — SAB Zero-Copy IPC ABI guarantees (Issue #31).
+// v1.3.0 - SAB Zero-Copy IPC ABI guarantees (Issue #31).
 // These static_asserts catch any compiler that produces a layout incompatible
 // with the JavaScript Int32Array reader in extensions/hexcore-common/src/sharedRingBuffer.ts.
 static_assert(sizeof(RingHeader) == 64, "RingHeader must be exactly 64 bytes for cache-line alignment");
@@ -96,7 +96,7 @@ Napi::Object UnicornWrapper::Init(Napi::Env env, Napi::Object exports) {
 		// Hook operations
 		InstanceMethod<&UnicornWrapper::HookAdd>("hookAdd"),
 		InstanceMethod<&UnicornWrapper::HookDel>("hookDel"),
-		// v4.0.0 — SAB zero-copy CODE hook (Issue #31)
+		// v1.3.0 - SAB zero-copy CODE hook (Issue #31)
 		InstanceMethod<&UnicornWrapper::HookAddSAB>("hookAddSAB"),
 
 		// Native Breakpoints
@@ -183,7 +183,7 @@ void UnicornWrapper::CleanupHooks() {
 	}
 	hooks_.clear();
 
-	// v4.0.0 — Drain SAB hooks alongside the legacy hooks (Issue #31).
+	// v1.3.0 - Drain SAB hooks alongside the legacy hooks (Issue #31).
 	for (auto& pair : sabHooks_) {
 		if (pair.second) {
 			pair.second->active = false;
@@ -1413,6 +1413,21 @@ void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data) {
 	HookData* data = static_cast<HookData*>(user_data);
 	if (!data || !data->active) return;
 
+	// Synchronous emulation already runs on the JavaScript thread. Queueing a
+	// blocking TSFN back to that same thread deadlocks because emuStart() owns
+	// the event loop until Unicorn returns. Invoke the persistent callback
+	// directly while Unicorn is paused in the interrupt hook.
+	if (!data->wrapper->IsEmulatingAsync()) {
+		try {
+			data->callback.Call({Napi::Number::New(data->callback.Env(), intno)});
+		} catch (...) {
+			// Never unwind a C++ exception through Unicorn's C callback boundary.
+			// N-API retains the pending JavaScript exception for emuStart() to return.
+			uc_emu_stop(uc);
+		}
+		return;
+	}
+
 	// Allocate on stack — we block until JS finishes the syscall handler.
 	InterruptHookCallData callData;
 	callData.intno = intno;
@@ -1516,7 +1531,7 @@ bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int siz
 	return true; // Fault handled, Unicorn retries the access
 }
 
-// ============== v4.0.0 — SAB Zero-Copy CODE Hook (Issue #31) ==============
+// ============== v1.3.0 - SAB Zero-Copy CODE Hook (Issue #31) ==============
 
 /**
  * Split-path CODE hook callback. Watched addresses (breakpoints, API stubs)
@@ -1647,6 +1662,7 @@ Napi::Value UnicornWrapper::HookAdd(const Napi::CallbackInfo& info) {
 	hookData->type = hookType;
 	hookData->wrapper = this;
 	hookData->active = true;
+	hookData->callback = Napi::Persistent(callback);
 
 	// Create ThreadSafeFunction
 	hookData->tsfn = Napi::ThreadSafeFunction::New(
@@ -1704,7 +1720,7 @@ Napi::Value UnicornWrapper::HookAdd(const Napi::CallbackInfo& info) {
 	return Napi::Number::New(env, static_cast<double>(handle));
 }
 
-// ============== v4.0.0 — HookAddSAB (Issue #31) ==============
+// ============== v1.3.0 - HookAddSAB (Issue #31) ==============
 
 Napi::Value UnicornWrapper::HookAddSAB(const Napi::CallbackInfo& info) {
 	Napi::Env env = info.Env();
@@ -1728,7 +1744,7 @@ Napi::Value UnicornWrapper::HookAddSAB(const Napi::CallbackInfo& info) {
 
 	const int hookType = info[0].As<Napi::Number>().Int32Value();
 	if (hookType != UC_HOOK_CODE) {
-		Napi::TypeError::New(env, "hookAddSAB v4.0.0 only supports UC_HOOK_CODE").ThrowAsJavaScriptException();
+		Napi::TypeError::New(env, "hookAddSAB only supports UC_HOOK_CODE").ThrowAsJavaScriptException();
 		return env.Undefined();
 	}
 
@@ -1920,7 +1936,7 @@ Napi::Value UnicornWrapper::HookDel(const Napi::CallbackInfo& info) {
 		return env.Undefined();
 	}
 
-	// Remove from whichever map owns it (legacy or v4.0.0 SAB).
+	// Remove from whichever map owns it (legacy or SAB).
 	{
 		std::lock_guard<std::mutex> lock(hookMutex_);
 		auto legacyIt = hooks_.find(handle);

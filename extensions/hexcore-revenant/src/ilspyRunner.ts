@@ -40,7 +40,7 @@ export interface RevenantResult {
 	mode: RevenantMode;
 	/** Decompiled C# or IL on success; empty on failure. */
 	code: string;
-	/** Whether the input was detected as a managed (.NET) PE. */
+	/** Whether the input was detected as a managed PE or .NET single-file bundle. */
 	isDotNet: boolean;
 	/** Resolved backend path actually used (null if none found). */
 	tool: string | null;
@@ -51,6 +51,17 @@ export interface RevenantResult {
 	error?: string;
 	elapsedMs: number;
 }
+
+const SINGLE_FILE_BUNDLE_SIGNATURE = Buffer.from([
+	0x8b, 0x12, 0x02, 0xb9, 0x6a, 0x61, 0x20, 0x38,
+	0x72, 0x7b, 0x93, 0x02, 0x14, 0xd7, 0xa0, 0x32,
+	0x13, 0xf5, 0xb9, 0xe6, 0xef, 0xae, 0x33, 0x18,
+	0xee, 0x3b, 0x2d, 0xce, 0x24, 0xb3, 0x6a, 0xae,
+]);
+// The marker lives in the native apphost image, not in the appended payload.
+// Bound the synchronous IDE probe so a multi-gigabyte native file cannot stall
+// the extension host merely because it lacks a CLR header.
+const MAX_SINGLE_FILE_PROBE_BYTES = 64 * 1024 * 1024;
 
 /**
  * Lightweight .NET detection: a nonzero CLR Runtime Header (PE optional-header
@@ -75,14 +86,60 @@ export function detectDotNet(buf: Buffer): boolean {
 	}
 }
 
-/** Read just the PE headers of a file and test for a CLR header. */
+/** Detect the .NET apphost bundle marker and validate its manifest offset. */
+export function detectSingleFileBundle(buf: Buffer, fileSize = buf.length): boolean {
+	let marker = buf.indexOf(SINGLE_FILE_BUNDLE_SIGNATURE);
+	while (marker >= 0) {
+		if (marker >= 8) {
+			const headerOffset = buf.readBigInt64LE(marker - 8);
+			if (headerOffset > 0n && headerOffset < BigInt(fileSize)) { return true; }
+		}
+		marker = buf.indexOf(SINGLE_FILE_BUNDLE_SIGNATURE, marker + 1);
+	}
+	return false;
+}
+
+/** Scan a file in bounded chunks for the .NET single-file bundle marker. */
+export function isSingleFileBundle(filePath: string): boolean {
+	let fd = -1;
+	try {
+		fd = fs.openSync(filePath, 'r');
+		const fileSize = fs.fstatSync(fd).size;
+		if (fileSize < SINGLE_FILE_BUNDLE_SIGNATURE.length + 8) { return false; }
+		const scanSize = Math.min(fileSize, MAX_SINGLE_FILE_PROBE_BYTES);
+
+		const chunkSize = 1024 * 1024;
+		const overlapSize = SINGLE_FILE_BUNDLE_SIGNATURE.length + 7;
+		let overlap = Buffer.alloc(0);
+		let position = 0;
+		while (position < scanSize) {
+			const count = Math.min(chunkSize, scanSize - position);
+			const chunk = Buffer.allocUnsafe(count);
+			const bytesRead = fs.readSync(fd, chunk, 0, count, position);
+			if (bytesRead <= 0) { break; }
+			const window = overlap.length > 0
+				? Buffer.concat([overlap, chunk.subarray(0, bytesRead)])
+				: chunk.subarray(0, bytesRead);
+			if (detectSingleFileBundle(window, fileSize)) { return true; }
+			overlap = Buffer.from(window.subarray(Math.max(0, window.length - overlapSize)));
+			position += bytesRead;
+		}
+		return false;
+	} catch {
+		return false;
+	} finally {
+		if (fd >= 0) { try { fs.closeSync(fd); } catch { /* */ } }
+	}
+}
+
+/** Test for either a CLR-header assembly or a native .NET single-file apphost. */
 export function isDotNetFile(filePath: string): boolean {
 	let fd = -1;
 	try {
 		fd = fs.openSync(filePath, 'r');
 		const header = Buffer.alloc(Math.min(4096, fs.fstatSync(fd).size));
 		fs.readSync(fd, header, 0, header.length, 0);
-		return detectDotNet(header);
+		return detectDotNet(header) || isSingleFileBundle(filePath);
 	} catch {
 		return false;
 	} finally {
@@ -165,7 +222,7 @@ export async function getIlspyVersion(cmd: string, timeoutMs = 15000): Promise<s
 	if (error) { return undefined; }
 	// Both backends print a "<name>: <ver>" line:
 	//   ilspycmd:        "ilspycmd: 8.2.0.7535\nICSharpCode.Decompiler: 8.2.0.7535"
-	//   bundled engine:  "revenant-engine: 0.3.0\nICSharpCode.Decompiler: 10.1.0.8386"
+	//   bundled engine:  "revenant-engine: 0.4.0\nICSharpCode.Decompiler: 10.1.0.8386"
 	const m = stdout.match(/(?:revenant-engine|ilspycmd|ICSharpCode\.Decompiler):\s*([0-9][0-9.]*)/i);
 	return m ? m[1] : stdout.split(/\r?\n/)[0].trim() || undefined;
 }
@@ -186,7 +243,7 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 	}
 	const isDotNet = isDotNetFile(filePath);
 	if (!isDotNet) {
-		return { ...base, isDotNet: false, error: 'not a managed .NET assembly (no CLR runtime header) -- native target, use the native decompiler', elapsedMs: Date.now() - startedAt };
+		return { ...base, isDotNet: false, error: 'not a managed .NET assembly or single-file bundle -- native target, use the native decompiler', elapsedMs: Date.now() - startedAt };
 	}
 
 	const backend = locateBackend(options.ilspyPath);
@@ -194,6 +251,9 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 		return { ...base, isDotNet: true, error: "no decompiler backend found. Ship the bundled revenant-engine binary, install ilspycmd ('dotnet tool install -g ilspycmd'), or set hexcore.revenant.ilspyPath.", elapsedMs: Date.now() - startedAt };
 	}
 	const tool = backend.path;
+	if (backend.kind === 'ilspycmd' && !detectDotNet(readFileHeader(filePath))) {
+		return { ...base, isDotNet: true, tool, backend: backend.kind, error: 'single-file bundles require the bundled Revenant engine (the ilspycmd fallback cannot decompile the apphost directly)', elapsedMs: Date.now() - startedAt };
+	}
 
 	// Both backends share the same CLI: positional <assembly> + flags. IL mode is
 	// --ilcode; -t selects a single type; -r adds reference dirs.
@@ -216,4 +276,18 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 		return { ...base, isDotNet: true, tool, backend: backend.kind, toolVersion, error: stderr.trim() || 'decompiler produced no output', elapsedMs };
 	}
 	return { ok: true, mode, code: stdout, isDotNet: true, tool, backend: backend.kind, toolVersion, elapsedMs };
+}
+
+function readFileHeader(filePath: string): Buffer {
+	let fd = -1;
+	try {
+		fd = fs.openSync(filePath, 'r');
+		const header = Buffer.alloc(Math.min(4096, fs.fstatSync(fd).size));
+		fs.readSync(fd, header, 0, header.length, 0);
+		return header;
+	} catch {
+		return Buffer.alloc(0);
+	} finally {
+		if (fd >= 0) { try { fs.closeSync(fd); } catch { /* */ } }
+	}
 }

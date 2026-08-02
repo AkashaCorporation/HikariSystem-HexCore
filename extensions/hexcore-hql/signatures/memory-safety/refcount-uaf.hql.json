@@ -1,0 +1,30 @@
+{
+  "id": "memory-safety.refcount_free_no_invalidate",
+  "name": "Refcount-zero free without handle invalidation (UAF class)",
+  "description": "Co-occurrence (function-scoped) of (a) a refcount decrement -- an atomic decrement intrinsic on a struct field such as atomic_dec_and_test/refcount_dec_and_test/_InterlockedDecrement/__atomic_fetch_sub -- and (b) a free of a struct field reached via '->' (e.g. kfree(obj->buf)). This is the structural shape of the userland/kernel refcount use-after-free we triage: the owning object's buffer is released on the refcount==0 path. IMPORTANT over-approximation: the HQL matcher has no ordering, dataflow, or negation operators, so this signature CANNOT by itself prove (i) the freed field belongs to the SAME object that was decremented, (ii) the free is on the refcount==0 path, or (iii) that the owning handle/slot is NOT invalidated (obj->active=0 / obj->buf=NULL) afterwards. It is a HIGH-RECALL candidate filter for manual review, not a proof. The same-object / on-zero-path / no-invalidation refinement requires the deferred dataflow layer (refcountAuditScanner Pattern D / a memory-SSA points-to pass).",
+  "severity": "medium",
+  "mitre": ["T1068"],
+  "queries": [
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^(k?free|vfree|kvfree|kfree_rcu|kfree_sensitive|kzfree|free|HeapFree|ExFreePool|ExFreePoolWithTag|RtlFreeHeap|LocalFree|GlobalFree)$" }
+      ],
+      "operands": [
+        {
+          "position": 0,
+          "query": {
+            "target": "CFieldAccessExpr",
+            "attributes": [ { "field": "arrow", "value": true } ]
+          }
+        }
+      ]
+    },
+    {
+      "target": "CCallExpr",
+      "attributes": [
+        { "field": "callee", "value": "re:^(atomic_dec_and_test|atomic_long_dec_and_test|atomic64_dec_and_test|refcount_dec_and_test|kref_put|kref_sub|__atomic_fetch_sub|__atomic_sub_fetch|__sync_sub_and_fetch|__sync_fetch_and_sub|atomic_fetch_sub|atomic_fetch_sub_explicit|atomic_dec|_InterlockedDecrement|InterlockedDecrement|_InterlockedDecrement64|InterlockedDecrementRelease|ObfDereferenceObject|ObDereferenceObject)$" }
+      ]
+    }
+  ]
+}

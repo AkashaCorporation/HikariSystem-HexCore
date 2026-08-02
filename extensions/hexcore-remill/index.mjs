@@ -11,6 +11,13 @@ const require = createRequire(import.meta.url);
 
 const remill = require('./index.js');
 
-export const { RemillLifter, ARCH, OS, version } = remill;
+export const {
+	RemillLifter,
+	ARCH,
+	OS,
+	version,
+	upstreamVersion,
+	upstreamCommit,
+} = remill;
 
 export default RemillLifter;

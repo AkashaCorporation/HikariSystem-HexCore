@@ -116,12 +116,20 @@ export class ELFLoader {
 	 */
 	load(fileBuffer: Buffer, arch?: ArchitectureType, permissiveMemoryMapping?: boolean): ELFInfo {
 		this.permissiveMemoryMapping = permissiveMemoryMapping ?? false;
+		if (fileBuffer.length < 16) {
+			throw new Error('Truncated ELF file: identification header requires 16 bytes');
+		}
 		// Verify ELF magic
 		if (fileBuffer[0] !== 0x7F || fileBuffer.toString('ascii', 1, 4) !== 'ELF') {
 			throw new Error('Not a valid ELF file');
 		}
 
 		this.is64Bit = fileBuffer[4] === 2;
+		const minimumHeaderSize = this.is64Bit ? 64 : 52;
+		if (fileBuffer.length < minimumHeaderSize) {
+			throw new Error(
+				`Truncated ELF file: ${this.is64Bit ? 'ELF64' : 'ELF32'} header requires ${minimumHeaderSize} bytes`);
+		}
 		const isLittleEndian = fileBuffer[5] === 1;
 
 		if (!isLittleEndian) {
@@ -465,13 +473,19 @@ export class ELFLoader {
 	 */
 	private parseProgramHeaders(buf: Buffer): ELFSegment[] {
 		const segments: ELFSegment[] = [];
+		const minimumHeaderSize = this.is64Bit ? 64 : 52;
+		if (buf.length < minimumHeaderSize) { return segments; }
 
 		const phOff = this.is64Bit
 			? Number(buf.readBigUInt64LE(32))
 			: buf.readUInt32LE(28);
 
 		const phEntSize = buf.readUInt16LE(this.is64Bit ? 54 : 42);
-		const phNum = buf.readUInt16LE(this.is64Bit ? 56 : 44);
+		const phNum = Math.min(buf.readUInt16LE(this.is64Bit ? 56 : 44), 4096);
+		const minimumEntrySize = this.is64Bit ? 56 : 32;
+		if (phEntSize < minimumEntrySize || !Number.isSafeInteger(phOff)) {
+			return segments;
+		}
 
 		for (let i = 0; i < phNum; i++) {
 			const off = phOff + i * phEntSize;
@@ -518,6 +532,8 @@ export class ELFLoader {
 	 */
 	private parseSectionHeaders(buf: Buffer): ELFSection[] {
 		const sections: ELFSection[] = [];
+		const minimumHeaderSize = this.is64Bit ? 64 : 52;
+		if (buf.length < minimumHeaderSize) { return sections; }
 
 		const shOff = this.is64Bit
 			? Number(buf.readBigUInt64LE(40))
@@ -528,16 +544,22 @@ export class ELFLoader {
 		}
 
 		const shEntSize = buf.readUInt16LE(this.is64Bit ? 58 : 46);
-		const shNum = buf.readUInt16LE(this.is64Bit ? 60 : 48);
+		const shNum = Math.min(buf.readUInt16LE(this.is64Bit ? 60 : 48), 4096);
 		const shStrIdx = buf.readUInt16LE(this.is64Bit ? 62 : 50);
+		const minimumEntrySize = this.is64Bit ? 64 : 40;
+		if (shEntSize < minimumEntrySize || !Number.isSafeInteger(shOff)) {
+			return sections;
+		}
 
 		// Get string table offset
 		let strTableOff = 0;
 		if (shStrIdx < shNum) {
 			const strSectOff = shOff + shStrIdx * shEntSize;
-			strTableOff = this.is64Bit
-				? Number(buf.readBigUInt64LE(strSectOff + 24))
-				: buf.readUInt32LE(strSectOff + 16);
+			if (strSectOff >= 0 && strSectOff + shEntSize <= buf.length) {
+				strTableOff = this.is64Bit
+					? Number(buf.readBigUInt64LE(strSectOff + 24))
+					: buf.readUInt32LE(strSectOff + 16);
+			}
 		}
 
 		for (let i = 0; i < shNum; i++) {

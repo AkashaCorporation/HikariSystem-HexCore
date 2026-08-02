@@ -1,5 +1,5 @@
 // Copyright (c) HikariSystem. All rights reserved.
-// Licensed under the MIT License. See LICENSE in the project root.
+// SPDX-License-Identifier: GPL-2.0-only
 #ifndef UNICORN_WRAPPER_H
 #define UNICORN_WRAPPER_H
 
@@ -16,7 +16,7 @@
 
 // Forward declarations
 struct HookData;
-struct HookSabData; // v4.0.0 — SAB zero-copy IPC (Issue #31)
+struct HookSabData; // v1.3.0 - SAB zero-copy IPC (Issue #31)
 class UnicornContext;
 
 /**
@@ -36,12 +36,13 @@ public:
 	// Get the engine handle (for internal use)
 	uc_engine* GetEngine() const { return engine_; }
 	bool IsClosed() const { return closed_; }
+	bool IsEmulatingAsync() const { return emulating_.load(); }
 
 	// InvalidMemHookCB needs access to autoMapCount_ (BUG-UNI-006)
 	friend bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
 	// CodeHookCB needs access to codeHookSeq_ (BUG-UNI-007)
 	friend void CodeHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
-	// v4.0.0 — CodeHookSabCB needs access to codeHookSeq_ for the SAB ring path (Issue #31)
+	// v1.3.0 - CodeHookSabCB needs access to codeHookSeq_ for the SAB ring path (Issue #31)
 	friend void CodeHookSabCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 
 private:
@@ -56,7 +57,7 @@ private:
 	std::unordered_map<uc_hook, std::unique_ptr<HookData>> hooks_;
 	uc_hook nextHookId_;
 
-	// v4.0.0 — Map of SAB-backed hooks: hook handle -> HookSabData (Issue #31)
+	// v1.3.0 - Map of SAB-backed hooks: hook handle -> HookSabData (Issue #31)
 	// Lives in parallel with hooks_; HookDel and CleanupHooks check both maps.
 	std::unordered_map<uc_hook, std::unique_ptr<HookSabData>> sabHooks_;
 
@@ -192,14 +193,14 @@ private:
 	Napi::Value HookAdd(const Napi::CallbackInfo& info);
 
 	/**
-	 * v4.0.0 — Add a SAB-backed CODE hook (Issue #31).
+	 * v1.3.0 - Add a SAB-backed CODE hook (Issue #31).
 	 *
 	 * Zero-copy alternative to HookAdd for high-frequency CODE hooks. Writes
 	 * each hook event into a SharedArrayBuffer ring buffer instead of marshalling
 	 * via TSFN. Watched addresses (breakpoints, API stubs) still route through
 	 * the legacy callback to preserve emuStop() semantics.
 	 *
-	 * @param info[0] hookType (HOOK.CODE only in v4.0.0)
+	 * @param info[0] hookType (HOOK.CODE only)
 	 * @param info[1] sabRef    SharedArrayBuffer >= 64 + slotSize*slotCount bytes
 	 * @param info[2] slotSize  bytes per slot (32 for CODE)
 	 * @param info[3] slotCount power of two (4096 recommended)
@@ -346,6 +347,7 @@ private:
  */
 struct HookData {
 	Napi::ThreadSafeFunction tsfn;
+	Napi::FunctionReference callback;
 	uc_hook handle;
 	int type;
 	UnicornWrapper* wrapper;
@@ -353,6 +355,7 @@ struct HookData {
 
 	HookData() : handle(0), type(0), wrapper(nullptr), active(true) {}
 	~HookData() {
+		callback.Reset();
 		if (tsfn) {
 			tsfn.Release();
 		}
@@ -404,7 +407,7 @@ struct InvalidMemHookCallData {
 	bool result{false};
 };
 
-// ============== v4.0.0 — SAB Zero-Copy IPC (Issue #31) ==============
+// ============== v1.3.0 - SAB Zero-Copy IPC (Issue #31) ==============
 
 /**
  * 64-byte cache-line aligned ring buffer header.
@@ -437,7 +440,7 @@ struct alignas(8) CodeHookSabSlot {
 	uint64_t address;         // offset 8  — instruction address
 	uint32_t size;            // offset 16 — instruction size
 	uint32_t flags;           // offset 20 — reserved (bit 0 = also-watched)
-	uint64_t timestamp;       // offset 24 — reserved (rdtsc), zero in v4.0.0
+	uint64_t timestamp;       // offset 24 - reserved (rdtsc), currently zero
 };
 
 /**
@@ -479,7 +482,7 @@ void MemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int6
 void InterruptHookCB(uc_engine* uc, uint32_t intno, void* user_data);
 void InsnHookCB(uc_engine* uc, void* user_data);
 bool InvalidMemHookCB(uc_engine* uc, uc_mem_type type, uint64_t address, int size, int64_t value, void* user_data);
-// v4.0.0 — SAB-backed CODE hook (Issue #31)
+// v1.3.0 - SAB-backed CODE hook (Issue #31)
 void CodeHookSabCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 void BreakpointHookCB(uc_engine* uc, uint64_t address, uint32_t size, void* user_data);
 

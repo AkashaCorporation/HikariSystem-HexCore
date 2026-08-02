@@ -147,6 +147,8 @@ rule Ashaka_v5_Self_Modifying_Stub
         author = "HexCore"
         category = "evasion"
         family = "Ashaka"
+        architecture = "x86_64"
+        requires_executable = "true"
     strings:
         $vp = "VirtualProtect"
         // PAGE_EXECUTE_READWRITE = 0x40 pushed as imm8

@@ -56,6 +56,11 @@ export { hydrateHAST } from './adapter/flatbuf.js';
 
 // Built-in signature library + one-call scan API
 export { BUILTIN_SIGNATURES } from './signatures/builtin.js';
+export {
+  getDefaultSignatures,
+  loadSignatureDirectory,
+  mergeSignatureLibraries,
+} from './signatures/loader.js';
 export { scanHAST } from './scan.js';
 export type { HQLFunctionFindings } from './scan.js';
 

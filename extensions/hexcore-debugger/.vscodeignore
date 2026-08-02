@@ -1,4 +1,11 @@
 src/**
+tests/**
+rag/**
+out/**/*.test.js
+out/**/*.test.js.map
+out/**/*.map
+logerror.txt
+tsconfig.json
 node_modules/hexcore-unicorn/node_modules/**
 node_modules/hexcore-unicorn/src/**
 node_modules/hexcore-unicorn/deps/**

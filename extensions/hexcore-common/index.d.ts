@@ -17,6 +17,13 @@ export function processFileInChunks(
 	onProgress?: (bytesProcessed: number, totalBytes: number) => void
 ): Promise<void>;
 
+export function isWithinDir(parent: string, child: string): boolean;
+export function assertWithinWorkspaceOrHome(
+	outputPath: string,
+	workspaceRoots: readonly string[],
+	homeDir?: string
+): string;
+
 export interface NativeModuleLoadOptions {
 	moduleName: string;
 	candidatePaths?: string[];

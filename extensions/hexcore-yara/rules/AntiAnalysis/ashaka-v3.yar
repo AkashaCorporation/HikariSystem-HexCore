@@ -73,7 +73,7 @@ rule Ashaka_Dynamic_ShellExecute
 {
     meta:
         description = "Dynamic resolution of ShellExecuteW via LoadLibrary + GetProcAddress — beacon or launcher pattern"
-        severity = "high"
+        severity = "medium"
         author = "HexCore"
         category = "evasion"
         family = "Ashaka"
@@ -97,6 +97,8 @@ rule Ashaka_Full_Combo
         author = "HexCore"
         category = "anti-analysis"
         family = "Ashaka"
+        architecture = "x86_64"
+        requires_executable = "true"
     strings:
         // x64 PEB walk
         $peb64 = { 65 48 8B 04 25 60 00 00 00 }

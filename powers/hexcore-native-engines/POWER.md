@@ -48,12 +48,15 @@ HikariSystem-HexCore/
 
 Cada engine nativa tem um repo standalone onde o código-fonte e as releases de prebuilds vivem:
 
-- `LXrdKnowkill/hexcore-capstone`
-- `LXrdKnowkill/hexcore-unicorn`
-- `LXrdKnowkill/hexcore-llvm-mc`
-- `LXrdKnowkill/hexcore-better-sqlite3`
-- `LXrdKnowkill/hexcore-remill`
-- `LXrdKnowkill/hexcore-rellic` (experimental)
+- `AkashaCorporation/hexcore-capstone`
+- `AkashaCorporation/hexcore-unicorn`
+- `AkashaCorporation/hexcore-llvm-mc`
+- `AkashaCorporation/hexcore-better-sqlite3`
+- `AkashaCorporation/hexcore-remill`
+- `AkashaCorporation/hexcore-souper`
+- `AkashaCorporation/hexcore-revenant`
+
+`hexcore-rellic` is disabled and must not be added back to the release matrix without a separate validation cycle.
 
 O monorepo contém uma cópia sincronizada de cada engine em `extensions/hexcore-{name}/`.
 
@@ -270,7 +273,7 @@ export default binding;
 
 1. O workflow `hexcore-native-prebuilds.yml` é disparado manualmente via `workflow_dispatch`
 2. Para cada engine na matrix, ele:
-   - Faz checkout do repo standalone (ex: `LXrdKnowkill/hexcore-capstone`)
+   - Faz checkout do repo standalone (ex: `AkashaCorporation/hexcore-capstone`)
    - Instala deps com `npm ci --ignore-scripts`
    - Roda `npm run make-prebuild` → `prebuildify --napi --strip`
    - Empacota `prebuilds/` em `{name}-v{version}-napi-v8-win32-x64.tar.gz`
@@ -281,7 +284,7 @@ export default binding;
 
 Quando você atualiza uma engine (ex: nova versão do Unicorn):
 
-1. Atualize o código no repo standalone (`LXrdKnowkill/hexcore-{name}`)
+1. Atualize o código no repo standalone (`AkashaCorporation/hexcore-{name}`)
 2. Bumpe a versão no `package.json` do repo standalone
 3. Dispare o workflow `hexcore-native-prebuilds.yml` no monorepo
 4. O workflow vai:
@@ -342,14 +345,14 @@ O Remill é diferente das outras engines porque depende de LLVM 18 inteiro + XED
 **Solução adotada:**
 1. As deps são compiladas localmente com `_rebuild_mt.py` (requer clang-cl + VS2022)
 2. Empacotadas com `_pack_deps.py` → `remill-deps-win32-x64.zip`
-3. Uploaded como release asset no repo standalone (`LXrdKnowkill/hexcore-remill`, tag `v0.1.0`)
+3. Uploaded como release asset no repo standalone (`AkashaCorporation/hexcore-remill`, usando a mesma tag do `package.json`)
 4. O workflow experimental baixa esse zip antes de rodar `prebuildify`
 
 **Para desenvolvedores que querem testar localmente:**
 ```powershell
 cd extensions/hexcore-remill
 # Baixar deps da release
-gh release download v0.1.0 -p "remill-deps-win32-x64.zip" -R LXrdKnowkill/hexcore-remill
+gh release download v0.5.1 -p "remill-deps-win32-x64.zip" -R AkashaCorporation/hexcore-remill
 Expand-Archive remill-deps-win32-x64.zip -DestinationPath . -Force
 # Instalar devDeps e compilar
 npm install --ignore-scripts
@@ -434,7 +437,7 @@ O `package.json` no monorepo (`extensions/hexcore-{name}/`) e no standalone (`St
 | Campo | Monorepo | Standalone |
 |-------|----------|------------|
 | `scripts.install` | `"node ../../scripts/hexcore-native-install.js"` | `"prebuild-install -r napi \|\| node-gyp rebuild"` |
-| `devDependencies` | `{}` (vazio — build tools ficam no standalone) | `{ "prebuildify": "^6.0.0", "prebuild-install": "^7.1.0", "node-addon-api": "^8.0.0", "node-gyp": "^10.0.0" }` |
+| `devDependencies` | `{}` (vazio — build tools ficam no standalone) | `{ "prebuildify": "^6.0.0", "prebuild-install": "^7.1.0", "node-addon-api": "^8.0.0", "node-gyp": "^12.4.0" }` |
 
 ### Por que são diferentes?
 
@@ -466,7 +469,7 @@ $pkg.devDependencies = @{
   "prebuildify" = "^6.0.0"
   "prebuild-install" = "^7.1.0"
   "node-addon-api" = "^8.0.0"
-  "node-gyp" = "^10.0.0"
+  "node-gyp" = "^12.4.0"
 }
 $pkg | ConvertTo-Json -Depth 10 | Set-Content package.json -Encoding UTF8
 
@@ -531,7 +534,7 @@ Antes de submeter um PR com mudanças em extensões nativas, verificar:
 | Diretório no monorepo | `extensions/hexcore-{name}/` | `extensions/hexcore-capstone/` |
 | target_name (binding.gyp) | `hexcore_{name}` (underscore) | `hexcore_sqlite3` |
 | Arquivo .node | `hexcore-{name}.node` ou `hexcore_{name}.node` | `hexcore-capstone.node` |
-| Repo standalone | `LXrdKnowkill/hexcore-{name}` | `LXrdKnowkill/hexcore-unicorn` |
+| Repo standalone | `AkashaCorporation/hexcore-{name}` | `AkashaCorporation/hexcore-unicorn` |
 | Release tag | `v{semver}` | `v1.2.0` |
 | Asset de prebuild | `{pkg}-v{ver}-napi-v{n}-{os}-{arch}.tar.gz` | `hexcore-capstone-v1.3.1-napi-v8-win32-x64.tar.gz` |
 | Classe C++ principal | `{Name}Wrapper` (PascalCase) | `DatabaseWrapper`, `CapstoneWrapper` |

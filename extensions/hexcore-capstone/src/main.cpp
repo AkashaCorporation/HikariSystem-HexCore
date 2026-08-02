@@ -121,8 +121,12 @@ Napi::Object Init(Napi::Env env, Napi::Object exports) {
         Napi::Object version = Napi::Object::New(env);
         version.Set("major", Napi::Number::New(env, major));
         version.Set("minor", Napi::Number::New(env, minor));
+        version.Set("patch", Napi::Number::New(env, CS_VERSION_EXTRA));
         version.Set("string", Napi::String::New(env,
             std::to_string(major) + "." + std::to_string(minor)));
+        version.Set("fullString", Napi::String::New(env,
+            std::to_string(major) + "." + std::to_string(minor) + "." +
+            std::to_string(CS_VERSION_EXTRA)));
         return version;
     }));
 
