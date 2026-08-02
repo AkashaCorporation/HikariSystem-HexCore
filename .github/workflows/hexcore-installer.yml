@@ -6,9 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g., v1.0.0)"
+        description: "Version tag (e.g., v3.8.3-rc)"
         required: true
-        default: "v1.0.0"
+        default: "v3.8.3-rc"
+      build_linux:
+        description: "Build the experimental Linux package"
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -222,6 +227,7 @@ jobs:
 
   build-linux:
     name: Build Linux Package
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.build_linux }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository

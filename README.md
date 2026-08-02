@@ -115,7 +115,7 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 | **hexcore-remill** | 0.5.1 | Patched Remill N-API lifter — machine code to LLVM IR with current call, relocation, preamble, and fallback hardening |
 | **hexcore-helix** | 0.9.3 | Canonical Helix MLIR decompiler with structured control flow and debug-info-guided type recovery |
 | **hexcore-souper** | 0.2.0 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |
-| **hexcore-elixir** *(Azoth)* | 1.0.0 | Project Azoth clean-room dynamic analysis framework — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
+| **hexcore-elixir** *(Azoth)* | 1.0.3 | Project Azoth clean-room dynamic analysis framework — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
 > **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The `.node` binary is pre-built and ships with HexCore — no compilation needed for end users. Building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build (~131 MB deps).
