@@ -170,6 +170,7 @@
 		"re2-wasm": "^1.0.2"
 	},
 	"devDependencies": {
+		"@types/mocha": "^10.0.0",
 		"@types/node": "^18.0.0",
 		"@types/vscode": "^1.70.0",
 		"typescript": "^5.0.0"
