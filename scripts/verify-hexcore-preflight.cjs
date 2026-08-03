@@ -180,6 +180,29 @@ function verifyPortableDistribution() {
 	}
 }
 
+function verifyInterfaceDefaults() {
+	const product = readJson('product.json');
+	const themePackage = readJson('extensions/theme-bathexcore/package.json');
+	const theme = readJson('extensions/theme-bathexcore/themes/hexcore-analysis-dark.json');
+	const workflow = readText('.github/workflows/hexcore-installer.yml');
+
+	if (product?.configurationDefaults?.['workbench.colorTheme'] !== 'HexCore Analysis Dark') {
+		errors.push('product.json must default to the HexCore Analysis Dark theme');
+	}
+	if (product?.configurationDefaults?.['workbench.iconTheme'] !== 'vs-seti') {
+		errors.push('product.json must default to the Seti file icon theme');
+	}
+	const contributedTheme = themePackage?.contributes?.themes?.find(candidate => candidate.id === 'hexcore-analysis-dark');
+	if (contributedTheme?.label !== 'HexCore Analysis Dark' || contributedTheme?.path !== './themes/hexcore-analysis-dark.json') {
+		errors.push('theme-bathexcore must contribute HexCore Analysis Dark from the canonical theme path');
+	}
+	if (theme?.semanticHighlighting !== true || theme?.type !== 'dark') {
+		errors.push('HexCore Analysis Dark must be a semantic dark theme');
+	}
+	assertIncludes(workflow, 'Verify packaged HexCore theme', '.github/workflows/hexcore-installer.yml');
+	assertIncludes(workflow, 'hexcore-analysis-dark.json', '.github/workflows/hexcore-installer.yml');
+}
+
 function verifyExtensionCompileCoverage() {
 	// A tsc-built extension declares "main": "./out/..." and is compiled by the
 	// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
@@ -289,6 +312,7 @@ verifyBuildCoverage();
 verifyDebuggerWorkerPackaging();
 verifyRevenantPackaging();
 verifyPortableDistribution();
+verifyInterfaceDefaults();
 verifyExtensionCompileCoverage();
 verifyManifestActivationEvents();
 

@@ -231,6 +231,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Verify packaged HexCore theme
+        run: |
+          $theme = "../VSCode-win32-x64/resources/app/extensions/theme-bathexcore/themes/hexcore-analysis-dark.json"
+          if (-not (Test-Path $theme)) {
+            throw "Required HexCore Analysis Dark theme is missing from the packaged app: $theme"
+          }
+          Get-Content $theme -Raw | ConvertFrom-Json | Out-Null
+
       - name: Generate packaged engine manifest
         run: |
           node scripts/generate-hexcore-engine-manifest.cjs `

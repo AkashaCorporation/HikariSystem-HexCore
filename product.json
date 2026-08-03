@@ -49,7 +49,10 @@
 		"https://open-vsx.org"
 	],
 	"configurationDefaults": {
-		"extensions.verifySignature": false
+		"extensions.verifySignature": false,
+		"workbench.colorTheme": "HexCore Analysis Dark",
+		"workbench.iconTheme": "vs-seti",
+		"workbench.tree.renderIndentGuides": "always"
 	},
 	"builtInExtensions": [],
 	"defaultChatAgent": {

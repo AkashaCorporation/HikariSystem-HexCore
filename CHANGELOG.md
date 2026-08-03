@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "Honest Analysis at Scale"
 
+### Workbench - analysis-focused visual refresh
+
+- `HexCore Analysis Dark` is now the product default for profiles that have not explicitly selected another theme. The palette uses neutral charcoal work surfaces, restrained violet branding, and distinct semantic colors for control flow, types, functions, strings, addresses/numbers, success, warnings, and errors.
+- The Seti file icon theme and persistent tree indent guides improve scanning in report-heavy workspaces without changing the workbench layout or overriding an analyst's explicit theme choice.
+- The Windows packaging workflow fails if the HexCore theme is absent or invalid JSON, preventing a source-only theme from silently disappearing from a release ZIP.
+
 ### Automation/YARA - close autonomous-analysis blockers (Disassembler 1.4.27; Debugger 2.1.10; YARA 2.1.3)
 
 - Better SQLite3 `2.0.3` now drains its prepared-statement registry without invalidating the active iterator during database close or garbage collection, and keeps its process-lifetime N-API error-constructor reference from destructing after the environment. Together these remove the intermittent native access violation reproduced by HexCore's multi-statement SessionStore lifecycle (`12/20` failing before the fix).

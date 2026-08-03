@@ -1,0 +1,23 @@
+{
+	"name": "theme-bathexcore",
+	"displayName": "HexCore Analysis Theme",
+	"description": "A restrained dark theme for reverse engineering and binary analysis",
+	"version": "1.1.0",
+	"publisher": "HikariSystem",
+	"engines": {
+		"vscode": "^1.74.0"
+	},
+	"categories": [
+		"Themes"
+	],
+	"contributes": {
+		"themes": [
+			{
+				"id": "hexcore-analysis-dark",
+				"label": "HexCore Analysis Dark",
+				"uiTheme": "vs-dark",
+				"path": "./themes/hexcore-analysis-dark.json"
+			}
+		]
+	}
+}
