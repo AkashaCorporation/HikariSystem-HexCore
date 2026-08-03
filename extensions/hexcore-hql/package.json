@@ -13,6 +13,7 @@
     "hexcore-better-sqlite3": "file:../hexcore-better-sqlite3"
   },
   "devDependencies": {
+    "@types/node": "^22.18.10",
     "typescript": "^5.7.0",
     "tsx": "^4.19.0"
   },
