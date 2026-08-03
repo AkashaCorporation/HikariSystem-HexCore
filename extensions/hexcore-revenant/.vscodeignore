@@ -1,0 +1,12 @@
+.github/**
+.vscode/**
+.vscode-test/**
+engine/**
+examples/**
+rag/**
+src/**
+test/**
+**/*.map
+tsconfig.json
+package-lock.json
+*.vsix

@@ -177,6 +177,23 @@ jobs:
           Write-Host "Semantics installed:"
           Get-ChildItem deps/remill/share/semantics/ | Select-Object Name
 
+      - name: Fetch HexCore Revenant Backend (Windows)
+        run: |
+          cd extensions/hexcore-revenant
+          $version = node -p "require('./package.json').version"
+          $tag = "v$version"
+          $asset = "revenant-engine-win-x64.tar.gz"
+          $url = "https://github.com/AkashaCorporation/hexcore-revenant/releases/download/$tag/$asset"
+          Write-Host "Downloading Revenant backend from $url ..."
+          Invoke-WebRequest -Uri $url -OutFile $asset
+          New-Item -ItemType Directory -Force bin/win-x64 | Out-Null
+          tar -xzf $asset -C bin/win-x64
+          Remove-Item $asset
+          if (-not (Test-Path bin/win-x64/revenant-engine.exe)) {
+            throw "Revenant backend missing after extracting $asset"
+          }
+          Write-Host "Revenant backend installed: $((Get-Item bin/win-x64/revenant-engine.exe).Length) bytes"
+
       - name: Compile HexCore Extensions
         env:
           npm_config_ignore_scripts: true
@@ -356,6 +373,20 @@ jobs:
           rm -f "${asset}"
           echo "Semantics installed:"
           ls deps/remill/share/semantics/
+
+      - name: Fetch HexCore Revenant Backend (Linux)
+        run: |
+          cd extensions/hexcore-revenant
+          version=$(node -p "require('./package.json').version")
+          tag="v${version}"
+          asset="revenant-engine-linux-x64.tar.gz"
+          url="https://github.com/AkashaCorporation/hexcore-revenant/releases/download/${tag}/${asset}"
+          echo "Downloading Revenant backend from ${url} ..."
+          curl -fsSL -o "${asset}" "${url}"
+          mkdir -p bin/linux-x64
+          tar -xzf "${asset}" -C bin/linux-x64
+          rm -f "${asset}"
+          test -x bin/linux-x64/revenant-engine || { echo "Revenant backend missing after extraction"; exit 1; }
 
       - name: Compile HexCore Extensions
         run: |

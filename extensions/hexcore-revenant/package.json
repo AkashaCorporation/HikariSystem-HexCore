@@ -52,7 +52,7 @@
 				"hexcore.revenant.ilspyPath": {
 					"type": "string",
 					"default": "",
-					"description": "Path to the ilspycmd executable. Leave empty to auto-locate (PATH, then the dotnet global-tools directory). In a future release this is replaced by a bundled self-contained wrapper, removing the .NET runtime dependency."
+					"description": "Optional backend override. Leave empty to use the bundled self-contained Revenant engine, with system ilspycmd as a development fallback."
 				},
 				"hexcore.revenant.timeoutMs": {
 					"type": "number",

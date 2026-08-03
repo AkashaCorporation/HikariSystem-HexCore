@@ -122,6 +122,24 @@ function verifyDebuggerWorkerPackaging() {
 	}
 }
 
+function verifyRevenantPackaging() {
+	const workflow = readText('.github/workflows/hexcore-installer.yml');
+	const vscodeIgnore = readText('extensions/hexcore-revenant/.vscodeignore');
+
+	for (const required of [
+		'revenant-engine-win-x64.tar.gz',
+		'bin/win-x64/revenant-engine.exe',
+		'revenant-engine-linux-x64.tar.gz',
+		'bin/linux-x64/revenant-engine'
+	]) {
+		assertIncludes(workflow, required, '.github/workflows/hexcore-installer.yml');
+	}
+
+	if (vscodeIgnore.split(/\r?\n/).some(line => /^\s*bin(?:\/|\*|$)/.test(line))) {
+		errors.push('extensions/hexcore-revenant/.vscodeignore must not exclude bin/; the bundled backend is a release prebuild');
+	}
+}
+
 function verifyExtensionCompileCoverage() {
 	// A tsc-built extension declares "main": "./out/..." and is compiled by the
 	// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
@@ -229,6 +247,7 @@ verifyYaraCommands();
 verifyPipelineCapabilities();
 verifyBuildCoverage();
 verifyDebuggerWorkerPackaging();
+verifyRevenantPackaging();
 verifyExtensionCompileCoverage();
 verifyManifestActivationEvents();
 
