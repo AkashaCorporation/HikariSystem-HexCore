@@ -97,8 +97,28 @@ function verifyBuildCoverage() {
 	const npmDirs = readText('build/npm/dirs.ts');
 
 	assertIncludes(winBuildScript, '"extensions/hexcore-yara"', 'scripts/build-hexcore-win.ps1');
+	assertIncludes(winBuildScript, 'extensions/hexcore-hql', 'scripts/build-hexcore-win.ps1');
 	assertIncludes(gulpExtensions, "'extensions/hexcore-yara/tsconfig.json'", 'build/gulpfile.extensions.ts');
 	assertIncludes(npmDirs, "'extensions/hexcore-yara'", 'build/npm/dirs.ts');
+	assertIncludes(npmDirs, "'extensions/hexcore-hql'", 'build/npm/dirs.ts');
+}
+
+function verifyDebuggerWorkerPackaging() {
+	const tsconfig = readJson('extensions/hexcore-debugger/tsconfig.json');
+	if (tsconfig?.compilerOptions?.allowJs !== true) {
+		errors.push('extensions/hexcore-debugger/tsconfig.json must enable allowJs so runtime workers are emitted into out/');
+	}
+
+	const workers = [
+		['pe32Worker.js', 'pe32WorkerClient.ts'],
+		['arm64Worker.js', 'arm64WorkerClient.ts'],
+		['x64ElfWorker.js', 'x64ElfWorkerClient.ts']
+	];
+	for (const [worker, client] of workers) {
+		readText(`extensions/hexcore-debugger/src/${worker}`);
+		const clientSource = readText(`extensions/hexcore-debugger/src/${client}`);
+		assertIncludes(clientSource, `path.join(__dirname, '${worker}')`, `extensions/hexcore-debugger/src/${client}`);
+	}
 }
 
 function verifyExtensionCompileCoverage() {
@@ -129,18 +149,20 @@ function verifyExtensionCompileCoverage() {
 	// One "Compile HexCore Extensions" step per build job (Windows + Linux today).
 	const compileJobCount = (workflow.match(/Compile HexCore Extensions/g) || []).length;
 
-	// Count, per extension, how many `npm run compile` lines reference it. Each compile-loop
-	// line looks like `cd ../hexcore-NAME && npm ci ... && npm run compile`; the first
+	// Count, per extension and package script, how many build lines reference it. Each line
+	// looks like `cd ../hexcore-NAME && npm ci ... && npm run compile`; the first
 	// hexcore-* token on such a line is the cd target. Native/prebuilt fetch steps use
-	// `node`/bare `npm ci` (no `npm run compile`), so they are correctly ignored.
-	const compileCounts = new Map();
+	// `node`/bare `npm ci` (no `npm run ...`), so they are correctly ignored.
+	const buildCounts = new Map();
 	for (const line of workflow.split(/\r?\n/)) {
-		if (!line.includes('npm run compile')) {
+		const scriptMatch = line.match(/npm run (compile|build)\b/);
+		if (!scriptMatch) {
 			continue;
 		}
 		const match = line.match(/hexcore-[a-z0-9-]+/);
 		if (match) {
-			compileCounts.set(match[0], (compileCounts.get(match[0]) || 0) + 1);
+			const key = `${match[0]}:${scriptMatch[1]}`;
+			buildCounts.set(key, (buildCounts.get(key) || 0) + 1);
 		}
 	}
 
@@ -155,18 +177,23 @@ function verifyExtensionCompileCoverage() {
 			continue;
 		}
 
-		// Only tsc-built extensions (./out/ main) need the compile loop. Native extensions
-		// (e.g. hexcore-helix, hexcore-remill) ship prebuilt and point main elsewhere.
+		// Native extensions (e.g. hexcore-helix, hexcore-remill) ship prebuilt. TypeScript
+		// extensions use either the conventional compile -> out/ contract or build -> dist/.
 		const main = packageJson.main;
-		if (typeof main !== 'string' || !main.startsWith('./out/')) {
+		const packageScript = typeof main === 'string' && main.startsWith('./out/')
+			? 'compile'
+			: typeof main === 'string' && main.startsWith('dist/')
+				? 'build'
+				: undefined;
+		if (!packageScript) {
 			continue;
 		}
 
-		const count = compileCounts.get(extensionName) || 0;
+		const count = buildCounts.get(`${extensionName}:${packageScript}`) || 0;
 		if (count === 0) {
-			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is not in the "Compile HexCore Extensions" step of ${workflowRel} — add 'cd .../${extensionName} && npm ci --ignore-scripts && npm run compile' to every build job`);
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is not in the "Compile HexCore Extensions" step of ${workflowRel} — add 'cd .../${extensionName} && npm ci --ignore-scripts && npm run ${packageScript}' to every build job`);
 		} else if (compileJobCount > 0 && count < compileJobCount) {
-			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is compiled in only ${count} of ${compileJobCount} build jobs in ${workflowRel} — it must be in every job's "Compile HexCore Extensions" loop (Windows + Linux)`);
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is built in only ${count} of ${compileJobCount} build jobs in ${workflowRel} — it must be in every job's "Compile HexCore Extensions" loop (Windows + Linux)`);
 		}
 	}
 }
@@ -200,6 +227,7 @@ function verifyManifestActivationEvents() {
 verifyYaraCommands();
 verifyPipelineCapabilities();
 verifyBuildCoverage();
+verifyDebuggerWorkerPackaging();
 verifyExtensionCompileCoverage();
 verifyManifestActivationEvents();
 

@@ -87,7 +87,7 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.9 | PE/ELF emulation with Unicorn Engine, API hooks, stdin emulation, snapshots, traces, and headless lifecycle commands |
+| **Debugger** | 2.1.10 | PE/ELF emulation with Unicorn Engine, API hooks, stdin emulation, snapshots, traces, and headless lifecycle commands |
 | **Disassembler** | 1.4.27 | Multi-arch disassembly, PE/ELF parsing, function discovery, Pathfinder, Remill lifting, Helix integration, and automation |
 | **Hex Viewer** | 1.2.3 | Professional binary file viewer with virtual scrolling |
 | **PE Analyzer** | 1.1.1 | Comprehensive PE executable analysis with headless mode |

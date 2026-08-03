@@ -41,6 +41,7 @@ jobs:
             extensions/hexcore-elfanalyzer/package-lock.json
             extensions/hexcore-report-composer/package-lock.json
             extensions/hexcore-minidump/package-lock.json
+            extensions/hexcore-hql/package-lock.json
 
       - name: HexCore Preflight (Command/Build Coverage)
         run: node scripts/verify-hexcore-preflight.cjs
@@ -126,6 +127,12 @@ jobs:
           npm ci
           npm run compile
 
+      - name: Build HQL
+        working-directory: extensions/hexcore-hql
+        run: |
+          npm ci --ignore-scripts
+          npm run build
+
       - name: Build Summary
         run: |
           echo "## HexCore Extensions Build Summary" >> $GITHUB_STEP_SUMMARY
@@ -145,6 +152,7 @@ jobs:
           echo "| hexcore-minidump | ✅ Built |" >> $GITHUB_STEP_SUMMARY
           echo "| hexcore-elfanalyzer | ✅ Built |" >> $GITHUB_STEP_SUMMARY
           echo "| hexcore-report-composer | ✅ Built |" >> $GITHUB_STEP_SUMMARY
+          echo "| hexcore-hql | ✅ Built |" >> $GITHUB_STEP_SUMMARY
 
   lint:
     name: Lint TypeScript

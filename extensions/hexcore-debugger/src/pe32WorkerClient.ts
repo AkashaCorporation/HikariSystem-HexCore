@@ -121,7 +121,7 @@ export class Pe32WorkerClient {
 			return this.readyPromise;
 		}
 
-		const workerPath = path.join(__dirname, '..', 'src', 'pe32Worker.js');
+		const workerPath = path.join(__dirname, 'pe32Worker.js');
 
 		// Unicorn's QEMU TCG JIT backend allocates RWX memory for code
 		// translation.  The Electron binary has Arbitrary Code Guard (ACG)

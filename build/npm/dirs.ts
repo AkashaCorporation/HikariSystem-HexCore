@@ -19,6 +19,7 @@ export const dirs = [
 	'extensions/hexcore-entropy',
 	'extensions/hexcore-filetype',
 	'extensions/hexcore-hashcalc',
+	'extensions/hexcore-hql',
 	'extensions/hexcore-hexviewer',
 	'extensions/hexcore-ioc',
 	'extensions/hexcore-minidump',

@@ -115,7 +115,7 @@ export class Arm64WorkerClient {
 			return this.readyPromise;
 		}
 
-		const workerPath = path.join(__dirname, '..', 'src', 'arm64Worker.js');
+		const workerPath = path.join(__dirname, 'arm64Worker.js');
 		const systemNode = this.findSystemNode();
 		const env = { ...process.env };
 

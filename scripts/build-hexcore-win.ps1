@@ -106,6 +106,11 @@ foreach ($extDir in $hexcoreExtensions) {
 	Invoke-Step "npm run compile --prefix $extDir"
 }
 
+# HQL is a sibling runtime library consumed by the Disassembler. Its compiled
+# entrypoint is dist/index.js and uses a build script rather than compile.
+Invoke-Step "npm ci --prefix extensions/hexcore-hql --ignore-scripts"
+Invoke-Step "npm run build --prefix extensions/hexcore-hql"
+
 Invoke-Step "npm run gulp vscode-win32-x64-min"
 
 Write-Host "Build completed. Output should be in VSCode-win32-x64." -ForegroundColor Green

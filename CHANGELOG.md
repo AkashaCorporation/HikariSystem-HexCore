@@ -7,12 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.3] - Unreleased - "Honest Analysis at Scale"
 
-### Automation/YARA - close autonomous-analysis blockers (Disassembler 1.4.27; Debugger 2.1.9; YARA 2.1.3)
+### Automation/YARA - close autonomous-analysis blockers (Disassembler 1.4.27; Debugger 2.1.10; YARA 2.1.3)
 
 - Better SQLite3 `2.0.3` now drains its prepared-statement registry without invalidating the active iterator during database close or garbage collection, and keeps its process-lifetime N-API error-constructor reference from destructing after the environment. Together these remove the intermittent native access violation reproduced by HexCore's multi-statement SessionStore lifecycle (`12/20` failing before the fix).
 - Elixir wrapper metadata is aligned with native release `1.0.3`, so clean installer builds fetch the current NAPI-RS binary instead of resolving the legacy `1.0.0` asset. Manual installer builds are Windows-only by default; the unsupported Linux package is now explicit opt-in.
 - YARA now declares its Mocha type definitions directly, so the extension compiles in the isolated dependency environment used by GitHub Actions instead of relying on types inherited from the monorepo root.
 - Windows product and native-module resources now identify Akasha Corporation instead of inheriting Microsoft branding from the Code OSS packaging defaults. Bundled product metadata records HexCore `3.8.3`, and license/issue links target the canonical organization repository while the Code OSS compatibility version remains `1.104.0`.
+- Distribution builds now compile and package the HQL `dist/` runtime consumed by Disassembler commands. The build preflight covers both `compile -> out/` extensions and `build -> dist/` sibling libraries, closing the gap that let source acceptance pass while `hexcore.hql.scanHeadless` was absent from the generated ZIP.
+- Debugger `2.1.10` emits its PE32, ARM64 and x64 ELF worker scripts into the packaged `out/` directory and resolves them beside their compiled clients. Previously the clients referenced `src/*.js`, but `src/` is intentionally excluded from releases, so packaged PE emulation workers exited before ready even though source-tree runs passed.
 - Stateful jobs now hold a whole-job exclusive engine gate. Queue workers are logical slots in one Extension Host, so binary context can no longer be replaced between dependent steps. A 100-pair/200-job adversarial stress test with distinct paths, hashes, image bases, architectures, strings and sessions has zero cross-context results.
 - Validation is a mandatory execution preflight. Invalid output containment writes a validation report and terminal error without dispatching a command. PE/ELF/minidump format gates skip incompatible parsers before expensive initialization.
 - Pipeline success now follows semantic outcomes, not only `executeCommand` transport completion. HQL child failures and debugger terminal faults propagate as `failed`; mixed HQL results require explicit `allowPartial:true` and remain terminal `partial`. Queue jobs inherit terminal pipeline failure instead of becoming `done`.

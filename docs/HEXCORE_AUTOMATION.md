@@ -4,7 +4,7 @@ HexCore supports running analysis pipelines from workspace job files.
 
 This document describes the `3.8.3` release-candidate contract. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.27`, debugger `2.1.9`, Revenant `0.4.0`, Capstone `1.3.5`, Remill `0.5.1`, Unicorn `1.3.1`, Souper `0.2.0`, Helix `0.9.3`, and Elixir `1.0.3`.
+Relevant integrated versions: disassembler `1.4.27`, debugger `2.1.10`, Revenant `0.4.0`, Capstone `1.3.5`, Remill `0.5.1`, Unicorn `1.3.1`, Souper `0.2.0`, Helix `0.9.3`, and Elixir `1.0.3`.
 
 ## How It Works
 

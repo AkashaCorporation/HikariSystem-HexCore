@@ -111,7 +111,7 @@ export class X64ElfWorkerClient {
 			return this.readyPromise;
 		}
 
-		const workerPath = path.join(__dirname, '..', 'src', 'x64ElfWorker.js');
+		const workerPath = path.join(__dirname, 'x64ElfWorker.js');
 
 		// Unicorn's QEMU TCG JIT backend allocates RWX memory for x64 code
 		// translation.  The Electron binary has Arbitrary Code Guard (ACG)

@@ -7,10 +7,13 @@
 		"outDir": "out",
 		"rootDir": "src",
 		"sourceMap": true,
+		"allowJs": true,
+		"checkJs": false,
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
 		"forceConsistentCasingInFileNames": true
 	},
+	"include": ["src/**/*"],
 	"exclude": ["node_modules", ".vscode-test"]
 }
