@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It brings static analysis, IR lifting, MLIR-based decompilation, controlled CPU emulation, semantic queries, and reproducible automation into one workspace.
 
-**Stable release:** `v3.8.2.2`. **Public release candidate:** [`v3.8.3-rc.2`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3-rc.2). The 3.8.3 work focuses on truthful pipeline outcomes, whole-job engine isolation, artifact provenance, parser format gates, YARA evidence qualification, native-engine refreshes, the canonical Helix `0.9.3` migration, and a restrained analysis-focused interface refresh. See the [changelog](CHANGELOG.md) for the release record.
+**Stable release:** [`v3.8.3`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3). This release focuses on truthful pipeline outcomes, whole-job engine isolation, artifact provenance, parser format gates, YARA evidence qualification, native-engine refreshes, the canonical Helix `0.9.3` migration, and a restrained analysis-focused interface refresh. See the [changelog](CHANGELOG.md) for the release record.
 
 > **Platform status:** the supported packaged application is currently **Windows 10/11 x64**. HexCore analyzes both PE and ELF targets, but that does not imply a supported Linux-host distribution. Linux packaging remains a separate Docker/CI effort and is not part of the 3.8.3 release claim.
 
