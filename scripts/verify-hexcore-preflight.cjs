@@ -95,6 +95,7 @@ function verifyBuildCoverage() {
 	const winBuildScript = readText('scripts/build-hexcore-win.ps1');
 	const gulpExtensions = readText('build/gulpfile.extensions.ts');
 	const npmDirs = readText('build/npm/dirs.ts');
+	readJson('extensions/hexcore-hql/package-lock.json');
 
 	assertIncludes(winBuildScript, '"extensions/hexcore-yara"', 'scripts/build-hexcore-win.ps1');
 	assertIncludes(winBuildScript, 'extensions/hexcore-hql', 'scripts/build-hexcore-win.ps1');
