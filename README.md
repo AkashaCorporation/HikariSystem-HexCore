@@ -28,7 +28,7 @@
 
 HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It brings static analysis, IR lifting, MLIR-based decompilation, controlled CPU emulation, semantic queries, and reproducible automation into one workspace.
 
-**Stable release:** `v3.8.2.2`. **Current release candidate:** `v3.8.3` (not yet published). The 3.8.3 work focuses on truthful pipeline outcomes, whole-job engine isolation, artifact provenance, parser format gates, YARA evidence qualification, native-engine refreshes, and the canonical Helix `0.9.3` migration. See the [changelog](CHANGELOG.md) for the release record.
+**Stable release:** `v3.8.2.2`. **Public release candidate:** [`v3.8.3-rc.1`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3-rc.1). The 3.8.3 work focuses on truthful pipeline outcomes, whole-job engine isolation, artifact provenance, parser format gates, YARA evidence qualification, native-engine refreshes, and the canonical Helix `0.9.3` migration. See the [changelog](CHANGELOG.md) for the release record.
 
 > **Platform status:** the supported packaged application is currently **Windows 10/11 x64**. HexCore analyzes both PE and ELF targets, but that does not imply a supported Linux-host distribution. Linux packaging remains a separate Docker/CI effort and is not part of the 3.8.3 release claim.
 
@@ -347,10 +347,14 @@ Professional binary file viewer with virtual scrolling for large files.
 
 ### Packaged Application
 
-The supported release artifact is the Windows x64 ZIP/installer produced by
+The supported release artifact is the portable Windows x64 ZIP produced by
 GitHub Actions. Download it from the
 [AkashaCorporation releases page](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases).
 Native `.node` engines are bundled; end users do not compile LLVM/MLIR locally.
+Updates are manual so analysts can keep reproducible versions side by side; the
+application does not replace a working analysis environment automatically. Each
+package includes `resources/app/hexcore-engine-manifest.json` with the version,
+release tag, size, and SHA-256 of every bundled native engine artifact.
 
 ### Development Mode
 

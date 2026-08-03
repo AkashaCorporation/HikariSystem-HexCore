@@ -92,7 +92,9 @@ export class Win32UpdateService extends AbstractUpdateService implements IRelaun
 	}
 
 	protected override async initialize(): Promise<void> {
-		if (this.environmentMainService.isBuilt) {
+		// Portable product builds without an update endpoint are intentionally updated
+		// manually. Do not initialize Electron's appUpdate path for that distribution.
+		if (this.environmentMainService.isBuilt && this.productService.updateUrl && this.productService.commit) {
 			const cachePath = await this.cachePath;
 			app.setPath('appUpdate', cachePath);
 			try {

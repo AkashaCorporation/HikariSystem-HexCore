@@ -1,6 +1,6 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore CI preflight checks
- *  Ensures critical command registrations and build coverage are in sync.
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
 const fs = require('fs');
@@ -99,9 +99,9 @@ function verifyBuildCoverage() {
 
 	assertIncludes(winBuildScript, '"extensions/hexcore-yara"', 'scripts/build-hexcore-win.ps1');
 	assertIncludes(winBuildScript, 'extensions/hexcore-hql', 'scripts/build-hexcore-win.ps1');
-	assertIncludes(gulpExtensions, "'extensions/hexcore-yara/tsconfig.json'", 'build/gulpfile.extensions.ts');
-	assertIncludes(npmDirs, "'extensions/hexcore-yara'", 'build/npm/dirs.ts');
-	assertIncludes(npmDirs, "'extensions/hexcore-hql'", 'build/npm/dirs.ts');
+	assertIncludes(gulpExtensions, `'extensions/hexcore-yara/tsconfig.json'`, 'build/gulpfile.extensions.ts');
+	assertIncludes(npmDirs, `'extensions/hexcore-yara'`, 'build/npm/dirs.ts');
+	assertIncludes(npmDirs, `'extensions/hexcore-hql'`, 'build/npm/dirs.ts');
 }
 
 function verifyDebuggerWorkerPackaging() {
@@ -140,18 +140,58 @@ function verifyRevenantPackaging() {
 	}
 }
 
+function verifyPortableDistribution() {
+	const updater = readText('src/vs/platform/update/electron-main/updateService.win32.ts');
+	const workflow = readText('.github/workflows/hexcore-installer.yml');
+	const manifestGenerator = readText('scripts/generate-hexcore-engine-manifest.cjs');
+	readText('scripts/generate-hexcore-engine-manifest.test.cjs');
+
+	assertIncludes(
+		updater,
+		'this.productService.updateUrl && this.productService.commit',
+		'src/vs/platform/update/electron-main/updateService.win32.ts'
+	);
+
+	const helixStep = workflow.match(/- name: Fetch HexCore Helix Prebuilds \(Windows\)[\s\S]*?(?=\n\s+- name:)/)?.[0] || '';
+	if (/continue-on-error:\s*true/.test(helixStep)) {
+		errors.push('Windows Helix prebuild installation must not use continue-on-error');
+	}
+	for (const required of [
+		'hexcore-helix.win32-x64-msvc.node',
+		'Required Helix prebuild is missing after install',
+		'generate-hexcore-engine-manifest.cjs',
+		'generate-hexcore-engine-manifest.test.cjs',
+		'hexcore-engine-manifest.json'
+	]) {
+		assertIncludes(workflow, required, '.github/workflows/hexcore-installer.yml');
+	}
+
+	for (const required of [
+		'hexcore-capstone',
+		'hexcore-remill',
+		'hexcore-helix',
+		'hexcore-souper',
+		'hexcore-elixir',
+		'hexcore-revenant',
+		`'.node'`,
+		`'.bc'`
+	]) {
+		assertIncludes(manifestGenerator, required, 'scripts/generate-hexcore-engine-manifest.cjs');
+	}
+}
+
 function verifyExtensionCompileCoverage() {
 	// A tsc-built extension declares "main": "./out/..." and is compiled by the
 	// "Compile HexCore Extensions" step in hexcore-installer.yml. Its out/ tree is a
 	// gitignored build artifact, so if the extension is missing from that compile loop the
 	// shipped zip has no compiled entrypoint and the extension fails to activate ("Cannot
-	// find module out/extension.js") — exactly the hexcore-elixir regression behind issue #36.
+		// find module out/extension.js") - exactly the hexcore-elixir regression behind issue #36.
 	//
 	// This is a STATIC config check, NOT a disk check: the preflight step runs BEFORE the
 	// "Compile HexCore Extensions" step in CI, so out/ does not exist yet at this point.
 	// Asserting the compiled artifact exists would (and did) fail on EVERY extension. Instead
 	// we parse the workflow and assert every out/-main extension is wired into the compile
-	// loop of EVERY build job (Windows + Linux) — the elixir bug shipped because it was
+		// loop of EVERY build job (Windows + Linux) - the elixir bug shipped because it was
 	// omitted from both, and a single-job omission would silently break that platform's zip.
 	const extensionsDir = path.join(root, 'extensions');
 	if (!fs.existsSync(extensionsDir)) {
@@ -210,9 +250,9 @@ function verifyExtensionCompileCoverage() {
 
 		const count = buildCounts.get(`${extensionName}:${packageScript}`) || 0;
 		if (count === 0) {
-			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is not in the "Compile HexCore Extensions" step of ${workflowRel} — add 'cd .../${extensionName} && npm ci --ignore-scripts && npm run ${packageScript}' to every build job`);
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is not in the "Compile HexCore Extensions" step of ${workflowRel} - add 'cd .../${extensionName} && npm ci --ignore-scripts && npm run ${packageScript}' to every build job`);
 		} else if (compileJobCount > 0 && count < compileJobCount) {
-			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is built in only ${count} of ${compileJobCount} build jobs in ${workflowRel} — it must be in every job's "Compile HexCore Extensions" loop (Windows + Linux)`);
+			errors.push(`${packagePath} has "main": "${main}" but ${extensionName} is built in only ${count} of ${compileJobCount} build jobs in ${workflowRel} - it must be in every job's "Compile HexCore Extensions" loop (Windows + Linux)`);
 		}
 	}
 }
@@ -248,6 +288,7 @@ verifyPipelineCapabilities();
 verifyBuildCoverage();
 verifyDebuggerWorkerPackaging();
 verifyRevenantPackaging();
+verifyPortableDistribution();
 verifyExtensionCompileCoverage();
 verifyManifestActivationEvents();
 

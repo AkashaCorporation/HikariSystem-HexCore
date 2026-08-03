@@ -5,9 +5,9 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
 | Field | Value |
 |-------|--------|
 | **Package** | `hexcore-disassembler` |
-| **Version** | **1.4.23** |
+| **Version** | **1.4.27** |
 | **Publisher** | hikarisystem |
-| **Product train** | HexCore **3.8.3** (Unreleased) |
+| **Product train** | HexCore **3.8.3 RC** |
 
 ## 1.4.23 highlights (exact ELF symbol-boundary normalization)
 

@@ -42,7 +42,9 @@ jobs:
           node-version: "22.21.1"
 
       - name: HexCore Preflight (Command/Build Coverage)
-        run: node scripts/verify-hexcore-preflight.cjs
+        run: |
+          node scripts/verify-hexcore-preflight.cjs
+          node scripts/generate-hexcore-engine-manifest.test.cjs
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -159,9 +161,13 @@ jobs:
           exit 0
 
       - name: Fetch HexCore Helix Prebuilds (Windows)
-        continue-on-error: true
         run: |
-          cd extensions/hexcore-helix && node ../../scripts/hexcore-native-install.js
+          cd extensions/hexcore-helix
+          node ../../scripts/hexcore-native-install.js
+          $nodeFile = "hexcore-helix.win32-x64-msvc.node"
+          if (-not (Test-Path $nodeFile)) {
+            throw "Required Helix prebuild is missing after install: $nodeFile"
+          }
 
       - name: Fetch HexCore Remill Semantics
         run: |
@@ -225,6 +231,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Generate packaged engine manifest
+        run: |
+          node scripts/generate-hexcore-engine-manifest.cjs `
+            --app-root ../VSCode-win32-x64/resources/app `
+            --output ../VSCode-win32-x64/resources/app/hexcore-engine-manifest.json
+
       - name: Create ZIP archive
         run: |
           Compress-Archive -Path "../VSCode-win32-x64/*" -DestinationPath "HexCore-win32-x64.zip"
@@ -257,7 +269,9 @@ jobs:
           node-version: "22.21.1"
 
       - name: HexCore Preflight (Command/Build Coverage)
-        run: node scripts/verify-hexcore-preflight.cjs
+        run: |
+          node scripts/verify-hexcore-preflight.cjs
+          node scripts/generate-hexcore-engine-manifest.test.cjs
 
       - name: Raise File Descriptor Limit
         run: ulimit -n 65535 || true
