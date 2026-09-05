@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-08-28",
+  "tools": [
+    {
+      "id": "mandiant.capa",
+      "version": "9.4.0",
+      "ref": "v9.4.0",
+      "commit": "7a79f799a70f052e8382cdbeaec8115daba14a5b",
+      "repository": "https://github.com/mandiant/capa.git",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "mandiant.capa-rules",
+      "version": "9.4.0",
+      "ref": "v9.4.0",
+      "commit": "2af9fbfc1c9b4634dbeb76b5d34fca9389fa7f80",
+      "repository": "https://github.com/mandiant/capa-rules.git",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "mandiant.flare-floss",
+      "version": "3.1.1",
+      "ref": "v3.1.1",
+      "commit": "3cd3ee6a74992d98e91463c2658d9af446504821",
+      "repository": "https://github.com/mandiant/flare-floss.git",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "nsa.ghidra",
+      "version": "12.1.2",
+      "ref": "Ghidra_12.1.2_build",
+      "commit": "c0f584bf229fffba61b36431f3ce30c0c3e4e682",
+      "repository": "https://github.com/NationalSecurityAgency/ghidra.git",
+      "license": "Apache-2.0 with bundled component notices"
+    }
+  ]
+}

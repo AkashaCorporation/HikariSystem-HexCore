@@ -48,6 +48,8 @@ struct LiftOptions {
 	bool   splitAtCalls    = true;    // Record external CALL targets
 	bool   optimizeIR      = true;    // Run LLVM passes (mem2reg, instcombine, simplifycfg, dce)
 	bool   inlineSemantics = false;   // Preserve named semantic calls by default for downstream decompilers
+	uint64_t entryAddress  = 0;       // Logical entry when buffer starts before the function
+	bool   reachableOnly   = false;   // Keep only instructions reachable from entryAddress
 
 	// FIX-052b: When true, the optimization pipeline (Phase 5.5) PRESERVES CFG
 	// topology — it drops SimplifyCFG (whose block merging collapses a
@@ -81,6 +83,14 @@ struct LiftResult {
 	std::string error;       // Error message if !success
 	uint64_t address;        // Start address
 	uint64_t bytesConsumed;  // How many input bytes were consumed
+
+	// Semantic coverage metadata. These counts are collected before LLVM
+	// optimization so DCE cannot make an incomplete lift appear complete.
+	uint64_t decodedInstructions = 0;
+	uint64_t liftedInstructions = 0;
+	uint64_t unsupportedInstructions = 0;
+	uint64_t decodeFailureInstructions = 0;
+	std::map<std::string, uint64_t> unsupportedOpcodes;
 
 	// Boundary detection metadata
 	bool truncated = false;            // True if limits were hit before all bytes consumed

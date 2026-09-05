@@ -16,3 +16,10 @@ tsconfig.json
 
 # Worker subprocess for ACG bypass — must be included
 !worker/**
+
+# Keep the addon, DLL and worker; exclude local diagnostic evidence.
+**/mlir_debug_dump.txt
+**/helix_dump_*.mlir
+**/*.node.*
+**/.hexcore-meta/**
+**/.hexcore_session.db*

@@ -8,6 +8,8 @@
 import * as assert from 'assert';
 import * as fc from 'fast-check';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
 
 /**
  * We need a minimal vscode mock because automationPipelineRunner.ts imports
@@ -48,13 +50,16 @@ interface PipelineCapabilityEntry {
 	headless: boolean;
 	defaultTimeoutMs: number;
 	validateOutput: boolean;
+	cancelCommand?: string;
 	reason?: string;
 	requiredExtension: string[];
+	supportedTargets?: string[];
 }
 
 suite('Property 19: Capability entry completeness', () => {
 
 	let headlessEntries: PipelineCapabilityEntry[];
+	let checkBinaryArchGate: (command: string, targetPath: string) => { skip: boolean; reason?: string };
 
 	suiteSetup(() => {
 		installVscodeMock();
@@ -63,6 +68,7 @@ suite('Property 19: Capability entry completeness', () => {
 		const runner = require(modulePath);
 		const allEntries: PipelineCapabilityEntry[] = runner.listCapabilities();
 		headlessEntries = allEntries.filter((e: PipelineCapabilityEntry) => e.headless === true);
+		checkBinaryArchGate = runner.checkBinaryArchGate;
 	});
 
 	/**
@@ -115,5 +121,41 @@ suite('Property 19: Capability entry completeness', () => {
 			),
 			{ numRuns: 100 }
 		);
+	});
+
+	test('Elixir capabilities and ELF gate expose the PE32+ boundary', () => {
+		const elixir = headlessEntries.find(entry => entry.command === 'hexcore.elixir.emulateHeadless');
+		assert.deepStrictEqual(elixir?.supportedTargets, ['PE32+ x86_64']);
+
+		const fixture = path.join(os.tmpdir(), `hexcore-elixir-gate-${process.pid}.elf`);
+		try {
+			const header = Buffer.alloc(0x80);
+			header.set([0x7f, 0x45, 0x4c, 0x46]);
+			fs.writeFileSync(fixture, header);
+			const gate = checkBinaryArchGate('hexcore.elixir.emulateHeadless', fixture);
+			assert.strictEqual(gate.skip, true);
+			assert.match(gate.reason ?? '', /PE32\+ x86_64 only/);
+		} finally {
+			fs.rmSync(fixture, { force: true });
+		}
+	});
+
+	test('live-memory commands declare the cross-extension ownership boundary', () => {
+		const disassemble = headlessEntries.find(entry => entry.command === 'hexcore.debug.disassembleMemoryHeadless');
+		const decompile = headlessEntries.find(entry => entry.command === 'hexcore.debug.decompileMemoryHeadless');
+		const lift = headlessEntries.find(entry => entry.command === 'hexcore.disasm.liftMemoryHeadless');
+		const bufferDisasm = headlessEntries.find(entry => entry.command === 'hexcore.disasm.disassembleBufferHeadless');
+		assert.deepStrictEqual(disassemble?.requiredExtension, [
+			'hikarisystem.hexcore-debugger',
+			'hikarisystem.hexcore-disassembler',
+		]);
+		assert.deepStrictEqual(decompile?.requiredExtension, [
+			'hikarisystem.hexcore-debugger',
+			'hikarisystem.hexcore-disassembler',
+		]);
+		assert.deepStrictEqual(lift?.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		assert.deepStrictEqual(bufferDisasm?.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		assert.strictEqual(decompile?.validateOutput, true);
+		assert.strictEqual(decompile?.cancelCommand, 'hexcore.helix.cancelActiveLiveDecompile');
 	});
 });

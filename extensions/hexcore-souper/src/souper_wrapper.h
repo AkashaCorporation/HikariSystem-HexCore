@@ -20,6 +20,8 @@
 #include <chrono>
 #include <map>
 
+inline constexpr char kSouperWrapperVersion[] = "0.2.2";
+
 // Forward declarations — LLVM
 namespace llvm {
 class LLVMContext;
@@ -35,7 +37,7 @@ class InstContext;
  * Options for the superoptimization pass.
  */
 struct OptimizeOptions {
-    /** Maximum candidates to extract per function (0 = unlimited). */
+    /** Maximum candidates to solve per function (0 = unlimited). */
     size_t maxCandidates = 1000;
 
     /** Z3 solver timeout in milliseconds per candidate. */
@@ -61,11 +63,23 @@ struct OptimizeResult {
     /** Error message (empty on success). */
     std::string error;
 
+    /** Non-fatal solver and optimization diagnostics. */
+    std::string diagnostics;
+
     /** Number of optimization candidates found. */
     uint32_t candidatesFound = 0;
 
-    /** Number of candidates successfully replaced. */
+    /** Number of candidates submitted to the solver. */
+    uint32_t candidatesAttempted = 0;
+
+    /** Number of candidates for which the solver inferred an RHS. */
+    uint32_t candidatesInferred = 0;
+
+    /** Number of candidates whose inferred RHS was applied to LLVM IR. */
     uint32_t candidatesReplaced = 0;
+
+    /** Number of solver calls that reached their configured timeout. */
+    uint32_t solverTimeouts = 0;
 
     /** Wall-clock time for the optimization pass (ms). */
     double optimizationTimeMs = 0.0;

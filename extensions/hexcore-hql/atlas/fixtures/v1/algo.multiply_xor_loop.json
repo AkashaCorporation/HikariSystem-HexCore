@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "algo.multiply_xor_loop",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:algo.multiply_xor_loop.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "function"
+      ],
+      "contentSha256": "7d6e5b1aea8b181e14d867186e76f8da90d7f9a53b674b5f0f78ded44b73b93a",
+      "ast": {
+        "k": "fn",
+        "at": "function",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "*=",
+                "a": "hash",
+                "b": 33
+              },
+              {
+                "k": "bin",
+                "op": "^=",
+                "a": "hash",
+                "b": "byte"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:algo.multiply_xor_loop.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "a549a0be354a69bf1d3034dee1cf3d1b35ce7104f6c9ca53d826898746827b61",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "*=",
+                "a": "hash",
+                "b": 33
+              },
+              {
+                "k": "bin",
+                "op": "+=",
+                "a": "hash",
+                "b": "byte"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:algo.multiply_xor_loop.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "5256a82214cd800e89a0156b77347b2acb1cc38a280324e38d0cb9d952cfe2c3",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^=",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "+=",
+                "a": "hash",
+                "b": 33
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

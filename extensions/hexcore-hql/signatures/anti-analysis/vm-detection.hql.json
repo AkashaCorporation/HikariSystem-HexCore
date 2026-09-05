@@ -1,43 +1,55 @@
 {
   "id": "anti-analysis.vm_detection",
+  "version": "1.0.0",
+  "namespace": "anti-analysis",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL rule library", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/anti-analysis.vm_detection.json" },
+  "limitations": ["Enumeration APIs alone are weak; registry and WMI branches require artifact strings."],
   "name": "Virtual Machine Detection",
   "description": "Detects calls to system enumeration functions (GetComputerName, RegOpenKeyEx) when the operand strings reference VMware, VBox, Virtual Box, or QEMU registry paths. Combined with cpuid hypervisor checks (handled by the instruction scanner), this is the strongest user-mode VM detection signal.",
   "severity": "high",
   "mitre": ["T1497.001"],
-  "queries": [
-    {
+  "evidenceLevel": "signal",
+  "condition": {
+    "any": [
+      { "query": {
       "target": "CCallExpr",
       "attributes": [
         { "field": "callee", "value": "re:^(GetComputerName[AW]?|GetSystemFirmwareTable)$" }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CCallExpr",
       "attributes": [
         { "field": "callee", "value": "re:^(RegOpenKeyEx[AW]?|RegQueryValueEx[AW]?)$" }
       ],
       "contains": [
         {
-          "target": "CStringLiteral",
+          "target": "CStringLitExpr",
           "attributes": [
             { "field": "value", "value": "re:(VMware|VirtualBox|VBOX|VEN_VMWARE|VEN_VBOX|Parallels|QEMU|Hyper-V)" }
           ]
         }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CCallExpr",
       "attributes": [
         { "field": "callee", "value": "wbemServices_ExecQuery" }
       ],
       "contains": [
         {
-          "target": "CStringLiteral",
+          "target": "CStringLitExpr",
           "attributes": [
             { "field": "value", "value": "re:Win32_(BIOS|ComputerSystem|VideoController)" }
           ]
         }
       ]
-    }
-  ]
+      } }
+    ]
+  }
 }

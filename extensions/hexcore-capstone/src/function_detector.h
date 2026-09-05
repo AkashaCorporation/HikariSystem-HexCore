@@ -11,14 +11,15 @@
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <utility>
 
 // ============================================================================
 // FunctionBoundary — result structure for detected functions
 // ============================================================================
 struct FunctionBoundary {
 	uint64_t start;
-	uint64_t end;             // address of last instruction
-	uint32_t size;            // bytes from start to end of last instruction
+	uint64_t endExclusive;    // first byte after the function
+	uint32_t size;            // endExclusive - start
 	uint32_t instructionCount;
 	std::string detectionMethod; // "prologue", "call_target", "symbol", "heuristic"
 	float confidence;            // 0.0 - 1.0
@@ -149,6 +150,8 @@ public:
 		std::set<uint64_t> prologueAddrs;
 		std::set<uint64_t> callTargets;
 		std::set<uint64_t> retAddrs;
+		std::vector<uint64_t> instructionAddrs;
+		std::vector<std::pair<uint64_t, uint64_t>> callEdges;
 
 		// For the iter API
 		cs_insn* insn = cs_malloc(handle);
@@ -168,6 +171,7 @@ public:
 		}
 
 		while (cs_disasm_iter(handle, &codePtr, &codeSize, &addr, insn)) {
+			instructionAddrs.push_back(insn->address);
 			// Check if this instruction starts a prologue sequence
 			size_t offset = static_cast<size_t>(insn->address - baseAddress_);
 			if (offset < code_.size()) {
@@ -195,6 +199,7 @@ public:
 					if (target != 0 && target >= baseAddress_ &&
 					    target < baseAddress_ + code_.size()) {
 						callTargets.insert(target);
+						callEdges.emplace_back(insn->address, target);
 					}
 				}
 
@@ -239,10 +244,10 @@ public:
 			FunctionBoundary fb;
 			fb.start = sorted[i];
 
-			// End is either next function start - 1 or end of buffer
+			// All internal ranges are half-open: [start, endExclusive).
 			uint64_t nextStart = (i + 1 < sorted.size()) ?
 				sorted[i + 1] : baseAddress_ + code_.size();
-			fb.end = nextStart - 1;
+			fb.endExclusive = nextStart;
 			fb.size = static_cast<uint32_t>(nextStart - sorted[i]);
 
 			// Detection method
@@ -269,13 +274,46 @@ public:
 			// Check if it's a thunk (very small function with just a jump)
 			fb.isThunk = (fb.size <= 16 && !fb.hasReturn);
 
-			fb.instructionCount = 0; // Would need a second pass to count accurately
+			// The linear detection scan already has exact decoded instruction
+			// addresses and direct call edges. Derive metadata from that evidence
+			// instead of publishing zero/empty as if analysis proved absence.
+			auto instructionBegin = std::lower_bound(
+				instructionAddrs.begin(), instructionAddrs.end(), fb.start);
+			auto instructionEnd = std::lower_bound(
+				instructionAddrs.begin(), instructionAddrs.end(), fb.endExclusive);
+			fb.instructionCount = static_cast<uint32_t>(
+				std::distance(instructionBegin, instructionEnd));
 
-			// Call relationships
-			// callTargets that fall within our range are our callees
-			// (simplified — full analysis would re-disassemble each function)
+			for (const auto& [source, target] : callEdges) {
+				if (source >= fb.start && source < fb.endExclusive)
+					fb.callTargets.push_back(target);
+			}
+			std::sort(fb.callTargets.begin(), fb.callTargets.end());
+			fb.callTargets.erase(
+				std::unique(fb.callTargets.begin(), fb.callTargets.end()),
+				fb.callTargets.end());
 
 			results_.push_back(std::move(fb));
+		}
+
+		// Build the reverse relation only for callees that survived candidate
+		// limits and have an exact entry match.
+		for (const auto& caller : results_) {
+			for (uint64_t target : caller.callTargets) {
+				auto callee = std::lower_bound(
+					results_.begin(), results_.end(), target,
+					[](const FunctionBoundary& boundary, uint64_t address) {
+						return boundary.start < address;
+					});
+				if (callee != results_.end() && callee->start == target)
+					callee->calledBy.push_back(caller.start);
+			}
+		}
+		for (auto& function : results_) {
+			std::sort(function.calledBy.begin(), function.calledBy.end());
+			function.calledBy.erase(
+				std::unique(function.calledBy.begin(), function.calledBy.end()),
+				function.calledBy.end());
 		}
 
 		cs_close(&handle);
@@ -290,7 +328,10 @@ public:
 			Napi::Object obj = Napi::Object::New(env);
 
 			obj.Set("start", Napi::BigInt::New(env, fb.start));
-			obj.Set("end", Napi::BigInt::New(env, fb.end));
+			obj.Set("endExclusive", Napi::BigInt::New(env, fb.endExclusive));
+			// Compatibility field for consumers predating the half-open contract.
+			// New code must use endExclusive; remove this after the 3.8.x bridge.
+			obj.Set("end", Napi::BigInt::New(env, fb.endExclusive - 1));
 			obj.Set("size", Napi::Number::New(env, fb.size));
 			obj.Set("instructionCount", Napi::Number::New(env, fb.instructionCount));
 			obj.Set("detectionMethod", Napi::String::New(env, fb.detectionMethod));

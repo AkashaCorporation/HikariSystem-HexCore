@@ -55,6 +55,14 @@ const TEB_SIZE = 0x2000;
 const PEB_ADDRESS = 0x7FFD0000n;
 const PEB_SIZE = 0x1000;
 
+// Protected-mode x86 resolves FS through a descriptor table. FS_BASE is an
+// x86-64 register and Unicorn intentionally ignores it in MODE_32.
+const X86_GDT_ADDRESS = 0x7FF90000n;
+const X86_GDT_SIZE = 0x1000;
+const X86_CODE_SELECTOR = 0x08; // GDT index 1
+const X86_DATA_SELECTOR = 0x10; // GDT index 2
+const X86_TEB_SELECTOR = 0x18;  // GDT index 3
+
 // v3.8.0-nightly — Synthetic module region for hash-resolved imports.
 // Malware that walks PEB->Ldr->InMemoryOrderModuleList then reads each
 // module's export table (Ashaka v5 "Mirage" pattern) needs to find
@@ -225,7 +233,7 @@ export class PELoader {
 		this.memoryManager.trackAllocation(SYNTHETIC_DLL_BASE, SYNTHETIC_DLL_REGION_SIZE, 5, 'synthetic-dlls');
 
 		// Map all sections into emulator memory
-		this.mapSections(fileBuffer, sections, imageBase, sizeOfImage);
+		this.mapSections(fileBuffer, sections, imageBase, sizeOfImage, is64Bit);
 
 		// Parse and resolve imports
 		const imports = this.resolveImports(fileBuffer, importDirRVA, importDirSize, sections, imageBase, is64Bit);
@@ -307,7 +315,13 @@ export class PELoader {
 	/**
 	 * Map all sections into emulator memory
 	 */
-	private mapSections(buf: Buffer, sections: PESection[], imageBase: bigint, sizeOfImage: number): void {
+	private mapSections(
+		buf: Buffer,
+		sections: PESection[],
+		imageBase: bigint,
+		sizeOfImage: number,
+		is64Bit: boolean
+	): void {
 		const pageSize = this.emulator.getPageSize();
 
 		// Map the full image range first (covers headers and gaps between sections)
@@ -324,6 +338,9 @@ export class PELoader {
 			[TLS_VECTOR_ADDRESS, BigInt(TLS_VECTOR_SIZE), 'TLS vector'],
 			[DEFAULT_STACK_LIMIT, DEFAULT_STACK_SIZE, 'default stack'],
 		];
+		if (!is64Bit) {
+			reserved.push([X86_GDT_ADDRESS, BigInt(X86_GDT_SIZE), 'x86 GDT']);
+		}
 		for (const [start, size, name] of reserved) {
 			if (addressRangesOverlap(imageBase, imageSize, start, size)) {
 				throw new Error(`PE image range collides with reserved emulator region: ${name}`);
@@ -766,6 +783,11 @@ export class PELoader {
 		this.emulator.mapMemoryRaw(PEB_ADDRESS, PEB_SIZE, 3); // RW
 		this.memoryManager.trackAllocation(PEB_ADDRESS, PEB_SIZE, 3, 'PEB');
 
+		if (!is64Bit) {
+			this.emulator.mapMemoryRaw(X86_GDT_ADDRESS, X86_GDT_SIZE, 3); // RW
+			this.memoryManager.trackAllocation(X86_GDT_ADDRESS, X86_GDT_SIZE, 3, 'x86-GDT');
+		}
+
 		const teb = Buffer.alloc(TEB_SIZE);
 		const peb = Buffer.alloc(PEB_SIZE);
 		const tlsVector = Buffer.alloc(TLS_VECTOR_SIZE);
@@ -913,6 +935,10 @@ export class PELoader {
 			peb.writeBigUInt64LE(lastAddr  + 0x20n,  ldrDataOffset + 0x38); // Blink
 		} else {
 			// NT_TIB32
+			// The first NT_TIB field is the head of the x86 SEH chain. A clean
+			// process starts with the end-of-chain sentinel, not a NULL pointer.
+			// CRT helpers such as _alloca_probe_16 read this through fs:[0].
+			teb.writeUInt32LE(0xFFFFFFFF, 0x00);
 			teb.writeUInt32LE(Number(DEFAULT_STACK_TOP & 0xFFFFFFFFn), 0x04);   // StackBase
 			teb.writeUInt32LE(Number(DEFAULT_STACK_LIMIT & 0xFFFFFFFFn), 0x08); // StackLimit
 
@@ -963,12 +989,28 @@ export class PELoader {
 					// GS_BASE register may not be directly writable on all Unicorn builds.
 				}
 			} else {
-				// FS base points to TEB on x86 Windows.
-				try {
-					this.emulator.setRegisterSync('fs_base', TEB_ADDRESS);
-				} catch {
-					// FS_BASE register may not be directly writable on all Unicorn builds.
-				}
+				const createDescriptor = (base: number, limit: number, access: number, flags: number): Buffer => {
+					const descriptor = Buffer.alloc(8);
+					descriptor.writeUInt16LE(limit & 0xFFFF, 0);
+					descriptor.writeUInt16LE(base & 0xFFFF, 2);
+					descriptor[4] = (base >>> 16) & 0xFF;
+					descriptor[5] = access;
+					descriptor[6] = ((limit >>> 16) & 0x0F) | flags;
+					descriptor[7] = (base >>> 24) & 0xFF;
+					return descriptor;
+				};
+				const gdt = Buffer.alloc(32);
+				createDescriptor(0, 0xFFFFF, 0x9A, 0xC0).copy(gdt, 8); // flat code
+				createDescriptor(0, 0xFFFFF, 0x92, 0xC0).copy(gdt, 16); // flat data/stack
+				createDescriptor(Number(TEB_ADDRESS & 0xFFFFFFFFn), TEB_SIZE - 1, 0x92, 0x40).copy(gdt, 24);
+				this.emulator.writeMemory(X86_GDT_ADDRESS, gdt);
+				this.emulator.configureX86Segments(
+					X86_GDT_ADDRESS,
+					gdt.length - 1,
+					X86_CODE_SELECTOR,
+					X86_DATA_SELECTOR,
+					X86_TEB_SELECTOR
+				);
 			}
 		}
 	}

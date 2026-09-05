@@ -1,0 +1,113 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "memory-safety.refcount_free_no_invalidate_binary",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate_binary.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "free-call",
+        "decrement"
+      ],
+      "contentSha256": "1ab02e2fe8f3cec4c6c7b544d7a9c7214847879705d86cb531153d2f2e3ffb1e",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "free-call",
+            "name": "ExFreePoolWithTag",
+            "args": [
+              {
+                "k": "field",
+                "name": "allocation",
+                "object": "object",
+                "arrow": true
+              },
+              "tag"
+            ]
+          },
+          {
+            "k": "bin",
+            "at": "decrement",
+            "op": "-=",
+            "a": {
+              "k": "field",
+              "name": "usageCount",
+              "object": "object",
+              "arrow": true
+            },
+            "b": 1
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate_binary.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "792622216c342b3b3774900d62ba13a1b400a46f7131c00f0ff1daf055ac09e9",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "ExFreePoolWithTag",
+            "args": [
+              {
+                "k": "field",
+                "name": "allocation",
+                "object": "object",
+                "arrow": true
+              },
+              "tag"
+            ]
+          },
+          {
+            "k": "bin",
+            "op": "+=",
+            "a": {
+              "k": "field",
+              "name": "usageCount",
+              "object": "object",
+              "arrow": true
+            },
+            "b": 1
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate_binary.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "86a637e180dfce066bbdb725519a71bd29e2d9a3a95ef1aedc808c32b0abb256",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "HeapFree",
+            "args": [
+              "allocation"
+            ]
+          },
+          {
+            "k": "bin",
+            "op": "-=",
+            "a": {
+              "k": "field",
+              "name": "refCount",
+              "object": "object",
+              "arrow": true
+            },
+            "b": 1
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -5,6 +5,7 @@
  *---------------------------------------------------------------------------------------------*/
 
 import * as path from 'path';
+import { fork } from 'child_process';
 import { Worker } from 'worker_threads';
 import { loadNativeModule } from 'hexcore-common';
 import type { ArchitectureConfig } from './capstoneWrapper';
@@ -12,6 +13,10 @@ import { mapCapstoneToHelix, isHelixArchSupported, HelixArch, type HelixArchValu
 import type { StructInfoJson } from './elfBtfLoader';
 import { applyStructFieldNames, type PostProcessResult } from './structFieldPostProcessor';
 import { cleanupHelixSource, type CleanupOptions } from './helixCleanupPostProcessor';
+import {
+	createHelixDebugTypeEnvelope,
+	type HelixAnalysisContext,
+} from './helixAnalysisContext';
 
 // ---------------------------------------------------------------------------
 // Interfaces do módulo nativo hexcore-helix
@@ -105,6 +110,10 @@ export interface HelixResultWithMetrics {
 /** Threshold em bytes acima do qual usamos worker thread */
 const ASYNC_THRESHOLD = 65536; // 64KB
 
+interface ActiveDecompile {
+	cancel(): void;
+}
+
 /**
  * Wrapper para o módulo nativo hexcore-helix.
  *
@@ -121,6 +130,7 @@ export class HelixWrapper {
 	private available: boolean = false;
 	private lastError?: string;
 	private modulePaths: string[] = [];
+	private readonly activeDecompiles = new Map<ActiveDecompile, string | undefined>();
 
 	constructor() {
 		this.tryLoad();
@@ -216,6 +226,8 @@ export class HelixWrapper {
 		variableRenames?: Array<{ oldName: string; newName: string }>;
 		/** v3.8.0: Struct field info from BTF/DWARF/PDB for field naming */
 		structInfo?: StructInfoJson;
+		/** Immutable Disassembler evidence captured for this exact function. */
+		semanticContext?: HelixAnalysisContext;
 		/** Function name for param type resolution against structInfo */
 		functionName?: string;
 		/**
@@ -249,6 +261,14 @@ export class HelixWrapper {
 		 * editor stays responsive.
 		 */
 		forceSync?: boolean;
+		/** Force a fresh worker even for small IR. Used by cancellable live-memory jobs. */
+		forceWorker?: boolean;
+		/** Force a separate OS process. Required when a native call must be killable safely. */
+		forceProcess?: boolean;
+		/** Hard deadline for an isolated worker. Ignored by the synchronous path. */
+		workerTimeoutMs?: number;
+		/** Optional cancellation group for scoped cancellation commands. */
+		workerGroup?: string;
 	}): Promise<HelixResult> {
 		if (!this.available || !this.module) {
 			return this.errorResult('hexcore-helix is not available');
@@ -287,14 +307,14 @@ export class HelixWrapper {
 		// v3.7.5 P3: Apply variable renames to the engine before decompilation.
 		// The C AST optimizer will walk CVarRefExpr nodes and substitute names.
 		const renames = options?.variableRenames;
-		if (renames && renames.length > 0) {
+		{
 			try {
 				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine) {
 					if (typeof engine.clearVariableRenames === 'function') {
 						engine.clearVariableRenames();
 					}
-					if (typeof engine.addVariableRename === 'function') {
+					if (renames && typeof engine.addVariableRename === 'function') {
 						for (const { oldName, newName } of renames) {
 							engine.addVariableRename(oldName, newName);
 						}
@@ -307,15 +327,17 @@ export class HelixWrapper {
 		// resolve jump tables.  Without this the pass auto-skips and every
 		// `switch (...)` in the source collapses to `goto default`.
 		const dataSections = options?.dataSections;
-		if (dataSections && dataSections.length > 0) {
+		{
 			try {
 				const engine = this.ensureEngine(mapping.helixArch);
-				if (engine && typeof engine.addDataSection === 'function') {
+				if (engine) {
 					if (typeof engine.clearDataSections === 'function') {
 						engine.clearDataSections();
 					}
-					for (const { vaStart, bytes } of dataSections) {
-						engine.addDataSection(vaStart, bytes);
+					if (dataSections && typeof engine.addDataSection === 'function') {
+						for (const { vaStart, bytes } of dataSections) {
+							engine.addDataSection(vaStart, bytes);
+						}
 					}
 				}
 			} catch { /* Native module too old — proceed without sections */ }
@@ -328,20 +350,20 @@ export class HelixWrapper {
 		// would discard an earlier table) and right before the decompile.  Full
 		// table or nothing (a partial table mis-gates valid calls to indirect).
 		const functionStarts = options?.functionStarts;
-		if (functionStarts && functionStarts.length > 0) {
+		{
 			try {
 				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine && typeof (engine as any).setFunctionStarts === 'function') {
-					(engine as any).setFunctionStarts(functionStarts);
+					(engine as any).setFunctionStarts(functionStarts ?? []);
 				}
 			} catch { /* Native module too old -- proceed without authoritative table */ }
 		}
 
 		// FIX-121: seed nominal debug types inside the MLIR pipeline. Always
 		// replace (including empty) because engine instances are reused.
-		const debugTypeInfoJson = options?.structInfo
-			? JSON.stringify(options.structInfo)
-			: '';
+		const debugTypeInfoJson = options?.semanticContext
+			? JSON.stringify(createHelixDebugTypeEnvelope(options.semanticContext, options.structInfo))
+			: options?.structInfo ? JSON.stringify(options.structInfo) : '';
 		try {
 			const engine = this.ensureEngine(mapping.helixArch);
 			if (engine && typeof engine.setDebugTypeInfoJson === 'function') {
@@ -354,8 +376,24 @@ export class HelixWrapper {
 		// same engine instance that received setUseCastLayer / dataSections /
 		// functionStarts actually runs decompileIr. Worker path still used for
 		// large interactive decompiles to keep the UI responsive.
-		const useWorker = irText.length > ASYNC_THRESHOLD && options?.forceSync !== true;
-		if (useWorker) {
+		const forcedModes = [options?.forceSync, options?.forceWorker, options?.forceProcess]
+			.filter(value => value === true).length;
+		if (forcedModes > 1) {
+			return this.errorResult('forceSync, forceWorker and forceProcess are mutually exclusive');
+		}
+		const useProcess = options?.forceProcess === true;
+		const useWorker = !useProcess && (options?.forceWorker === true
+			|| (irText.length > ASYNC_THRESHOLD && options?.forceSync !== true));
+		if (useProcess) {
+			result = await this.decompileIrInProcess(irText, mapping.helixArch, {
+				skipOptimization: skipOpt,
+				useCastLayer: castLayer,
+				variableRenames: renames,
+				functionStarts,
+				dataSections,
+				debugTypeInfoJson,
+			}, options?.workerTimeoutMs, options?.workerGroup);
+		} else if (useWorker) {
 			// v3.7.4: Pass engine flags to worker — worker creates its own engine
 			// so flags set on the main-thread engine don't propagate automatically
 			result = await this.decompileIrAsync(irText, mapping.helixArch, {
@@ -365,7 +403,7 @@ export class HelixWrapper {
 				functionStarts,
 				dataSections,
 				debugTypeInfoJson,
-			});
+			}, options?.workerTimeoutMs, options?.workerGroup);
 		} else {
 			if (irText.length > ASYNC_THRESHOLD) {
 				console.log(
@@ -406,7 +444,7 @@ export class HelixWrapper {
 			} catch { /* ignore */ }
 		}
 
-		if (!useWorker && debugTypeInfoJson) {
+		if (!useWorker && !useProcess && debugTypeInfoJson) {
 			try {
 				const engine = this.ensureEngine(mapping.helixArch);
 				if (engine && typeof engine.setDebugTypeInfoJson === 'function') {
@@ -542,6 +580,8 @@ export class HelixWrapper {
 		irText: string,
 		arch: HelixArchValue,
 		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[]; dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>; debugTypeInfoJson?: string },
+		timeoutMs?: number,
+		workerGroup?: string,
 	): Promise<HelixResult> {
 		return new Promise<HelixResult>((resolve) => {
 			const workerCode = `
@@ -624,13 +664,25 @@ export class HelixWrapper {
 					debugTypeInfoJson: flags?.debugTypeInfoJson ?? '',
 				},
 			});
+			const active: ActiveDecompile = { cancel: () => { void worker.terminate(); } };
+			this.activeDecompiles.set(active, workerGroup);
 
 			let settled = false;
+			let timeoutHandle: NodeJS.Timeout | undefined;
 			const settle = (r: HelixResult): void => {
 				if (settled) { return; }
 				settled = true;
+				if (timeoutHandle) { clearTimeout(timeoutHandle); }
+				this.activeDecompiles.delete(active);
 				resolve(r);
 			};
+			if (timeoutMs !== undefined) {
+				const boundedTimeout = Math.max(1, Math.min(Math.trunc(timeoutMs), 2_147_483_647));
+				timeoutHandle = setTimeout(() => {
+					settle(this.errorResult(`Helix worker timed out after ${boundedTimeout}ms`));
+					void worker.terminate();
+				}, boundedTimeout);
+			}
 
 			worker.on('message', (msg: { result?: HelixDecompileResult; error?: string }) => {
 				if (msg.error) {
@@ -653,6 +705,98 @@ export class HelixWrapper {
 				settle(this.errorResult(`Helix worker exited without returning a result (code ${code})`));
 			});
 		});
+	}
+
+	/**
+	 * Runs Helix in a separate process. Killing a worker_thread while it is inside
+	 * LLVM/MLIR native code can terminate the whole Extension Host on Windows.
+	 */
+	private decompileIrInProcess(
+		irText: string,
+		arch: HelixArchValue,
+		flags?: { skipOptimization?: boolean; useCastLayer?: boolean; variableRenames?: Array<{ oldName: string; newName: string }>; functionStarts?: number[]; dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>; debugTypeInfoJson?: string },
+		timeoutMs?: number,
+		workerGroup?: string,
+	): Promise<HelixResult> {
+		return new Promise<HelixResult>((resolve) => {
+			const child = fork(path.join(__dirname, 'helixDecompileChild.js'), [], {
+				env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+				// The Dev Extension Host carries --inspect=<port>. Inheriting it makes
+				// every child contend for the host's inspector and can abort Electron.
+				execArgv: [],
+				serialization: 'advanced',
+				stdio: ['ignore', 'ignore', 'pipe', 'ipc'],
+			});
+			const active: ActiveDecompile = { cancel: () => { child.kill(); } };
+			this.activeDecompiles.set(active, workerGroup);
+
+			let settled = false;
+			let timeoutHandle: NodeJS.Timeout | undefined;
+			let stderr = '';
+			child.stderr?.on('data', chunk => {
+				stderr = (stderr + String(chunk)).slice(-8192);
+			});
+			const settle = (result: HelixResult, terminate = false): void => {
+				if (settled) { return; }
+				settled = true;
+				if (timeoutHandle) { clearTimeout(timeoutHandle); }
+				this.activeDecompiles.delete(active);
+				resolve(result);
+				if (terminate) { child.kill(); }
+			};
+
+			if (timeoutMs !== undefined) {
+				const boundedTimeout = Math.max(1, Math.min(Math.trunc(timeoutMs), 2_147_483_647));
+				timeoutHandle = setTimeout(() => {
+					settle(this.errorResult(`Helix process timed out after ${boundedTimeout}ms`), true);
+				}, boundedTimeout);
+			}
+
+			child.on('message', (message: { result?: HelixDecompileResult; error?: string }) => {
+				if (message.error) {
+					settle(this.errorResult(`Helix process error: ${message.error}`), true);
+				} else if (message.result) {
+					settle(this.wrapResult(message.result), true);
+				} else {
+					settle(this.errorResult('Helix process returned empty response'), true);
+				}
+			});
+			child.on('error', error => {
+				settle(this.errorResult(`Helix process launch error: ${error.message}`), true);
+			});
+			child.on('exit', code => {
+				const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
+				settle(this.errorResult(`Helix process exited without returning a result (code ${code})${detail}`));
+			});
+
+			child.send({
+				irText,
+				arch,
+				modulePaths: this.modulePaths,
+				skipOptimization: flags?.skipOptimization ?? false,
+				useCastLayer: flags?.useCastLayer ?? false,
+				variableRenames: flags?.variableRenames ?? [],
+				functionStarts: flags?.functionStarts ?? [],
+				dataSections: flags?.dataSections ?? [],
+				debugTypeInfoJson: flags?.debugTypeInfoJson ?? '',
+			}, error => {
+				if (error) {
+					settle(this.errorResult(`Helix process IPC error: ${error.message}`), true);
+				}
+			});
+		});
+	}
+
+	/** Cancels every isolated decompile currently owned by this wrapper. */
+	cancelActiveDecompiles(workerGroup?: string): number {
+		const workers = [...this.activeDecompiles.entries()]
+			.filter(([, group]) => workerGroup === undefined || group === workerGroup)
+			.map(([worker]) => worker);
+		for (const worker of workers) {
+			this.activeDecompiles.delete(worker);
+			worker.cancel();
+		}
+		return workers.length;
 	}
 
 	private wrapResult(raw: HelixDecompileResult): HelixResult {
@@ -692,6 +836,7 @@ export class HelixWrapper {
 	 * Idempotente — pode ser chamado múltiplas vezes sem erro.
 	 */
 	dispose(): void {
+		this.cancelActiveDecompiles();
 		if (this.engine && !this.engine.isDisposed) {
 			this.engine.dispose();
 			this.engine = undefined;

@@ -334,5 +334,62 @@ console.log('Testing async disassembly (disasmAsync - basic)...');
 	csSyncSyntax.close();
 	csAsyncSyntax.close();
 
+	// =====================================================================
+	// Function boundary contract: every range is [start, endExclusive)
+	// =====================================================================
+	console.log('Testing half-open function boundary contract...');
+	const csBoundaries = new Capstone(ARCH.X86, MODE.MODE_64);
+	const boundaryBase = 0x140001200n;
+	const boundaryBytes = Buffer.alloc(0x20, 0x90);
+	// Two one-byte `ret` functions at independently recognized prologues.
+	boundaryBytes.set([0x55, 0xC3], 0x00);
+	boundaryBytes.set([0x55, 0xC3], 0x10);
+	try {
+		const boundaries = await csBoundaries.detectFunctions(boundaryBytes, boundaryBase);
+		const first = boundaries.find(boundary => boundary.start === boundaryBase);
+		assert.ok(first, 'first prologue should produce a function boundary');
+		assert.strictEqual(first.endExclusive, boundaryBase + 0x10n,
+			'endExclusive must be the next function start');
+		assert.strictEqual(first.end, boundaryBase + 0x0Fn,
+			'legacy end remains inclusive during the compatibility bridge');
+		assert.strictEqual(first.size, 0x10, 'size must equal endExclusive - start');
+		console.log('  [PASS] native boundaries use a half-open endpoint\n');
+	} catch (e) {
+		console.error(`  [FAIL] half-open function boundary contract failed: ${e.message}`);
+		process.exit(1);
+	} finally {
+		csBoundaries.close();
+	}
+
+	console.log('Testing native function metadata...');
+	const csMetadata = new Capstone(ARCH.X86, MODE.MODE_64);
+	const metadataBase = 0x401000n;
+	const metadataBytes = Buffer.from([
+		0x55,                         // push rbp (caller prologue)
+		0x48, 0x89, 0xe5,             // mov rbp, rsp
+		0xe8, 0x07, 0x00, 0x00, 0x00, // call 0x401010
+		0xc3,                         // ret
+		0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+		0xc3,                         // callee ret at 0x401010
+	]);
+	try {
+		const functions = await csMetadata.detectFunctions(metadataBytes, metadataBase);
+		const caller = functions.find(boundary => boundary.start === metadataBase);
+		const callee = functions.find(boundary => boundary.start === metadataBase + 0x10n);
+		assert.ok(caller, 'caller prologue must be detected');
+		assert.ok(callee, 'direct-call target must be detected');
+		assert.strictEqual(caller.instructionCount, 10,
+			'instructionCount must reflect the decoded half-open range');
+		assert.strictEqual(callee.instructionCount, 1);
+		assert.deepStrictEqual(caller.callTargets, [metadataBase + 0x10n]);
+		assert.deepStrictEqual(callee.calledBy, [metadataBase]);
+		console.log('  [PASS] instruction and call relationship metadata is populated\n');
+	} catch (e) {
+		console.error(`  [FAIL] native function metadata failed: ${e.message}`);
+		process.exit(1);
+	} finally {
+		csMetadata.close();
+	}
+
 	console.log('=== All tests passed! ===');
 })();

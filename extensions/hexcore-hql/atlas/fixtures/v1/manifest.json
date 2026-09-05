@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "hql-atlas-core-v1",
+  "expectedSignatureCount": 12,
+  "expectedCaseCount": 60,
+  "fixtureFiles": [
+    {
+      "path": "algo.multiply_xor_loop.json",
+      "canonicalFileSha256": "6f6a9f34408c570a625b6a745a8d51683b41ecab572dedc4045bafecac402716"
+    },
+    {
+      "path": "anti-analysis.api_hash_lookup.json",
+      "canonicalFileSha256": "799b69c2c1825f5137f079f484cfb4d5a1ca0c262797db7e329b251f6cf1dbb3"
+    },
+    {
+      "path": "anti-analysis.peb_access.json",
+      "canonicalFileSha256": "e0cd8b761fdc614361a7092babd7feb2164de575f4a9158ff40a9a72c6f27e8c"
+    },
+    {
+      "path": "anti-analysis.timing_check.json",
+      "canonicalFileSha256": "727dea07088334f5ecb68b58e56537da578016ba3e4863b0b199a5876a388558"
+    },
+    {
+      "path": "anti-analysis.vm_detection.json",
+      "canonicalFileSha256": "c45406883fe7d14f9ebc4688c9325e8799340778bfbebfabdeb9d871784e4ed8"
+    },
+    {
+      "path": "crypto.crc32.json",
+      "canonicalFileSha256": "72128a18b322a0f748b29660c25308b0f207c851c9d5ffbf56734a7134538b64"
+    },
+    {
+      "path": "crypto.fnv1.json",
+      "canonicalFileSha256": "9c03dda7dd67ad23d443893333476e391671ee8e7b7be49988bb1d10c0ac56c1"
+    },
+    {
+      "path": "crypto.fnv1_64.json",
+      "canonicalFileSha256": "d82237b4ebb53127a276c208310d857a2a2da20300eff43961921e37ea750c53"
+    },
+    {
+      "path": "crypto.xor_present.json",
+      "canonicalFileSha256": "582a3c1ca1cb120acc94667b1063584caa8290ba06c1de60d18f3e7804555fb9"
+    },
+    {
+      "path": "memory-safety.refcount_free_no_invalidate.json",
+      "canonicalFileSha256": "0fcbb8533a9706fe3579a5862b04e0be532996ce0d1771be1fa3b1d98ba1d15e"
+    },
+    {
+      "path": "memory-safety.refcount_free_no_invalidate_binary.json",
+      "canonicalFileSha256": "1652d1d5c5b9a1d8d74aa955970d89a2b4fbdea33fd16838ce99dfa34ac471c7"
+    },
+    {
+      "path": "struct.guarded_loop.json",
+      "canonicalFileSha256": "73adb88782965b218c8ae1b769c6dbfb83e0dab7dcab6a65bddee454e141b23f"
+    }
+  ]
+}

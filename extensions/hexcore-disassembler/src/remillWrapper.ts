@@ -6,6 +6,7 @@
 import * as path from 'path';
 import { loadNativeModule } from 'hexcore-common';
 import type { ArchitectureConfig } from './capstoneWrapper';
+import { CapstoneWrapper } from './capstoneWrapper';
 import { mapCapstoneToRemill, isArchSupported } from './archMapper';
 import { deflattenCallfuscation } from './pathfinder';
 
@@ -51,6 +52,10 @@ export interface RemillLiftOptions {
 	optimizeIR?: boolean;
 	/** Inline semantic helper functions */
 	inlineSemantics?: boolean;
+	/** Logical function entry when the supplied buffer begins at an earlier VA. */
+	entryAddress?: number;
+	/** Emit only instructions reachable from entryAddress after decoding the buffer. */
+	reachableOnly?: boolean;
 	/** Extra BB entry points from external analysis (jump tables, .pdata, symtab) */
 	additionalLeaders?: number[];
 	/** Format-specific lifting mode */
@@ -58,10 +63,9 @@ export interface RemillLiftOptions {
 	/** PE64: function end addresses from .pdata */
 	knownFunctionEnds?: number[];
 	/**
-	 * EXPERIMENTAL — opt-in callfuscation deflattening (call-as-jmp rewrite) before
-	 * lifting. Default off. The current implementation is a raw byte scan with false
-	 * positives; do not enable in production until it is instruction-aware. See
-	 * deflattenCallfuscation() in pathfinder.ts and HELIX_AGENT_BRIEFING.md.
+	 * Instruction-aware callfuscation deflattening (call-as-jmp rewrite) before
+	 * lifting. The wrapper decodes real instruction boundaries with Capstone and
+	 * applies a ratio gate before rewriting.
 	 */
 	deflattenCallfuscation?: boolean;
 	/**
@@ -80,14 +84,43 @@ export interface RemillLiftOptions {
 export interface LiftResult {
 	/** Se o lifting foi bem-sucedido */
 	success: boolean;
+	/** Semantic status is independent from transport/file-write success. */
+	status?: 'ok' | 'partial';
 	/** Texto LLVM IR gerado */
 	ir: string;
 	/** Mensagem de erro (vazia se sucesso) */
 	error: string;
 	/** Endereço base usado no lifting */
 	address: number;
+	/** Endereço originalmente solicitado antes de backtrack/preamble handling. */
+	requestedAddress?: number;
+	/** Transformações explícitas aplicadas antes de entregar bytes ao lifter. */
+	liftTransformations?: Array<{
+		kind: 'cet-preamble' | 'ftrace-preamble';
+		address: number;
+		bytes: number;
+	}>;
 	/** Quantidade de bytes consumidos pelo lifter */
 	bytesConsumed: number;
+	decodedInstructions?: number;
+	liftedInstructions?: number;
+	unsupportedInstructions?: number;
+	decodeFailureInstructions?: number;
+	semanticCoverage?: number;
+	/** Native limit state; false means maxInstructions/maxBlocks/maxBytes were not exhausted. */
+	truncated?: boolean;
+	nextAddress?: number;
+	truncationReason?: 'max_instructions' | 'max_blocks' | 'max_bytes';
+	/** Bytes decoded relative to the explicit lift window. */
+	requestedWindowCoverage?: number;
+	/** Bytes decoded relative to an authoritative whole-function extent. */
+	decodedByteCoverage?: number;
+	functionBoundaryKnown?: boolean;
+	unsupportedOpcodes?: Record<string, number>;
+	semanticWarning?: string;
+	/** Pipeline-level metadata: caller intentionally requested a bounded sample. */
+	scopeLimited?: boolean;
+	requestedInstructionLimit?: number;
 	/** External call targets discovered during lifting (Phase 3) */
 	callTargets?: number[];
 	/** Implicit parameters (registers read before written) */
@@ -255,22 +288,32 @@ export class RemillWrapper {
 		}
 
 		try {
-			// v3.8.1: Callfuscation deflattening (call-as-jmp) hook.
-			// NOTE: auto-application is DISABLED. deflattenCallfuscation() is currently
-			// a raw byte scan that flags some 0xE8 operand/data bytes as `call`s (~888
-			// false positives measured on the Callfuscated sample: 4102 byte-scan hits
-			// vs 3214 real calls), which would CORRUPT the lift of exactly the
-			// callfuscated binaries it targets. It must be made instruction-aware
-			// (decode the chain, patch only genuine call opcodes — see
-			// make_deflat_aware.py / HELIX_AGENT_BRIEFING.md) before being re-enabled,
-			// and the lifter must also follow the resulting jmp chain as one
-			// multi-block function (it currently single-traces and stops at the first
-			// jmp). Opt in explicitly only for experiments:
+			// Callfuscation deflattening is gated by Capstone instruction boundaries.
+			// Raw byte scanning is not safe here because 0xE8 also occurs in operands/data.
 			if ((arch === 'x64' || arch === 'x86') && liftOptions?.deflattenCallfuscation === true) {
-				const df = deflattenCallfuscation(Buffer.from(buffer), address);
+				const source = Buffer.from(buffer);
+				const decoder = new CapstoneWrapper();
+				let df;
+				try {
+					await decoder.initialize(arch);
+					const decoded = await decoder.disassemble(
+						source,
+						address,
+						Math.min(liftOptions.maxInstructions ?? 256_000, 256_000),
+					);
+					const calls = decoded.filter(instruction =>
+						instruction.isCall && instruction.size === 5 && instruction.bytes[0] === 0xe8);
+					const instructionOffsets = new Set(calls.map(instruction => instruction.address - address));
+					df = deflattenCallfuscation(source, address, {
+						instructionOffsets,
+						decodedCallCount: calls.length,
+					});
+				} finally {
+					decoder.dispose();
+				}
 				if (df.applied) {
 					buffer = df.patched;
-					console.log(`[remill] (experimental) deflattened callfuscation: ${df.linkCount} call->jmp, ` +
+					console.log(`[remill] instruction-aware callfuscation deflattening: ${df.linkCount} call->jmp, ` +
 						`${df.popsNeutralized} pop discards neutralized`);
 					// FIX-052b: the deflattened body is a long jmp-chain whose recovered
 					// multi-block CFG must survive to Helix. SimplifyCFG would merge the
@@ -278,7 +321,14 @@ export class RemillWrapper {
 					// native CFG-preserving optimization pipeline for THIS lift only.
 					// Normal (non-deflattened) lifts never set this and keep the full
 					// SimplifyCFG + SROA(ModifyCFG) cleanup.
-					liftOptions = { ...liftOptions, preserveCfgTopology: true };
+					liftOptions = {
+						...liftOptions,
+						preserveCfgTopology: true,
+						additionalLeaders: [...new Set([
+							...(liftOptions.additionalLeaders ?? []),
+							...df.targetAddresses,
+						])],
+					};
 				}
 			}
 
@@ -365,6 +415,8 @@ export class RemillWrapper {
 		if (opts.splitAtCalls !== undefined) { native.splitAtCalls = opts.splitAtCalls; }
 		if (opts.optimizeIR !== undefined) { native.optimizeIR = opts.optimizeIR; }
 		if (opts.inlineSemantics !== undefined) { native.inlineSemantics = opts.inlineSemantics; }
+		if (opts.entryAddress !== undefined) { native.entryAddress = opts.entryAddress; }
+		if (opts.reachableOnly !== undefined) { native.reachableOnly = opts.reachableOnly; }
 		if (opts.preserveCfgTopology !== undefined) { native.preserveCfgTopology = opts.preserveCfgTopology; }
 		if (opts.additionalLeaders?.length) { native.additionalLeaders = opts.additionalLeaders; }
 		if (opts.liftMode) { native.liftMode = opts.liftMode; }

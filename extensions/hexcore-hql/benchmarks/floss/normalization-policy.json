@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "hexcore.floss-evidence-projection.v1",
+  "tool": "mandiant.flare-floss",
+  "volatileRawPointers": [
+    "/metadata/file_path",
+    "/metadata/runtime"
+  ],
+  "identityPointers": [
+    "/metadata/version",
+    "/metadata/imagebase",
+    "/metadata/min_length",
+    "/strings/static_strings",
+    "/strings/language_strings",
+    "/strings/language_strings_missed",
+    "/strings/stack_strings",
+    "/strings/tight_strings",
+    "/strings/decoded_strings"
+  ],
+  "nonEvidencePointers": [
+    "/analysis",
+    "/metadata/language",
+    "/metadata/language_selected",
+    "/metadata/language_version"
+  ],
+  "reason": "FLOSS is imported as string evidence only. Runtime/path fields are volatile, while analysis summaries and language guesses are retained in raw output but are not string facts."
+}

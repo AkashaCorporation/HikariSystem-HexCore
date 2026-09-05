@@ -2,7 +2,7 @@
 	"name": "hexcore-report-composer",
 	"displayName": "HexCore Report Composer",
 	"description": "Aggregates multiple analysis reports into a unified Markdown report",
-	"version": "1.0.1",
+	"version": "1.0.14",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

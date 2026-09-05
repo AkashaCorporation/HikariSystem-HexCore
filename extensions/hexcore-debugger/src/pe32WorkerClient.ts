@@ -323,6 +323,10 @@ export class Pe32WorkerClient {
 		await this.call('regWrite', regId, value);
 	}
 
+	async regWriteMmr(regId: number, selector: number, base: bigint, limit: number, flags: number): Promise<void> {
+		await this.call('regWriteMmr', regId, selector, base, limit, flags);
+	}
+
 	async emuStart(begin: bigint, until: bigint, timeout?: number, count?: number): Promise<void> {
 		await this.call('emuStart', begin, until, timeout, count);
 	}

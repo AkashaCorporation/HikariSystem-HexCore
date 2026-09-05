@@ -652,7 +652,10 @@ export declare class Unicorn {
      * @param regId - Register ID
      * @param value - Value to write
      */
-    regWrite(regId: number, value: bigint | number): void;
+    regWrite(regId: number, value: bigint | number | Buffer): void;
+
+    /** Write an x86 GDTR/IDTR/LDTR/TR value using Unicorn's uc_x86_mmr layout. */
+    regWriteMmr(regId: number, selector: number, base: bigint | number, limit: number, flags: number): void;
 
     /**
      * Read multiple registers at once

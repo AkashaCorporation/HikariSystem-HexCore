@@ -8,3 +8,10 @@ README.md
 # NAPI-RS binaries: force include (overrides .gitignore)
 # These are downloaded by hexcore-native-install.js at build time
 !*.node
+
+# Local compiler diagnostics and native backups are never runtime payloads.
+**/mlir_debug_dump.txt
+**/helix_dump_*.mlir
+**/*.node.*
+**/.hexcore-meta/**
+**/.hexcore_session.db*

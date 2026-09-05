@@ -4,6 +4,7 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { assertWithinWorkspaceOrHome } from 'hexcore-common';
@@ -14,6 +15,87 @@ import { DebugEngine } from './debugEngine';
 import { TraceTreeProvider } from './traceView';
 import { SessionLock, type SessionLockHandle } from './sessionLock';
 import type { ArchitectureType } from './unicornWrapper';
+import {
+	classifyHeadlessOutcome,
+	isInvalidInstructionError,
+	parseTerminalAddresses,
+	type UnsupportedInstructionEvidence,
+} from './headlessOutcome';
+import type { TraceCaptureOptions } from './traceManager';
+import type { PrngMode } from './prng';
+import { buildEmulationArtifactSummary, serializeApiTrace } from './emulationArtifact';
+import { resolveLiveDecompileWorkerBudget } from './liveDecompileBudget';
+import { buildRuntimeObservationArtifact } from './runtimeObservation';
+
+interface HeadlessPrngOptions {
+	prngMode?: PrngMode;
+	prngSeed?: number;
+}
+
+async function captureUnsupportedInstruction(
+	engine: DebugEngine,
+	error: string | undefined,
+	address: bigint | undefined,
+): Promise<UnsupportedInstructionEvidence | undefined> {
+	if (!isInvalidInstructionError(error) || address === undefined) { return undefined; }
+	const formattedAddress = `0x${address.toString(16)}`;
+	try {
+		const disassembly = await engine.dumpAndDisassemble(formattedAddress, 15);
+		const instruction = disassembly.instructions[0];
+		if (!instruction) { return { address: formattedAddress }; }
+		const bytes = Buffer.isBuffer(instruction.bytes)
+			? instruction.bytes.toString('hex')
+			: Array.from(instruction.bytes as ArrayLike<number>)
+				.map(byte => byte.toString(16).padStart(2, '0')).join('');
+		return {
+			address: `0x${instruction.address.toString(16)}`,
+			mnemonic: instruction.mnemonic,
+			opStr: instruction.opStr,
+			bytes,
+		};
+	} catch (diagnosticError) {
+		console.warn(`[hexcore-debugger] Unable to decode unsupported instruction at ${formattedAddress}: ${String(diagnosticError)}`);
+		return { address: formattedAddress };
+	}
+}
+
+export function parseHeadlessPrngOptions(arg?: Record<string, unknown>): HeadlessPrngOptions {
+	const rawMode = arg?.prngMode;
+	if (rawMode !== undefined && rawMode !== 'glibc' && rawMode !== 'msvcrt' && rawMode !== 'stub') {
+		throw new Error('prngMode must be one of "glibc", "msvcrt", or "stub".');
+	}
+	const rawSeed = arg?.prngSeed;
+	if (rawSeed !== undefined && (!Number.isSafeInteger(rawSeed) || (rawSeed as number) < 0 || (rawSeed as number) > 0xFFFFFFFF)) {
+		throw new Error('prngSeed must be an integer from 0 to 4294967295.');
+	}
+	if (rawSeed !== undefined && (rawMode === undefined || rawMode === 'stub')) {
+		throw new Error('prngSeed requires prngMode "glibc" or "msvcrt".');
+	}
+	return { prngMode: rawMode as PrngMode | undefined, prngSeed: rawSeed as number | undefined };
+}
+
+export function parseTraceCaptureOptions(arg?: Record<string, unknown>): TraceCaptureOptions | undefined {
+	const raw = arg?.trace;
+	if (raw === undefined) { return undefined; }
+	if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+		throw new Error('trace must be an object with maxEntries, sampleEvery, and groupRepeated options.');
+	}
+	const value = raw as Record<string, unknown>;
+	if (value.maxEntries !== undefined && (!Number.isInteger(value.maxEntries) || (value.maxEntries as number) < 1 || (value.maxEntries as number) > 1_000_000)) {
+		throw new Error('trace.maxEntries must be an integer from 1 to 1000000.');
+	}
+	if (value.sampleEvery !== undefined && (!Number.isInteger(value.sampleEvery) || (value.sampleEvery as number) < 1 || (value.sampleEvery as number) > 1_000_000)) {
+		throw new Error('trace.sampleEvery must be an integer from 1 to 1000000.');
+	}
+	if (value.groupRepeated !== undefined && typeof value.groupRepeated !== 'boolean') {
+		throw new Error('trace.groupRepeated must be boolean.');
+	}
+	return {
+		maxEntries: value.maxEntries as number | undefined,
+		sampleEvery: value.sampleEvery as number | undefined,
+		groupRepeated: value.groupRepeated as boolean | undefined,
+	};
+}
 
 // ─── Project Pythia Oracle Hook — v3.9.0-preview.oracle ───────────────────
 // Inline type for the `oracle` argument on emulateFullHeadless. Matches
@@ -494,6 +576,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			const arch = typeof arg?.arch === 'string' ? arg.arch as ArchitectureType : undefined;
 			const stdin = typeof arg?.stdin === 'string' ? arg.stdin : undefined;
 			const permissiveMemoryMapping = arg?.permissiveMemoryMapping === true;
+			const { prngMode, prngSeed } = parseHeadlessPrngOptions(arg);
+			const trace = parseTraceCaptureOptions(arg);
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
@@ -512,7 +596,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const lockHandle = await sessionLock.acquire();
 
 			try {
-				await engine.startEmulation(filePath, arch, { permissiveMemoryMapping });
+				await engine.startEmulation(filePath, arch, { permissiveMemoryMapping, prngMode, prngSeed, trace });
 			} catch (error) {
 				// startEmulation threw before a live session exists — release the
 				// lock so the next emulate is not blocked forever.
@@ -534,7 +618,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				architecture: engine.getArchitecture(),
 				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),
+				sessionActive: engine.isEmulationSessionActive(),
+				elfRelocations: engine.getELFInfo()?.relocations,
 				permissiveMemoryMapping,
+				prng: { mode: prngMode ?? 'stub', seed: prngSeed ?? null },
+				trace: engine.getTraceManager().exportJSON().configuration,
 				entryPoint: state ? '0x' + state.currentAddress.toString(16) : '0x0',
 				memoryRegions: regions.map(r => ({
 					address: '0x' + r.address.toString(16),
@@ -565,6 +653,10 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 			const maxSteps = typeof arg?.maxSteps === 'number' ? arg.maxSteps : 0;
+			const terminalAddresses = parseTerminalAddresses(arg?.terminalAddresses);
+			const terminalKind = typeof arg?.terminalKind === 'string' && arg.terminalKind.trim()
+				? arg.terminalKind.trim().slice(0, 64)
+				: undefined;
 
 			const stateBefore = engine.getEmulationState();
 			if (!stateBefore) {
@@ -574,42 +666,73 @@ export function activate(context: vscode.ExtensionContext): void {
 			const instrBefore = stateBefore.instructionsExecuted;
 			let crashed = false;
 			let crashError = '';
+			const existingBreakpoints = new Set(engine.getEmulationBreakpoints());
+			const temporaryTerminalBreakpoints = terminalAddresses.filter(address => !existingBreakpoints.has(address));
+			for (const address of temporaryTerminalBreakpoints) engine.emulationSetBreakpoint(address);
 
-			if (maxSteps > 0) {
-				// Counted mode: single emuStart call with count=N (avoids hook add/delete churn)
-				try {
+			try {
+				if (maxSteps > 0) {
+					// Counted mode: single emuStart call with count=N (avoids hook add/delete churn)
 					await engine.emulationRunCounted(maxSteps);
-				} catch (error: any) {
-					crashed = true;
-					crashError = error.message || String(error);
-				}
-			} else {
-				// Full continue (uses continueElfSafely internally)
-				try {
+				} else {
+					// Full continue (uses continueElfSafely internally)
 					await engine.emulationContinue();
-				} catch (error: any) {
-					crashed = true;
-					crashError = error.message || String(error);
 				}
+			} catch (error: any) {
+				crashed = true;
+				crashError = error.message || String(error);
+			} finally {
+				for (const address of temporaryTerminalBreakpoints) engine.emulationRemoveBreakpoint(address);
 			}
 
 			const stateAfter = engine.getEmulationState();
 			const registers = await engine.getFullRegistersAsync();
-			const apiCalls = engine.getApiCallLog();
+			const traceExport = engine.getTraceManager().exportJSON();
+			const serializedTrace = serializeApiTrace(traceExport);
 			const stdout = engine.getStdoutBuffer();
+			const regions = await engine.getMemoryRegions();
 			const terminatedWithError = Boolean(stateAfter?.lastError);
 			const effectiveError = crashError || stateAfter?.lastError || undefined;
 			const faultInfo = engine.getLastFaultInfo();
+			const instructionsRan = (stateAfter?.instructionsExecuted ?? 0) - instrBefore;
+			const executionBackend = engine.getExecutionBackend();
+			const architecture = engine.getArchitecture();
+			const unsupportedInstruction = await captureUnsupportedInstruction(
+				engine, effectiveError, stateAfter?.currentAddress,
+			);
+			const terminalOutcome = classifyHeadlessOutcome({
+				crashed,
+				error: effectiveError,
+				currentAddress: stateAfter?.currentAddress,
+				breakpoints: engine.getEmulationBreakpoints(),
+				instructionsRan,
+				instructionBudget: maxSteps,
+				backend: executionBackend,
+				architecture,
+				unsupportedInstruction,
+				terminalAddresses,
+				terminalKind,
+			});
+			const expectedTerminal = terminalOutcome.stopReason.kind === 'sentinel-return'
+				|| terminalOutcome.stopReason.kind === 'configured-terminal';
+			if (expectedTerminal) engine.clearLastError();
 
 			const exportData = {
-				success: !crashed && !terminatedWithError,
-				status: !crashed && !terminatedWithError ? 'ok' as const : 'failed' as const,
+				success: terminalOutcome.success,
+				status: terminalOutcome.status,
+				stopReason: terminalOutcome.stopReason,
+				capability: terminalOutcome.stopReason.capability,
 				crashed,
 				crashError: crashError || undefined,
-				terminatedWithError,
-				error: effectiveError,
-				faultInfo,
-				executionBackend: engine.getExecutionBackend(),
+				terminatedWithError: expectedTerminal ? false : terminatedWithError,
+				error: expectedTerminal ? undefined : effectiveError,
+				faultInfo: expectedTerminal ? undefined : faultInfo,
+				...(expectedTerminal && effectiveError ? { expectedTerminalFault: {
+					message: effectiveError,
+					faultInfo,
+				} } : {}),
+				executionBackend,
+				sessionActive: engine.isEmulationSessionActive(),
 				state: stateAfter ? {
 					isRunning: stateAfter.isRunning,
 					isPaused: stateAfter.isPaused,
@@ -617,14 +740,26 @@ export function activate(context: vscode.ExtensionContext): void {
 					instructionsExecuted: stateAfter.instructionsExecuted,
 					lastError: stateAfter.lastError
 				} : null,
-				instructionsRan: (stateAfter?.instructionsExecuted ?? 0) - instrBefore,
+				instructionsRan,
 				registers,
-				apiCalls: apiCalls.map(c => ({
-					dll: c.dll,
-					name: c.name,
-					returnValue: '0x' + (c.returnValue ?? 0n).toString(16)
-				})),
+				apiCalls: serializedTrace.apiCalls,
+				apiCallSummary: serializedTrace.apiCallSummary,
+				summary: buildEmulationArtifactSummary({
+					instructionsExecuted: stateAfter?.instructionsExecuted,
+					currentAddress: stateAfter?.currentAddress,
+					trace: traceExport,
+					memoryRegionCount: regions.length,
+					stdout,
+				}),
 				stdout,
+				runtimeEvidence: engine.getTargetPath() ? buildRuntimeObservationArtifact({
+					binaryPath: engine.getTargetPath()!, architecture, executionBackend,
+					trace: traceExport, sideChannels: engine.getSideChannelData(),
+					inputConfiguration: {
+						...engine.getRuntimeInputConfiguration(), command: 'continueHeadless', maxSteps,
+						terminalAddresses: terminalAddresses.map(address => `0x${address.toString(16)}`), terminalKind: terminalKind ?? null,
+					},
+				}) : undefined,
 				generatedAt: new Date().toISOString()
 			};
 
@@ -640,7 +775,7 @@ export function activate(context: vscode.ExtensionContext): void {
 						? `ERROR: ${effectiveError}`
 						: 'OK';
 				vscode.window.showInformationMessage(
-					`Emulation ${status}: ${exportData.instructionsRan} instructions, ${apiCalls.length} API calls`
+					`Emulation ${status}: ${exportData.instructionsRan} instructions, ${traceExport.totalCalls} API calls`
 				);
 			}
 
@@ -659,6 +794,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!state) {
 				throw new Error('No active emulation session. Call emulateHeadless first.');
 			}
+			if (!Number.isSafeInteger(count) || count <= 0 || count > 1_000_000) {
+				throw new Error('stepHeadless requires "count" to be an integer between 1 and 1000000.');
+			}
 
 			const steps: Array<{ address: string; registers: Record<string, string> }> = [];
 
@@ -671,8 +809,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					registers: regs
 				});
 
-				// Stop if emulation ended
-				if (s && !s.isRunning) {
+				// isRunning is false after every completed synchronous step. Only an
+				// actual execution error is terminal for a requested multi-step run.
+				if (s?.lastError) {
 					break;
 				}
 			}
@@ -795,7 +934,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			const state = engine.getEmulationState();
 			const registers = await engine.getFullRegistersAsync();
 			const regions = await engine.getMemoryRegions();
-			const apiCalls = engine.getApiCallLog();
+			const traceExport = engine.getTraceManager().exportJSON();
+			const serializedTrace = serializeApiTrace(traceExport);
 			const stdout = engine.getStdoutBuffer();
 			const faultInfo = engine.getLastFaultInfo();
 
@@ -811,6 +951,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				architecture: engine.getArchitecture(),
 				executionBackend: engine.getExecutionBackend(),
 				fileType: engine.getFileType(),
+				sessionActive: engine.isEmulationSessionActive(),
+				elfRelocations: engine.getELFInfo()?.relocations,
 				registers,
 				faultInfo,
 				memoryRegions: regions.map(r => ({
@@ -819,11 +961,15 @@ export function activate(context: vscode.ExtensionContext): void {
 					permissions: r.permissions,
 					name: r.name
 				})),
-				apiCallLog: apiCalls.map(c => ({
-					dll: c.dll,
-					name: c.name,
-					returnValue: '0x' + (c.returnValue ?? 0n).toString(16)
-				})),
+				apiCallLog: serializedTrace.apiCalls,
+				apiCallSummary: serializedTrace.apiCallSummary,
+				summary: buildEmulationArtifactSummary({
+					instructionsExecuted: state?.instructionsExecuted,
+					currentAddress: state?.currentAddress,
+					trace: traceExport,
+					memoryRegionCount: regions.length,
+					stdout,
+				}),
 				stdout,
 				generatedAt: new Date().toISOString()
 			};
@@ -959,7 +1105,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// v3.7 options
 			const permissiveMemoryMapping = arg?.permissiveMemoryMapping === true;
-			const prngMode = typeof arg?.prngMode === 'string' ? arg.prngMode as 'glibc' | 'msvcrt' | 'stub' : undefined;
+			const { prngMode, prngSeed } = parseHeadlessPrngOptions(arg);
+			const trace = parseTraceCaptureOptions(arg);
 			const collectSideChannels = arg?.collectSideChannels === true;
 			const memoryDumps = Array.isArray(arg?.memoryDumps) ? arg.memoryDumps as Array<{ address: string; size: number; trigger: 'breakpoint' | 'end' }> : undefined;
 
@@ -974,6 +1121,47 @@ export function activate(context: vscode.ExtensionContext): void {
 				} else if (bpArr.length > 0 && typeof bpArr[0] === 'object') {
 					breakpointConfigs = bpArr as typeof breakpointConfigs;
 				}
+			}
+			if (Array.isArray(arg?.breakpointConfigs)) {
+				breakpointConfigs = arg.breakpointConfigs as typeof breakpointConfigs;
+			}
+			if (simpleBreakpoints) {
+				for (const [index, address] of simpleBreakpoints.entries()) {
+					if (typeof address !== 'string') {
+						throw new Error(`breakpoints[${index}] must be an address string.`);
+					}
+					try { BigInt(address); } catch {
+						throw new Error(`breakpoints[${index}] is not a valid address: "${address}".`);
+					}
+				}
+			}
+			if (breakpointConfigs) {
+				breakpointConfigs = breakpointConfigs.map((bp, index) => {
+					if (!bp || typeof bp.address !== 'string') {
+						throw new Error(`breakpointConfigs[${index}].address must be a string.`);
+					}
+					try { BigInt(bp.address); } catch {
+						throw new Error(`breakpointConfigs[${index}].address is invalid: "${bp.address}".`);
+					}
+					if (bp.autoSnapshot !== undefined && typeof bp.autoSnapshot !== 'boolean') {
+						throw new Error(`breakpointConfigs[${index}].autoSnapshot must be boolean.`);
+					}
+					if (bp.dumpRanges !== undefined) {
+						if (!Array.isArray(bp.dumpRanges) || bp.dumpRanges.length > 64) {
+							throw new Error(`breakpointConfigs[${index}].dumpRanges must contain at most 64 ranges.`);
+						}
+						for (const [rangeIndex, range] of bp.dumpRanges.entries()) {
+							if (!range || typeof range.address !== 'string' ||
+								!Number.isSafeInteger(range.size) || range.size <= 0 || range.size > 4 * 1024 * 1024) {
+								throw new Error(`breakpointConfigs[${index}].dumpRanges[${rangeIndex}] requires an address and a size from 1 to 4194304.`);
+							}
+							try { BigInt(range.address); } catch {
+								throw new Error(`breakpointConfigs[${index}].dumpRanges[${rangeIndex}].address is invalid.`);
+							}
+						}
+					}
+					return bp;
+				});
 			}
 
 			// ── issue #28: serialize emulation sessions on the shared engine ──
@@ -998,6 +1186,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			await engine.startEmulation(filePath, arch, {
 				permissiveMemoryMapping,
 				prngMode,
+				prngSeed,
+				trace,
 				collectSideChannels,
 				memoryDumps,
 				breakpointConfigs,
@@ -1045,12 +1235,29 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const stateAfter = engine.getEmulationState();
 			const registers = await engine.getFullRegistersAsync();
-			const apiCalls = engine.getApiCallLog();
+			const traceExport = engine.getTraceManager().exportJSON();
+			const serializedTrace = serializeApiTrace(traceExport);
 			const stdout = engine.getStdoutBuffer();
 			const regions = await engine.getMemoryRegions();
 			const terminatedWithError = Boolean(stateAfter?.lastError);
 			const effectiveError = crashError || stateAfter?.lastError || undefined;
 			const faultInfo = engine.getLastFaultInfo();
+			const executionBackend = engine.getExecutionBackend();
+			const architecture = engine.getArchitecture();
+			const unsupportedInstruction = await captureUnsupportedInstruction(
+				engine, effectiveError, stateAfter?.currentAddress,
+			);
+			const terminalOutcome = classifyHeadlessOutcome({
+				crashed,
+				error: effectiveError,
+				currentAddress: stateAfter?.currentAddress,
+				breakpoints: engine.getEmulationBreakpoints(),
+				instructionsRan: stateAfter?.instructionsExecuted ?? 0,
+				instructionBudget: maxInstructions,
+				backend: executionBackend,
+				architecture,
+				unsupportedInstruction,
+			});
 
 			// Collect v3.7 data
 			const breakpointSnapshotsData = engine.getBreakpointSnapshots();
@@ -1100,16 +1307,20 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const exportData: Record<string, any> = {
 				file: filePath,
-				success: !crashed && !terminatedWithError,
-				status: !crashed && !terminatedWithError ? 'ok' : 'failed',
-				architecture: engine.getArchitecture(),
-				executionBackend: engine.getExecutionBackend(),
+				success: terminalOutcome.success,
+				status: terminalOutcome.status,
+				stopReason: terminalOutcome.stopReason,
+				capability: terminalOutcome.stopReason.capability,
+				architecture,
+				executionBackend,
 				fileType: engine.getFileType(),
+				elfRelocations: engine.getELFInfo()?.relocations,
 				crashed,
 				crashError: crashError || undefined,
 				terminatedWithError,
 				error: effectiveError,
 				faultInfo,
+				sessionActive: keepAlive && engine.isEmulationSessionActive(),
 				state: stateAfter ? {
 					isRunning: stateAfter.isRunning,
 					isPaused: stateAfter.isPaused,
@@ -1118,11 +1329,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					lastError: stateAfter.lastError
 				} : null,
 				registers,
-				apiCalls: apiCalls.map(c => ({
-					dll: c.dll,
-					name: c.name,
-					returnValue: '0x' + (c.returnValue ?? 0n).toString(16)
-				})),
+				prng: { mode: prngMode ?? 'stub', seed: prngSeed ?? null },
+				apiCalls: serializedTrace.apiCalls,
+				apiCallSummary: serializedTrace.apiCallSummary,
 				stdout,
 				memoryRegions: regions.map(r => ({
 					address: '0x' + r.address.toString(16),
@@ -1130,7 +1339,27 @@ export function activate(context: vscode.ExtensionContext): void {
 					permissions: r.permissions,
 					name: r.name
 				})),
+				summary: buildEmulationArtifactSummary({
+					instructionsExecuted: stateAfter?.instructionsExecuted,
+					currentAddress: stateAfter?.currentAddress,
+					trace: traceExport,
+					memoryRegionCount: regions.length,
+					stdout,
+				}),
+				runtimeEvidence: buildRuntimeObservationArtifact({
+					binaryPath: filePath, architecture, executionBackend, trace: traceExport,
+					sideChannels: sideChannelDataResult ?? engine.getSideChannelData(),
+					inputConfiguration: {
+						...engine.getRuntimeInputConfiguration(), command: 'emulateFullHeadless',
+						keepAlive, collectSideChannels,
+					},
+				}),
 				generatedAt: new Date().toISOString()
+			};
+			exportData.breakpointSnapshotStatus = {
+				requested: breakpointConfigs?.filter(bp => bp.autoSnapshot).length ?? 0,
+				captured: breakpointSnapshotsData.length,
+				supported: true,
 			};
 
 			// Oracle Hook run summary (Project Pythia v3.9.0-preview.oracle)
@@ -1306,8 +1535,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (!state) {
 				throw new Error('No active emulation session.');
 			}
+			if (input === undefined) {
+				const hint = Object.prototype.hasOwnProperty.call(arg ?? {}, 'data')
+					? ' Use the "input" argument; "data" is not accepted.'
+					: '';
+				throw new Error(`setStdinHeadless requires a string "input" argument.${hint}`);
+			}
 
-			const decodedInput = decodeEscapedInput(input ?? '');
+			const decodedInput = decodeEscapedInput(input);
 			engine.setStdinBuffer(decodedInput);
 
 			const exportData = {
@@ -1369,6 +1604,171 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Read ${data.length} bytes from 0x${address.toString(16)}`);
 			}
 
+			return exportData;
+		})
+	);
+
+	// Disassemble bytes from the active Unicorn session without writing a derived binary.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.disassembleMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const addressText = typeof arg?.address === 'string' ? arg.address : undefined;
+			const size = typeof arg?.size === 'number' ? arg.size : undefined;
+			const includeBytes = arg?.includeBytes === true;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+			if (!addressText || !Number.isSafeInteger(size) || !size || size <= 0 || size > 4 * 1024 * 1024) {
+				throw new Error('disassembleMemoryHeadless requires "address" and an integer "size" between 1 and 4194304.');
+			}
+			if (!engine.isEmulationSessionActive()) {
+				throw new Error('No active emulation session. Start one with keepAlive=true first.');
+			}
+
+			const address = BigInt(addressText);
+			if (address < 0n || address > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new Error('disassembleMemoryHeadless address is outside the exact JavaScript integer range.');
+			}
+			const raw = await engine.emulationReadMemory(address, size);
+			const disassembly: any = await vscode.commands.executeCommand('hexcore.disasm.disassembleBufferHeadless', {
+				bytesBase64: raw.toString('base64'),
+				address: `0x${address.toString(16)}`,
+				arch: engine.getArchitecture(),
+			});
+			if (!disassembly || !Array.isArray(disassembly.instructions)) {
+				throw new Error(disassembly?.error ?? 'Live-memory disassembly failed.');
+			}
+			const exportData: Record<string, unknown> = {
+				success: disassembly.success === true,
+				source: 'debugger-live-memory',
+				targetFile: engine.getTargetPath(),
+				address: `0x${address.toString(16)}`,
+				requestedSize: size,
+				size: raw.length,
+				sha256: crypto.createHash('sha256').update(raw).digest('hex'),
+				architecture: engine.getArchitecture(),
+				executionBackend: engine.getExecutionBackend(),
+				instructions: disassembly.instructions,
+				generatedAt: new Date().toISOString(),
+			};
+			if (includeBytes) { exportData.bytesBase64 = raw.toString('base64'); }
+			if (outputOptions?.path) {
+				assertOutputAllowed(outputOptions.path);
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, JSON.stringify(exportData, null, 2), 'utf8');
+			}
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`Disassembled ${disassembly.instructions.length} live-memory instructions.`);
+			}
+			return exportData;
+		})
+	);
+
+	// Live memory -> Remill IR -> Helix C, transported entirely in process.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.debug.decompileMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const commandStartedAt = Date.now();
+			const addressText = typeof arg?.address === 'string' ? arg.address : undefined;
+			const size = typeof arg?.size === 'number' ? arg.size : undefined;
+			const quietMode = arg?.quiet === true;
+			const outputOptions = arg?.output as { path?: string } | undefined;
+			const retainIr = arg?.retainIr === true;
+			if (!addressText || !Number.isSafeInteger(size) || !size || size <= 0 || size > 4 * 1024 * 1024) {
+				throw new Error('decompileMemoryHeadless requires "address" and an integer "size" between 1 and 4194304.');
+			}
+			if (!engine.isEmulationSessionActive()) {
+				throw new Error('No active emulation session. Start one with keepAlive=true first.');
+			}
+
+			const address = BigInt(addressText);
+			if (address < 0n || address > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new Error('decompileMemoryHeadless address is outside the exact JavaScript integer range.');
+			}
+			const bytes = await engine.emulationReadMemory(address, size);
+			const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
+			const architecture = engine.getArchitecture();
+			const targetOs = engine.getFileType() === 'pe' ? 'windows' : 'linux';
+			const lift: any = await vscode.commands.executeCommand('hexcore.disasm.liftMemoryHeadless', {
+				bytesBase64: bytes.toString('base64'),
+				address: `0x${address.toString(16)}`,
+				arch: architecture,
+				targetOs,
+				maxInstructions: arg?.maxInstructions,
+				maxBasicBlocks: arg?.maxBasicBlocks,
+				optimizeIR: arg?.optimizeIR,
+				inlineSemantics: arg?.inlineSemantics,
+				splitAtCalls: arg?.splitAtCalls,
+			});
+			if (!lift?.success || typeof lift.ir !== 'string') {
+				return { success: false, source: 'debugger-live-memory', address: `0x${address.toString(16)}`, size, sha256, error: lift?.error ?? 'Live-memory lift failed.' };
+			}
+			const irSha256 = crypto.createHash('sha256').update(lift.ir, 'utf8').digest('hex');
+			let retainedIrPath: string | undefined;
+			if (retainIr && outputOptions?.path) {
+				retainedIrPath = `${outputOptions.path}.ll`;
+				assertOutputAllowed(retainedIrPath);
+				fs.mkdirSync(path.dirname(retainedIrPath), { recursive: true });
+				fs.writeFileSync(retainedIrPath, lift.ir, 'utf8');
+			}
+			// Account for memory read + lift time. The worker must settle before the
+			// outer pipeline deadline so status and worker/session ownership release.
+			const helixWorkerTimeoutMs = resolveLiveDecompileWorkerBudget(
+				arg?.pipelineTimeoutMs,
+				Date.now() - commandStartedAt,
+			);
+			const decompiled: any = await vscode.commands.executeCommand('hexcore.helix.decompileIR', {
+				irText: lift.ir,
+				address: `0x${address.toString(16)}`,
+				architecture,
+				sourceTargetFile: engine.getTargetPath(),
+				forceProcess: true,
+				workerTimeoutMs: helixWorkerTimeoutMs,
+				workerGroup: 'debugger-live-memory',
+				quiet: true,
+				output: undefined,
+			});
+			if (!decompiled?.success || typeof decompiled.code !== 'string') {
+				return {
+					success: false,
+					source: 'debugger-live-memory',
+					address: `0x${address.toString(16)}`,
+					size,
+					sha256,
+					bytesConsumed: lift.bytesConsumed,
+					irBytes: Buffer.byteLength(lift.ir, 'utf8'),
+					irSha256,
+					retainedIrPath,
+					analysisContext: decompiled?.analysisContext,
+					error: decompiled?.error ?? 'Live-memory decompilation failed.',
+				};
+			}
+			if (outputOptions?.path) {
+				assertOutputAllowed(outputOptions.path);
+				fs.mkdirSync(path.dirname(outputOptions.path), { recursive: true });
+				fs.writeFileSync(outputOptions.path, decompiled.code, 'utf8');
+			}
+			const exportData = {
+				success: true,
+				status: decompiled.status,
+				source: 'debugger-live-memory',
+				targetFile: engine.getTargetPath(),
+				address: `0x${address.toString(16)}`,
+				size,
+				sha256,
+				architecture,
+				executionBackend: engine.getExecutionBackend(),
+				bytesConsumed: lift.bytesConsumed,
+				irBytes: Buffer.byteLength(lift.ir, 'utf8'),
+				irSha256,
+				retainedIrPath,
+				confidence: decompiled.confidence,
+				qualityIssues: decompiled.qualityIssues,
+				warning: decompiled.warning,
+				analysisContext: decompiled.analysisContext,
+				code: decompiled.code,
+				generatedAt: new Date().toISOString(),
+			};
+			if (!quietMode) {
+				vscode.window.showInformationMessage(`Decompiled ${lift.bytesConsumed}/${size} live-memory bytes.`);
+			}
 			return exportData;
 		})
 	);
@@ -1466,8 +1866,11 @@ export function activate(context: vscode.ExtensionContext): void {
 						wildcardMask.push(true);
 					} else {
 						const byte = parseInt(token, 16);
-						if (isNaN(byte)) {
-							throw new Error(`Invalid hex byte in pattern: "${token}"`);
+						if (isNaN(byte) || !/^[0-9a-fA-F]{2}$/.test(token)) {
+							const hint = arg?.encoding === undefined
+								? ' Set "encoding": "ascii" (or "utf16") to search for text.'
+								: '';
+							throw new Error(`Invalid hex byte in pattern: "${token}".${hint}`);
 						}
 						searchBytes.push(byte);
 						wildcardMask.push(false);

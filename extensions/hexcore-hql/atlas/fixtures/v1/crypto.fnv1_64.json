@@ -1,0 +1,72 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "crypto.fnv1_64",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:crypto.fnv1_64.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "mix"
+      ],
+      "contentSha256": "fddf91fdba5c7edc1f4565178514dfb46ee41a5ba49ba1f272c4a7ac10c2764c",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "at": "mix",
+            "op": "*",
+            "a": "hash",
+            "b": {
+              "k": "int",
+              "value": "1099511628211"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.fnv1_64.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7dd85ebad5f960b634598ccc7bf42474b3d4eff9f423a13e063d19f546943d2a",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "op": "*",
+            "a": "hash",
+            "b": {
+              "k": "int",
+              "value": "1099511628213"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.fnv1_64.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "87ea9a80ae56dd896dd80dd64f5d1210935f4e3e0526fe4a8700c16327939e68",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "op": "+",
+            "a": "hash",
+            "b": {
+              "k": "int",
+              "value": "1099511628211"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

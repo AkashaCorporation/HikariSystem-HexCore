@@ -168,5 +168,71 @@ export {
 	SHARED_MEMORY_STATUS
 } from './sharedMemoryBuffer';
 
-export { assertWithinWorkspaceOrHome, isWithinDir } from './outputPathGuard';
+export { assertWithinWorkspaceOrHome, isWithinDir, resolvePathWithinRoots } from './outputPathGuard';
+
+export {
+	ANALYSIS_CONTRACT_VERSION,
+	createAnalysisAddress,
+	createAnalysisArtifactProvenance,
+	createAnalysisResult,
+	createAnalysisSession,
+	createAnalysisTarget,
+	isAnalysisResult,
+	normalizeAddressValue,
+	normalizeSha256,
+	type AnalysisAddress,
+	type AnalysisAddressSpace,
+	type AnalysisArtifactProvenance,
+	type AnalysisArtifactProvenanceInput,
+	type AnalysisArtifactReference,
+	type AnalysisBinaryFormat,
+	type AnalysisDiagnostic,
+	type AnalysisDiagnosticSeverity,
+	type AnalysisEngineIdentity,
+	type AnalysisResult,
+	type AnalysisResultInput,
+	type AnalysisSession,
+	type AnalysisSessionInput,
+	type AnalysisStatus,
+	type AnalysisTarget,
+	type AnalysisTargetInput
+} from './analysisContract';
+
+export {
+	analysisObjectIdTargetId,
+	createArtifactId,
+	createBasicBlockId,
+	createDataObjectId,
+	createFindingId,
+	createFunctionId,
+	createInstructionId,
+	createStringId,
+	createTypeId,
+	createVariableId,
+	createXrefId,
+	isAnalysisObjectId,
+	parseAnalysisObjectId,
+	type AnalysisAddressedObjectIdInput,
+	type AnalysisBasicBlockIdInput,
+	type AnalysisFindingIdInput,
+	type AnalysisObjectKind,
+	type AnalysisStringIdInput,
+	type AnalysisTypeIdInput,
+	type AnalysisVariableIdInput,
+	type AnalysisXrefIdInput,
+	type ParsedAnalysisObjectId
+} from './analysisIds';
+
+export {
+	ANALYSIS_ERROR_CODES,
+	ANALYSIS_ERROR_SPECS,
+	analysisError,
+	failedResult,
+	isAnalysisErrorCode,
+	okResult,
+	partialResult,
+	skippedResult,
+	type AnalysisErrorCode,
+	type AnalysisErrorSpec
+} from './analysisErrors';
 

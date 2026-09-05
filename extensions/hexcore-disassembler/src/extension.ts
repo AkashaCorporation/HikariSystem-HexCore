@@ -4,7 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import * as v8 from 'v8';
+import * as zlib from 'zlib';
 import * as vscode from 'vscode';
 import { encodeX86PcRelativeDataDisplacement } from './elfTextRelocation';
 import { DisassemblyEditorProvider } from './disassemblyEditor';
@@ -13,10 +16,42 @@ import { StringRefProvider } from './stringRefTree';
 import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
-import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis, ELFExecutableSection, decodeIatOperandVA } from './disassemblerEngine';
+import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis, ELFExecutableSection, decodeIatOperandVA, type AssemblyExportResult, type FunctionBodyStatus, type FunctionAnalysisMaterialization } from './disassemblerEngine';
 import { formatApiSignatureCompact, CATEGORY_LABELS } from './peApiDatabase';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
+import {
+	AnalysisCenterProvider,
+	type AnalysisActionResult,
+	type AnalysisCenterRequest,
+	type AnalysisCenterSnapshot,
+	type AnalysisFinding
+} from './analysisCenter';
+import {
+	buildStringInvestigationFindings,
+	resolveInvestigationQueries,
+	assertFindingMatchesActiveTarget,
+	type InvestigationPreset
+} from './investigationModel';
+import { createInvestigationJob, sanitizeInvestigationJobName } from './investigationJob';
+import { inspectHelixOutputQuality, stampHelixConfidenceAxes } from './helixOutputQuality';
+import { assessLiftSemanticCoverage, formatLiftSemanticHeader } from './liftSemanticCoverage';
+import {
+	assessFunctionMaterialization,
+	normalizeFunctionMaterializationPolicy,
+} from './functionMaterializationCoverage';
+import { decideAnalysisContextOwnership } from './analysisContextOwnership';
+import { describeCanonicalArtifactIdentity } from './artifactNormalization';
+import { describeQueueObservation, type QueueQueryContext } from './queueObservation';
+import { analyzeAllProcessController, type NativeAnalyzeExecution } from './analyzeAllProcess';
+import { findRecordedAutoRunAttempt, recoverStaleAutoRunAttempt } from './autoRunAttempt';
+import {
+	classifyDisassemblyInstructionRole,
+	type DisassemblyInstructionRole,
+} from './disassemblyInstructionRole';
+import type { InvestigationFindingEntry, SessionStore } from './sessionStore';
+import { resolvePathWithinRoots, type AnalysisEngineIdentity } from 'hexcore-common';
+import { decorateOkResult, decoratePipelineRunStatus, decorateValidationReport, type ContractDecorated } from './commandResult';
 import {
 	AutomationPipelineRunner,
 	PipelineDoctorReport,
@@ -30,8 +65,9 @@ import {
 	JOB_STATUS_FILENAME,
 	JOB_LOG_FILENAME
 } from './automationPipelineRunner';
-import { QueuedJob, QueueStats, JobStatusReport } from './jobQueueManager';
+import { QueuedJob, QueueStats, JobStatusReport, jobPathIdentity } from './jobQueueManager';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
+import { solveConstraints, type ConstraintSolverOptions } from './constraintSolver';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
 import { RemillWrapper, buildIRHeader, type LiftResult, type RemillLiftOptions } from './remillWrapper';
 import {
@@ -47,14 +83,18 @@ import {
 	runHqlScanBatch,
 	buildScanTargets,
 	scanOneTarget,
+	createLiveHqlSessionReader,
+	DEFAULT_HQL_BATCH_BUDGET,
 	type HqlScanTarget,
 	type HelixDecompileQuietResult,
 } from './hqlScanner';
 import { readPeDataSections, type DataSection as PeDataSection } from './peDataSections';
 import { SouperWrapper, decideSouperGate } from './souperWrapper';
 import { getStructInfoForFunction, exportStructInfoJson, scopeStructInfoForFunctions, type StructInfoJson } from './elfBtfLoader';
-import { auditRefcount, type RefcountAuditReport } from './refcountAuditScanner';
+import { auditRefcount } from './refcountAuditScanner';
+import { readAuditInputQuality } from './auditInputQuality';
 import { mapCapstoneToRemill } from './archMapper';
+import { planLiftPreamble, type LiftPreambleTransformation } from './liftPreamble';
 import {
 	PipelineJobTemplate,
 	PipelinePreset,
@@ -70,24 +110,103 @@ import {
 	resolveHelixBaseOptions,
 	wantsHelixFunctionStarts,
 	resolveLiftByteSize,
+	assessByteRangeCompletion,
+	assessLiftRangeCompletion,
 	coercePositiveInt,
 	getAuthoritativeFunctionExtent,
 	shouldHonorExplicitLiftWindow,
+	isBacktrackWithinSection,
 	hasHeadlessHelixIrInput,
+	type ResolvedLiftByteSize,
 } from './helixPackaging';
 import {
 	buildImportSymbolMap,
 	applyImportSymbolNamesToSource,
 } from './importSymbolNames';
+import { classifyDisassemblyStop, type DisassemblyStopReason } from './disassemblyStop';
 import { applyHonestyConfidenceCap, type HonestyEvidence } from './honestyConfidenceCap';
 import { detectPacker, packerCapabilityTags } from './packerDetect';
 import { isSingleFileBundle } from './managedDotNetDetector';
+import {
+	createHelixAnalysisContext,
+	type HelixAnalysisContext,
+} from './helixAnalysisContext';
+import { buildWindowsFilesystemAudit } from './windowsFilesystemAudit';
+import {
+	decorateSemanticCommandResult,
+	prepareSemanticCommandService,
+	readSemanticImportInput,
+	resolveSemanticOutputPath,
+	semanticCommandCallbacks,
+	type SemanticCommandInvocationOptions,
+} from './semanticCommandIntegration';
+import type {
+	ApplyPrototypeRequest,
+	ClearOverrideRequest,
+	ExplainPrototypeRequest,
+	SemanticCommandExportEnvelope,
+	SetCallingConventionRequest,
+	SetParameterRequest,
+} from './semanticCommandService';
+import {
+	syncTypedReferenceGraph,
+	type ReferenceGraphProducerBudgets,
+	type ReferenceGraphSyncResult,
+} from './typedReferenceGraphProducer';
+import {
+	runReferenceGraphExport,
+	runReferenceGraphQuery,
+	type ReferenceGraphExportCommandOptions,
+	type ReferenceGraphQueryCommandOptions,
+} from './typedReferenceGraphCommands';
+import {
+	runPropagationExport,
+	runPropagationSolve,
+	runPropagationStatus,
+	type PropagationCommandOptions,
+} from './wholeProgramPropagationCommands';
+import {
+	runDebugTypeIngest,
+	runRecordRecovery,
+	runTypeCreate,
+	runTypeDelete,
+	runTypeExport,
+	runTypeImport,
+	runTypeList,
+	runTypeRename,
+	runTypeUpdate,
+	runTypeUndo,
+} from './typeManagerCommands';
+import type { TypeManagerExport } from './typeManager';
+import { importPdbSemantics } from './pdbSemanticImport';
+import { resolvePdbFromSymbolServers } from './pdbProvider';
+import { applyImportSignatureProvider } from './signatureProvider';
+import { SemanticExplorerPanel } from './semanticExplorer';
 
 type OutputFormat = 'json' | 'md';
 
 interface AnalyzeAllOutputOptions {
 	path: string;
 	format?: OutputFormat;
+}
+
+interface WindowsFilesystemAuditCommandOptions {
+	file?: string;
+	output?: { path: string; format?: 'json' };
+	quiet?: boolean;
+	maxStringSignals?: number;
+}
+
+interface SemanticImportCommandOptions extends SemanticCommandInvocationOptions {
+	input?: unknown;
+	inputPath?: string;
+}
+
+interface ReferenceGraphCommandInvocationOptions {
+	file?: string;
+	quiet?: boolean;
+	output?: string | { path?: string };
+	producerBudgets?: Partial<ReferenceGraphProducerBudgets>;
 }
 
 interface AnalyzeAllCommandOptions {
@@ -98,10 +217,22 @@ interface AnalyzeAllCommandOptions {
 	maxFunctionSize?: number;
 	forceReload?: boolean;
 	includeInstructions?: boolean;
+	/** Architecture override for headerless raw binaries only. */
+	arch?: 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'mips64';
+	/** Virtual load base for headerless raw binaries only. */
+	baseAddress?: string | number;
 	// v3.7 options
 	filterJunk?: boolean;
 	detectVM?: boolean;
 	detectPRNG?: boolean;
+	/** Explicitly accept deferred function bodies in reconnaissance jobs. */
+	allowLazy?: boolean;
+	/** Explicitly accept entries whose decoder returned no instructions. */
+	allowDecodeEmpty?: boolean;
+	/** Optional minimum decoded-body ratio, from 0.0 to 1.0. */
+	minMaterializedRatio?: number;
+	/** Supplied by the pipeline runner; direct callers may set a bounded native deadline. */
+	pipelineTimeoutMs?: number;
 }
 
 interface BuildFormulaCommandOptions {
@@ -134,8 +265,16 @@ interface AnalyzeAllFunctionSummary {
 	name: string;
 	size: number;
 	instructionCount: number;
+	bodyStatus: FunctionBodyStatus;
+	bodyReason?: 'deferred-until-requested' | 'decoder-returned-no-instructions';
 	callers: number;
 	callees: number;
+	discoveryEvidence?: Array<{
+		kind: string;
+		sourceAddress?: string;
+		consumerAddress?: string;
+		confidence?: number;
+	}>;
 	instructions?: AnalyzeAllInstructionEntry[];
 	xrefsTo?: string[];
 	xrefsFrom?: string[];
@@ -149,10 +288,31 @@ interface AnalyzeAllStringEntry {
 }
 
 interface AnalyzeAllResult {
+	status: 'ok' | 'partial';
+	analysisDepth: ReturnType<typeof assessFunctionMaterialization>['analysisDepth'];
+	negativeEvidenceUsable: false;
+	functionsMaterialized: number;
+	partialFunctions: number;
+	warning?: string;
 	filePath: string;
 	fileName: string;
 	newFunctions: number;
+	removedFunctions: number;
+	functionNetChange: number;
 	totalFunctions: number;
+	functionsWithInstructions: number;
+	functionsWithoutInstructions: number;
+	lazyFunctions: number;
+	decodeEmptyFunctions: number;
+	materializedFunctionRatio: number;
+	materializationPolicy: {
+		allowLazy: boolean;
+		allowDecodeEmpty: boolean;
+		minMaterializedRatio: number;
+	};
+	closureRestoration: ReturnType<DisassemblerEngine['getAnalysisClosureRestoration']>;
+	nativeExecution?: NativeAnalyzeExecution;
+	totalFunctionInstructions: number;
 	totalStrings: number;
 	architecture: string;
 	baseAddress: string;
@@ -185,6 +345,7 @@ interface AnalyzeAllResult {
 	// Pure byte scan — independent of function discovery, so it reports the
 	// obfuscation even when prologue-based discovery finds nothing.
 	callfuscation?: { detected: boolean; gadgetCount: number; callCount: number; ratio: number; discardRegisters: string[] };
+	referenceGraph?: ReferenceGraphSyncResult | { status: 'error'; reason: string };
 }
 
 interface BuildFormulaResult {
@@ -269,15 +430,79 @@ export interface DisassembleAtInstructionEntry {
 	comment: string;         // Resolved reference or ""
 	size: number;
 	isContext: boolean;      // true for context instructions
+	role: DisassemblyInstructionRole;
 }
 
 export interface DisassembleAtResult {
+	status: 'ok' | 'partial';
+	semanticWarning?: string;
 	address: string;         // VA requested in hex
+	effectiveAddress?: string;
+	addressMapping?: ReturnType<DisassemblerEngine['getAddressMapping']>;
+	effectiveAddressMapping?: ReturnType<DisassemblerEngine['getAddressMapping']>;
 	count: number;           // Requested count
+	effectiveCount: number;  // Count accepted for this page
+	countingDomain: 'byte-range' | 'instruction-count';
 	context: number;         // Requested context
+	contextRecovery: ContextRecoverySummary;
 	actualCount: number;     // Total instructions returned (context + main)
+	returnedMainCount: number;
+	semanticInstructionCount: number;
+	paddingInstructionCount: number;
+	unclassifiedInstructionCount: number;
+	analysisClosure: {
+		status: FunctionAnalysisMaterialization['status'] | 'display-only';
+		functionAddress?: string;
+		bodyStatus: FunctionBodyStatus;
+		changed: boolean;
+		auditUniverseChanged: boolean;
+		instructionsAdded: number;
+		engineGenerationBefore: number;
+		engineGenerationAfter: number;
+		sessionGenerationBefore?: number;
+		sessionGenerationAfter?: number;
+		reason: string;
+	};
+	truncated: boolean;
+	truncationReason?: 'count-limit' | 'decode-failure';
+	stopReason: DisassemblyStopReason;
+	pageFillRatio: number;
+	requestedWindowCoverage: number;
+	decodedByteCoverage?: number;
+	requestedByteRange?: {
+		start: string;
+		endExclusive: string;
+		size: number;
+		reached: boolean;
+		byteCoverage: number;
+		source: 'explicit-endExclusive' | 'function-boundary';
+	};
+	functionBoundary?: {
+		start: string;
+		endExclusive: string;
+		/** @deprecated Alias of endExclusive for 3.8.x consumers. */
+		end: string;
+		semanticEnd?: string;
+		paddingBytes?: number;
+		size: number;
+		source: 'function-table' | 'pdata' | 'recommended' | 'none';
+		reached: boolean;
+		crossed: boolean;
+		byteCoverage: number;
+	};
+	maxCount: number;
+	nextAddress?: string;
 	instructions: DisassembleAtInstructionEntry[];
 	generatedAt: string;     // ISO 8601 timestamp
+}
+
+export interface ContextRecoverySummary {
+	status: 'complete' | 'partial' | 'unavailable';
+	requestedCount: number;
+	returnedCount: number;
+	contiguous: boolean;
+	targetAddress: string;
+	reason?: 'disabled' | 'binary-boundary' | 'insufficient-contiguous-predecessors' | 'no-contiguous-predecessor';
 }
 
 /**
@@ -448,29 +673,61 @@ export async function followTrampolineChain(
 	return { target: current, hops };
 }
 
-export function parseDisassembleAtAddress(args: any): { address: number; count: number; context: number; file?: string; output?: { path: string }; quiet?: boolean } {
-	// --- address (required, hex string) ---
-	const rawAddress: unknown = args?.address;
-	if (rawAddress === undefined || rawAddress === null || rawAddress === '') {
-		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
-	}
-	if (typeof rawAddress !== 'string') {
-		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+export const MAX_DISASSEMBLE_AT_COUNT = 10000;
+
+export interface ParsedDisassembleAtAddress {
+	address: number;
+	count: number;
+	effectiveCount: number;
+	countingDomain: 'byte-range' | 'instruction-count';
+	endExclusive?: number;
+	stopAtFunctionBoundary: boolean;
+	context: number;
+	file?: string;
+	output?: { path: string };
+	quiet?: boolean;
+}
+
+function parseRequiredHexAddress(rawAddress: unknown, field: 'address' | 'endExclusive'): number {
+	const message = field === 'address'
+		? "disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000')."
+		: "disassembleAtHeadless: 'endExclusive' must be a valid hex address.";
+	if (rawAddress === undefined || rawAddress === null || rawAddress === '' || typeof rawAddress !== 'string') {
+		throw new Error(message);
 	}
 	let hexStr = rawAddress;
 	if (hexStr.startsWith('0x') || hexStr.startsWith('0X')) {
 		hexStr = hexStr.slice(2);
 	}
 	if (hexStr.length === 0 || !/^[0-9a-fA-F]+$/.test(hexStr)) {
-		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+		throw new Error(message);
 	}
-	const address = parseInt(hexStr, 16);
-	if (Number.isNaN(address)) {
-		throw new Error("disassembleAtHeadless requires a valid hex 'address' argument (e.g. '0x401000').");
+	const parsed = parseInt(hexStr, 16);
+	if (!Number.isSafeInteger(parsed)) {
+		throw new Error(message);
 	}
+	return parsed;
+}
 
-	// --- count (optional, positive integer, default 30) ---
-	let count = DEFAULT_COUNT;
+export function parseDisassembleAtAddress(args: any): ParsedDisassembleAtAddress {
+	// --- address (required, hex string) ---
+	const address = parseRequiredHexAddress(args?.address, 'address');
+	if (args?.stopAtFunctionBoundary !== undefined && typeof args.stopAtFunctionBoundary !== 'boolean') {
+		throw new Error("disassembleAtHeadless: 'stopAtFunctionBoundary' must be a boolean.");
+	}
+	const stopAtFunctionBoundary = args?.stopAtFunctionBoundary === true;
+	const endExclusive = args?.endExclusive !== undefined && args?.endExclusive !== null
+		? parseRequiredHexAddress(args.endExclusive, 'endExclusive')
+		: undefined;
+	if (endExclusive !== undefined && endExclusive <= address) {
+		throw new Error("disassembleAtHeadless: 'endExclusive' must be greater than 'address'.");
+	}
+	const countingDomain = endExclusive !== undefined || stopAtFunctionBoundary
+		? 'byte-range' as const
+		: 'instruction-count' as const;
+
+	// In byte-range mode count is only a decoder safety ceiling, never the scope.
+	let count = countingDomain === 'byte-range' ? MAX_DISASSEMBLE_AT_COUNT : DEFAULT_COUNT;
 	if (args?.count !== undefined && args?.count !== null) {
 		count = args.count;
 		if (typeof count !== 'number' || !Number.isInteger(count) || count <= 0) {
@@ -490,6 +747,10 @@ export function parseDisassembleAtAddress(args: any): { address: number; count: 
 	return {
 		address,
 		count,
+		effectiveCount: Math.min(count, MAX_DISASSEMBLE_AT_COUNT),
+		countingDomain,
+		...(endExclusive !== undefined ? { endExclusive } : {}),
+		stopAtFunctionBoundary,
 		context,
 		file: args?.file,
 		output: args?.output,
@@ -511,8 +772,21 @@ export async function computeContextInstructions(
 	contextCount: number,
 	maxInstructionSize: number
 ): Promise<Instruction[]> {
+	return (await computeContextRecovery(engine, targetAddress, contextCount, maxInstructionSize)).instructions;
+}
+
+export async function computeContextRecovery(
+	engine: DisassemblerEngine,
+	targetAddress: number,
+	contextCount: number,
+	maxInstructionSize: number
+): Promise<{ instructions: Instruction[]; summary: ContextRecoverySummary }> {
+	const targetHex = `0x${targetAddress.toString(16).toUpperCase()}`;
 	if (contextCount <= 0) {
-		return [];
+		return {
+			instructions: [],
+			summary: { status: 'complete', requestedCount: 0, returnedCount: 0, contiguous: true, targetAddress: targetHex, reason: 'disabled' }
+		};
 	}
 
 	const baseAddress = engine.getBaseAddress();
@@ -526,19 +800,53 @@ export async function computeContextInstructions(
 
 	const rangeSize = targetAddress - startAddr;
 	if (rangeSize <= 0) {
-		return [];
+		return {
+			instructions: [],
+			summary: { status: 'partial', requestedCount: contextCount, returnedCount: 0, contiguous: true, targetAddress: targetHex, reason: 'binary-boundary' }
+		};
 	}
 
 	const allInstructions = await engine.disassembleRange(startAddr, rangeSize);
 
-	// Keep only instructions strictly before the target address
+	// Keep only instructions strictly before the target address. An arbitrary
+	// byte estimate can decode a valid prefix and then stop at an undecodable
+	// barrier; never concatenate that prefix with the requested target.
 	const beforeTarget = allInstructions.filter(instr => instr.address < targetAddress);
-
-	// Return the last contextCount instructions
-	if (beforeTarget.length <= contextCount) {
-		return beforeTarget;
+	const contiguousReversed: Instruction[] = [];
+	let expectedEnd = targetAddress;
+	for (let i = beforeTarget.length - 1; i >= 0 && contiguousReversed.length < contextCount; i--) {
+		const instr = beforeTarget[i];
+		const instructionEnd = instr.address + instr.size;
+		if (instructionEnd === expectedEnd) {
+			contiguousReversed.push(instr);
+			expectedEnd = instr.address;
+			continue;
+		}
+		if (instructionEnd < expectedEnd) {
+			break;
+		}
 	}
-	return beforeTarget.slice(beforeTarget.length - contextCount);
+	const instructions = contiguousReversed.reverse();
+	if (instructions.length === 0) {
+		return {
+			instructions,
+			summary: {
+				status: 'unavailable', requestedCount: contextCount, returnedCount: 0,
+				contiguous: false, targetAddress: targetHex, reason: 'no-contiguous-predecessor'
+			}
+		};
+	}
+	return {
+		instructions,
+		summary: {
+			status: instructions.length === contextCount ? 'complete' : 'partial',
+			requestedCount: contextCount,
+			returnedCount: instructions.length,
+			contiguous: true,
+			targetAddress: targetHex,
+			...(instructions.length === contextCount ? {} : { reason: 'insufficient-contiguous-predecessors' as const })
+		}
+	};
 }
 
 
@@ -721,18 +1029,401 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push({ dispose: () => souperWrapper.dispose() });
 	vscode.commands.executeCommand('setContext', 'hexcore:helixAvailable', helixWrapper.isAvailable());
 
+	let activeInvestigationId: string | undefined;
+	const resolveFindingFunction = async (
+		store: SessionStore,
+		finding: InvestigationFindingEntry
+	): Promise<{ address: string; name: string }> => {
+		let functionAddress = finding.function_address;
+		let functionName = finding.function_name;
+		if (!functionAddress) {
+			const referenceAddress = parseAddressValue(finding.reference_address ?? undefined);
+			if (referenceAddress === undefined) {
+				throw new Error('This finding has no code reference from which to resolve a function.');
+			}
+			const resolvedAddress = await engine.findFunctionStartForAddress(referenceAddress);
+			if (resolvedAddress === undefined) {
+				throw new Error(
+					`Function boundary unresolved for ${finding.reference_address}. Run Analyze and try again.`
+				);
+			}
+			if (!engine.getFunctionAt(resolvedAddress)) {
+				await engine.analyzeFunction(resolvedAddress, `sub_${resolvedAddress.toString(16).toUpperCase()}`);
+				functionProvider.refresh();
+			}
+			functionAddress = `0x${resolvedAddress.toString(16).toUpperCase()}`;
+			functionName = engine.getFunctionName(resolvedAddress) ?? `sub_${resolvedAddress.toString(16).toUpperCase()}`;
+			store.setInvestigationFindingFunction(finding.id, functionAddress, functionName);
+		}
+
+		const numericAddress = parseAddressValue(functionAddress);
+		if (numericAddress === undefined) {
+			throw new Error(`Invalid function address stored for finding ${finding.id}.`);
+		}
+		return {
+			address: functionAddress,
+			name: functionName ?? engine.getFunctionName(numericAddress) ?? `sub_${numericAddress.toString(16).toUpperCase()}`,
+		};
+	};
+
+	const getAnalysisCenterSnapshot = async (): Promise<AnalysisCenterSnapshot> => {
+		const [disassembler, assembler, jobUris, targetUris] = await Promise.all([
+			engine.getDisassemblerAvailability(),
+			engine.getAssemblerAvailability(),
+			vscode.workspace.findFiles(
+				'**/*.hexcore_job.json',
+				'**/{node_modules,.git,out,dist}/**',
+				20
+			),
+			vscode.workspace.findFiles(
+				'**/*.{exe,dll,sys,ocx,scr,cpl,elf,so,a,o,ko,bin,raw,dmp}',
+				'**/{node_modules,.git,out,dist,hexcore-reports,hexcore-reports-*}/**',
+				80
+			)
+		]);
+		const fileInfo = engine.getFileInfo();
+		const loaded = engine.isFileLoaded();
+		const filePath = engine.getFilePath() ?? '';
+		const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const formatJobPath = (uri: vscode.Uri): string => workspaceRoot
+			? path.relative(workspaceRoot, uri.fsPath)
+			: uri.fsPath;
+		const sessionStore = engine.getSessionStore();
+		maybeRecordSessionManifest(sessionStore, { capstone: disassembler.available, llvmMc: assembler.available });
+		const analysisTarget = sessionStore?.getAnalysisTarget() ?? null;
+		const analysisSession = sessionStore?.getAnalysisSession() ?? null;
+		const investigations = sessionStore?.getRecentInvestigations(20) ?? [];
+		const visibleInvestigationId = investigations.some(item => item.id === activeInvestigationId)
+			? activeInvestigationId
+			: investigations[0]?.id;
+		const recentFindings = visibleInvestigationId
+			? sessionStore?.getInvestigationFindings(visibleInvestigationId) ?? []
+			: [];
+		const toFinding = (finding: typeof recentFindings[number]): AnalysisFinding => ({
+			id: finding.id,
+			investigationId: finding.investigation_id,
+			query: finding.query,
+			label: finding.label,
+			stringAddress: finding.string_address,
+			referenceAddress: finding.reference_address,
+			functionAddress: finding.function_address,
+			functionName: finding.function_name,
+			encoding: finding.encoding,
+			saved: finding.saved === 1
+		});
+		const status = (
+			id: string,
+			label: string,
+			available: boolean,
+			detail?: string
+		): AnalysisCenterSnapshot['engines'][number] => ({
+			id,
+			label,
+			status: available ? 'ready' : 'unavailable',
+			detail: available ? 'Native runtime loaded' : (detail || 'Native runtime unavailable')
+		});
+
+		return {
+			loaded,
+			fileName: loaded ? engine.getFileName() : '',
+			filePath,
+			format: fileInfo?.format ?? 'Not detected',
+			architecture: String(fileInfo?.architecture ?? engine.getArchitecture()),
+			entryPoint: fileInfo?.entryPoint ?? 0,
+			baseAddress: fileInfo?.baseAddress ?? engine.getBaseAddress(),
+			imageSize: fileInfo?.imageSize ?? engine.getBufferSize(),
+			metrics: {
+				functions: engine.getFunctions().length,
+				sections: engine.getSections().length,
+				imports: engine.getImports().reduce((total, library) => total + library.functions.length, 0),
+				exports: engine.getExports().length,
+				strings: engine.getStrings().length,
+				bookmarks: engine.getAllBookmarks().length,
+			},
+			engines: [
+				status('capstone', 'Capstone', disassembler.available, disassembler.error),
+				status('llvm-mc', 'LLVM MC', assembler.available, assembler.error),
+				status('remill', 'Remill', remillWrapper.isAvailable(), remillWrapper.getLastError()),
+				status('helix', 'Helix', helixWrapper.isAvailable(), helixWrapper.getLastError()),
+				status('souper', 'Souper', souperWrapper.isAvailable(), souperWrapper.getLastError()),
+				{
+					id: 'rellic',
+					label: 'Rellic',
+					status: 'disabled',
+					detail: 'Disabled compatibility backend'
+				}
+			],
+			emulator: readCurrentEmulator(),
+			workspaceName: vscode.workspace.name ?? '',
+			jobFiles: jobUris.map(formatJobPath).sort((a, b) => a.localeCompare(b)),
+			sessionPath: loaded ? path.join(path.dirname(filePath), '.hexcore_session.db') : '',
+			sessionPersistence: loaded && engine.getSessionStore() !== undefined,
+			analysisTarget,
+			analysisSession,
+			workspaceTargets: targetUris.map(uri => ({
+				name: path.basename(uri.fsPath),
+				path: uri.fsPath,
+				relativePath: formatJobPath(uri)
+			})).sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+			investigations: investigations.map(item => ({
+				id: item.id,
+				title: item.title,
+				kind: item.kind,
+				query: item.query,
+				status: item.status,
+				resultCount: item.result_count,
+				createdAt: item.created_at
+			})),
+			recentFindings: recentFindings.map(toFinding),
+			savedFindings: (sessionStore?.getSavedInvestigationFindings(250) ?? []).map(toFinding),
+		};
+	};
+
+	// 3.8.4 C3: record the engine manifest once per session DB. Best-effort
+	// observability — recording must never break analysis or the UI.
+	const maybeRecordSessionManifest = (
+		sessionStore: SessionStore | undefined,
+		nativeAvailability: { capstone: boolean; llvmMc: boolean }
+	): void => {
+		if (!sessionStore || sessionStore.getEngineManifest()) {
+			return;
+		}
+		try {
+			const engines: AnalysisEngineIdentity[] = [];
+			const extensionVersion = vscode.extensions.getExtension('hikarisystem.hexcore-disassembler')?.packageJSON?.version;
+			if (typeof extensionVersion === 'string' && extensionVersion.length > 0) {
+				engines.push({ id: 'hikarisystem.hexcore-disassembler', version: extensionVersion });
+			}
+			const helixVersion = helixWrapper.isAvailable() ? helixWrapper.getVersion() : undefined;
+			if (helixVersion) {
+				engines.push({ id: 'hikarisystem.hexcore-helix', version: helixVersion });
+			}
+			const config = vscode.workspace.getConfiguration('hexcore');
+			sessionStore.recordEngineManifest(engines, {
+				'pipeline.queue.poolSize': config.get('pipeline.queue.poolSize'),
+				'disassembler.defaultArchitecture': config.get('disassembler.defaultArchitecture'),
+				'disassembler.syntaxFlavor': config.get('disassembler.syntaxFlavor'),
+				'disassembler.maxFunctions': config.get('disassembler.maxFunctions'),
+				'disassembler.maxFunctionSize': config.get('disassembler.maxFunctionSize'),
+				engineAvailability: {
+					capstone: nativeAvailability.capstone,
+					'llvm-mc': nativeAvailability.llvmMc,
+					remill: remillWrapper.isAvailable(),
+					helix: helixWrapper.isAvailable(),
+					souper: souperWrapper.isAvailable(),
+				},
+			});
+		} catch {
+			// Manifest recording is diagnostics, not a gate.
+		}
+	};
+
+	const analysisCenterProvider = new AnalysisCenterProvider(
+		getAnalysisCenterSnapshot,
+		async (request: AnalysisCenterRequest): Promise<AnalysisActionResult | void> => {
+			const currentFile = engine.getFilePath();
+			const currentUri = currentFile ? vscode.Uri.file(currentFile) : undefined;
+			if (request.type === 'loadTarget') {
+				const uri = vscode.Uri.file(request.path);
+				if (!vscode.workspace.getWorkspaceFolder(uri) || !fs.existsSync(uri.fsPath) || !fs.statSync(uri.fsPath).isFile()) {
+					throw new Error('The selected target is not a readable file in this workspace.');
+				}
+				await vscode.commands.executeCommand('vscode.openWith', uri, DisassemblyEditorProvider.viewType);
+				activeInvestigationId = undefined;
+				return { title: 'Binary loaded', message: uri.fsPath };
+			}
+
+			if (request.type === 'runInvestigation') {
+				if (!engine.isFileLoaded()) {
+					throw new Error('Load a binary before running an investigation.');
+				}
+				const store = engine.getSessionStore();
+				if (!store) {
+					throw new Error('Session persistence is unavailable for this binary.');
+				}
+				const queries = resolveInvestigationQueries(request.preset, request.query);
+				if (queries.length === 0) {
+					throw new Error('Enter a string or term to investigate.');
+				}
+				const investigationId = crypto.randomUUID();
+				const matches: Array<{
+					query: string; address: number; string: string; encoding: string; references: number[];
+				}> = [];
+				for (const query of queries) {
+					const results = await engine.searchStringReferences(query, 500);
+					for (const result of results) {
+						matches.push({ query, ...result });
+					}
+				}
+				const findings = buildStringInvestigationFindings(
+					investigationId,
+					matches,
+					engine.getFunctions(),
+					250,
+					{ target: store.getAnalysisTarget() }
+				);
+				const presetTitles: Record<InvestigationPreset, string> = {
+					custom: request.query.trim(),
+					health: 'Health / state',
+					'anti-debug': 'Anti-debug',
+					network: 'Network / URLs',
+					credentials: 'Credentials / secrets'
+				};
+				const truncated = findings.length >= 250;
+				store.recordInvestigation({
+					id: investigationId,
+					title: presetTitles[request.preset] || 'String investigation',
+					kind: 'string-reference',
+					query: queries.join(', '),
+					status: truncated ? 'complete-truncated' : 'complete'
+				}, findings);
+				activeInvestigationId = investigationId;
+				return {
+					title: 'Investigation complete',
+					message: `${truncated ? 'First ' : ''}${findings.length} findings recorded in ${store.getDbPath()}`
+				};
+			}
+
+			if (request.type === 'openInvestigation') {
+				const store = engine.getSessionStore();
+				const exists = store?.getRecentInvestigations(100).some(item => item.id === request.id);
+				if (!exists) {
+					throw new Error('This investigation is no longer available in the active session.');
+				}
+				activeInvestigationId = request.id;
+				return { title: 'Investigation opened', message: `${store!.getInvestigationFindings(request.id).length} findings` };
+			}
+
+			if (request.type === 'createInvestigationJob') {
+				if (!currentFile || !engine.isFileLoaded()) {
+					throw new Error('Load a binary before creating an investigation job.');
+				}
+				const store = engine.getSessionStore();
+				const finding = store?.getInvestigationFinding(request.findingId);
+				if (!store || !finding || finding.saved !== 1) {
+					throw new Error('Select a finding that is saved in the active session.');
+				}
+				assertFindingMatchesActiveTarget(request.findingId, store.getAnalysisTarget());
+				const targetWorkspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(currentFile));
+				const workspaceFolder = targetWorkspaceFolder ?? vscode.workspace.workspaceFolders?.[0];
+				if (!workspaceFolder) {
+					throw new Error('Open a workspace before creating a reusable job.');
+				}
+
+				const resolved = await resolveFindingFunction(store, finding);
+				const functionInfo = engine.getFunctionAt(parseAddressValue(resolved.address)!);
+				const instructionCount = Math.max(150, Math.min(10000, (functionInfo?.instructions.length ?? 268) + 32));
+				const slug = sanitizeInvestigationJobName(request.name);
+				const jobsDirectory = path.join(workspaceFolder.uri.fsPath, 'hexcore-jobs');
+				const outputDirectory = path.join(workspaceFolder.uri.fsPath, 'hexcore-reports', 'investigations', slug);
+				const definition = createInvestigationJob({
+					targetPath: targetWorkspaceFolder ? path.relative(jobsDirectory, currentFile) : currentFile,
+					outputDirectory: path.relative(jobsDirectory, outputDirectory),
+					name: request.name,
+					query: finding.query,
+					functionAddress: resolved.address,
+					instructionCount,
+				});
+				const jobPath = path.join(jobsDirectory, definition.fileName);
+				if (fs.existsSync(jobPath)) {
+					throw new Error(`A job named "${definition.slug}" already exists.`);
+				}
+				fs.mkdirSync(jobsDirectory, { recursive: true });
+				fs.writeFileSync(jobPath, `${JSON.stringify(definition.job, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+				return {
+					title: 'Investigation job created',
+					message: `${path.relative(workspaceFolder.uri.fsPath, jobPath)} queued; output: ${path.relative(workspaceFolder.uri.fsPath, outputDirectory)}`
+				};
+			}
+
+			if (request.type === 'finding') {
+				const store = engine.getSessionStore();
+				const finding = store?.getInvestigationFinding(request.id);
+				if (!store || !finding) {
+					throw new Error('This finding is no longer available in the active session.');
+				}
+				assertFindingMatchesActiveTarget(request.id, store.getAnalysisTarget());
+				if (request.action === 'save' || request.action === 'unsave') {
+					store.setInvestigationFindingSaved(request.id, request.action === 'save');
+					return {
+						title: request.action === 'save' ? 'Finding saved' : 'Finding removed',
+						message: finding.function_name || finding.label
+					};
+				}
+				if (request.action === 'open') {
+					const address = parseAddressValue(finding.reference_address ?? finding.function_address ?? undefined);
+					if (address === undefined) {
+						throw new Error('This finding has no code reference to open.');
+					}
+					await vscode.commands.executeCommand('hexcore.disasm.goToAddress', address);
+					return { title: 'Reference opened', message: `0x${address.toString(16).toUpperCase()}` };
+				}
+				const resolved = await resolveFindingFunction(store, finding);
+				await vscode.commands.executeCommand('hexcore.helix.decompile', {
+					file: currentFile,
+					address: resolved.address,
+					quiet: false
+				});
+				return { title: 'Decompile complete', message: resolved.name };
+			}
+
+			switch (request.action) {
+				case 'openBinary':
+					await vscode.commands.executeCommand('hexcore.disasm.openFile');
+					return { title: 'Binary opened', message: engine.getFilePath() ?? 'No target selected' };
+				case 'analyze':
+					const analysis = await vscode.commands.executeCommand<any>('hexcore.disasm.analyzeAll', currentUri);
+					return analysis
+						? {
+							title: 'Analysis complete',
+							message: `${analysis.newFunctions ?? 0} added, ${analysis.removedFunctions ?? 0} pruned; ${analysis.totalFunctions ?? engine.getFunctions().length} total. Cache: ${path.join(path.dirname(currentFile!), '.hexcore_session.db')}`
+						}
+						: { title: 'Analysis finished', message: `${engine.getFunctions().length} functions indexed` };
+				case 'lift':
+					await vscode.commands.executeCommand('hexcore.disasm.liftToIR');
+					return { title: 'Lift complete', message: 'LLVM IR opened in the editor' };
+				case 'decompile':
+					await vscode.commands.executeCommand('hexcore.helix.decompile');
+					return { title: 'Decompile complete', message: 'Helix output opened in the editor' };
+				case 'hex':
+					await vscode.commands.executeCommand('hexcore.openHexView', currentUri);
+					return { title: 'Hex Viewer opened', message: path.basename(currentFile!) };
+				case 'yara':
+					await vscode.commands.executeCommand('hexcore.yara.scan', currentUri);
+					return { title: 'YARA scan complete', message: path.basename(currentFile!) };
+				case 'entropy':
+					await vscode.commands.executeCommand('hexcore.entropy.analyze', currentUri);
+					return { title: 'Entropy analysis complete', message: path.basename(currentFile!) };
+				case 'pe':
+					await vscode.commands.executeCommand('hexcore.peanalyzer.analyze', currentUri);
+					return { title: 'PE analysis complete', message: path.basename(currentFile!) };
+				case 'runJob':
+					await vscode.commands.executeCommand('hexcore.pipeline.runJob');
+					return { title: 'Pipeline finished', message: 'Job status refreshed' };
+				case 'doctor':
+					await vscode.commands.executeCommand('hexcore.pipeline.doctor');
+					return { title: 'Pipeline Doctor complete', message: 'Diagnostic report opened' };
+				case 'nativeStatus':
+					await vscode.commands.executeCommand('hexcore.disasm.nativeStatus');
+					return { title: 'Engine status refreshed', message: 'Native runtime checks complete' };
+			}
+			analysisCenterProvider.refresh();
+		}
+	);
+	context.subscriptions.push(analysisCenterProvider);
+
 	let shownExperimentalNotice = false;
 
 	const showNativeStatus = async (): Promise<void> => {
 		const disassembler = await engine.getDisassemblerAvailability();
 		const assembler = await engine.getAssemblerAvailability();
 		const remillAvailable = remillWrapper.isAvailable();
-		const rellicAvailable = rellicWrapper.isAvailable();
 		const helixAvailable = helixWrapper.isAvailable();
+		const souperAvailable = souperWrapper.isAvailable();
 
-		if (disassembler.available && assembler.available && remillAvailable && rellicAvailable && helixAvailable) {
+		if (disassembler.available && assembler.available && remillAvailable && helixAvailable && souperAvailable) {
 			vscode.window.showInformationMessage(
-				vscode.l10n.t('Native engines are available for this session (Capstone + LLVM MC + Remill + Rellic + Helix).')
+				vscode.l10n.t('Active native engines are available for this session (Capstone + LLVM MC + Remill + Helix + Souper). Rellic is disabled compatibility scope.')
 			);
 			return;
 		}
@@ -758,14 +1449,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.l10n.t('Remill: {0}', remillWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
 			);
 		}
-		if (!rellicAvailable) {
-			parts.push(
-				vscode.l10n.t('Rellic: {0}', rellicWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
-			);
-		}
 		if (!helixAvailable) {
 			parts.push(
 				vscode.l10n.t('Helix: {0}', helixWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
+			);
+		}
+		if (!souperAvailable) {
+			parts.push(
+				vscode.l10n.t('Souper: {0}', souperWrapper.getLastError() ?? vscode.l10n.t('Unavailable'))
 			);
 		}
 
@@ -775,6 +1466,122 @@ export function activate(context: vscode.ExtensionContext): void {
 	};
 
 	const pipelineRunner = new AutomationPipelineRunner();
+	const semanticInvocation = (arg: unknown): Record<string, unknown> & SemanticCommandInvocationOptions =>
+		isRecord(arg) ? arg as Record<string, unknown> & SemanticCommandInvocationOptions : {};
+	const selectedSemanticFunctionIdentity = (): string | undefined => {
+		const address = disasmEditorProvider.getCurrentFunctionAddress()
+			?? graphViewProvider.getCurrentFunctionAddress();
+		return address === undefined ? undefined : `0x${address.toString(16)}`;
+	};
+	const semanticFunctionIdentity = (
+		options: Record<string, unknown>,
+		label = 'functionIdentity',
+	): string => {
+		const raw = options.functionIdentity ?? options.functionAddress ?? options.address;
+		if (typeof raw === 'string' && raw.trim().length > 0) {
+			return raw.trim();
+		}
+		if (typeof raw === 'number' && Number.isSafeInteger(raw) && raw >= 0) {
+			return `0x${raw.toString(16)}`;
+		}
+		const selected = selectedSemanticFunctionIdentity();
+		if (selected) { return selected; }
+		throw new Error(`Semantic command requires ${label} or a selected function.`);
+	};
+	const semanticService = async (options: SemanticCommandInvocationOptions) =>
+		prepareSemanticCommandService(engine, options.file, session => ({
+			producer: 'hexcore-disassembler:types-command-r32',
+			callbacks: semanticCommandCallbacks(session, engine),
+		}));
+	const prepareReferenceGraphTarget = async (options: ReferenceGraphCommandInvocationOptions): Promise<void> => {
+		if (typeof options.file === 'string' && options.file.trim().length > 0) {
+			const requested = path.resolve(options.file);
+			if (engine.getFilePath() !== requested) {
+				const loaded = await engine.loadFile(requested);
+				if (!loaded) { throw new Error(`Failed to load reference-graph target: ${requested}`); }
+			}
+		}
+		if (!engine.isFileLoaded()) {
+			throw new Error('Reference graph command requires a loaded binary or an explicit file path.');
+		}
+	};
+	const writeReferenceGraphOutput = (options: ReferenceGraphCommandInvocationOptions, result: unknown): string | undefined => {
+		const rawOutput = options.output as unknown;
+		const outputPath = typeof rawOutput === 'string'
+			? rawOutput
+			: isRecord(rawOutput) && typeof rawOutput.path === 'string'
+				? rawOutput.path
+				: undefined;
+		if (!outputPath) { return undefined; }
+		const resolved = path.resolve(outputPath);
+		writeJsonFile(resolved, result);
+		return resolved;
+	};
+	const writeSemanticCommandOutput = (
+		options: SemanticCommandInvocationOptions,
+		result: unknown,
+		canonicalText?: string,
+	): string | undefined => {
+		const outputPath = resolveSemanticOutputPath(options.output);
+		if (!outputPath) { return undefined; }
+		if (canonicalText !== undefined) {
+			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+			fs.writeFileSync(outputPath, `${canonicalText}\n`, 'utf8');
+		} else {
+			writeJsonFile(outputPath, result);
+		}
+		return outputPath;
+	};
+	const refreshAfterSemanticCommand = (): void => {
+		functionProvider.refresh();
+		disasmEditorProvider.refresh();
+		analysisCenterProvider.refresh();
+	};
+	const announceSemanticCommand = (
+		options: SemanticCommandInvocationOptions,
+		result: {
+			ok?: unknown;
+			reason?: unknown;
+			status?: unknown;
+			semanticStatus?: unknown;
+			semanticWarning?: unknown;
+		},
+		label: string,
+		outputPath?: string,
+	): void => {
+		if (options.quiet) { return; }
+		const suffix = outputPath ? ` Output: ${outputPath}` : '';
+		if (result.ok === false) {
+			vscode.window.showErrorMessage(`${label}: ${String(result.reason ?? result.status ?? 'failed')}.${suffix}`);
+		} else if (result.semanticStatus === 'partial') {
+			vscode.window.showWarningMessage(`${label}: ${String(result.semanticWarning ?? 'caller propagation is incomplete')}.${suffix}`);
+		} else {
+			vscode.window.showInformationMessage(`${label} completed.${suffix}`);
+		}
+	};
+	const interactivePrototypeRequest = async (
+		identity: string,
+	): Promise<ApplyPrototypeRequest | undefined> => {
+		const architecture = String(engine.getArchitecture()).toLowerCase();
+		const callingConventionId = architecture === 'x86' ? 'cdecl'
+			: architecture === 'arm' ? 'aapcs32'
+				: architecture === 'arm64' ? 'aapcs64'
+					: 'win64';
+		const value = await vscode.window.showInputBox({
+			prompt: 'Full semantic prototype as JSON',
+			value: JSON.stringify({
+				functionIdentity: identity,
+				functionAddress: identity,
+				returnType: 'int32_t',
+				callingConventionId,
+				parameters: [],
+			}),
+			ignoreFocusOut: true,
+		});
+		if (value === undefined) { return undefined; }
+		const parsed = JSON.parse(value) as Partial<ApplyPrototypeRequest>;
+		return { ...parsed, functionIdentity: parsed.functionIdentity ?? identity } as ApplyPrototypeRequest;
+	};
 	const pendingJobRuns = new Map<string, NodeJS.Timeout>();
 	const activeJobRuns = new Set<string>();
 	const queuedAutoRuns = new Set<string>();
@@ -795,7 +1602,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		quiet: boolean,
 		autoTriggered: boolean
 	): Promise<PipelineRunStatus | undefined> => {
-		const normalizedPath = path.resolve(jobFilePath);
+		const normalizedPath = jobPathIdentity(jobFilePath);
 		if (activeJobRuns.has(normalizedPath)) {
 			if (autoTriggered) {
 				queuedAutoRuns.add(normalizedPath);
@@ -833,7 +1640,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		}
 	};
 
-	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<PipelineRunStatus | undefined> => {
+	const runPipelineJob = async (arg?: vscode.Uri | string | RunJobCommandOptions): Promise<ContractDecorated<PipelineRunStatus> | undefined> => {
 		const options = normalizeRunJobCommandOptions(arg);
 		const quiet = options.quiet ?? false;
 		const jobFilePath = await resolveJobFilePath(arg, options.jobFile, { interactive: !quiet });
@@ -844,7 +1651,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			return undefined;
 		}
 
-		return executePipelineJob(jobFilePath, quiet, false);
+		const result = await executePipelineJob(jobFilePath, quiet, false);
+		return result ? decoratePipelineRunStatus(result) : undefined;
 	};
 
 	// Bug #36/4: a job-file written INSIDE an outDir self-matches the recursive
@@ -893,7 +1701,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Auto/watcher jobs are submitted at LOW priority so they never starve
 	// user-submitted (normal/high) jobs from the queueJob command.
 	const scheduleJobRun = (jobFilePath: string): void => {
-		const normalizedPath = path.resolve(jobFilePath);
+		const normalizedPath = jobPathIdentity(jobFilePath);
 
 		// Cheap, synchronous exclusion before we even debounce: never let a
 		// generated artifact or an in-outDir job file enter the scheduler.
@@ -901,6 +1709,25 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (skipReason) {
 			console.log(`[HexCore][autoRun] skipped (${skipReason}): ${normalizedPath}`);
 			return;
+		}
+		const staleRunningMs = vscode.workspace.getConfiguration('hexcore.pipeline').get<number>('staleRunningMs', 15 * 60_000);
+		const recordedAttempt = findRecordedAutoRunAttempt(normalizedPath, Date.now(), staleRunningMs);
+		if (recordedAttempt) {
+			if (recordedAttempt.stale) {
+				const recovery = recoverStaleAutoRunAttempt(recordedAttempt);
+				if (recovery.recovered) {
+					console.warn(`[HexCore][autoRun] recovered stale attempt (${recordedAttempt.ageMs}ms): ${normalizedPath}`);
+				} else {
+					console.warn(`[HexCore][autoRun] stale attempt recovery failed (${recovery.reason ?? 'unknown'}): ${normalizedPath}`);
+					return;
+				}
+			} else {
+			console.log(
+				`[HexCore][autoRun] skipped (unchanged revision already attempted: ` +
+				`status=${recordedAttempt.status}, startedAt=${recordedAttempt.startedAt}): ${normalizedPath}`
+			);
+			return;
+			}
 		}
 
 		const existing = pendingJobRuns.get(normalizedPath);
@@ -990,6 +1817,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		sectionProvider.refresh();
 		importProvider.refresh();
 		exportProvider.refresh();
+		analysisCenterProvider.refresh();
 	});
 
 	// Register Custom Editor (Main disassembly view)
@@ -1007,6 +1835,11 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Register Webview Providers (Sidebar)
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider(
+			AnalysisCenterProvider.viewType,
+			analysisCenterProvider,
+			{ webviewOptions: { retainContextWhenHidden: true } }
+		),
+		vscode.window.registerWebviewViewProvider(
 			'hexcore.disassembler.graphView',
 			graphViewProvider,
 			{ webviewOptions: { retainContextWhenHidden: true } }
@@ -1023,6 +1856,9 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.analysis.openCenter', () => {
+			analysisCenterProvider.show();
+		}),
 		vscode.commands.registerCommand('hexcore.pipeline.runJob', async (arg?: vscode.Uri | string | RunJobCommandOptions) => {
 			return runPipelineJob(arg);
 		}),
@@ -1035,10 +1871,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				if (!options?.quiet) {
 					vscode.window.showInformationMessage(`Pipeline capabilities written to ${outputPath}`);
 				}
-				return capabilities;
+				return decorateOkResult(capabilities);
 			}
 			showCapabilitiesInOutputChannel(capabilities);
-			return capabilities;
+			return decorateOkResult(capabilities);
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.validateJob', async (arg?: vscode.Uri | string | ValidateJobCommandOptions) => {
 			const options = normalizeValidateJobCommandOptions(arg);
@@ -1072,7 +1908,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 			}
 
-			return report;
+			return decorateValidationReport(report);
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.validateWorkspace', async (arg?: ValidateWorkspaceCommandOptions) => {
 			const options = normalizeValidateWorkspaceCommandOptions(arg);
@@ -1323,7 +2159,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Job queued with ID: ${jobId} (priority: ${priority}${sessionNote})`);
 			}
 
-			return { jobId, filePath: jobFilePath, priority, ...(sessionId ? { sessionId } : {}) };
+			return decorateOkResult({ jobId, filePath: jobFilePath, priority, ...(sessionId ? { sessionId } : {}) });
 		}),
 		vscode.commands.registerCommand('hexcore.pipeline.cancelJob', async (arg?: { jobId?: string; quiet?: boolean }) => {
 			let jobId = arg?.jobId;
@@ -1365,8 +2201,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			return cancelled;
 		}),
-		vscode.commands.registerCommand('hexcore.pipeline.jobStatus', async (arg?: { jobId?: string; quiet?: boolean }) => {
+		vscode.commands.registerCommand('hexcore.pipeline.jobStatus', async (arg?: { jobId?: string; quiet?: boolean; output?: string | { path?: string }; pipelineQueryContext?: QueueQueryContext }) => {
 			const manager = getJobQueueManagerInstance();
+			const outputPath = resolveOptionalOutputPath(arg?.output);
 
 			if (arg?.jobId) {
 				// Issue #24/#26: return the public status report, which carries
@@ -1380,7 +2217,11 @@ export function activate(context: vscode.ExtensionContext): void {
 						vscode.window.showWarningMessage(`Job not found: ${arg.jobId}`);
 					}
 				}
-				return report;
+				const result = report ? decorateOkResult(report) : report;
+				if (outputPath && result) {
+					writeJsonFile(outputPath, result);
+				}
+				return result;
 			}
 
 			const allJobs = manager.getAllJobs();
@@ -1390,7 +2231,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				showQueueStatusInOutputChannel(allJobs, stats);
 			}
 
-			return { jobs: allJobs, stats };
+			const result = decorateOkResult({ jobs: allJobs, stats, ...describeQueueObservation(allJobs, arg?.pipelineQueryContext) });
+			if (outputPath) {
+				writeJsonFile(outputPath, result);
+			}
+			return result;
 		})
 	);
 
@@ -1515,15 +2360,26 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 
 				if (func && func.instructions.length > 0) {
-					// Auto-focus the graph view and show CFG
-					try {
-						await vscode.commands.executeCommand('hexcore.disassembler.graphView.focus');
-					} catch {
-						// View may not be visible yet, that's ok
-					}
-					graphViewProvider.showFunction(func);
+					await graphViewProvider.showFunction(func);
 				}
 			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.goToFileOffset', async (arg?: { filePath?: string; offset?: number }) => {
+			const loadedPath = engine.getFilePath();
+			if (!loadedPath || !arg?.filePath || path.resolve(loadedPath) !== path.resolve(arg.filePath)) {
+				vscode.window.showWarningMessage('Hex Viewer sync requires the same binary to be open in the Disassembler.');
+				return false;
+			}
+			const address = engine.fileOffsetToAddress(arg.offset ?? Number.NaN);
+			if (address === undefined) {
+				vscode.window.showWarningMessage('The selected file offset is outside the loaded binary.');
+				return false;
+			}
+			await vscode.commands.executeCommand('hexcore.disasm.goToAddress', address);
+			return true;
 		})
 	);
 
@@ -1642,10 +2498,42 @@ export function activate(context: vscode.ExtensionContext): void {
 	// v3.7.4: Retype function return type
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.retypeFunction', async (arg?: any) => {
+			const applyLegacyFunctionRetype = (addr: number, returnType: string) => {
+				if (!Number.isSafeInteger(addr) || addr < 0) {
+					throw new Error('retypeFunction requires a non-negative safe virtual address.');
+				}
+				const session = engine.getSessionStore();
+				if (!session) {
+					throw new Error('HXDB semantic persistence is unavailable for the active binary.');
+				}
+				const functionIdentity = `0x${addr.toString(16)}`;
+				const semanticStore = session.getSemanticStore();
+				const previous = semanticStore.getPrototype(functionIdentity);
+				const generationBefore = session.getAnalysisSession()?.generation;
+				engine.retypeFunction(addr, returnType);
+				const prototype = semanticStore.getPrototype(functionIdentity);
+				if (!prototype) {
+					throw new Error(`retypeFunction did not persist a semantic prototype for ${functionIdentity}.`);
+				}
+				const changed = previous?.prototypeHash !== prototype.prototypeHash;
+				return decorateSemanticCommandResult({
+					success: true,
+					ok: true,
+					command: 'retypeFunction',
+					functionIdentity,
+					changed,
+					prototype,
+					previousPrototypeHash: previous?.prototypeHash,
+					prototypeHash: prototype.prototypeHash,
+					generationBefore,
+					generationAfter: session.getAnalysisSession()?.generation,
+					storeHash: semanticStore.exportHash(),
+					propagationComplete: !changed,
+				});
+			};
 			if (arg && typeof arg === 'object' && 'address' in arg && 'returnType' in arg) {
 				const addr = typeof arg.address === 'string' ? parseInt(arg.address, 16) : arg.address;
-				engine.retypeFunction(addr, arg.returnType);
-				return { success: true };
+				return applyLegacyFunctionRetype(addr, arg.returnType);
 			}
 			const addr = arg?.address || disasmEditorProvider.getCurrentFunctionAddress();
 			if (addr === undefined) {
@@ -1654,11 +2542,328 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			const returnType = await vscode.window.showInputBox({ prompt: 'Function return type:', value: 'int' });
 			if (returnType) {
-				engine.retypeFunction(addr, returnType);
+				const result = applyLegacyFunctionRetype(addr, returnType);
 				disasmEditorProvider.refresh();
 				vscode.window.showInformationMessage(`Return type → ${returnType}`);
+				return result;
 			}
 		})
+	);
+
+	// R32: complete semantic prototype/ABI commands. Headless calls receive the
+	// pipeline target and output path; command-palette calls use the selected function.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.types.applyPrototype', async (arg?: unknown) => {
+			const options = semanticInvocation(arg);
+			const identity = semanticFunctionIdentity(options);
+			let request: ApplyPrototypeRequest | undefined;
+			if (options.returnType !== undefined || options.parameters !== undefined || options.callingConventionId !== undefined) {
+				request = { ...options, functionIdentity: identity } as unknown as ApplyPrototypeRequest;
+			} else if (!options.quiet) {
+				request = await interactivePrototypeRequest(identity);
+			}
+			if (!request) {
+				if (options.quiet) { throw new Error('applyPrototype requires a complete prototype request.'); }
+				return undefined;
+			}
+			const prepared = await semanticService(options);
+			const result = decorateSemanticCommandResult({ ...prepared.service.applyPrototype(request) });
+			const outputPath = writeSemanticCommandOutput(options, result);
+			refreshAfterSemanticCommand();
+			announceSemanticCommand(options, result, 'Semantic prototype', outputPath);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.setCallingConvention', async (arg?: unknown) => {
+			const options = semanticInvocation(arg);
+			const identity = semanticFunctionIdentity(options);
+			let callingConventionId = typeof options.callingConventionId === 'string'
+				? options.callingConventionId
+				: undefined;
+			if (!callingConventionId && !options.quiet) {
+				callingConventionId = await vscode.window.showQuickPick(
+					['cdecl', 'stdcall', 'fastcall', 'thiscall', 'vectorcall', 'usercall', 'win64', 'sysv64', 'aapcs32', 'aapcs64'],
+					{ placeHolder: 'Calling convention', ignoreFocusOut: true },
+				);
+			}
+			if (!callingConventionId) {
+				if (options.quiet) { throw new Error('setCallingConvention requires callingConventionId.'); }
+				return undefined;
+			}
+			const request = {
+				...options,
+				functionIdentity: identity,
+				callingConventionId,
+			} as unknown as SetCallingConventionRequest;
+			const prepared = await semanticService(options);
+			const result = decorateSemanticCommandResult({ ...prepared.service.setCallingConvention(request) });
+			const outputPath = writeSemanticCommandOutput(options, result);
+			refreshAfterSemanticCommand();
+			announceSemanticCommand(options, result, 'Calling convention', outputPath);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.setParameter', async (arg?: unknown) => {
+			const options = semanticInvocation(arg);
+			const identity = semanticFunctionIdentity(options);
+			let ordinal = typeof options.ordinal === 'number' ? options.ordinal : undefined;
+			let parameter = isRecord(options.parameter) ? options.parameter : undefined;
+			if ((ordinal === undefined || !parameter) && !options.quiet) {
+				const value = await vscode.window.showInputBox({
+					prompt: 'Parameter patch as JSON',
+					value: JSON.stringify({ ordinal: ordinal ?? 0, parameter: parameter ?? { name: 'arg0', type: 'uint64_t' } }),
+					ignoreFocusOut: true,
+				});
+				if (value === undefined) { return undefined; }
+				const parsed = JSON.parse(value) as { ordinal?: unknown; parameter?: unknown };
+				ordinal = typeof parsed.ordinal === 'number' ? parsed.ordinal : undefined;
+				parameter = isRecord(parsed.parameter) ? parsed.parameter : undefined;
+			}
+			if (ordinal === undefined || !parameter) {
+				throw new Error('setParameter requires a numeric ordinal and a parameter patch.');
+			}
+			const request = {
+				...options,
+				functionIdentity: identity,
+				ordinal,
+				parameter,
+			} as unknown as SetParameterRequest;
+			const prepared = await semanticService(options);
+			const result = decorateSemanticCommandResult({ ...prepared.service.setParameter(request) });
+			const outputPath = writeSemanticCommandOutput(options, result);
+			refreshAfterSemanticCommand();
+			announceSemanticCommand(options, result, 'Semantic parameter', outputPath);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.clearOverride', async (arg?: unknown) => {
+			const options = semanticInvocation(arg);
+			const identity = semanticFunctionIdentity(options);
+			const explicitIdentity = options.functionIdentity !== undefined || options.functionAddress !== undefined || options.address !== undefined;
+			if (!options.quiet && !explicitIdentity) {
+				const confirmation = await vscode.window.showWarningMessage(
+					`Clear the analyst semantic override for ${identity}?`,
+					{ modal: true },
+					'Clear Override',
+				);
+				if (confirmation !== 'Clear Override') { return undefined; }
+			}
+			const request: ClearOverrideRequest = { functionIdentity: identity };
+			const prepared = await semanticService(options);
+			const result = decorateSemanticCommandResult({ ...prepared.service.clearOverride(request) });
+			const outputPath = writeSemanticCommandOutput(options, result);
+			if (result.changed === true) { refreshAfterSemanticCommand(); }
+			announceSemanticCommand(options, result, 'Semantic override', outputPath);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.explainPrototype', async (arg?: unknown) => {
+			const options = semanticInvocation(arg);
+			const request: ExplainPrototypeRequest = { functionIdentity: semanticFunctionIdentity(options) };
+			const prepared = await semanticService(options);
+			const result = { ...prepared.service.explainPrototype(request), semanticStatus: 'ok' as const };
+			const outputPath = writeSemanticCommandOutput(options, result);
+			if (!options.quiet && !outputPath) {
+				const document = await vscode.workspace.openTextDocument({
+					language: 'json',
+					content: `${JSON.stringify(result, null, 2)}\n`,
+				});
+				await vscode.window.showTextDocument(document, { preview: true });
+			}
+			announceSemanticCommand(options, result, 'Prototype explanation', outputPath);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.export', async (arg?: unknown) => {
+			let options = semanticInvocation(arg);
+			const prepared = await semanticService(options);
+			if (!resolveSemanticOutputPath(options.output) && !options.quiet) {
+				const target = engine.getFilePath();
+				const uri = await vscode.window.showSaveDialog({
+					defaultUri: target ? vscode.Uri.file(`${target}.hexcore-semantics.json`) : undefined,
+					filters: { 'HexCore Semantic Export': ['json'] },
+				});
+				if (!uri) { return undefined; }
+				options = { ...options, output: uri.fsPath };
+			}
+			const result = prepared.service.export();
+			const outputPath = writeSemanticCommandOutput(options, result, prepared.service.exportCanonical());
+			if (!options.quiet) {
+				vscode.window.showInformationMessage(`Semantic model exported${outputPath ? `: ${outputPath}` : '.'}`);
+			}
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.import', async (arg?: unknown) => {
+			let options = semanticInvocation(arg) as Record<string, unknown> & SemanticImportCommandOptions;
+			if (options.input === undefined && options.inputPath === undefined && !options.quiet) {
+				const uris = await vscode.window.showOpenDialog({
+					canSelectMany: false,
+					canSelectFiles: true,
+					canSelectFolders: false,
+					filters: { 'HexCore Semantic Export': ['json'] },
+				});
+				if (!uris?.[0]) { return undefined; }
+				options = { ...options, inputPath: uris[0].fsPath };
+			}
+			const prepared = await semanticService(options);
+			const input = readSemanticImportInput(options);
+			const result = decorateSemanticCommandResult({
+				...prepared.service.import(input as string | SemanticCommandExportEnvelope),
+			});
+			const outputPath = writeSemanticCommandOutput(options, result);
+			if (result.changedPrototypeCount > 0) { refreshAfterSemanticCommand(); }
+			announceSemanticCommand(options, result, 'Semantic import', outputPath);
+			return result;
+		}),
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.references.query', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as ReferenceGraphCommandInvocationOptions & ReferenceGraphQueryCommandOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = runReferenceGraphQuery(engine, options);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.references.export', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as ReferenceGraphCommandInvocationOptions & ReferenceGraphExportCommandOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = runReferenceGraphExport(engine, options);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.propagation.solve', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as PropagationCommandOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = await runPropagationSolve(engine, options);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.propagation.status', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as PropagationCommandOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = runPropagationStatus(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.propagation.export', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as PropagationCommandOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = runPropagationExport(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.list', async (arg?: unknown) => {
+			const options = (isRecord(arg) ? arg : {}) as ReferenceGraphCommandInvocationOptions;
+			await prepareReferenceGraphTarget(options);
+			const result = runTypeList(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.create', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			if (!isRecord(options.spec)) { throw new Error('typeManager.create requires spec.'); }
+			const result = runTypeCreate(engine, options.spec as never, typeof options.generation === 'number' ? options.generation : undefined);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.update', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			if (typeof options.typeId !== 'string' || !isRecord(options.patch)) { throw new Error('typeManager.update requires typeId and patch.'); }
+			const result = runTypeUpdate(engine, options.typeId, options.patch as never, typeof options.generation === 'number' ? options.generation : undefined);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.rename', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			if (typeof options.typeId !== 'string' || typeof options.name !== 'string') { throw new Error('typeManager.rename requires typeId and name.'); }
+			const result = runTypeRename(engine, options.typeId, options.name, typeof options.generation === 'number' ? options.generation : undefined);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.delete', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			if (typeof options.typeId !== 'string') { throw new Error('typeManager.delete requires typeId.'); }
+			const result = runTypeDelete(engine, options.typeId, typeof options.generation === 'number' ? options.generation : undefined);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.undo', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			if (typeof options.typeId !== 'string') { throw new Error('typeManager.undo requires typeId.'); }
+			const result = runTypeUndo(engine, options.typeId, typeof options.generation === 'number' ? options.generation : undefined);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.export', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			const result = runTypeExport(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.typeManager.import', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			let input = options.input;
+			if (input === undefined && typeof options.inputPath === 'string') {
+				input = JSON.parse(fs.readFileSync(path.resolve(options.inputPath), 'utf8'));
+			}
+			if (!isRecord(input)) { throw new Error('typeManager.import requires input or inputPath.'); }
+			const result = runTypeImport(engine, input as unknown as TypeManagerExport);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.types.ingestDebug', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			const result = await runDebugTypeIngest(engine, isRecord(options.input) ? options.input as never : undefined, options as never);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.records.recover', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			const result = await runRecordRecovery(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.pdb.importSemantics', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			const result = await importPdbSemantics(engine, {
+				...(typeof options.pdbPath === 'string' ? { pdbPath: options.pdbPath } : {}),
+				...(typeof options.maxFunctions === 'number' ? { maxFunctions: options.maxFunctions } : {}),
+			});
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.pdb.resolveSymbols', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			if (typeof options.pdbName !== 'string' || typeof options.guid !== 'string' || typeof options.age !== 'number' || typeof options.cacheDirectory !== 'string') {
+				throw new Error('pdb.resolveSymbols requires pdbName, guid, age and cacheDirectory.');
+			}
+			const resolvedPath = await resolvePdbFromSymbolServers({
+				pdbName: options.pdbName, guid: options.guid, age: options.age, cacheDirectory: options.cacheDirectory,
+				...(Array.isArray(options.symbolServers) ? { symbolServers: options.symbolServers.filter((item): item is string => typeof item === 'string') } : {}),
+			});
+			const result = { ok: resolvedPath !== undefined, command: 'hexcore.pdb.resolveSymbols', resolvedPath: resolvedPath ?? null };
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.signatures.apply', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			const result = applyImportSignatureProvider(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.semanticExplorer.open', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareReferenceGraphTarget(options);
+			SemanticExplorerPanel.show(context.extensionUri, engine);
+			return { ok: true, command: 'hexcore.semanticExplorer.open' };
+		}),
 	);
 
 	// v3.7.4: Set/remove bookmark
@@ -1713,7 +2918,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.showCFG', async () => {
-			const addr = disasmEditorProvider.getCurrentFunctionAddress();
+			const addr = disasmEditorProvider.getCurrentFunctionAddress()
+				?? graphViewProvider.getCurrentFunctionAddress();
 			if (addr === undefined) {
 				vscode.window.showWarningMessage('No function selected');
 				return;
@@ -1721,12 +2927,19 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const func = engine.getFunctionAt(addr);
 			if (func) {
-				// Focus the graph view
-				await vscode.commands.executeCommand('hexcore.disassembler.graphView.focus');
-				// Render the graph
-				graphViewProvider.showFunction(func);
+				await graphViewProvider.showFunctionInEditor(func);
 			} else {
 				vscode.window.showErrorMessage('Function data not found');
+			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.updateCFG', async () => {
+			const addr = disasmEditorProvider.getCurrentFunctionAddress();
+			const func = addr === undefined ? undefined : engine.getFunctionAt(addr);
+			if (func) {
+				await graphViewProvider.showFunction(func);
 			}
 		})
 	);
@@ -1741,6 +2954,19 @@ export function activate(context: vscode.ExtensionContext): void {
 				const results = await engine.searchStringReferences(query);
 				stringRefProvider.setResults(results);
 			}
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.constraints.solveHeadless', async (arg?: ConstraintSolverOptions) => {
+			const options = arg ?? {};
+			const result = await solveConstraints(options);
+			if (!options.quiet) {
+				vscode.window.showInformationMessage(
+					`Z3 ${result.status}: ${result.modelCount} model(s) in ${result.metrics.elapsedMs}ms`
+				);
+			}
+			return result;
 		})
 	);
 
@@ -1840,8 +3066,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				filters: { 'Assembly': ['asm', 's'], 'Text': ['txt'] }
 			});
 			if (uri) {
-				await engine.exportAssembly(uri.fsPath);
-				vscode.window.showInformationMessage(`Assembly exported to ${uri.fsPath}`);
+				const result = await engine.exportAssembly(uri.fsPath);
+				if (result.status === 'partial') {
+					vscode.window.showWarningMessage(
+						`Assembly exported with ${result.functionsWithoutInstructions}/${result.totalFunctions} empty function bodies: ${uri.fsPath}`
+					);
+				} else {
+					vscode.window.showInformationMessage(`Assembly exported to ${uri.fsPath}`);
+				}
 			}
 		})
 	);
@@ -2047,6 +3279,127 @@ export function activate(context: vscode.ExtensionContext): void {
 	);
 
 	// -----------------------------------------------------------------------
+	// Live-memory disassembly — raw bytes supplied by the Debugger.
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.disassembleBufferHeadless', async (arg?: Record<string, unknown>) => {
+			const bytesBase64 = typeof arg?.bytesBase64 === 'string' ? arg.bytesBase64 : undefined;
+			const addressText = typeof arg?.address === 'string' ? arg.address : undefined;
+			const archText = typeof arg?.arch === 'string' ? arg.arch : undefined;
+			if (!bytesBase64 || !addressText || !archText) {
+				throw new Error('disassembleBufferHeadless requires "bytesBase64", "address", and "arch".');
+			}
+			if (!['x86', 'x64', 'arm', 'arm64', 'mips', 'mips64'].includes(archText)) {
+				throw new Error(`disassembleBufferHeadless does not support architecture "${archText}".`);
+			}
+			const bytes = Buffer.from(bytesBase64, 'base64');
+			if (bytes.length === 0 || bytes.length > 4 * 1024 * 1024) {
+				throw new Error('disassembleBufferHeadless requires between 1 byte and 4 MiB.');
+			}
+			const address = BigInt(addressText);
+			if (address < 0n || address > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new Error('disassembleBufferHeadless address is outside the exact JavaScript integer range.');
+			}
+
+			const memoryEngine = new DisassemblerEngine();
+			try {
+				memoryEngine.loadBuffer(bytes, Number(address), archText as ReturnType<typeof engine.getArchitecture>);
+				const instructions = await memoryEngine.disassembleRange(Number(address), bytes.length);
+				const result = {
+					success: instructions.length > 0,
+					source: 'debugger-live-memory',
+					address: `0x${address.toString(16)}`,
+					size: bytes.length,
+					architecture: archText,
+					instructions: instructions.map(i => ({
+						address: `0x${i.address.toString(16)}`,
+						bytes: Buffer.from(i.bytes).toString('hex'),
+						mnemonic: i.mnemonic,
+						opStr: i.opStr,
+						size: i.size,
+					})),
+				};
+				const outputPath = typeof arg?.output === 'string'
+					? arg.output
+					: (arg?.output as { path?: string } | undefined)?.path;
+				if (outputPath) {
+					fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+					fs.writeFileSync(outputPath, JSON.stringify(result, null, 2), 'utf8');
+				}
+				return result;
+			} finally {
+				memoryEngine.dispose();
+			}
+		})
+	);
+
+	// -----------------------------------------------------------------------
+	// Live-memory lifting — bytes supplied by the Debugger, never materialized
+	// as a derived executable on disk.
+	// -----------------------------------------------------------------------
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.liftMemoryHeadless', async (arg?: Record<string, unknown>) => {
+			const bytesBase64 = typeof arg?.bytesBase64 === 'string' ? arg.bytesBase64 : undefined;
+			const addressText = typeof arg?.address === 'string' ? arg.address : undefined;
+			const archText = typeof arg?.arch === 'string' ? arg.arch : undefined;
+			const targetOs = typeof arg?.targetOs === 'string' ? arg.targetOs : undefined;
+			if (!bytesBase64 || !addressText || !archText) {
+				throw new Error('liftMemoryHeadless requires "bytesBase64", "address", and "arch".');
+			}
+			if (!['x86', 'x64', 'arm', 'arm64'].includes(archText)) {
+				throw new Error(`liftMemoryHeadless does not support architecture "${archText}".`);
+			}
+			if (!remillWrapper.isAvailable()) {
+				return { success: false, ir: '', error: 'hexcore-remill is not available.', bytesConsumed: 0 };
+			}
+
+			const bytes = Buffer.from(bytesBase64, 'base64');
+			if (bytes.length === 0 || bytes.length > 4 * 1024 * 1024) {
+				throw new Error('liftMemoryHeadless requires between 1 byte and 4 MiB of live memory.');
+			}
+			const address = BigInt(addressText);
+			if (address < 0n || address > BigInt(Number.MAX_SAFE_INTEGER)) {
+				throw new Error('liftMemoryHeadless address is outside the exact JavaScript integer range.');
+			}
+			const maxInstructions = typeof arg?.maxInstructions === 'number'
+				? Math.min(Math.max(Math.trunc(arg.maxInstructions), 1), 256_000)
+				: Math.min(Math.max(Math.ceil(bytes.length / 2) + 4096, 8000), 256_000);
+			const maxBasicBlocks = typeof arg?.maxBasicBlocks === 'number'
+				? Math.min(Math.max(Math.trunc(arg.maxBasicBlocks), 1), 64_000)
+				: Math.min(Math.max(Math.ceil(bytes.length / 4) + 1024, 4096), 64_000);
+			const liftOptions: RemillLiftOptions = {
+				maxBytes: bytes.length,
+				maxInstructions,
+				maxBasicBlocks,
+				optimizeIR: arg?.optimizeIR !== false,
+				inlineSemantics: arg?.inlineSemantics !== false,
+				splitAtCalls: arg?.splitAtCalls !== false,
+			};
+			const result = await remillWrapper.liftBytes(
+				bytes,
+				Number(address),
+				archText as ReturnType<typeof engine.getArchitecture>,
+				targetOs,
+				liftOptions,
+			);
+			const outputPath = typeof arg?.output === 'string'
+				? arg.output
+				: (arg?.output as { path?: string } | undefined)?.path;
+			if (outputPath && result.success) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, result.ir, 'utf8');
+			}
+			return {
+				...result,
+				address: `0x${address.toString(16)}`,
+				architecture: archText,
+				source: 'debugger-live-memory',
+				requestedBytes: bytes.length,
+			};
+		})
+	);
+
+	// -----------------------------------------------------------------------
 	// [Experimental] Lift to LLVM IR
 	// -----------------------------------------------------------------------
 	context.subscriptions.push(
@@ -2068,7 +3421,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			const arch = engine.getArchitecture();
+			const requestedArch = typeof options.architecture === 'string'
+				? options.architecture
+				: typeof options.arch === 'string' ? options.arch : undefined;
+			const arch = requestedArch && ['x86', 'x64', 'arm', 'arm64'].includes(requestedArch)
+				? requestedArch as ReturnType<typeof engine.getArchitecture>
+				: engine.getArchitecture();
 			const mapping = mapCapstoneToRemill(arch);
 			if (!mapping.supported) {
 				const errorMsg = `Architecture '${arch}' is not supported by Remill. Supported: x86, x64.`;
@@ -2084,6 +3442,10 @@ export function activate(context: vscode.ExtensionContext): void {
 			let functionName: string | undefined;
 			let didBacktrack = false;
 			let backtrackOriginalAddress: number | undefined;
+			const liftTransformations: LiftPreambleTransformation[] = [];
+			const requestedInstructionLimit = coercePositiveInt(options.count);
+			let explicitScopeLimited = false;
+			let liftWindow: ResolvedLiftByteSize | undefined;
 			// v3.8.0-nightly: trampoline follow metadata (Milestone 4.1). Populated
 			// when the resolved entry turns out to be a single unconditional JMP.
 			let trampolineOriginalAddress: number | undefined;
@@ -2250,6 +3612,9 @@ export function activate(context: vscode.ExtensionContext): void {
 						);
 					}
 					const resolved = resolveLiftByteSize({
+						startAddress,
+						endExclusive: options.endExclusive,
+						stopAtFunctionBoundary: options.stopAtFunctionBoundary === true,
 						size: options.size,
 						count: options.count,
 						knownFunctionSize: extent.size,
@@ -2261,6 +3626,8 @@ export function activate(context: vscode.ExtensionContext): void {
 							options, engine.getFileInfo()?.isRelocatable === true),
 					});
 					size = resolved.size;
+					explicitScopeLimited = resolved.scopeLimited === true;
+					liftWindow = resolved;
 					console.log(
 						`[HexCore] liftToIR FIX-QUALITY-002: size=${size} reason=${resolved.reason}` +
 						(resolved.clampedFrom !== undefined ? ` (was ${resolved.clampedFrom})` : '') +
@@ -2284,17 +3651,35 @@ export function activate(context: vscode.ExtensionContext): void {
 				}
 				const func = engine.getFunctionAt(startAddress);
 				if (func) {
-					size = func.endAddress - func.address;
+					const resolved = resolveLiftByteSize({
+						startAddress,
+						endExclusive: options.endExclusive,
+						stopAtFunctionBoundary: options.stopAtFunctionBoundary === true,
+						size: options.size,
+						count: options.count,
+						knownFunctionSize: func.endAddress - func.address,
+						bufferSize: engine.getBufferSize(),
+						allowOversizedLift: shouldHonorExplicitLiftWindow(
+							options, engine.getFileInfo()?.isRelocatable === true),
+					});
+					size = resolved.size;
+					explicitScopeLimited = resolved.scopeLimited === true;
+					liftWindow = resolved;
 					functionName = func.name;
 				} else {
 					// v3.7.5 FIX: Smart sizing — symbol table → count → 4096 (was 256)
-					if (typeof options.size === 'number') {
-						size = options.size;
-					} else if (typeof options.count === 'number') {
-						size = options.count * 15;
-					} else {
-						size = engine.getRecommendedLiftSize(startAddress, 4096);
-					}
+					const resolved = resolveLiftByteSize({
+						startAddress,
+						endExclusive: options.endExclusive,
+						stopAtFunctionBoundary: options.stopAtFunctionBoundary === true,
+						size: options.size,
+						count: options.count,
+						knownFunctionSize: 0,
+						bufferSize: engine.getRecommendedLiftSize(startAddress, 4096),
+					});
+					size = resolved.size;
+					explicitScopeLimited = resolved.scopeLimited === true;
+					liftWindow = resolved;
 				}
 
 				// (Symtab lookup moved to shared code below, before IR rename)
@@ -2326,7 +3711,16 @@ export function activate(context: vscode.ExtensionContext): void {
 					vscode.window.showErrorMessage(`Invalid size: ${sizeInput}`);
 					return undefined;
 				}
+				liftWindow = {
+					size,
+					reason: 'interactive-byte-size',
+					countingDomain: 'byte-range',
+				};
 			}
+
+			const effectiveInstructionLimit = liftWindow?.countingDomain === 'instruction-count-heuristic'
+				? requestedInstructionLimit
+				: undefined;
 
 			// Extract bytes from engine buffer (addressToOffset handles VA→file offset)
 			if (!engine.isFileLoaded()) {
@@ -2373,39 +3767,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			// patched by ftrace at runtime. Both appear at the start of Linux
 			// kernel module functions compiled with -fcf-protection and -pg.
 			{
+				const fileInfo = engine.getFileInfo();
+				const isRelocatableElf = fileInfo?.isRelocatable === true;
 				const firstBytes = Array.from(bytes.subarray(0, Math.min(16, bytes.length))).map(b => b.toString(16).padStart(2, '0')).join(' ');
 				console.log(`[HexCore] liftToIR FIX-017 probe: addr=0x${startAddress.toString(16)} first16=[${firstBytes}] len=${bytes.length}`);
-				let skip = 0;
-				// endbr64: F3 0F 1E FA (4 bytes)
-				if (bytes.length >= skip + 4 &&
-					bytes[skip] === 0xF3 && bytes[skip + 1] === 0x0F &&
-					bytes[skip + 2] === 0x1E && bytes[skip + 3] === 0xFA) {
-					skip += 4;
-				}
-				// endbr32: F3 0F 1E FB (4 bytes)
-				else if (bytes.length >= skip + 4 &&
-					bytes[skip] === 0xF3 && bytes[skip + 1] === 0x0F &&
-					bytes[skip + 2] === 0x1E && bytes[skip + 3] === 0xFB) {
-					skip += 4;
-				}
-				// call __fentry__ / call +0 (ftrace NOP): E8 00 00 00 00 (5 bytes)
-				if (bytes.length >= skip + 5 &&
-					bytes[skip] === 0xE8 &&
-					bytes[skip + 1] === 0x00 && bytes[skip + 2] === 0x00 &&
-					bytes[skip + 3] === 0x00 && bytes[skip + 4] === 0x00) {
-					skip += 5;
-				}
-				// Multi-byte NOP sled (66 0F 1F 84 00 00 00 00 00 = 9-byte NOP)
-				if (bytes.length >= skip + 2 && bytes[skip] === 0x66 && bytes[skip + 1] === 0x0F) {
-					// Skip the NOP (variable length: 2-9 bytes)
-					const nopLens = [2, 3, 4, 5, 6, 7, 8, 9];
-					for (const len of nopLens) {
-						if (bytes.length >= skip + len && bytes[skip] === 0x66 && bytes[skip + 1] === 0x0F && bytes[skip + 2] === 0x1F) {
-							skip += len;
-							break;
-						}
-					}
-				}
+				const preamblePlan = planLiftPreamble(bytes, startAddress, isRelocatableElf);
+				const skip = preamblePlan.skipBytes;
+				liftTransformations.push(...preamblePlan.transformations);
 
 				if (skip > 0) {
 					console.log(`[HexCore] liftToIR FIX-017: Skipping ${skip}-byte CET/ftrace preamble at 0x${startAddress.toString(16)} (endbr64+__fentry__)`);
@@ -2597,6 +3965,41 @@ export function activate(context: vscode.ExtensionContext): void {
 					: undefined;
 
 			const liftOpts: RemillLiftOptions = {};
+			let liftBufferAddress = startAddress;
+			const callfuscationEvidence = engine.detectCallfuscation();
+			if (callfuscationEvidence.detected && options.deflattenCallfuscation !== false) {
+				if (effectiveInstructionLimit !== undefined) {
+					liftOpts.deflattenCallfuscation = true;
+					liftOpts.entryAddress = startAddress;
+					liftOpts.reachableOnly = true;
+					console.log(
+						`[HexCore] callfuscation lift: preserving explicit count=${effectiveInstructionLimit} ` +
+						`within bounded window @0x${startAddress.toString(16)}+${bytes.length}`
+					);
+				} else {
+					const section = engine.getSections().find(candidate => {
+						const end = candidate.virtualAddress + Math.max(candidate.virtualSize, candidate.rawSize);
+						return (candidate.isCode || candidate.isExecutable) &&
+							startAddress >= candidate.virtualAddress && startAddress < end;
+					});
+					const sectionBytes = section
+						? engine.getBytes(section.virtualAddress, section.rawSize)
+						: undefined;
+					if (section && sectionBytes && sectionBytes.length > 0) {
+						bytes = sectionBytes;
+						liftBufferAddress = section.virtualAddress;
+						liftOpts.deflattenCallfuscation = true;
+						liftOpts.entryAddress = startAddress;
+						liftOpts.reachableOnly = true;
+						console.log(
+							`[HexCore] callfuscation lift: entry=0x${startAddress.toString(16)}, ` +
+							`window=${section.name}@0x${section.virtualAddress.toString(16)}+${sectionBytes.length}`
+						);
+					} else {
+						console.warn('[HexCore] callfuscation detected, but no containing executable section was available; using the bounded lift window');
+					}
+				}
+			}
 
 			// FIX-QUALITY-002 / 002c / 002d: single-function lift scope.
 			// Primary end MUST come from .pdata when larger than the function
@@ -2627,8 +4030,10 @@ export function activate(context: vscode.ExtensionContext): void {
 			// additionalLeaders (not the full BB leader flood — that races
 			// maxBasicBlocks and under-lifts). Full leader injection remains
 			// opt-in via allowOversizedLift.
+			let pathfinderOwnershipEnd: number | undefined;
 			try {
 				const cfgHints = await runPathfinder(engine, startAddress, bytes);
+				pathfinderOwnershipEnd = cfgHints.ownershipEnd;
 				const rangeHi = Math.min(primaryEnd, startAddress + bytes.length);
 				const jtTargets = (cfgHints.indirectJumps ?? [])
 					.filter(j => j.type === 'jump_table')
@@ -2679,13 +4084,17 @@ export function activate(context: vscode.ExtensionContext): void {
 				const leaderCount = liftOpts.additionalLeaders?.length ?? 0;
 				if (liftOpts.maxBytes === undefined) {
 					liftOpts.maxBytes = Math.min(
-						Math.max(bytes.length, knownFnSize + 64, 32768),
+						explicitScopeLimited ? bytes.length : Math.max(bytes.length, knownFnSize + 64, 32768),
 						4 * 1024 * 1024,
 					);
 				}
 				if (liftOpts.maxInstructions === undefined) {
-					const est = Math.ceil(bytes.length / 2) + leaderCount + 4096;
-					liftOpts.maxInstructions = Math.min(Math.max(est, 8000), 256_000);
+					if (effectiveInstructionLimit !== undefined) {
+						liftOpts.maxInstructions = Math.min(effectiveInstructionLimit, 256_000);
+					} else {
+						const est = Math.ceil(bytes.length / 2) + leaderCount + 4096;
+						liftOpts.maxInstructions = Math.min(Math.max(est, 8000), 256_000);
+					}
 				}
 				if (liftOpts.maxBasicBlocks === undefined) {
 					// CRITICAL: floor well above pre-injected leaders (leaderCount+2048).
@@ -2706,7 +4115,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					cancellable: false,
 				},
 				async () => {
-					return remillWrapper.liftBytes(bytes, startAddress, arch, targetOs, liftOpts);
+					return remillWrapper.liftBytes(bytes, liftBufferAddress, arch, targetOs, liftOpts);
 				}
 			);
 
@@ -2719,6 +4128,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				typeof liftResult.bytesConsumed === 'number' &&
 				liftResult.bytesConsumed > 0 &&
 				liftResult.bytesConsumed < knownFnSize * 0.85 &&
+				!explicitScopeLimited &&
 				options.noLiftRetry !== true
 			) {
 				const short = liftResult.bytesConsumed;
@@ -3044,7 +4454,125 @@ export function activate(context: vscode.ExtensionContext): void {
 				functionName,
 			});
 
-			const fullIR = header + processedIR;
+			const minimumSemanticCoverage = typeof options.minimumSemanticCoverage === 'number'
+				? options.minimumSemanticCoverage
+				: 1;
+			const liftSemantics = assessLiftSemanticCoverage(
+				processedIR,
+				liftResult,
+				minimumSemanticCoverage,
+			);
+			if (explicitScopeLimited) {
+				liftSemantics.status = 'partial';
+				const scopeReason = `explicit instruction scope limited to ${effectiveInstructionLimit} instruction(s)`;
+				liftSemantics.reason = liftSemantics.reason
+					? `${liftSemantics.reason}; ${scopeReason}`
+					: scopeReason;
+			}
+			const coverageExtent = getAuthoritativeFunctionExtent(engine, startAddress);
+			const decodedBytes = Math.max(0, Number(liftResult.bytesConsumed ?? 0));
+			const requestedWindowCoverage = Math.max(0, Math.min(1, decodedBytes / Math.max(1, size)));
+			const decodedByteCoverage = coverageExtent.size > 0
+				? Math.max(0, Math.min(1, decodedBytes / coverageExtent.size))
+				: undefined;
+			const requestedEndExclusive = startAddress + size;
+			const functionEndExclusive = liftWindow?.endExclusive
+				?? (coverageExtent.source !== 'none' ? coverageExtent.end : undefined);
+			const functionRangeSize = functionEndExclusive !== undefined
+				? Math.max(0, functionEndExclusive - startAddress)
+				: undefined;
+			const functionRangeSource = liftWindow?.endExclusive !== undefined
+				? liftWindow.reason
+				: coverageExtent.source;
+			const semanticInstructionEnd = primaryFn?.instructions?.reduce(
+				(maximum, instruction) => Math.max(
+					maximum,
+					Number(instruction.address) + Number(instruction.size),
+				),
+				startAddress,
+			);
+			const boundaryCompletion = functionEndExclusive !== undefined
+				? assessLiftRangeCompletion({
+					startAddress,
+					endExclusive: functionEndExclusive,
+					semanticEndExclusive: semanticInstructionEnd,
+					pathfinderOwnershipEnd,
+					nativeTruncated: liftResult.truncated,
+				})
+				: undefined;
+			if (boundaryCompletion?.status === 'partial') {
+				liftSemantics.status = 'partial';
+				liftSemantics.reason = liftSemantics.reason
+					? `${liftSemantics.reason}; ${boundaryCompletion.reason}`
+					: boundaryCompletion.reason;
+			}
+			const semanticEndExclusive = semanticInstructionEnd !== undefined
+				? (functionEndExclusive !== undefined
+					? Math.min(functionEndExclusive, semanticInstructionEnd)
+					: semanticInstructionEnd)
+				: startAddress;
+			const rangeContract = {
+				requestedByteRange: {
+					start: toHexAddress(startAddress),
+					endExclusive: toHexAddress(requestedEndExclusive),
+					size,
+					countingDomain: liftWindow?.countingDomain ?? 'byte-range',
+					reason: liftWindow?.reason ?? 'resolved-lift-window',
+				},
+				...(functionEndExclusive !== undefined ? {
+					functionByteRange: {
+						start: toHexAddress(startAddress),
+						endExclusive: toHexAddress(functionEndExclusive),
+						size: functionRangeSize,
+						source: functionRangeSource,
+					},
+				} : {}),
+				semanticBodyRange: {
+					start: toHexAddress(startAddress),
+					endExclusive: toHexAddress(semanticEndExclusive),
+					size: Math.max(0, semanticEndExclusive - startAddress),
+					boundaryReached: boundaryCompletion?.reached ?? false,
+					boundaryCrossed: boundaryCompletion?.crossed ?? false,
+					byteCoverage: boundaryCompletion?.coverage,
+					source: semanticInstructionEnd !== undefined
+						? 'function-table-instructions' as const
+						: 'unavailable' as const,
+				},
+				remillDecodedByteSet: {
+					bytes: decodedBytes,
+					coverage: functionRangeSize !== undefined
+						? Math.max(0, Math.min(1, decodedBytes / Math.max(1, functionRangeSize)))
+						: undefined,
+					representation: 'union-of-decoded-intervals' as const,
+					nativeTruncated: liftResult.truncated === true,
+					...(liftResult.nextAddress ? { nextAddress: toHexAddress(liftResult.nextAddress) } : {}),
+					...(liftResult.truncationReason ? { truncationReason: liftResult.truncationReason } : {}),
+				},
+			};
+			const coverageHeader =
+				`; RequestedByteRange: [${toHexAddress(startAddress)}, ${toHexAddress(requestedEndExclusive)}) ` +
+				`domain=${rangeContract.requestedByteRange.countingDomain} reason=${rangeContract.requestedByteRange.reason}\n` +
+				(functionEndExclusive !== undefined
+					? `; FunctionByteRange: [${toHexAddress(startAddress)}, ${toHexAddress(functionEndExclusive)}) source=${functionRangeSource}\n`
+					: '; FunctionByteRange: unknown\n') +
+				`; SemanticBodyRange: [${toHexAddress(startAddress)}, ${toHexAddress(semanticEndExclusive)}) ` +
+				`boundaryReached=${rangeContract.semanticBodyRange.boundaryReached} ` +
+				`boundaryCrossed=${rangeContract.semanticBodyRange.boundaryCrossed} ` +
+				`source=${rangeContract.semanticBodyRange.source}\n` +
+				`; RemillDecodedByteSet: ${(requestedWindowCoverage * 100).toFixed(2)}% ` +
+				`(${decodedBytes}/${size} bytes) representation=union-of-decoded-intervals ` +
+				`nativeTruncated=${liftResult.truncated === true}\n` +
+				`; DecodedByteCoverage: ${decodedByteCoverage === undefined
+					? 'unknown (function boundary unavailable)'
+					: `${(decodedByteCoverage * 100).toFixed(2)}% (${decodedBytes}/${coverageExtent.size} bytes, ${coverageExtent.source})`}\n\n`;
+			const fullIR = header + formatLiftSemanticHeader(liftSemantics) + coverageHeader + processedIR;
+			if (liftSemantics.status === 'partial') {
+				console.warn(
+					`[HexCore] liftToIR semantic partial: ${liftSemantics.reason ?? 'incomplete semantics'}; ` +
+					`decoded=${liftSemantics.decodedInstructions} lifted=${liftSemantics.liftedInstructions} ` +
+					`unsupported=${liftSemantics.unsupportedInstructions} decodeFailures=${liftSemantics.decodeFailureInstructions}`,
+				);
+			}
 
 			// v3.7.5 FIX-021: Separate internal vs external call targets.
 			// Internal targets are within the .ko/.text range — can be lifted recursively.
@@ -3080,9 +4608,13 @@ export function activate(context: vscode.ExtensionContext): void {
 					architecture: mapping.remillArch,
 					functionName,
 					backtracked: didBacktrack,
+					requestedAddress: backtrackOriginalAddress,
+					liftTransformations,
 					// FIX-QUALITY-001: surface Remill callTargets so helix.decompile
 					// can enrich the D2 functionStarts registry (plus IR parse).
 					callTargets: liftResult.callTargets,
+					scopeLimited: explicitScopeLimited,
+					requestedInstructionLimit: effectiveInstructionLimit,
 					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 					...(trampolineChain.length > 0 ? {
 						trampolineFollowed: true,
@@ -3095,6 +4627,12 @@ export function activate(context: vscode.ExtensionContext): void {
 						})),
 					} : {}),
 					internalCallTargets,
+					...liftSemantics,
+					requestedWindowCoverage,
+					decodedByteCoverage,
+					functionBoundaryKnown: coverageExtent.source !== 'none',
+					semanticWarning: liftSemantics.reason ?? '',
+					...rangeContract,
 				};
 			}
 
@@ -3107,8 +4645,12 @@ export function activate(context: vscode.ExtensionContext): void {
 					architecture: mapping.remillArch,
 					functionName,
 					backtracked: didBacktrack,
+					requestedAddress: backtrackOriginalAddress,
+					liftTransformations,
 					// FIX-QUALITY-001: see headless return above.
 					callTargets: liftResult.callTargets,
+					scopeLimited: explicitScopeLimited,
+					requestedInstructionLimit: effectiveInstructionLimit,
 					...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 					...(trampolineChain.length > 0 ? {
 						trampolineFollowed: true,
@@ -3121,6 +4663,12 @@ export function activate(context: vscode.ExtensionContext): void {
 						})),
 					} : {}),
 					internalCallTargets,
+					...liftSemantics,
+					requestedWindowCoverage,
+					decodedByteCoverage,
+					functionBoundaryKnown: coverageExtent.source !== 'none',
+					semanticWarning: liftSemantics.reason ?? '',
+					...rangeContract,
 				};
 			}
 
@@ -3150,8 +4698,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				architecture: mapping.remillArch,
 				functionName,
 				backtracked: didBacktrack,
+				requestedAddress: backtrackOriginalAddress,
+				liftTransformations,
 				callTargets: liftResult.callTargets,
+				scopeLimited: explicitScopeLimited,
+				requestedInstructionLimit: effectiveInstructionLimit,
 				internalCallTargets,
+				...liftSemantics,
+				requestedWindowCoverage,
+				decodedByteCoverage,
+				functionBoundaryKnown: coverageExtent.source !== 'none',
+				semanticWarning: liftSemantics.reason ?? '',
+				...rangeContract,
 				...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
 			};
 		})
@@ -3329,6 +4887,27 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// FIX-QUALITY-002: same single-function scope as liftToIR
 			const decompLiftOpts: RemillLiftOptions = {};
+			let decompLiftBufferAddress = startAddress;
+			const callfuscationEvidence = engine.detectCallfuscation();
+			if (callfuscationEvidence.detected && options.deflattenCallfuscation !== false) {
+				const section = engine.getSections().find(candidate => {
+					const end = candidate.virtualAddress + Math.max(candidate.virtualSize, candidate.rawSize);
+					return (candidate.isCode || candidate.isExecutable) &&
+						startAddress >= candidate.virtualAddress && startAddress < end;
+				});
+				const sectionBytes = section
+					? engine.getBytes(section.virtualAddress, section.rawSize)
+					: undefined;
+				if (section && sectionBytes && sectionBytes.length > 0) {
+					bytes = sectionBytes;
+					decompLiftBufferAddress = section.virtualAddress;
+					decompLiftOpts.deflattenCallfuscation = true;
+					decompLiftOpts.entryAddress = startAddress;
+					decompLiftOpts.reachableOnly = true;
+				} else {
+					console.warn('[HexCore] callfuscation detected, but no containing executable section was available; using the bounded lift window');
+				}
+			}
 			const primaryFnDecomp = engine.getFunctionAt(startAddress);
 			const primaryEndDecomp = (primaryFnDecomp && primaryFnDecomp.endAddress > startAddress)
 				? primaryFnDecomp.endAddress
@@ -3385,7 +4964,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const liftResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: '[Experimental] Lifting to LLVM IR...', cancellable: false },
-				async () => remillWrapper.liftBytes(bytes, startAddress, arch, targetOsForLift, decompLiftOpts)
+				async () => remillWrapper.liftBytes(bytes, decompLiftBufferAddress, arch, targetOsForLift, decompLiftOpts)
 			);
 
 			if (!liftResult.success) {
@@ -3672,7 +5251,21 @@ export function activate(context: vscode.ExtensionContext): void {
 
 	// #52 (option a): post-process Helix C with engine import/PLT map.
 	// Pure logic lives in importSymbolNames.ts — see regression tests there.
-	function applyImportSymbolNames(source: string): string {
+	function applyImportSymbolNames(source: string, semanticContext?: HelixAnalysisContext): string {
+		if (semanticContext) {
+			const snapshotSymbols = new Map<number, string>();
+			for (const symbol of semanticContext.symbols) {
+				snapshotSymbols.set(Number.parseInt(symbol.address, 16), symbol.name);
+			}
+			for (const imported of semanticContext.imports) {
+				snapshotSymbols.set(Number.parseInt(imported.address, 16), imported.name);
+			}
+			const { source: out, renamed } = applyImportSymbolNamesToSource(source, snapshotSymbols);
+			if (renamed > 0) {
+				console.log(`[HexCore] helix.decompile: named ${renamed} call target(s) via immutable context`);
+			}
+			return out;
+		}
 		if (!engine.isFileLoaded()) { return source; }
 		let functions: Array<{ address: number; name?: string }> = [];
 		let imports: Array<{ functions?: Array<{ address: number; name?: string }> }> = [];
@@ -3838,6 +5431,13 @@ export function activate(context: vscode.ExtensionContext): void {
 		await eng.ensurePdataFunctionsReconciled();
 		const pdataRange = eng.findAuthoritativePdataRangeContaining(original);
 		if (pdataRange && pdataRange.begin < original) {
+			if (!isBacktrackWithinSection(eng.getSections(), pdataRange.begin, original)) {
+				console.log(
+					`[HexCore] auto-backtrack: rejected cross-section pdata range ` +
+					`0x${original.toString(16)} -> 0x${pdataRange.begin.toString(16)}`
+				);
+				return undefined;
+			}
 			return {
 				start: pdataRange.begin,
 				end: pdataRange.end,
@@ -3847,6 +5447,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
 		const candidate = await eng.findFunctionStartForAddress(original, false);
 		if (candidate === undefined || candidate >= original) {
+			return undefined;
+		}
+		if (!isBacktrackWithinSection(eng.getSections(), candidate, original)) {
+			console.log(
+				`[HexCore] auto-backtrack: rejected cross-section heuristic ` +
+				`0x${original.toString(16)} -> 0x${candidate.toString(16)}`
+			);
 			return undefined;
 		}
 
@@ -3949,7 +5556,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!quiet) {
 				if (result.success) {
-					console.log(`[souper] Optimized: ${result.candidatesReplaced}/${result.candidatesFound} candidates in ${result.optimizationTimeMs.toFixed(0)}ms`);
+					console.log(`[souper] Optimized: applied=${result.candidatesReplaced} inferred=${result.candidatesInferred} attempted=${result.candidatesAttempted}/${result.candidatesFound} timeouts=${result.solverTimeouts} in ${result.optimizationTimeMs.toFixed(0)}ms`);
 				} else {
 					console.warn(`[souper] Optimization failed: ${result.error}`);
 				}
@@ -3973,8 +5580,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				success: result.success,
 				ir: result.ir,
 				candidatesFound: result.candidatesFound,
+				candidatesAttempted: result.candidatesAttempted,
+				candidatesInferred: result.candidatesInferred,
 				candidatesReplaced: result.candidatesReplaced,
+				solverTimeouts: result.solverTimeouts,
 				optimizationTimeMs: result.optimizationTimeMs,
+				diagnostics: result.diagnostics || '',
 				error: result.error || '',
 			};
 		})
@@ -3984,19 +5595,46 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Helix — Decompile IR to pseudo-C (direct IR input)
 	// -----------------------------------------------------------------------
 	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.helix.cancelActiveLiveDecompile', () => ({
+			success: true,
+			cancelledWorkers: helixWrapper.cancelActiveDecompiles('debugger-live-memory'),
+		}))
+	);
+
+	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.helix.decompileIR', async (arg?: unknown) => {
 			const isHeadless = !((arg as any) instanceof vscode.Uri)
 				&& hasHeadlessHelixIrInput(arg);
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
-			const arch = engine.getArchitecture();
+			const sourceTargetFile = typeof options.sourceTargetFile === 'string'
+				? options.sourceTargetFile
+				: typeof options.file === 'string' ? options.file : undefined;
+			const analysisContext = decideAnalysisContextOwnership(
+				sourceTargetFile,
+				engine.getFilePath(),
+			);
+			const useActiveEngineContext = analysisContext.activeEngineEvidenceUsed;
+			const requestedArch = typeof options.architecture === 'string'
+				? options.architecture
+				: typeof options.arch === 'string' ? options.arch : undefined;
+			const arch = requestedArch && ['x86', 'x64', 'arm', 'arm64'].includes(requestedArch)
+				? requestedArch as ReturnType<typeof engine.getArchitecture>
+				: useActiveEngineContext ? engine.getArchitecture() : 'x64';
+			if (!useActiveEngineContext) {
+				console.log(
+					`[hexcore-helix] active engine context denied for decompileIR ` +
+					`(ownership=${analysisContext.ownership}, source=${analysisContext.sourceTargetFile ?? 'unbound'}, ` +
+					`active=${analysisContext.activeTargetFile ?? 'none'})`
+				);
+			}
 
 			if (!helixWrapper.isAvailable()) {
 				const errorMsg = 'hexcore-helix is not available.';
 				// Bug #36/2: headless/pipeline runs get the structured error, not undefined + modal.
 				if (quiet || isHeadless) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg, analysisContext };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -4020,7 +5658,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					// return undefined or pop a modal during a headless auto-run (the
 					// file-watcher path is headless but has quiet:false).
 					if (quiet || isHeadless) {
-						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
+						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg, analysisContext };
 					}
 					vscode.window.showErrorMessage(errorMsg);
 					return undefined;
@@ -4031,7 +5669,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					const errorMsg = `File not found: ${options.file}`;
 					// Bug #36/2: headless callers must get the structured error, not a modal.
 					if (quiet || isHeadless) {
-						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
+						return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg, analysisContext };
 					}
 					vscode.window.showErrorMessage(errorMsg);
 					return undefined;
@@ -4054,11 +5692,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 				functionStarts?: number[];
+				semanticContext?: HelixAnalysisContext;
 			} = { ...resolveHelixBaseOptions(options) };
 
 			// v3.7.5 P3: Collect session variable renames for this function and pass
 			// them to the Helix engine so the C AST walker can apply them surgically.
-			const sessionRenames = collectSessionVariableRenames(options, engine);
+			const sessionRenames = useActiveEngineContext
+				? collectSessionVariableRenames(options, engine)
+				: [];
 			if (sessionRenames.length > 0) {
 				helixIROptions = helixIROptions ?? {};
 				helixIROptions.variableRenames = sessionRenames;
@@ -4069,6 +5710,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				?? parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined)
 				?? parseAddressValue(options.targetAddress as string | number | undefined);
+			const semanticContext = useActiveEngineContext && funcAddr !== undefined
+				? await createHelixAnalysisContext(engine, funcAddr)
+				: undefined;
+			if (semanticContext) {
+				helixIROptions.semanticContext = semanticContext;
+			}
 			// v3.8.1: If neither address nor name was provided in options,
 			// extract the function name directly from the LLVM IR text.
 			// Remill/Pathfinder names it during lift (e.g.
@@ -4083,7 +5730,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					console.log(`[helix-struct] Extracted function name from IR: ${explicitFuncName}`);
 				}
 			}
-			const structResult = options.structInfo !== false
+			const structResult = useActiveEngineContext && options.structInfo !== false
 				? extractStructInfoForFunction(engine, funcAddr, explicitFuncName, irText)
 				: null;
 			if (structResult) {
@@ -4149,9 +5796,17 @@ export function activate(context: vscode.ExtensionContext): void {
 				}));
 			}
 
-			// FIX-QUALITY-001: D2 registry is OPT-IN (functionStarts:true / honesty:true).
-			// Default omit → non-authoritative, engine-direct quality parity.
-			if (wantsHelixFunctionStarts(options)) {
+			// A completed immutable context owns the function-start table. Older or
+			// incomplete contexts retain the explicit honesty-mode fallback.
+			if (semanticContext?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
+				helixIROptions.functionStarts = [...semanticContext.functionStarts];
+				if (!quiet) {
+					console.log(
+						`[helix] immutable context ${semanticContext.contextSha256.slice(0, 12)}: ` +
+						`${semanticContext.functionStarts.length} authoritative function starts`
+					);
+				}
+			} else if (useActiveEngineContext && wantsHelixFunctionStarts(options)) {
 				const starts = buildHelixFunctionStarts(engine, {
 					irText: irForHelix,
 					entryAddress: funcAddr,
@@ -4169,12 +5824,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				console.log('[helix] functionStarts: omitted (default quality path; set functionStarts:true for D2 honesty)');
 			}
 
+			const forceWorker = options.forceWorker === true;
+			const forceProcess = options.forceProcess === true;
+			const workerTimeoutMs = typeof options.workerTimeoutMs === 'number'
+				? options.workerTimeoutMs
+				: undefined;
+			const workerGroup = typeof options.workerGroup === 'string'
+				? options.workerGroup
+				: undefined;
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
-				// FIX-QUALITY-002b: headless/quiet → forceSync (no Electron worker)
+				// Live-memory callers explicitly force an isolated process so native work
+				// can be killed without terminating the Extension Host.
 				async () => helixWrapper.decompileIr(irForHelix, arch, {
 					...helixIROptions,
-					forceSync: quiet || isHeadless || options.forceSync === true,
+					forceWorker,
+					forceProcess,
+					workerTimeoutMs,
+					workerGroup,
+					forceSync: !forceWorker && !forceProcess && (quiet || isHeadless || options.forceSync === true),
 				})
 			);
 
@@ -4185,7 +5853,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				// structured error, not undefined + modal, so the recorded step error is
 				// the real Helix cause rather than 'output file was not created'.
 				if (quiet || isHeadless) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: decompileResult.error };
+					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: decompileResult.error, analysisContext };
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -4194,10 +5862,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Apply Session DB renames/retypes (funcAddress from options if available)
 			const decompileAddr = parseAddressValue(options.functionAddress as string | number | undefined)
 				?? parseAddressValue(options.address as string | number | undefined);
-			let fullCode = applySessionRenames(decompileResult.source, decompileAddr);
+			let fullCode = decompileResult.source;
+			if (useActiveEngineContext) {
+				fullCode = applySessionRenames(fullCode, decompileAddr);
 				// #52: name imported/PLT call targets (sub_<pltVA> → dlopen, …) via the engine symbol map.
-				fullCode = applyImportSymbolNames(fullCode);
-				fullCode = applyHonestyCap(fullCode);
+				fullCode = applyImportSymbolNames(fullCode, semanticContext);
+				fullCode = applyHonestyCap(fullCode, {
+					callfuscation: engine.detectCallfuscation(),
+				});
+			}
 
 			// v3.8.0: Replace Helix-generated sub_<hex> with real function name.
 			// Helix ignores the IR function name and generates sub_<hex> from the
@@ -4234,6 +5907,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 			}
+			const outputQuality = inspectHelixOutputQuality(fullCode);
+			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
@@ -4244,35 +5919,43 @@ export function activate(context: vscode.ExtensionContext): void {
 				fs.writeFileSync(outputPath, fullCode, 'utf-8');
 			}
 
+			const commandResult = {
+				success: true,
+				status: outputQuality.status,
+				code: fullCode,
+				functionCount: decompileResult.instructionCount,
+				address: decompileResult.entryAddress,
+				architecture: arch,
+				confidence: outputQuality.confidence,
+				confidenceAxes: outputQuality.confidenceAxes,
+				qualityIssues: outputQuality.qualityIssues,
+				qualityIssueMessages: outputQuality.issues,
+				securityEvidenceUsable: outputQuality.securityEvidenceUsable,
+				warning: outputQuality.reason ?? '',
+				error: '',
+				analysisContext,
+				semanticContext: semanticContext ? {
+					contextVersion: semanticContext.contextVersion,
+					contextSha256: semanticContext.contextSha256,
+					function: semanticContext.function,
+					analysis: semanticContext.analysis,
+				} : undefined,
+				// HQL: expose the raw HAST FlatBuffer so headless callers
+				// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
+				// function. In-process executeCommand returns the literal object so
+				// the Buffer survives uncopied. Additive: existing callers ignore it.
+				astBuffer: decompileResult.astBuffer,
+			};
+
 			if (quiet) {
-				return {
-					success: true,
-					code: fullCode,
-					functionCount: decompileResult.instructionCount,
-					address: decompileResult.entryAddress,
-					architecture: arch,
-					error: '',
-					// HQL: expose the raw HAST FlatBuffer so headless callers
-					// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
-					// function. In-process executeCommand returns the literal object so
-					// the Buffer survives uncopied. Additive: existing callers ignore it.
-					astBuffer: decompileResult.astBuffer,
-				};
+				return commandResult;
 			}
 
 			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
 			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
 			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
 
-			return {
-				success: true,
-				code: fullCode,
-				functionCount: decompileResult.instructionCount,
-				address: decompileResult.entryAddress,
-				architecture: arch,
-				error: '',
-				astBuffer: decompileResult.astBuffer,
-			};
+			return commandResult;
 		})
 	);
 
@@ -4384,6 +6067,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				structInfo?: StructInfoJson; functionName?: string;
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 				functionStarts?: number[];
+				semanticContext?: HelixAnalysisContext;
 			} = { ...resolveHelixBaseOptions(options) };
 
 			// v3.7.5 P3: Collect session variable renames and pass to Helix engine
@@ -4397,6 +6081,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			const funcAddr2 = (typeof liftResult.address === 'number' ? liftResult.address : undefined)
 				?? parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined);
+			const semanticContext2 = funcAddr2 !== undefined
+				? await createHelixAnalysisContext(engine, funcAddr2)
+				: undefined;
+			if (semanticContext2) {
+				helixOptions.semanticContext = semanticContext2;
+			}
 			const structResult2 = options.structInfo !== false
 				? extractStructInfoForFunction(engine, funcAddr2, typeof options.functionName === 'string' ? options.functionName : undefined, liftResult.ir)
 				: null;
@@ -4460,10 +6150,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				}));
 			}
 
-			// FIX-QUALITY-001: D2 registry is OPT-IN (functionStarts:true / honesty:true).
-			// Default omit → non-authoritative (engine-direct quality). Enriched
-			// table when requested so analyzeAll-only mis-gates do not return.
-			if (wantsHelixFunctionStarts(options)) {
+			if (semanticContext2?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
+				helixOptions.functionStarts = [...semanticContext2.functionStarts];
+				if (!quiet) {
+					console.log(
+						`[helix] immutable context ${semanticContext2.contextSha256.slice(0, 12)}: ` +
+						`${semanticContext2.functionStarts.length} authoritative function starts`
+					);
+				}
+			} else if (wantsHelixFunctionStarts(options)) {
 				const lrAny = liftResult as LiftResult & { internalCallTargets?: number[] };
 				const starts = buildHelixFunctionStarts(engine, {
 					callTargets: Array.isArray(lrAny.callTargets) ? lrAny.callTargets : undefined,
@@ -4515,7 +6210,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				?? parseAddressValue(options.functionAddress as string | number | undefined);
 			let fullCode = applySessionRenames(decompileResult.source, funcAddr, origAddr);
 				// #52: name imported/PLT call targets (sub_<pltVA> → dlopen, …) via the engine symbol map.
-				fullCode = applyImportSymbolNames(fullCode);
+				fullCode = applyImportSymbolNames(fullCode, semanticContext2);
 
 			// FIX-QUALITY-002: stamp lift diagnostics into the C header so job
 			// outputs self-describe whether Remill under-lifted (silent gap).
@@ -4531,6 +6226,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					return getAuthoritativeFunctionExtent(engine, a).size;
 				})();
 				const under = knownSz > 0 && consumed > 0 && consumed < knownSz * 0.85;
+				const scopeLimited = liftResult.scopeLimited === true;
 				// #56: apply the honesty gate while lift coverage is still
 				// structured data. Parsing the later LiftDiag comment is both late
 				// and fragile, and previously made UNDERLIFT invisible to the cap.
@@ -4538,13 +6234,36 @@ export function activate(context: vscode.ExtensionContext): void {
 					bytesConsumed: consumed,
 					knownFunctionSize: knownSz,
 					cLines,
+					callfuscation: engine.detectCallfuscation(),
+					semanticCoverage: liftResult.semanticCoverage,
+					unsupportedInstructions: liftResult.unsupportedInstructions,
+					decodeFailureInstructions: liftResult.decodeFailureInstructions,
+					scopeLimited: scopeLimited ? {
+						instructionLimit: liftResult.requestedInstructionLimit,
+					} : undefined,
 				});
+				const requestedLiftAddress = typeof liftResult.requestedAddress === 'number'
+					? liftResult.requestedAddress : (origAddr ?? funcAddr ?? 0);
+				const effectiveLiftAddress = typeof liftResult.address === 'number'
+					? liftResult.address : 0;
+				const transformations = Array.isArray(liftResult.liftTransformations)
+					? liftResult.liftTransformations as Array<{ kind: string; address: number; bytes: number }>
+					: [];
 				const diag =
-					`// LiftDiag: addr=0x${(typeof liftResult.address === 'number' ? liftResult.address : 0).toString(16)} ` +
+					`// LiftDiag: addr=0x${effectiveLiftAddress.toString(16)} ` +
+					`requested=0x${requestedLiftAddress.toString(16)} effective=0x${effectiveLiftAddress.toString(16)} ` +
+					`range=${knownSz > 0 ? `0x${effectiveLiftAddress.toString(16)}-0x${(effectiveLiftAddress + knownSz).toString(16)}` : '?'} ` +
 					`bytesConsumed=${consumed}/${knownSz || '?'} irLines=${irLines} cLines=${cLines} ` +
 					`cast=${helixOptions.useCastLayer !== false} ` +
-					`fnStarts=${helixOptions.functionStarts?.length ?? 0}` +
-					(under ? ' UNDERLIFT' : '');
+					`fnStarts=${helixOptions.functionStarts?.length ?? 0} ` +
+					`semanticCoverage=${typeof liftResult.semanticCoverage === 'number' ? (liftResult.semanticCoverage * 100).toFixed(1) + '%' : '?'} ` +
+					`unsupported=${liftResult.unsupportedInstructions ?? '?'} ` +
+					`decodeFailures=${liftResult.decodeFailureInstructions ?? '?'}` +
+					(under ? ' UNDERLIFT' : '') +
+					(scopeLimited ? ` SCOPED(count=${liftResult.requestedInstructionLimit ?? '?'})` : '') +
+					(transformations.length > 0
+						? ` transforms=${transformations.map(item => `${item.kind}@0x${item.address.toString(16)}+${item.bytes}`).join(',')}`
+						: ' transforms=none');
 				console.log(`[HexCore] ${diag}`);
 				// Insert after the Confidence header line when present, else prepend.
 				if (/Confidence:\s*[\d.]+%/.test(fullCode)) {
@@ -4556,6 +6275,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					fullCode = diag + '\n' + fullCode;
 				}
 			}
+			const outputQuality = inspectHelixOutputQuality(fullCode);
+			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
 
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
@@ -4564,32 +6285,50 @@ export function activate(context: vscode.ExtensionContext): void {
 				fs.writeFileSync(outputPath, fullCode, 'utf-8');
 			}
 
+			const commandResult = {
+				success: true,
+				status: liftResult.status === 'partial' ? 'partial' as const : outputQuality.status,
+				code: fullCode,
+				functionCount: decompileResult.instructionCount,
+				address: decompileResult.entryAddress || String(liftResult.address || ''),
+				architecture: arch,
+				confidence: outputQuality.confidence,
+				confidenceAxes: outputQuality.confidenceAxes,
+				qualityIssues: outputQuality.qualityIssues,
+				qualityIssueMessages: outputQuality.issues,
+				securityEvidenceUsable: outputQuality.securityEvidenceUsable,
+				warning: liftResult.semanticWarning || outputQuality.reason || '',
+				liftSemantics: {
+					decodedInstructions: liftResult.decodedInstructions,
+					liftedInstructions: liftResult.liftedInstructions,
+					unsupportedInstructions: liftResult.unsupportedInstructions,
+					decodeFailureInstructions: liftResult.decodeFailureInstructions,
+					semanticCoverage: liftResult.semanticCoverage,
+					unsupportedOpcodes: liftResult.unsupportedOpcodes,
+					requestedWindowCoverage: liftResult.requestedWindowCoverage,
+					decodedByteCoverage: liftResult.decodedByteCoverage,
+					functionBoundaryKnown: liftResult.functionBoundaryKnown,
+				},
+				semanticContext: semanticContext2 ? {
+					contextVersion: semanticContext2.contextVersion,
+					contextSha256: semanticContext2.contextSha256,
+					function: semanticContext2.function,
+					analysis: semanticContext2.analysis,
+				} : undefined,
+				error: '',
+				// HQL: raw HAST FlatBuffer for headless scanHAST() callers (additive).
+				astBuffer: decompileResult.astBuffer,
+			};
+
 			if (quiet) {
-				return {
-					success: true,
-					code: fullCode,
-					functionCount: decompileResult.instructionCount,
-					address: decompileResult.entryAddress || String(liftResult.address || ''),
-					architecture: arch,
-					error: '',
-					// HQL: raw HAST FlatBuffer for headless scanHAST() callers (additive).
-					astBuffer: decompileResult.astBuffer,
-				};
+				return commandResult;
 			}
 
 			const doc = await vscode.workspace.openTextDocument({ content: fullCode, language: 'c' });
 			await vscode.window.showTextDocument(doc, { preview: false, viewColumn: vscode.ViewColumn.Beside });
 			await vscode.commands.executeCommand('workbench.action.files.setActiveEditorReadonlyInSession');
 
-			return {
-				success: true,
-				code: fullCode,
-				functionCount: decompileResult.instructionCount,
-				address: decompileResult.entryAddress || String(liftResult.address || ''),
-				architecture: arch,
-				error: '',
-				astBuffer: decompileResult.astBuffer,
-			};
+			return commandResult;
 		})
 	);
 
@@ -4625,6 +6364,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 		);
 	};
+	const hqlSessionBinding = () => {
+		const session = engine.getSessionStore();
+		if (!session) { return undefined; }
+		return createLiveHqlSessionReader(session);
+	};
 
 	// Interactive: scan the current/selected function for HQL signature matches.
 	context.subscriptions.push(
@@ -4649,7 +6393,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const target: HqlScanTarget = { file: engine.getFilePath(), address: addr };
 			const result = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'HQL: Scanning function...', cancellable: false },
-				async () => scanOneTarget(target, hqlDecompile)
+				async () => scanOneTarget(target, hqlDecompile, { session: hqlSessionBinding })
 			);
 
 			const channel = hqlOutputChannel();
@@ -4661,7 +6405,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			channel.appendLine(`[HQL] ${label} -- ${result.findings.length} signature(s) matched`);
 			for (const f of result.findings) {
-				channel.appendLine(`         ${f.signatureId} (confidence ${f.confidence.toFixed(2)}, ${f.matchCount} node(s))`);
+				const calibrated = f.confidence !== undefined ? `, calibrated confidence ${f.confidence.toFixed(2)}` : '';
+				channel.appendLine(`         ${f.signatureId} (${f.evidenceLevel}, structural ${f.structuralCompleteness.toFixed(2)}${calibrated}, ${f.matchCount} node(s))`);
 			}
 			channel.show(true);
 			vscode.window.showInformationMessage(`HQL: ${result.findings.length} signature(s) matched in ${label}`);
@@ -4685,6 +6430,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				? arg.output
 				: (typeof (arg?.output as { path?: unknown })?.path === 'string'
 					? (arg!.output as { path: string }).path : undefined);
+			const positiveIntegerArg = (name: string): number | undefined => {
+				const value = arg?.[name];
+				return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+			};
 
 			const targets = buildScanTargets({ file, address, addresses, irPath, irText });
 			if (targets.length === 0) {
@@ -4696,9 +6445,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					targetCount: 0,
 					completedTargetCount: 0,
 					failedTargetCount: 0,
+					partialTargetCount: 0,
 					matchedFunctionCount: 0,
 					totalFindings: 0,
 					results: [],
+					budget: { ...DEFAULT_HQL_BATCH_BUDGET },
 					error: 'hexcore.hql.scanHeadless requires an "address", "addresses", "irPath", or "irText".',
 				};
 				if (outputPath) {
@@ -4708,7 +6459,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				return report;
 			}
 
-			const report = await runHqlScanBatch(file, targets, hqlDecompile);
+			const report = await runHqlScanBatch(file, targets, hqlDecompile, {
+				maxTargets: positiveIntegerArg('maxTargets'),
+				maxConcurrency: positiveIntegerArg('maxConcurrency'),
+				maxFunctionsPerHast: positiveIntegerArg('maxFunctionsPerHast'),
+				maxNodesPerFunction: positiveIntegerArg('maxNodesPerFunction'),
+				maxFindingsPerFunction: positiveIntegerArg('maxFindingsPerFunction'),
+				session: hqlSessionBinding,
+			});
 
 			if (outputPath) {
 				// Bug #36/2: create the parent dir so the write never silently fails
@@ -4811,48 +6569,46 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
+			let nativeExecution: NativeAnalyzeExecution | undefined;
 			const runAnalysis = async (progress?: vscode.Progress<{ message?: string }>): Promise<number> => {
 				engine.reloadConfig();
-				const currentFile = engine.getFilePath();
-				const forceReload = shouldForceReloadAnalyzeAll(options);
-				if (forceReload || currentFile !== targetFilePath) {
-					progress?.report({ message: `Loading ${path.basename(targetFilePath)}...` });
-					const loaded = await engine.loadFile(targetFilePath);
-					if (!loaded) {
-						throw new Error(`Failed to load file: ${targetFilePath}`);
-					}
-				}
-
 				const defaultLimits = engine.getAnalysisLimits();
 				const requestedLimits = resolveAnalyzeAllLimits(options);
-				const overrideMaxFunctions = requestedLimits.maxFunctions ?? defaultLimits.maxFunctions;
-				const overrideMaxFunctionSize = requestedLimits.maxFunctionSize ?? defaultLimits.maxFunctionSize;
-				const hasOverride = overrideMaxFunctions !== defaultLimits.maxFunctions
-					|| overrideMaxFunctionSize !== defaultLimits.maxFunctionSize;
-
-				if (hasOverride) {
-					engine.setAnalysisLimits(overrideMaxFunctions, overrideMaxFunctionSize);
-					progress?.report({
-						message: `Applying limits (maxFunctions=${overrideMaxFunctions}, maxFunctionSize=${overrideMaxFunctionSize})...`
-					});
-				}
-
+				const maxFunctions = requestedLimits.maxFunctions ?? defaultLimits.maxFunctions;
+				const maxFunctionSize = requestedLimits.maxFunctionSize ?? defaultLimits.maxFunctionSize;
+				const requestedBase = parseOptionalRawBaseAddress(options.baseAddress);
+				const pipelineTimeout = Number.isFinite(options.pipelineTimeoutMs)
+					? Math.max(1_000, Math.trunc(options.pipelineTimeoutMs!))
+					: 600_000;
+				const nativeTimeout = Math.max(1_000, pipelineTimeout - 5_000);
+				const executionId = crypto.randomUUID();
+				const metaRoot = options.output?.path
+					? path.join(path.dirname(options.output.path), '.hexcore-meta')
+					: path.join(os.tmpdir(), 'hexcore-analyze-all');
+				const snapshotPath = path.join(metaRoot, `analyze-${executionId}.snapshot.bin`);
+				const heartbeatPath = path.join(metaRoot, `analyze-${executionId}.heartbeat.json`);
+				progress?.report({ message: `Starting isolated analysis (maxFunctions=${maxFunctions}, maxFunctionSize=${maxFunctionSize})...` });
+				const isolated = await analyzeAllProcessController.run({
+					filePath: targetFilePath,
+					raw: { architecture: options.arch, ...(requestedBase !== undefined ? { baseAddress: requestedBase } : {}) },
+					limits: { maxFunctions, maxFunctionSize },
+					options: { filterJunk: options.filterJunk, detectVM: options.detectVM, detectPRNG: options.detectPRNG },
+					snapshotPath,
+					heartbeatPath,
+					timeoutMs: nativeTimeout,
+				});
+				nativeExecution = isolated.nativeExecution;
+				progress?.report({ message: 'Importing isolated analysis snapshot...' });
 				try {
-					progress?.report({ message: 'Scanning for function prologs and references...' });
-					// MUST await: analyzeAll is async, so a bare `return engine.analyzeAll(...)`
-					// returns the pending promise and lets the finally reset the limits BEFORE
-					// the async scan actually runs -> the override (e.g. maxFunctions=8000) was
-					// silently discarded and the scan used the default 5000. Awaiting keeps the
-					// override in effect for the whole analysis.
-					return await engine.analyzeAll({ filterJunk: options.filterJunk, detectVM: options.detectVM, detectPRNG: options.detectPRNG });
+					const snapshot = v8.deserialize(zlib.gunzipSync(fs.readFileSync(isolated.snapshotPath)));
+					await engine.loadAnalysisSnapshot(targetFilePath, snapshot);
 				} finally {
-					if (hasOverride) {
-						engine.setAnalysisLimits(defaultLimits.maxFunctions, defaultLimits.maxFunctionSize);
-					}
+					try { fs.unlinkSync(isolated.snapshotPath); } catch { /* heartbeat retains execution evidence */ }
 				}
+				return isolated.functionNetChange;
 			};
 
-			const newFunctions = options.quiet
+			const functionNetChange = options.quiet
 				? await runAnalysis()
 				: await vscode.window.withProgress(
 					{
@@ -4869,22 +6625,119 @@ export function activate(context: vscode.ExtensionContext): void {
 			importProvider.refresh();
 			exportProvider.refresh();
 
-			const result = createAnalyzeAllResult(engine, targetFilePath, newFunctions, options.includeInstructions === true, {
+			const result = createAnalyzeAllResult(engine, targetFilePath, functionNetChange, options.includeInstructions === true, {
 				filterJunk: options.filterJunk,
 				detectVM: options.detectVM,
-				detectPRNG: options.detectPRNG
+				detectPRNG: options.detectPRNG,
+				allowLazy: options.allowLazy,
+				allowDecodeEmpty: options.allowDecodeEmpty,
+				minMaterializedRatio: options.minMaterializedRatio,
 			});
+			if (nativeExecution) { result.nativeExecution = nativeExecution; }
 			if (options.output) {
 				writeAnalyzeAllOutput(result, options.output);
 			}
 
 			if (!options.quiet) {
 				vscode.window.showInformationMessage(
-					`Analysis complete: ${result.newFunctions} new functions found (${result.totalFunctions} total)`
+					`Analysis complete: ${result.newFunctions} added, ${result.removedFunctions} pruned (${result.totalFunctions} total)`
 				);
 			}
 
 			return result;
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.cancelAnalyzeAll', () => ({
+			cancelled: analyzeAllProcessController.cancelActive(),
+		}))
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.windowsFilesystemAuditHeadless', async (arg?: WindowsFilesystemAuditCommandOptions) => {
+			const options = arg ?? {};
+			const requestedFile = typeof options.file === 'string' && options.file.length > 0
+				? path.resolve(options.file)
+				: engine.getFilePath();
+			if (!requestedFile) {
+				throw new Error('windowsFilesystemAuditHeadless requires a PE file or an active analyzed target.');
+			}
+			if (!Number.isInteger(options.maxStringSignals ?? 200) || (options.maxStringSignals ?? 200) <= 0) {
+				throw new Error('maxStringSignals must be a positive integer.');
+			}
+			const currentFile = engine.getFilePath();
+			if (!currentFile || path.resolve(currentFile).toLowerCase() !== requestedFile.toLowerCase()) {
+				const loaded = await engine.loadFile(requestedFile);
+				if (!loaded) { throw new Error(`Failed to load PE file: ${requestedFile}`); }
+			}
+			if (engine.getFunctions().length === 0) {
+				await engine.analyzeAll();
+			}
+			if (engine.getFileInfo()?.format.startsWith('PE') !== true) {
+				throw new Error('windowsFilesystemAuditHeadless is PE-only.');
+			}
+
+			let peAnalysis: any;
+			try {
+				peAnalysis = await vscode.commands.executeCommand('hexcore.peanalyzer.analyze', {
+					file: requestedFile,
+					quiet: true,
+				});
+			} catch (error) {
+				console.warn('[HexCore] PE Analyzer context unavailable for filesystem audit:', error);
+			}
+			const functions = engine.getFunctions();
+			const lazyFunctions = functions.filter(fn => engine.getFunctionBodyStatus(fn.address) === 'lazy').length;
+			const materializedFunctions = functions.filter(fn => engine.getFunctionBodyStatus(fn.address) === 'materialized').length;
+			const persistedSession = engine.getSessionStore()?.getAnalysisSession();
+			const universeManifest = engine.getSessionStore()?.getAnalysisUniverseManifest();
+			const result = buildWindowsFilesystemAudit({
+				principal: peAnalysis?.executionManifest,
+				imports: engine.getImports(),
+				functions,
+				strings: engine.getStrings(),
+				lazyFunctions,
+				maxStringSignals: options.maxStringSignals,
+				architecture: engine.getArchitecture(),
+			});
+			const outputBase = {
+				...result,
+				target: requestedFile,
+				analysisContext: {
+					engineGeneration: engine.getAnalysisGeneration(),
+					...(persistedSession ? {
+						sessionId: persistedSession.id,
+						sessionGeneration: persistedSession.generation,
+						...(persistedSession.parentGeneration !== undefined ? { parentGeneration: persistedSession.parentGeneration } : {}),
+					} : {}),
+					materializedFunctions,
+					lazyFunctions,
+					closureRestoration: engine.getAnalysisClosureRestoration(),
+					...(universeManifest ? {
+						universeSha256: universeManifest.universeSha256,
+						persistedMaterializedFunctions: universeManifest.materializedFunctions.length,
+					} : {}),
+				},
+				auditConfiguration: {
+					maxStringSignals: options.maxStringSignals ?? 200,
+				},
+				mitigations: peAnalysis?.mitigations ?? [],
+				peCapabilitySummary: peAnalysis?.windowsSecuritySummary ?? null,
+				semanticWarning: result.chain
+					.filter(edge => edge.status === 'blocked' || edge.status === 'missing')
+					.map(edge => `${edge.kind}: ${edge.blockers[0] ?? edge.summary}`)
+					.join('; '),
+			};
+			const output = {
+				...outputBase,
+				normalization: describeCanonicalArtifactIdentity(outputBase),
+			};
+			if (options.output?.path) {
+				fs.mkdirSync(path.dirname(options.output.path), { recursive: true });
+				fs.writeFileSync(options.output.path, JSON.stringify(output, null, 2), 'utf8');
+			}
+			return output;
 		})
 	);
 
@@ -4939,17 +6792,95 @@ export function activate(context: vscode.ExtensionContext): void {
 				: MAX_INSTRUCTION_SIZE_X86;
 
 			// 5. Compute context instructions (before target address)
-			let contextInstructions: Instruction[] = [];
-			if (params.context > 0) {
-				contextInstructions = await computeContextInstructions(
-					engine, params.address, params.context, maxInstructionSize
-				);
-			}
+			const contextRecovery = await computeContextRecovery(
+				engine, effectiveAddress, params.context, maxInstructionSize
+			);
+			const contextInstructions = contextRecovery.instructions;
 
-			// 6. Disassemble main instructions (use effectiveAddress for backtrack)
-			const estimatedSize = params.count * maxInstructionSize;
-			const rawMainInstructions = await engine.disassembleRange(effectiveAddress, estimatedSize);
-			const mainInstructions = rawMainInstructions.slice(0, params.count);
+			// 6. Disassemble main instructions (use effectiveAddress for backtrack).
+			// Clamp the byte window before decoding so a known function end is a
+			// terminal boundary, not metadata reported after a linear sweep crossed it.
+			const extent = getAuthoritativeFunctionExtent(engine, effectiveAddress);
+			if (params.stopAtFunctionBoundary && params.endExclusive === undefined && extent.source === 'none') {
+				throw new Error('disassembleAtHeadless: stopAtFunctionBoundary requires a known function extent.');
+			}
+			const requestedEndExclusive = params.endExclusive ??
+				(params.stopAtFunctionBoundary && extent.source !== 'none' ? extent.end : undefined);
+			if (requestedEndExclusive !== undefined && requestedEndExclusive <= effectiveAddress) {
+				throw new Error('disassembleAtHeadless: resolved endExclusive must be greater than the effective address.');
+			}
+			if (requestedEndExclusive !== undefined) {
+				const lastRequestedByte = engine.getBytes(requestedEndExclusive - 1, 1);
+				if (!lastRequestedByte || lastRequestedByte.length === 0) {
+					throw new Error(`Requested endExclusive 0x${requestedEndExclusive.toString(16).toUpperCase()} is outside the binary range.`);
+				}
+			}
+			const estimatedSize = params.effectiveCount * maxInstructionSize;
+			const automaticFunctionEnd = extent.source !== 'none' && effectiveAddress >= extent.start && effectiveAddress < extent.end
+				? extent.end
+				: undefined;
+			const decodeEndExclusive = requestedEndExclusive ?? automaticFunctionEnd;
+			const boundedSize = decodeEndExclusive !== undefined
+				? decodeEndExclusive - effectiveAddress
+				: estimatedSize;
+			const extentFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			if (extentFunction && extent.source !== 'pdata' && extent.end > extent.start &&
+				extent.end < extentFunction.endAddress) {
+				extentFunction.endAddress = extent.end;
+				extentFunction.size = extent.end - extent.start;
+			}
+			const knownFunctionAddress = extentFunction
+				? extent.start
+				: undefined;
+			const closureResult = knownFunctionAddress !== undefined
+				? await engine.materializeFunctionForAnalysis(knownFunctionAddress)
+				: undefined;
+			const rawMainInstructions = await engine.disassembleRange(effectiveAddress, boundedSize, params.effectiveCount);
+			const mainInstructions = rawMainInstructions
+				.filter(instruction => instruction.address >= effectiveAddress &&
+					(decodeEndExclusive === undefined || instruction.address + instruction.size <= decodeEndExclusive))
+				.slice(0, params.effectiveCount);
+			const lastMainInstruction = mainInstructions[mainInstructions.length - 1];
+			const candidateNextAddress = lastMainInstruction
+				? lastMainInstruction.address + lastMainInstruction.size
+				: effectiveAddress;
+			const nextByteAvailable = (engine.getBytes(candidateNextAddress, 1)?.length ?? 0) > 0;
+			const stop = classifyDisassemblyStop({
+				startAddress: effectiveAddress,
+				requestedCount: params.count,
+				effectiveCount: params.effectiveCount,
+				returnedCount: mainInstructions.length,
+				lastInstruction: lastMainInstruction,
+				functionExtent: extent.source !== 'none' ? extent : undefined,
+				requestedEndExclusive,
+				nextByteAvailable,
+			});
+			const decodedEndExclusive = lastMainInstruction
+				? lastMainInstruction.address + lastMainInstruction.size
+				: effectiveAddress;
+			const requestedByteCoverage = requestedEndExclusive !== undefined
+				? assessByteRangeCompletion(
+					decodedEndExclusive - effectiveAddress,
+					requestedEndExclusive - effectiveAddress,
+				)
+				: undefined;
+			const owningFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			const semanticAddresses = new Set(
+				(owningFunction?.instructions ?? []).map(instruction => Number(instruction.address)),
+			);
+			const lastSemanticInstruction = owningFunction?.instructions.at(-1);
+			const semanticEnd = lastSemanticInstruction
+				? Number(lastSemanticInstruction.address) + Number(lastSemanticInstruction.size)
+				: undefined;
+			const instructionRole = (instruction: { address: number; mnemonic: string }, isContext: boolean) =>
+				classifyDisassemblyInstructionRole({
+					address: instruction.address,
+					mnemonic: instruction.mnemonic,
+					isContext,
+					semanticAddresses,
+					semanticEnd,
+					boundaryEndExclusive: extent.source !== 'none' ? extent.end : undefined,
+				});
 
 			// 7. Prepare reference maps for comment resolution
 			const stringsMap = engine.getStringsMap();
@@ -4974,6 +6905,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					comment,
 					size: instr.size,
 					isContext: true,
+					role: instructionRole(instr, true),
 				});
 			}
 
@@ -4989,6 +6921,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					comment,
 					size: instr.size,
 					isContext: false,
+					role: instructionRole(instr, false),
 				});
 			}
 
@@ -5012,6 +6945,7 @@ export function activate(context: vscode.ExtensionContext): void {
 						comment,
 						size: instr.size,
 						isContext: false,
+						role: instructionRole(instr, false),
 					});
 				}
 				// Append filtered result (context + filtered main)
@@ -5032,13 +6966,103 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (detectPRNGFlag) {
 				prngDetection = engine.detectPRNG();
 			}
+			const semanticInstructionCount = allEntries.filter(entry => entry.role === 'semantic-body').length;
+			const paddingInstructionCount = allEntries.filter(entry => entry.role === 'alignment-padding').length;
+			const unclassifiedInstructionCount = allEntries.filter(entry => entry.role === 'unclassified').length;
+			const bodyStatus = knownFunctionAddress !== undefined
+				? engine.getFunctionBodyStatus(knownFunctionAddress)
+				: 'decode-empty';
+			const displayOnly = !closureResult || closureResult.status === 'unknown-function' ||
+				closureResult.status === 'decode-empty' || closureResult.status === 'partial';
+			const closureReason = closureResult?.status === 'committed'
+				? 'Function body was classified and committed to the downstream analysis universe.'
+				: closureResult?.status === 'already-current'
+					? 'Function body was already present in the current analysis universe.'
+					: closureResult?.status === 'partial'
+						? 'Function body decoded incompletely and remains retryable display-only evidence; downstream audits are unchanged.'
+					: semanticInstructionCount === 0
+						? 'Decoded bytes were not committed as a classified function body; downstream audits are unchanged.'
+						: 'No authoritative function body was available for an analysis-context commit.';
+			const coverageStatus = requestedByteCoverage?.status ?? 'ok';
+			const semanticStatus = coverageStatus === 'partial' || semanticInstructionCount === 0 || displayOnly
+				? 'partial' as const
+				: 'ok' as const;
+			const warnings = [
+				requestedByteCoverage?.reason,
+				semanticInstructionCount === 0 ? 'Decoded window contains zero classified semantic instructions.' : undefined,
+				displayOnly ? closureReason : undefined,
+			].filter((warning): warning is string => Boolean(warning));
 
 			// 9. Build result JSON
 			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number }; junkCount?: number; junkRatio?: number; vmDetection?: typeof vmDetection; prngDetection?: typeof prngDetection } = {
+				status: semanticStatus,
+				...(warnings.length > 0 ? { semanticWarning: warnings.join(' ') } : {}),
 				address: `0x${params.address.toString(16).toUpperCase()}`,
+				effectiveAddress: `0x${effectiveAddress.toString(16).toUpperCase()}`,
+				addressMapping: engine.getAddressMapping(params.address),
+				effectiveAddressMapping: engine.getAddressMapping(effectiveAddress),
 				count: params.count,
+				effectiveCount: params.effectiveCount,
+				countingDomain: params.countingDomain,
 				context: params.context,
+				contextRecovery: contextRecovery.summary,
 				actualCount: allEntries.length,
+				returnedMainCount: mainInstructions.length,
+				semanticInstructionCount,
+				paddingInstructionCount,
+				unclassifiedInstructionCount,
+				analysisClosure: {
+					status: closureResult?.status ?? 'display-only',
+					...(knownFunctionAddress !== undefined ? { functionAddress: `0x${knownFunctionAddress.toString(16).toUpperCase()}` } : {}),
+					bodyStatus,
+					...(closureResult?.bodyCompleteness ? { bodyCompleteness: closureResult.bodyCompleteness } : {}),
+					changed: closureResult?.changed === true,
+					auditUniverseChanged: closureResult?.changed === true && semanticInstructionCount > 0,
+					instructionsAdded: closureResult?.instructionsAdded ?? 0,
+					engineGenerationBefore: closureResult?.engineGenerationBefore ?? engine.getAnalysisGeneration(),
+					engineGenerationAfter: closureResult?.engineGenerationAfter ?? engine.getAnalysisGeneration(),
+					...(closureResult?.sessionGenerationBefore !== undefined ? { sessionGenerationBefore: closureResult.sessionGenerationBefore } : {}),
+					...(closureResult?.sessionGenerationAfter !== undefined ? { sessionGenerationAfter: closureResult.sessionGenerationAfter } : {}),
+					reason: closureReason,
+				},
+				truncated: stop.truncated,
+				...(stop.truncated && (stop.stopReason === 'count-limit' || stop.stopReason === 'decode-failure')
+					? { truncationReason: stop.stopReason }
+					: {}),
+				stopReason: stop.stopReason,
+				pageFillRatio: stop.pageFillRatio,
+				requestedWindowCoverage: requestedByteCoverage?.coverage ?? (params.count > 0
+					? Math.min(1, mainInstructions.length / params.count)
+					: 0),
+				...(requestedEndExclusive !== undefined && requestedByteCoverage !== undefined ? {
+					requestedByteRange: {
+						start: `0x${effectiveAddress.toString(16).toUpperCase()}`,
+						endExclusive: `0x${requestedEndExclusive.toString(16).toUpperCase()}`,
+						size: requestedEndExclusive - effectiveAddress,
+						reached: requestedByteCoverage.reached,
+						byteCoverage: requestedByteCoverage.coverage,
+						source: params.endExclusive !== undefined
+							? 'explicit-endExclusive' as const
+							: 'function-boundary' as const,
+					},
+				} : {}),
+				...(stop.functionBoundary ? { decodedByteCoverage: stop.functionBoundary.byteCoverage } : {}),
+				...(stop.functionBoundary ? { functionBoundary: {
+					start: `0x${stop.functionBoundary.start.toString(16).toUpperCase()}`,
+					endExclusive: `0x${stop.functionBoundary.end.toString(16).toUpperCase()}`,
+					end: `0x${stop.functionBoundary.end.toString(16).toUpperCase()}`,
+					...(semanticEnd !== undefined ? {
+						semanticEnd: `0x${semanticEnd.toString(16).toUpperCase()}`,
+						paddingBytes: Math.max(0, stop.functionBoundary.end - semanticEnd),
+					} : {}),
+					size: stop.functionBoundary.size,
+					source: stop.functionBoundary.source,
+					reached: stop.functionBoundary.reached,
+					crossed: stop.functionBoundary.crossed,
+					byteCoverage: stop.functionBoundary.byteCoverage,
+				} } : {}),
+				maxCount: MAX_DISASSEMBLE_AT_COUNT,
+				...(stop.nextAddress !== undefined ? { nextAddress: `0x${stop.nextAddress.toString(16).toUpperCase()}` } : {}),
 				instructions: allEntries,
 				generatedAt: new Date().toISOString(),
 			};
@@ -5103,12 +7127,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			// Prefer engine tables when this file is already loaded (richer section/string signals).
-			let sections: Array<{ name: string; isCode?: boolean; rawSize?: number; virtualSize?: number }> = [];
+			let sections: Array<{ name: string; isCode?: boolean; permissions?: string; rawAddress?: number; rawSize?: number; virtualSize?: number }> = [];
 			let strings: Array<{ string?: string }> = [];
 			try {
 				if (engine.getFilePath() === filePath) {
 					sections = engine.getSections().map(s => ({
-						name: s.name, isCode: s.isCode, rawSize: s.rawSize, virtualSize: s.virtualSize,
+						name: s.name, isCode: s.isCode, permissions: s.permissions,
+						rawAddress: s.rawAddress, rawSize: s.rawSize, virtualSize: s.virtualSize,
 					}));
 					strings = engine.getStrings().map(s => ({ string: s.string }));
 				}
@@ -5155,6 +7180,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			const filePath = typeof arg?.file === 'string' ? arg.file : undefined;
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as AnalyzeAllOutputOptions | undefined;
+			const minConfidence = typeof arg?.minConfidence === 'number' && Number.isFinite(arg.minConfidence)
+				? Math.max(0, Math.min(1, arg.minConfidence))
+				: 0;
 
 			if (filePath) {
 				const currentFile = engine.getFilePath();
@@ -5172,11 +7200,15 @@ export function activate(context: vscode.ExtensionContext): void {
 				const batchResults: Array<{
 					query: string;
 					totalMatches: number;
+					discardedLowConfidence: number;
 					matches: Array<{
 						address: string;
 						string: string;
 						encoding: string;
 						references: string[];
+						literalConfidence?: number;
+						evidenceClass?: string;
+						evidenceReasons?: string[];
 					}>;
 				}> = [];
 
@@ -5184,15 +7216,20 @@ export function activate(context: vscode.ExtensionContext): void {
 				const uniqueQueries = [...new Set(batchQueries)];
 
 				for (const q of uniqueQueries) {
-					const results = await engine.searchStringReferences(q);
+					const allResults = await engine.searchStringReferences(q);
+					const results = allResults.filter(result => (result.literalConfidence ?? 0) >= minConfidence);
 					batchResults.push({
 						query: q,
 						totalMatches: results.length,
+						discardedLowConfidence: allResults.length - results.length,
 						matches: results.map((sr: any) => ({
 							address: toHexAddress(sr.address),
 							string: sr.string,
 							encoding: sr.encoding,
 							references: sr.references.map((addr: number) => toHexAddress(addr)),
+							literalConfidence: sr.literalConfidence,
+							evidenceClass: sr.evidenceClass,
+							evidenceReasons: sr.evidenceReasons,
 							query: q
 						}))
 					});
@@ -5204,6 +7241,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					mode: 'batch' as const,
 					queriesCount: uniqueQueries.length,
 					totalMatches,
+					minConfidence,
+					discardedLowConfidence: batchResults.reduce((sum, result) => sum + result.discardedLowConfidence, 0),
 					results: batchResults,
 					generatedAt: new Date().toISOString()
 				};
@@ -5223,16 +7262,22 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			// Single query mode (backward compatible)
-			const results = await engine.searchStringReferences(singleQuery!);
+			const allResults = await engine.searchStringReferences(singleQuery!);
+			const results = allResults.filter(result => (result.literalConfidence ?? 0) >= minConfidence);
 
 			const exportData = {
 				query: singleQuery,
 				totalMatches: results.length,
+				minConfidence,
+				discardedLowConfidence: allResults.length - results.length,
 				matches: results.map((sr: any) => ({
 					address: toHexAddress(sr.address),
 					string: sr.string,
 					encoding: sr.encoding,
-					references: sr.references.map((addr: number) => toHexAddress(addr))
+					references: sr.references.map((addr: number) => toHexAddress(addr)),
+					literalConfidence: sr.literalConfidence,
+					evidenceClass: sr.evidenceClass,
+					evidenceReasons: sr.evidenceReasons,
 				})),
 				generatedAt: new Date().toISOString()
 			};
@@ -5333,6 +7378,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+			let exportResult: AssemblyExportResult;
 
 			if (functionAddress !== undefined && !isNaN(functionAddress)) {
 				// Export single function. A-lazy: materialize so an unopened .pdata stub's body is
@@ -5350,9 +7396,30 @@ export function activate(context: vscode.ExtensionContext): void {
 					asmContent += `0x${inst.address.toString(16).toUpperCase()}  ${hex}  ${inst.mnemonic} ${inst.opStr}${comment}\n`;
 				}
 				fs.writeFileSync(outputPath, asmContent, 'utf8');
+				const completeness = engine.getFunctionBodyCompleteness(func.address);
+				const incompleteFunctions: AssemblyExportResult['incompleteFunctions'] = completeness?.state === 'partial' ? [{
+					address: func.address,
+					name: func.name,
+					reason: 'partial-decode',
+					byteCoverage: completeness.byteCoverage,
+					stopReason: completeness.stopReason,
+				}] : [];
+				exportResult = {
+					status: func.instructions.length > 0 && incompleteFunctions.length === 0 ? 'ok' : 'partial',
+					totalFunctions: 1,
+					functionsWithInstructions: func.instructions.length > 0 ? 1 : 0,
+					functionsWithoutInstructions: func.instructions.length > 0 ? 0 : 1,
+					decodedInstructions: func.instructions.length,
+					emptyFunctions: func.instructions.length > 0 ? [] : [{
+						address: func.address,
+						name: func.name,
+						reason: 'decode-empty'
+					}],
+					incompleteFunctions,
+				};
 			} else {
 				// Export all functions
-				await engine.exportAssembly(outputPath);
+				exportResult = await engine.exportAssembly(outputPath);
 			}
 
 			if (!quietMode) {
@@ -5362,7 +7429,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Assembly exported (${label}) to ${outputPath}`);
 			}
 
-			return { outputPath, generatedAt: new Date().toISOString() };
+			return {
+				outputPath,
+				generatedAt: new Date().toISOString(),
+				...exportResult,
+				...(exportResult.status === 'partial' ? {
+					semanticWarning: `${exportResult.functionsWithoutInstructions}/${exportResult.totalFunctions} function body or bodies decoded no instructions`
+				} : {})
+			};
 		})
 	);
 
@@ -5396,41 +7470,56 @@ export function activate(context: vscode.ExtensionContext): void {
 			const assertContainedPath = (p: string, kind: 'input' | 'output'): string => {
 				const resolved = path.resolve(p);
 				const roots = (vscode.workspace.workspaceFolders ?? []).map(f => path.resolve(f.uri.fsPath));
-				const contained = roots.length === 0
-					? !path.isAbsolute(p)
-					: roots.some(r => resolved === r || resolved.startsWith(r + path.sep));
-				if (!contained) {
+				const containedPath = roots.length === 0
+					? (!path.isAbsolute(p) ? resolved : undefined)
+					: resolvePathWithinRoots(resolved, roots);
+				if (!containedPath) {
 					throw new Error(`refcountScan: ${kind} path "${p}" is outside the workspace; refusing (CWE-22 path containment).`);
 				}
-				return resolved;
+				return containedPath;
 			};
 			const safeInput = assertContainedPath(rawInput, 'input');
+			const safeOutput = outputPath ? assertContainedPath(outputPath, 'output') : undefined;
 
-			let source: string;
+			let sourceBytes: Buffer;
 			try {
 				const stat = fs.statSync(safeInput);
 				if (stat.size > MAX_AUDIT_INPUT_BYTES) {
 					throw new Error(`input is ${stat.size} bytes (cap ${MAX_AUDIT_INPUT_BYTES}); decompiled C is expected, refusing to avoid a DoS`);
 				}
-				source = fs.readFileSync(safeInput, 'utf8');
+				sourceBytes = fs.readFileSync(safeInput);
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
 				throw new Error(`refcountScan: failed to read ${safeInput}: ${message}`);
 			}
 
-			const report: RefcountAuditReport = auditRefcount(source, safeInput);
+			const scan = auditRefcount(sourceBytes.toString('utf8'), safeInput);
+			const inputQuality = readAuditInputQuality(safeInput, sourceBytes,
+				(vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath),
+				safeOutput ? path.join(path.dirname(safeOutput), '.hexcore-meta', 'inputs') : undefined);
+			if (scan.scanCoverage.status !== 'ok') {
+				inputQuality.status = 'partial';
+				inputQuality.negativeEvidenceUsable = false;
+				inputQuality.reasons.push(...scan.scanCoverage.reasons.map(reason => `scanner:${reason}`));
+			}
+			const report = {
+				...scan, command: 'hexcore.audit.refcountScan', status: inputQuality.status,
+				negativeEvidenceUsable: inputQuality.negativeEvidenceUsable, inputQuality,
+				conclusion: scan.findings.length ? 'pattern-signals' : inputQuality.negativeEvidenceUsable
+					? 'no-matches-in-accepted-input' : 'inconclusive',
+			};
 
-			if (outputPath) {
-				const safeOutput = assertContainedPath(outputPath, 'output');
+			if (safeOutput) {
 				fs.mkdirSync(path.dirname(safeOutput), { recursive: true });
 				fs.writeFileSync(safeOutput, JSON.stringify(report, null, 2), 'utf8');
 			}
 
 			if (!quietMode) {
-				const critical = report.findings.filter(f => f.severity === 'high').length;
-				const badge = critical > 0 ? `🔴 ${critical} high-severity` : report.summary.total > 0 ? `🟡 ${report.summary.total} finding(s)` : '🟢 Clean';
+				const badge = report.summary.total > 0
+					? `${report.summary.total} unproven pattern signal(s)` : report.negativeEvidenceUsable
+						? 'No matches in accepted input' : 'Inconclusive: input quality not accepted';
 				vscode.window.showInformationMessage(
-					`${badge} | ${report.functionsScanned} fn scanned | ${report.scanTimeMs}ms`,
+					`${badge} | ${report.observations.length} diagnostic observation(s) | ${report.functionsScanned} fn scanned | ${report.scanTimeMs}ms`,
 				);
 			}
 
@@ -5718,7 +7807,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			// engine and concurrent jobs can no longer interleave. Shadows the global
 			// `engine` for this command only; falls back to the global engine when no
 			// path is given (UI / generic callers).
-			const engine = filePath ? factory.getEngine(filePath) : factory.getEngine();
+			const engineLease = filePath ? await factory.acquireEngine(filePath) : undefined;
+			const engine = engineLease?.engine ?? factory.getEngine();
+			try {
 
 			// Load file into engine if a path is provided.
 			// Cache-poison guard: previous sessions in the same workspace can leave
@@ -5934,7 +8025,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				);
 			}
 
-			return result;
+				return result;
+			} finally {
+				engineLease?.dispose();
+			}
 		})
 	);
 
@@ -6324,18 +8418,11 @@ async function liftAllExecutableSections(
 		}
 
 		// Skip CET/ftrace preamble
-		let skipBytes = 0;
-		if (bytesToLift.length >= 4 &&
-			bytesToLift[0] === 0xF3 && bytesToLift[1] === 0x0F &&
-			bytesToLift[2] === 0x1E && (bytesToLift[3] === 0xFA || bytesToLift[3] === 0xFB)) {
-			skipBytes += 4; // endbr64/endbr32
-		}
-		if (bytesToLift.length >= skipBytes + 5 &&
-			bytesToLift[skipBytes] === 0xE8 &&
-			bytesToLift[skipBytes + 1] === 0x00 && bytesToLift[skipBytes + 2] === 0x00 &&
-			bytesToLift[skipBytes + 3] === 0x00 && bytesToLift[skipBytes + 4] === 0x00) {
-			skipBytes += 5; // call __fentry__
-		}
+		const skipBytes = planLiftPreamble(
+			bytesToLift,
+			execSec.virtualAddress || execSec.offset,
+			true,
+		).skipBytes;
 
 		if (skipBytes > 0) {
 			bytesToLift = bytesToLift.subarray(skipBytes);
@@ -6656,13 +8743,46 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 	if (raw.includeInstructions !== undefined) {
 		normalized.includeInstructions = raw.includeInstructions === true;
 	}
+	if (raw.arch !== undefined) {
+		if (!['x86', 'x64', 'arm', 'arm64', 'mips', 'mips64'].includes(raw.arch)) {
+			throw new Error(`Invalid "arch" option: ${String(raw.arch)}`);
+		}
+		normalized.arch = raw.arch;
+	}
+	if (raw.baseAddress !== undefined) {
+		parseOptionalRawBaseAddress(raw.baseAddress);
+		normalized.baseAddress = raw.baseAddress;
+	}
+	if (raw.pipelineTimeoutMs !== undefined) {
+		if (!Number.isFinite(raw.pipelineTimeoutMs) || raw.pipelineTimeoutMs <= 0) {
+			throw new Error('Invalid "pipelineTimeoutMs" option: expected a positive finite number.');
+		}
+		normalized.pipelineTimeoutMs = Math.trunc(raw.pipelineTimeoutMs);
+	}
 
 	// v3.7 options
 	if (raw.filterJunk === true) { normalized.filterJunk = true; }
 	if (raw.detectVM === true) { normalized.detectVM = true; }
 	if (raw.detectPRNG === true) { normalized.detectPRNG = true; }
+	Object.assign(
+		normalized,
+		normalizeFunctionMaterializationPolicy(raw as unknown as Record<string, unknown>),
+	);
 
 	return normalized;
+}
+
+function parseOptionalRawBaseAddress(value: string | number | undefined): number | undefined {
+	if (value === undefined) { return undefined; }
+	const parsed = typeof value === 'number'
+		? value
+		: /^0x[\da-f]+$/i.test(value.trim())
+			? Number.parseInt(value.trim().slice(2), 16)
+			: Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed < 0) {
+		throw new Error('Invalid "baseAddress" option: expected a non-negative safe integer or 0x-prefixed address.');
+	}
+	return parsed;
 }
 
 async function resolveAnalyzeAllTargetFilePath(
@@ -7216,6 +9336,8 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 			sections: engine.getSections().map(s => ({
 				name: s.name,
 				isCode: s.isCode,
+				permissions: s.permissions,
+				rawAddress: s.rawAddress,
 				rawSize: s.rawSize,
 				virtualSize: s.virtualSize,
 			})),
@@ -7268,18 +9390,46 @@ function computeAnalyzeAllCapabilities(engine: DisassemblerEngine): string[] {
 	return caps;
 }
 
-function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, newFunctions: number, includeInstructions: boolean = false, v37Options?: { filterJunk?: boolean; detectVM?: boolean; detectPRNG?: boolean }): AnalyzeAllResult {
+function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: string, _legacyNetChange: number, includeInstructions: boolean = false, v37Options?: {
+	filterJunk?: boolean;
+	detectVM?: boolean;
+	detectPRNG?: boolean;
+	allowLazy?: boolean;
+	allowDecodeEmpty?: boolean;
+	minMaterializedRatio?: number;
+}): AnalyzeAllResult {
 	const functions = engine.getFunctions();
+	const analysisDelta = engine.getLastAnalysisDelta();
 	const MAX_INSTRUCTIONS_PER_FUNCTION = 200;
 
 	const functionSummaries: AnalyzeAllFunctionSummary[] = functions.map(func => {
+		const bodyStatus = engine.getFunctionBodyStatus(func.address);
+		const discoveryEvidence = engine.getFunctionDiscoveryEvidence(func.address);
 		const summary: AnalyzeAllFunctionSummary = {
 			address: toHexAddress(func.address),
 			name: func.name,
 			size: func.size,
 			instructionCount: func.instructions.length,
+			bodyStatus,
+			...(bodyStatus === 'lazy'
+				? { bodyReason: 'deferred-until-requested' as const }
+				: bodyStatus === 'decode-empty'
+					? { bodyReason: 'decoder-returned-no-instructions' as const }
+					: {}),
 			callers: func.callers.length,
-			callees: func.callees.length
+			callees: func.callees.length,
+			...(discoveryEvidence.length > 0 ? {
+				discoveryEvidence: discoveryEvidence.map(evidence => ({
+					kind: evidence.kind,
+					...(evidence.sourceAddress !== undefined
+						? { sourceAddress: toHexAddress(evidence.sourceAddress) }
+						: {}),
+					...(evidence.consumerAddress !== undefined
+						? { consumerAddress: toHexAddress(evidence.consumerAddress) }
+						: {}),
+					...(evidence.confidence !== undefined ? { confidence: evidence.confidence } : {}),
+				})),
+			} : {}),
 		};
 
 		if (includeInstructions) {
@@ -7295,12 +9445,48 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 
 		return summary;
 	});
+	const functionsWithInstructions = functionSummaries.filter(func => func.instructionCount > 0).length;
+	const functionsMaterialized = functionSummaries.filter(func => func.bodyStatus === 'materialized').length;
+	const partialFunctions = functionSummaries.filter(func => func.bodyStatus === 'partial').length;
+	const lazyFunctions = functionSummaries.filter(func => func.bodyStatus === 'lazy').length;
+	const decodeEmptyFunctions = functionSummaries.filter(func => func.bodyStatus === 'decode-empty').length;
+	const totalFunctionInstructions = functionSummaries.reduce((total, func) => total + func.instructionCount, 0);
+	const materialization = assessFunctionMaterialization({
+		totalFunctions: functions.length,
+		materializedFunctions: functionsMaterialized,
+		partialFunctions,
+		lazyFunctions,
+		decodeEmptyFunctions,
+		allowLazy: v37Options?.allowLazy,
+		allowDecodeEmpty: v37Options?.allowDecodeEmpty,
+		minMaterializedRatio: v37Options?.minMaterializedRatio,
+	});
+	const closureRestoration = engine.getAnalysisClosureRestoration();
+	const restorationWarning = closureRestoration.status === 'partial' || closureRestoration.status === 'reset'
+		? `Persisted closure restoration incomplete: ${closureRestoration.restored}/${closureRestoration.requested}; ${closureRestoration.failed[0] ?? 'unknown failure'}`
+		: undefined;
 
 	const result: AnalyzeAllResult = {
+		status: closureRestoration.status === 'partial' || closureRestoration.status === 'reset' ? 'partial' : materialization.status,
+		...(materialization.reason || restorationWarning ? { warning: [materialization.reason, restorationWarning].filter(Boolean).join(' ') } : {}),
 		filePath: targetFilePath,
 		fileName: path.basename(targetFilePath),
-		newFunctions,
+		newFunctions: analysisDelta.added,
+		removedFunctions: analysisDelta.removed,
+		functionNetChange: analysisDelta.netChange,
 		totalFunctions: functions.length,
+		functionsWithInstructions,
+		functionsWithoutInstructions: functions.length - functionsWithInstructions,
+		lazyFunctions,
+		decodeEmptyFunctions,
+		materializedFunctionRatio: materialization.materializedFunctionRatio,
+		analysisDepth: materialization.analysisDepth,
+		negativeEvidenceUsable: false,
+		functionsMaterialized,
+		partialFunctions,
+		materializationPolicy: materialization.policy,
+		closureRestoration,
+		totalFunctionInstructions,
 		totalStrings: engine.getStrings().length,
 		architecture: engine.getArchitecture(),
 		baseAddress: toHexAddress(engine.getBaseAddress()),
@@ -7398,8 +9584,22 @@ function generateAnalyzeAllReport(result: AnalyzeAllResult): string {
 
 | Metric | Value |
 |--------|-------|
-| **New Functions** | ${result.newFunctions} |
+| **Functions Added** | ${result.newFunctions} |
+| **Functions Pruned** | ${result.removedFunctions} |
+| **Net Function Change** | ${result.functionNetChange} |
 | **Total Functions** | ${result.totalFunctions} |
+| **Functions With Decoded Instructions** | ${result.functionsWithInstructions} |
+| **Complete Materialized Functions** | ${result.functionsMaterialized} |
+| **Partial Function Bodies** | ${result.partialFunctions} |
+| **Analysis Depth** | ${result.analysisDepth} |
+| **Negative Evidence Usable** | false (discovery is not a behavioral audit) |
+| **Functions Without Decoded Instructions** | ${result.functionsWithoutInstructions} |
+| **Lazy Function Bodies** | ${result.lazyFunctions} |
+| **Decode-Empty Function Bodies** | ${result.decodeEmptyFunctions} |
+| **Materialized Function Ratio** | ${(result.materializedFunctionRatio * 100).toFixed(2)}% |
+| **Materialization Status** | ${result.status}${result.warning ? ` - ${result.warning}` : ''} |
+| **Materialization Policy** | allowLazy=${result.materializationPolicy.allowLazy}, allowDecodeEmpty=${result.materializationPolicy.allowDecodeEmpty}, minRatio=${(result.materializationPolicy.minMaterializedRatio * 100).toFixed(2)}% |
+| **Indexed Function Instructions** | ${result.totalFunctionInstructions} |
 | **Total Strings** | ${result.totalStrings} |
 | **Sections** | ${result.sections} |
 | **Imports** | ${result.imports} |
@@ -7407,18 +9607,22 @@ function generateAnalyzeAllReport(result: AnalyzeAllResult): string {
 
 ---
 
-## Functions (Top 100)
+## Function Index Preview (First 100 by Address)
 
-| Address | Name | Size | Instructions | Callers | Callees |
-|---------|------|------|--------------|---------|---------|
+Showing ${Math.min(result.functions.length, 100)} of ${result.functions.length} discovered functions.
+JSON output retains the full discovered-function index. Lazy bodies are indexed but not decoded;
+zero known references does not establish that a function has no callers or callees.
+
+| Address | Name | Size | Body | Instructions | Known Callers | Known Callees |
+|---------|------|------|------|--------------|---------|---------|
 `;
 
 	for (const func of result.functions.slice(0, 100)) {
-		report += `| ${func.address} | ${func.name} | ${func.size} | ${func.instructionCount} | ${func.callers} | ${func.callees} |\n`;
+		report += `| ${func.address} | ${func.name} | ${func.size} | ${func.bodyStatus} | ${func.instructionCount} | ${func.callers} | ${func.callees} |\n`;
 	}
 
 	if (result.functions.length > 100) {
-		report += `| ... | ... | ... | ... | ... | ... |\n`;
+		report += `| ... | ... | ... | ... | ... | ... | ... |\n`;
 	}
 
 	report += `
@@ -7448,7 +9652,24 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		filePath: result.filePath,
 		fileName: result.fileName,
 		newFunctions: result.newFunctions,
+		removedFunctions: result.removedFunctions,
+		functionNetChange: result.functionNetChange,
 		totalFunctions: result.totalFunctions,
+		functionsWithInstructions: result.functionsWithInstructions,
+		functionsWithoutInstructions: result.functionsWithoutInstructions,
+		lazyFunctions: result.lazyFunctions,
+		decodeEmptyFunctions: result.decodeEmptyFunctions,
+		materializedFunctionRatio: result.materializedFunctionRatio,
+		analysisDepth: result.analysisDepth,
+		negativeEvidenceUsable: result.negativeEvidenceUsable,
+		functionsMaterialized: result.functionsMaterialized,
+		partialFunctions: result.partialFunctions,
+		materializationPolicy: result.materializationPolicy,
+		closureRestoration: result.closureRestoration,
+		nativeExecution: result.nativeExecution,
+		status: result.status,
+		warning: result.warning,
+		totalFunctionInstructions: result.totalFunctionInstructions,
 		totalStrings: result.totalStrings,
 		architecture: result.architecture,
 		baseAddress: result.baseAddress,

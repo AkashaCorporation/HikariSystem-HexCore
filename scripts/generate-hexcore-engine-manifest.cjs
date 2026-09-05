@@ -23,6 +23,40 @@ const ENGINE_SPECS = [
 ];
 
 const NATIVE_EXTENSIONS = new Set(['.node', '.dll', '.exe', '.bc']);
+const ADDON_NAMES = {
+	'hexcore-capstone': 'hexcore_capstone', 'hexcore-unicorn': 'hexcore_unicorn',
+	'hexcore-llvm-mc': 'hexcore_llvm_mc', 'hexcore-better-sqlite3': 'hexcore_sqlite3',
+	'hexcore-remill': 'hexcore_remill', 'hexcore-souper': 'hexcore_souper'
+};
+
+function runtimeCandidates(id, platform, arch) {
+	if (id === 'hexcore-revenant') {
+		const os = platform === 'win32' ? 'win' : platform === 'darwin' ? 'osx' : 'linux';
+		const executable = platform === 'win32' ? 'revenant-engine.exe' : 'revenant-engine';
+		return [`bin/${os}-${arch}/${executable}`, `bin/${executable}`];
+	}
+	if (id === 'hexcore-helix' || id === 'hexcore-elixir') {
+		const suffixes = platform === 'win32' ? [`win32-${arch}-msvc`]
+			: platform === 'linux' ? [`linux-${arch}-gnu`, `linux-${arch}-musl`] : [`darwin-${arch}`];
+		return suffixes.map(suffix => `${id}.${suffix}.node`);
+	}
+	const name = ADDON_NAMES[id];
+	if (!name) return [];
+	return [
+		`prebuilds/${platform}-${arch}/node.napi.node`,
+		`prebuilds/${platform}-${arch}/${id}.node`,
+		`prebuilds/${platform}-${arch}/${name}.node`,
+		`build/Release/${name}.node`
+	];
+}
+
+function requireRuntimeFile(extensionRoot, candidates, label) {
+	for (const relative of candidates) {
+		const fullPath = path.join(extensionRoot, relative);
+		try { if (fs.statSync(fullPath).isFile() && fs.statSync(fullPath).size > 0) return fullPath; } catch { /* try next supported location */ }
+	}
+	throw new Error(`${label} missing or empty; expected one of: ${candidates.join(', ')}`);
+}
 
 function parseArguments(argv) {
 	const values = new Map();
@@ -57,7 +91,7 @@ function listNativeArtifacts(directory) {
 		for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
 			const fullPath = path.join(current, entry.name);
 			if (entry.isDirectory()) {
-				pending.push(fullPath);
+				if (!['node_modules', '.git', 'test', 'tests', 'target'].includes(entry.name)) pending.push(fullPath);
 			} else if (entry.isFile() && NATIVE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
 				artifacts.push(fullPath);
 			}
@@ -68,7 +102,14 @@ function listNativeArtifacts(directory) {
 }
 
 function hashFile(filePath) {
-	return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+	const hash = crypto.createHash('sha256');
+	const buffer = Buffer.allocUnsafe(1024 * 1024);
+	const fd = fs.openSync(filePath, 'r');
+	try {
+		let read;
+		while ((read = fs.readSync(fd, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, read));
+	} finally { fs.closeSync(fd); }
+	return hash.digest('hex');
 }
 
 function generateManifest({ appRoot, outputPath, platform = process.platform, arch = process.arch }) {
@@ -86,13 +127,25 @@ function generateManifest({ appRoot, outputPath, platform = process.platform, ar
 		const extensionRoot = path.join(resolvedRoot, 'extensions', spec.id);
 		const packagePath = path.join(extensionRoot, 'package.json');
 		if (!fs.existsSync(packagePath)) {
+			if (spec.required === false) return { id: spec.id, active: false, version: null, repository: null, releaseTag: null, artifacts: [] };
 			throw new Error(`Required engine package is missing: ${packagePath}`);
 		}
 
 		const packageJson = readJson(packagePath);
 		const artifactPaths = listNativeArtifacts(extensionRoot);
-		if (artifactPaths.length === 0 && spec.required !== false) {
-			throw new Error(`Engine ${spec.id} has no packaged native artifacts`);
+		let primaryRuntime;
+		if (spec.required !== false) {
+			primaryRuntime = requireRuntimeFile(extensionRoot, runtimeCandidates(spec.id, platform, arch), `Engine ${spec.id} primary runtime`);
+			if (!artifactPaths.includes(primaryRuntime)) artifactPaths.push(primaryRuntime);
+			if (platform === 'win32' && spec.id === 'hexcore-unicorn') {
+				requireRuntimeFile(extensionRoot, ['deps/unicorn/unicorn.dll', 'build/Release/unicorn.dll', `prebuilds/${platform}-${arch}/unicorn.dll`, 'unicorn.dll'], 'Unicorn runtime DLL');
+			}
+			if (platform === 'win32' && spec.id === 'hexcore-elixir') {
+				requireRuntimeFile(extensionRoot, ['unicorn.dll'], 'Elixir adjacent Unicorn runtime DLL');
+			}
+			if (spec.id === 'hexcore-remill' && !artifactPaths.some(file => path.extname(file).toLowerCase() === '.bc')) {
+				throw new Error('Remill semantics bitcode missing from package');
+			}
 		}
 
 		return {
@@ -101,6 +154,7 @@ function generateManifest({ appRoot, outputPath, platform = process.platform, ar
 			version: packageJson.version,
 			repository: normalizeRepository(packageJson.repository),
 			releaseTag: `v${packageJson.version}`,
+			...(primaryRuntime ? { primaryRuntime: path.relative(resolvedRoot, primaryRuntime).split(path.sep).join('/'), runtimeValidation: 'presence-only' } : {}),
 			artifacts: artifactPaths.map(artifactPath => {
 				const stat = fs.statSync(artifactPath);
 				return {
@@ -149,4 +203,4 @@ if (require.main === module) {
 	}
 }
 
-module.exports = { ENGINE_SPECS, generateManifest };
+module.exports = { ENGINE_SPECS, runtimeCandidates, generateManifest };

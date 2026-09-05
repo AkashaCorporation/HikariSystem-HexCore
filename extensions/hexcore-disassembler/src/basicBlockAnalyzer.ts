@@ -5,6 +5,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { Instruction } from './disassemblerEngine';
+import {
+	createBasicBlockId,
+	createFunctionId,
+	type AnalysisAddressSpace,
+	type AnalysisTarget,
+} from 'hexcore-common';
 
 /**
  * A basic block is a sequence of instructions with:
@@ -14,6 +20,12 @@ import { Instruction } from './disassemblerEngine';
  */
 export interface BasicBlock {
 	id: number;
+	/**
+	 * Analysis Contract identity (3.8.4 C1), derived from target + function
+	 * entry + block start. Present only when the analyzer was given a target
+	 * and address space; the numeric `id` remains the in-memory wiring key.
+	 */
+	stableId?: string;
 	startAddress: number;
 	endAddress: number;
 	instructions: Instruction[];
@@ -35,6 +47,8 @@ export interface CFG {
 	entryBlockId: number;
 	functionName: string;
 	functionAddress: number;
+	/** Analysis Contract identity of the owning function, when a target is bound. */
+	functionStableId?: string;
 }
 
 /**
@@ -43,11 +57,23 @@ export interface CFG {
 export class BasicBlockAnalyzer {
 	private blockIdCounter: number = 0;
 	private addressToBlockId: Map<number, number> = new Map();
+	private contractIdentity?: { target: AnalysisTarget; space: AnalysisAddressSpace; functionEntry: number };
 
 	/**
-	 * Build a CFG from a list of instructions belonging to a function
+	 * Build a CFG from a list of instructions belonging to a function.
+	 * When `options.target` and `options.addressSpace` are supplied, every
+	 * block also receives its Analysis Contract `stableId`; without them the
+	 * CFG keeps only in-memory numeric IDs (legacy behavior).
 	 */
-	buildCFG(instructions: Instruction[], functionName: string, functionAddress: number): CFG {
+	buildCFG(
+		instructions: Instruction[],
+		functionName: string,
+		functionAddress: number,
+		options: { target?: AnalysisTarget; addressSpace?: AnalysisAddressSpace } = {}
+	): CFG {
+		this.contractIdentity = options.target && options.addressSpace
+			? { target: options.target, space: options.addressSpace, functionEntry: functionAddress }
+			: undefined;
 		if (instructions.length === 0) {
 			return this.createEmptyCFG(functionName, functionAddress);
 		}
@@ -75,7 +101,14 @@ export class BasicBlockAnalyzer {
 			edges,
 			entryBlockId,
 			functionName,
-			functionAddress
+			functionAddress,
+			...(this.contractIdentity ? {
+				functionStableId: createFunctionId({
+					target: this.contractIdentity.target,
+					space: this.contractIdentity.space,
+					address: functionAddress,
+				}),
+			} : {}),
 		};
 	}
 
@@ -136,6 +169,14 @@ export class BasicBlockAnalyzer {
 				const blockId = this.blockIdCounter++;
 				currentBlock = {
 					id: blockId,
+					...(this.contractIdentity ? {
+						stableId: createBasicBlockId({
+							target: this.contractIdentity.target,
+							space: this.contractIdentity.space,
+							functionEntry: this.contractIdentity.functionEntry,
+							blockStart: inst.address,
+						}),
+					} : {}),
 					startAddress: inst.address,
 					endAddress: inst.address,
 					instructions: [],
@@ -275,7 +316,14 @@ export class BasicBlockAnalyzer {
 			edges: [],
 			entryBlockId: -1,
 			functionName,
-			functionAddress
+			functionAddress,
+			...(this.contractIdentity ? {
+				functionStableId: createFunctionId({
+					target: this.contractIdentity.target,
+					space: this.contractIdentity.space,
+					address: functionAddress,
+				}),
+			} : {}),
 		};
 	}
 

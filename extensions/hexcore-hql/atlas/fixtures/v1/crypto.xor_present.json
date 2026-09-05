@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "crypto.xor_present",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:crypto.xor_present.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "function"
+      ],
+      "contentSha256": "74279a67b7d17f75a67c5c8495c41026acbc12a4d2719cbf3b3325937ce9121d",
+      "ast": {
+        "k": "fn",
+        "at": "function",
+        "body": [
+          {
+            "k": "bin",
+            "op": "^",
+            "a": "state",
+            "b": "key"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.xor_present.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "55649125e6e54c8cbff7cdb4bac9656055ee81937614a10d56ca205cc11c0390",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "op": "&",
+            "a": "state",
+            "b": "mask"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.xor_present.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "9e946b912c393dabd07ff73be0149f819384f1016aa5f529fec9d9f4254221d2",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "str",
+            "value": "state ^= key"
+          }
+        ]
+      }
+    }
+  ]
+}

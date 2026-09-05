@@ -108,4 +108,32 @@ suite('Callfuscation Deflattening - Properties (v3.8.1)', () => {
 			assert.strictEqual(res.patched[8 + k * 16], 0xe8, 'ordinary call left as call');
 		}
 	});
+
+	test('P5: instruction-aware mode ignores E8 bytes that are not decoded call boundaries', () => {
+		const buf = buildGadgets(20);
+		const genuine = new Set<number>();
+		for (let k = 0; k < 16; k++) {
+			genuine.add(8 + k * 16);
+		}
+		const res = deflattenCallfuscation(buf, 0x401000, {
+			instructionOffsets: genuine,
+			decodedCallCount: 16,
+		});
+		assert.ok(res.applied);
+		assert.strictEqual(res.linkCount, 16);
+		for (let k = 0; k < 20; k++) {
+			assert.strictEqual(res.patched[8 + k * 16], k < 16 ? 0xe9 : 0xe8);
+		}
+	});
+
+	test('P6: instruction-aware ratio gate rejects sparse call-pop idioms', () => {
+		const buf = buildGadgets(16);
+		const offsets = new Set<number>();
+		for (let k = 0; k < 16; k++) { offsets.add(8 + k * 16); }
+		const res = deflattenCallfuscation(buf, 0x401000, {
+			instructionOffsets: offsets,
+			decodedCallCount: 64,
+		});
+		assert.strictEqual(res.applied, false);
+	});
 });

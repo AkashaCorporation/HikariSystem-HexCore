@@ -177,7 +177,9 @@ const cryptoSig: HQLSignature = {
 const result = matcher.evaluate(funcDecl, cryptoSig);
 assert(result !== null, 'Crypto signature fired');
 assert(result?.signatureId === 'crypto.xor_loop', `Signature ID: ${result?.signatureId}`);
-assert((result?.confidence ?? 0) > 0, `Confidence: ${result?.confidence}`);
+assert(result?.structuralCompleteness === 1, `Structural completeness: ${result?.structuralCompleteness}`);
+assert(result?.evidenceLevel === 'signal', `Evidence level: ${result?.evidenceLevel}`);
+assert(result?.confidence === undefined, 'Uncalibrated signature does not fabricate confidence');
 
 // Test 9: Signature that should NOT fire
 console.log('▸ Test 9: Negative signature evaluation');
@@ -195,6 +197,49 @@ const injectionSig: HQLSignature = {
 };
 const negResult = matcher.evaluate(funcDecl, injectionSig);
 assert(negResult === null, 'Injection signature did NOT fire (correct)');
+
+// Test 10: Recursive combinators
+console.log('â–¸ Test 10: all/any/not/count combinators');
+const combinatorSig: HQLSignature = {
+  id: 'test.combinators',
+  name: 'Combinator coverage',
+  description: 'Exercises the recursive condition tree',
+  severity: 'info',
+  evidenceLevel: 'candidate',
+  condition: {
+    all: [
+      { any: [
+        { query: { target: 'CCallExpr', attributes: [{ field: 'callee', value: 'memcpy' }] } },
+        { query: { target: 'CCallExpr', attributes: [{ field: 'callee', value: 'memset' }] } },
+      ] },
+      { not: { query: { target: 'CCallExpr', attributes: [{ field: 'callee', value: 'VirtualAllocEx' }] } } },
+      { count: { query: { target: 'CBinaryExpr' }, exactly: 2 } },
+    ],
+  },
+};
+const combinatorResult = matcher.evaluate(funcDecl, combinatorSig);
+assert(combinatorResult !== null, 'Nested all/any/not/count condition fired');
+assert(combinatorResult?.structuralCompleteness === 1, 'Combinator structural completeness is exact');
+
+const failingCount = {
+  ...combinatorSig,
+  id: 'test.combinators-fail',
+  condition: { count: { query: { target: 'CBinaryExpr' as const }, exactly: 3 } },
+};
+assert(matcher.evaluate(funcDecl, failingCount) === null, 'Count condition rejects the wrong cardinality');
+
+const lossyAbsence: CFunctionDecl = {
+  kind: 'CFunctionDecl', name: 'lossy_absence', returnType: 'void', params: [],
+  body: { kind: 'CBlockStmt', body: [{ kind: 'CUnknownStmt', sourceKind: 255, reason: 'future statement', lossy: true }] },
+  adapterCoverage: { totalNodes: 4, lossyNodes: 1, coverage: 0.75, unsupportedNodeCounts: { 'CUnknownStmt:255': 1 } },
+};
+const absenceSignature: HQLSignature = {
+  id: 'test.lossy-not', name: 'Lossy absence', description: 'Absence needs complete AST', severity: 'info', evidenceLevel: 'proven',
+  condition: { not: { query: { target: 'CCallExpr', attributes: [{ field: 'callee', value: 'danger' }] } } },
+};
+const absenceResult = matcher.evaluate(lossyAbsence, absenceSignature);
+assert(absenceResult?.evidenceLevel === 'candidate', 'Lossy NOT cannot retain proven evidence');
+assert(absenceResult?.adapterLossAffected === true, 'Lossy absence dependency is explicit');
 
 // ─── Summary ───
 console.log(`\n📊 Results: ${passed} passed, ${failed} failed\n`);

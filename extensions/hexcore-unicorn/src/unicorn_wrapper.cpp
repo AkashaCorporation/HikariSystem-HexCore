@@ -90,6 +90,7 @@ Napi::Object UnicornWrapper::Init(Napi::Env env, Napi::Object exports) {
 		// Register operations
 		InstanceMethod<&UnicornWrapper::RegRead>("regRead"),
 		InstanceMethod<&UnicornWrapper::RegWrite>("regWrite"),
+		InstanceMethod<&UnicornWrapper::RegWriteMmr>("regWriteMmr"),
 		InstanceMethod<&UnicornWrapper::RegReadBatch>("regReadBatch"),
 		InstanceMethod<&UnicornWrapper::RegWriteBatch>("regWriteBatch"),
 
@@ -1205,6 +1206,48 @@ Napi::Value UnicornWrapper::RegWrite(const Napi::CallbackInfo& info) {
 		ThrowUnicornError(env, err, "Failed to write register");
 	}
 
+	return env.Undefined();
+}
+
+Napi::Value UnicornWrapper::RegWriteMmr(const Napi::CallbackInfo& info) {
+	Napi::Env env = info.Env();
+
+	if (closed_) {
+		Napi::Error::New(env, "Engine is closed").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	if (info.Length() < 5) {
+		Napi::TypeError::New(env, "Expected 5 arguments: regId, selector, base, limit, flags")
+			.ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	const int regId = info[0].As<Napi::Number>().Int32Value();
+	if (regId != UC_X86_REG_GDTR && regId != UC_X86_REG_IDTR &&
+		regId != UC_X86_REG_LDTR && regId != UC_X86_REG_TR) {
+		Napi::RangeError::New(env, "regId must be GDTR, IDTR, LDTR, or TR")
+			.ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+
+	uc_x86_mmr value{};
+	value.selector = static_cast<uint16_t>(info[1].As<Napi::Number>().Uint32Value());
+	if (info[2].IsBigInt()) {
+		bool lossless = false;
+		value.base = info[2].As<Napi::BigInt>().Uint64Value(&lossless);
+	} else if (info[2].IsNumber()) {
+		value.base = static_cast<uint64_t>(info[2].As<Napi::Number>().Int64Value());
+	} else {
+		Napi::TypeError::New(env, "base must be a BigInt or Number").ThrowAsJavaScriptException();
+		return env.Undefined();
+	}
+	value.limit = info[3].As<Napi::Number>().Uint32Value();
+	value.flags = info[4].As<Napi::Number>().Uint32Value();
+
+	const uc_err err = uc_reg_write(engine_, regId, &value);
+	if (err != UC_ERR_OK) {
+		ThrowUnicornError(env, err, "Failed to write x86 memory-management register");
+	}
 	return env.Undefined();
 }
 

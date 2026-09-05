@@ -7,6 +7,12 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 
+/** Stable identity for queue deduplication; Windows paths are case-insensitive. */
+export function jobPathIdentity(filePath: string, platform: NodeJS.Platform = process.platform): string {
+	const resolved = path.resolve(filePath);
+	return platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
 /**
  * Job priority levels.
  * High priority jobs are processed before normal and low priority jobs.
@@ -495,14 +501,14 @@ export class JobQueueManager {
 	 * @returns The in-flight QueuedJob for the path, or undefined
 	 */
 	getActiveJobForPath(filePath: string): QueuedJob | undefined {
-		const normalized = path.resolve(filePath);
+		const normalized = jobPathIdentity(filePath);
 		for (const job of this.jobs.values()) {
 			// A job cancelled while its executor is still running stays in-flight
 			// (its worker is busy and it is still in runningJobs) until the executor
 			// settles. Treat it as active so the watcher / auto-run does not enqueue a
 			// duplicate run against the same file's outputs while the original is
 			// still writing them.
-			if (job.filePath === normalized &&
+			if (jobPathIdentity(job.filePath) === normalized &&
 				(job.status === 'queued' || job.status === 'running' || this.runningJobs.has(job.jobId))) {
 				return job;
 			}

@@ -57,7 +57,28 @@ export function generateAsciiGraph(blocks: EntropyBlock[], width: number, height
 	}
 
 	lines.push('   +' + '-'.repeat(sampledBlocks.length));
-	lines.push('    0' + ' '.repeat(Math.floor(sampledBlocks.length / 2) - 3) + 'Offset' + ' '.repeat(Math.floor(sampledBlocks.length / 2) - 6) + 'EOF');
+	lines.push(buildAxisLabel(sampledBlocks.length));
 
 	return lines.join('\n');
+}
+
+function buildAxisLabel(width: number): string {
+	if (width <= 0) {
+		return '    0 (empty)';
+	}
+	if (width < 12) {
+		return '    0 EOF';
+	}
+
+	const label = new Array<string>(width).fill(' ');
+	label[0] = '0';
+	const middle = Math.floor((width - 'Offset'.length) / 2);
+	for (let i = 0; i < 'Offset'.length; i++) {
+		label[middle + i] = 'Offset'[i];
+	}
+	const eofStart = width - 'EOF'.length;
+	for (let i = 0; i < 'EOF'.length; i++) {
+		label[eofStart + i] = 'EOF'[i];
+	}
+	return '    ' + label.join('');
 }

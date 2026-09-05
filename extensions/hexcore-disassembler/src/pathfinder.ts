@@ -62,6 +62,10 @@ export interface CFGHints {
 	/** Debug: number of unresolved indirect jumps */
 	unresolvedIndirects: number;
 
+	/** Evidence axes used to derive confidence instead of a decode/non-decode toggle. */
+	confidenceAxes?: PathfinderConfidenceAxes;
+	confidenceReasons?: string[];
+
 	/**
 	 * D-scanrange: start of the [scanStart, scanEnd) window these hints were
 	 * computed over. After a mid-function hit is re-anchored to the real
@@ -76,6 +80,61 @@ export interface CFGHints {
 	 * caller's real lift buffer. Undefined on empty hints.
 	 */
 	scanEnd?: number;
+
+	/** First byte not owned by this function, independent from available bytes. */
+	ownershipEnd?: number;
+}
+
+export interface PathfinderConfidenceAxes {
+	boundary: number;
+	decode: number;
+	termination: number;
+	indirectResolution: number;
+}
+
+export interface PathfinderConfidenceInput {
+	hasBoundary: boolean;
+	instructionsDecoded: number;
+	terminalPaths: number;
+	decodeFailures: number;
+	unresolvedIndirects: number;
+	resolvedIndirects: number;
+	hitIterationLimit: boolean;
+}
+
+export function scorePathfinderConfidence(input: PathfinderConfidenceInput): {
+	confidence: number;
+	axes: PathfinderConfidenceAxes;
+	reasons: string[];
+} {
+	const axes: PathfinderConfidenceAxes = {
+		boundary: input.hasBoundary ? 85 : 25,
+		decode: input.instructionsDecoded === 0 ? 0 : input.decodeFailures === 0 ? 80 : 55,
+		termination: input.terminalPaths > 0 ? 85 : 35,
+		indirectResolution: input.unresolvedIndirects + input.resolvedIndirects === 0
+			? 100
+			: Math.round(100 * input.resolvedIndirects /
+				(input.unresolvedIndirects + input.resolvedIndirects)),
+	};
+	if (input.hitIterationLimit) {
+		axes.decode = Math.min(axes.decode, 40);
+	}
+	let confidence = Math.round(
+		axes.boundary * 0.25 + axes.decode * 0.35 +
+		axes.termination * 0.25 + axes.indirectResolution * 0.15,
+	);
+	const reasons: string[] = [];
+	if (!input.hasBoundary) { reasons.push('no-known-function-boundary'); }
+	if (input.instructionsDecoded === 0) { reasons.push('no-instructions-decoded'); }
+	if (input.terminalPaths === 0) { reasons.push('no-return-or-tail-terminal'); }
+	if (input.decodeFailures > 0) { reasons.push(`${input.decodeFailures}-decode-failure(s)`); }
+	if (input.unresolvedIndirects > 0) { reasons.push(`${input.unresolvedIndirects}-unresolved-indirect(s)`); }
+	if (input.hitIterationLimit) { reasons.push('recursive-descent-iteration-limit'); }
+	if (input.instructionsDecoded === 0) { confidence = Math.min(confidence, 20); }
+	if (input.terminalPaths === 0) { confidence = Math.min(confidence, 65); }
+	if (!input.hasBoundary) { confidence = Math.min(confidence, 75); }
+	if (input.hitIterationLimit) { confidence = Math.min(confidence, 45); }
+	return { confidence, axes, reasons };
 }
 
 export interface IndirectJumpResolution {
@@ -134,13 +193,20 @@ function extractPE64Context(engine: DisassemblerEngine): BinaryContext {
 
 	const baseAddress = fileInfo.baseAddress ?? 0;
 
-	// 1. Parse .pdata — EXACT function boundaries
-	const pdataEntries = engine.getPdataEntries();
-	for (const entry of pdataEntries) {
-		context.functionBoundaries.push({
-			start: entry.beginAddress + baseAddress,
-			end: entry.endAddress + baseAddress,
-		});
+	// 1. Prefer the engine's reconciled logical boundaries. Raw RUNTIME_FUNCTION
+	// fragments can be nested/chained and are not a safe binary-search domain.
+	const authoritativeRanges = engine.getAuthoritativePdataRanges();
+	if (authoritativeRanges.length > 0) {
+		for (const range of authoritativeRanges) {
+			context.functionBoundaries.push({ start: range.begin, end: range.end });
+		}
+	} else {
+		for (const entry of engine.getPdataEntries()) {
+			context.functionBoundaries.push({
+				start: entry.beginAddress + baseAddress,
+				end: entry.endAddress + baseAddress,
+			});
+		}
 	}
 
 	// 1b. Supplement with PDB function symbols when available.
@@ -198,6 +264,7 @@ function extractPE64Context(engine: DisassemblerEngine): BinaryContext {
 			context.entryPoints.push(exp.address);
 		}
 	}
+	context.functionBoundaries.sort((a, b) => a.start - b.start || a.end - b.end);
 
 	return context;
 }
@@ -220,7 +287,11 @@ function extractELFContext(engine: DisassemblerEngine): BinaryContext {
 	const elfData = engine.getELFAnalysis();
 	if (elfData) {
 		for (const sym of (elfData as any).symbols ?? []) {
-			if (sym.type === 'FUNC' && sym.size > 0) {
+			// ET_REL symbol values are relative to their own section. The address-based
+			// Pathfinder domain is the canonical .text section; other executable sections
+			// are lifted by symbolName with their section-specific byte window.
+			const canonicalRelocatableSymbol = !fileInfo.isRelocatable || sym.sectionName === '.text';
+			if (sym.type === 'FUNC' && sym.size > 0 && canonicalRelocatableSymbol) {
 				context.functionBoundaries.push({
 					start: sym.value,
 					end: sym.value + sym.size,
@@ -296,6 +367,9 @@ class RecursiveDescentScanner {
 	private rodataRanges: ByteRange[];
 	private instructionsDecoded = 0;
 	private unresolvedIndirects = 0;
+	private terminalPaths = 0;
+	private decodeFailures = 0;
+	private hitIterationLimit = false;
 
 	constructor(
 		private capstone: CapstoneWrapper,
@@ -330,6 +404,7 @@ class RecursiveDescentScanner {
 
 			await this.scanBlock(addr, functionEnd);
 		}
+		this.hitIterationLimit = this.worklist.length > 0;
 	}
 
 	private async scanBlock(startAddr: number, functionEnd?: number): Promise<void> {
@@ -351,9 +426,13 @@ class RecursiveDescentScanner {
 			let insn: DisassembledInstruction;
 			try {
 				const result = await this.capstone.disassemble(Buffer.from(remaining), pc, 1);
-				if (!result || result.length === 0) { break; }
+				if (!result || result.length === 0) {
+					this.decodeFailures++;
+					break;
+				}
 				insn = result[0];
 			} catch {
+				this.decodeFailures++;
 				break; // Decode failure
 			}
 
@@ -365,6 +444,7 @@ class RecursiveDescentScanner {
 			// ── Classify instruction ───────────────────────────────
 			if (insn.isRet) {
 				// End of path
+				this.terminalPaths++;
 				break;
 
 			} else if (insn.isJump && !insn.isConditional) {
@@ -372,6 +452,7 @@ class RecursiveDescentScanner {
 				if (insn.targetAddress !== undefined && insn.targetAddress !== 0) {
 					if (this.isTailCall(pc, insn.targetAddress, functionEnd)) {
 						this.tailCalls.add(pc);
+						this.terminalPaths++;
 					} else {
 						this.leaders.add(insn.targetAddress);
 						this.addToWorklist(insn.targetAddress);
@@ -451,6 +532,9 @@ class RecursiveDescentScanner {
 	getIndirectJumps(): IndirectJumpResolution[] { return this.resolvedJumpTables; }
 	getInstructionsDecoded(): number { return this.instructionsDecoded; }
 	getUnresolvedIndirects(): number { return this.unresolvedIndirects; }
+	getTerminalPaths(): number { return this.terminalPaths; }
+	getDecodeFailures(): number { return this.decodeFailures; }
+	didHitIterationLimit(): boolean { return this.hitIterationLimit; }
 
 	// Jump table storage (populated during scan)
 	private resolvedJumpTables: IndirectJumpResolution[] = [];
@@ -948,6 +1032,13 @@ export async function runPathfinder(
 	// spawns llvm-pdbutil once and caches the result on the engine for
 	// subsequent calls in the same analysis session.
 	const isPE = fileInfo.format === 'PE' || fileInfo.format === 'PE64';
+	if (isPE && typeof (engine as any).ensurePdataFunctionsReconciled === 'function') {
+		try {
+			await (engine as any).ensurePdataFunctionsReconciled();
+		} catch (e) {
+			console.warn('[pathfinder] .pdata reconciliation failed; using raw boundaries:', e);
+		}
+	}
 	if (isPE && (engine as any).pePdbBoundaries === undefined) {
 		(engine as any).pePdbBoundaries = [];  // sentinel — "we tried" (avoid re-spawning on failure)
 		try {
@@ -1064,6 +1155,7 @@ export async function runPathfinder(
 	const functionBytes: Buffer | undefined = bytes;
 	const scanStart = targetAddress;
 	const scanEnd = targetAddress + (bytes?.length ?? 0);
+	const ownershipEnd = Math.min(boundary?.end ?? scanEnd, scanEnd);
 
 	// D-scanrange: surface the window so the caller can size Remill's buffer to
 	// match pathfinder's [scanStart, scanEnd). The caller re-anchors a
@@ -1072,6 +1164,7 @@ export async function runPathfinder(
 	// below is < scanEnd, so none falls outside the caller's real buffer.
 	hints.scanStart = scanStart;
 	hints.scanEnd = scanEnd;
+	hints.ownershipEnd = ownershipEnd;
 
 	if (!functionBytes || functionBytes.length === 0) {
 		console.log(`[pathfinder v0.2.0] no bytes available, returning Phase 1 hints only`);
@@ -1106,120 +1199,44 @@ export async function runPathfinder(
 			console.warn(`[pathfinder v0.2.0] ARM64 linear decode FAILED:`, e);
 		}
 	} else {
-		// x86/x64: Prefer full-function linear sweep via Capstone batch decode.
-		// For x86 we CAN'T trust linear sweep starting from arbitrary addresses
-		// (data in code), but starting from the function entry (targetAddress)
-		// Capstone will decode all instructions until it hits something invalid.
-		// Every branch target within the scan range becomes a leader.
+		// x86/x64: reachable ownership first. Available caller bytes may extend
+		// beyond the function, but recursive descent is capped at ownershipEnd.
 		try {
-			// Batch decode the entire buffer in one Capstone call
-			const maxInsns = Math.max(4096, Math.ceil(functionBytes.length / 2));
-			let allInsns: DisassembledInstruction[] = [];
-			try {
-				allInsns = await capstone.disassemble(Buffer.from(functionBytes), scanStart, maxInsns);
-			} catch (e) {
-				console.warn(`[pathfinder v0.2.0] x86 batch decode threw:`, e);
-			}
-
-			const leadersSet = new Set<number>();
-			const tailCallsSet = new Set<number>();
-			leadersSet.add(scanStart);
-
-			for (let i = 0; i < allInsns.length; i++) {
-				const insn = allInsns[i];
-				const nextAddr = insn.address + insn.size;
-
-				if (insn.isRet) {
-					// Code after ret is a potential leader
-					if (nextAddr < scanEnd) {
-						leadersSet.add(nextAddr);
-					}
-				} else if (insn.isJump && !insn.isConditional) {
-					// Unconditional jump
-					if (insn.targetAddress !== undefined && insn.targetAddress !== 0) {
-						if (insn.targetAddress >= scanStart && insn.targetAddress < scanEnd) {
-							leadersSet.add(insn.targetAddress);
-						} else {
-							// Tail call to outside our function
-							tailCallsSet.add(insn.address);
-						}
-					}
-					// Code after unconditional jump is a potential leader
-					if (nextAddr < scanEnd) {
-						leadersSet.add(nextAddr);
-					}
-				} else if (insn.isJump && insn.isConditional) {
-					// Conditional jump — target + fallthrough are leaders
-					if (insn.targetAddress !== undefined && insn.targetAddress !== 0) {
-						if (insn.targetAddress >= scanStart && insn.targetAddress < scanEnd) {
-							leadersSet.add(insn.targetAddress);
-						}
-					}
-					if (nextAddr < scanEnd) {
-						leadersSet.add(nextAddr);
-					}
-				} else if (insn.isCall) {
-					// Instruction after call is a leader (return point)
-					if (nextAddr < scanEnd) {
-						leadersSet.add(nextAddr);
-					}
-					// Internal call target = leader
-					if (insn.targetAddress !== undefined && insn.targetAddress >= scanStart && insn.targetAddress < scanEnd) {
-						leadersSet.add(insn.targetAddress);
-					}
-				}
-			}
-
-			console.log(`[pathfinder v0.2.0] x86 linear decode: ${allInsns.length} insns, ${leadersSet.size} leaders, ${tailCallsSet.size} tail-calls`);
-
-			// Issue #51: recover PIC jump-table case targets and promote them
-			// to leaders so Remill materialises the case bodies (otherwise
-			// RecoverSwitchTables finds the table but caseBlocks stays empty).
-			try {
-				const jtHits = recoverJumpTableTargets(allInsns, (va, sz) => engine.getBytes(va, sz));
-				if (jtHits.length > 0) {
-					hints.indirectJumps = jtHits.map(h => ({
-						instructionAddress: h.jmpAddress,
-						targets: h.targets,
-						type: 'jump_table' as const,
-						tableAddress: h.tableAddress,
-						tableSize: h.targets.length,
-					}));
-					const jtLeaders = collectJumpTableLeaders(jtHits, {
-						lo: scanStart,
-						hi: scanEnd,
-					});
-					for (const t of jtLeaders) {
-						leadersSet.add(t);
-					}
-					console.log(
-						`[pathfinder v0.2.0] #51 jump-tables: ${jtHits.length} dispatch(es), ` +
-						`${jtLeaders.length} case-target leaders in-range ` +
-						`(sample: [${jtLeaders.slice(0, 8).map(t => '0x' + t.toString(16)).join(', ')}${jtLeaders.length > 8 ? '...' : ''}])`
-					);
-				}
-			} catch (jtErr) {
-				console.warn('[pathfinder v0.2.0] #51 jump-table recovery failed:', jtErr);
-			}
-
-			// Merge into hints
-			const mergedLeaders = new Set([...hints.leaders, ...leadersSet]);
-			hints.leaders = [...mergedLeaders].sort((a, b) => a - b);
-			hints.tailCalls = [...tailCallsSet].sort((a, b) => a - b);
-			hints.instructionsDecoded = allInsns.length;
-			hints.confidence = allInsns.length > 0 ? 90 : 50;
-			if (hints.indirectJumps.length > 0) {
-				// Jump-table recovery raises confidence slightly (structured CFG)
-				hints.confidence = Math.min(95, hints.confidence + 3);
-			}
-
-			// Log a few sample leaders for debugging
-			if (leadersSet.size > 0) {
-				const sampleLeaders = [...leadersSet].sort((a, b) => a - b).slice(0, 10);
-				console.log(`[pathfinder v0.2.0] x86 first leaders: [${sampleLeaders.map(l => '0x' + l.toString(16)).join(', ')}${leadersSet.size > 10 ? '...' : ''}]`);
-			}
+			const scanner = new RecursiveDescentScanner(capstone, functionBytes, scanStart, context);
+			await scanner.scan(scanStart, ownershipEnd);
+			await scanner.resolveJumpTables();
+			const gapLeaders = await scanGapsForCode(
+				capstone, functionBytes, scanStart, scanner.getVisited(), scanStart, ownershipEnd,
+			);
+			const leaders = new Set([...hints.leaders, ...scanner.getLeaders(), ...gapLeaders]);
+			hints.leaders = [...leaders].filter(address => address < ownershipEnd).sort((a, b) => a - b);
+			hints.functionStarts = [...new Set([
+				...hints.functionStarts,
+				...scanner.getCallTargets().filter(address => address >= scanStart && address < ownershipEnd),
+			])].sort((a, b) => a - b);
+			hints.tailCalls = scanner.getTailCalls();
+			hints.indirectJumps = scanner.getIndirectJumps();
+			hints.instructionsDecoded = scanner.getInstructionsDecoded();
+			hints.unresolvedIndirects = scanner.getUnresolvedIndirects();
+			const scored = scorePathfinderConfidence({
+				hasBoundary: boundary !== undefined,
+				instructionsDecoded: hints.instructionsDecoded,
+				terminalPaths: scanner.getTerminalPaths(),
+				decodeFailures: scanner.getDecodeFailures(),
+				unresolvedIndirects: hints.unresolvedIndirects,
+				resolvedIndirects: hints.indirectJumps.length,
+				hitIterationLimit: scanner.didHitIterationLimit(),
+			});
+			hints.confidence = scored.confidence;
+			hints.confidenceAxes = scored.axes;
+			hints.confidenceReasons = scored.reasons;
+			console.log(
+				`[pathfinder v0.2.0] x86 recursive descent: ${hints.instructionsDecoded} insns, ` +
+				`${hints.leaders.length} leaders, ownershipEnd=0x${ownershipEnd.toString(16)}, ` +
+				`confidence=${hints.confidence}%`,
+			);
 		} catch (e) {
-			console.warn(`[pathfinder v0.2.0] x86 linear decode FAILED:`, e);
+			console.warn(`[pathfinder v0.2.0] x86 recursive descent FAILED:`, e);
 		}
 	}
 
@@ -1231,7 +1248,7 @@ export async function runPathfinder(
  * Get .pdata function count for diagnostic display.
  */
 export function getPdataFunctionCount(engine: DisassemblerEngine): number {
-	return engine.getPdataEntries().length;
+	return engine.getAuthoritativePdataRanges().length || engine.getPdataEntries().length;
 }
 
 /**
@@ -1422,6 +1439,8 @@ export interface DeflattenResult {
 	popsNeutralized: number;
 	/** Whether the transform was applied (gated by minLinks). */
 	applied: boolean;
+	/** Recovered jump targets suitable for native additionalLeaders. */
+	targetAddresses: number[];
 }
 
 /** True if a 1-byte (0x58-0x5F) or REX.B 2-byte (0x41 0x58-0x5F) `pop` sits at off. */
@@ -1478,7 +1497,13 @@ function popDiscardLen(buf: Buffer, off: number): 0 | 1 | 2 {
 export function deflattenCallfuscation(
 	bytes: Buffer,
 	baseAddress: number,
-	opts?: { minLinks?: number; neutralizePops?: boolean },
+	opts?: {
+		minLinks?: number;
+		neutralizePops?: boolean;
+		instructionOffsets?: ReadonlySet<number>;
+		decodedCallCount?: number;
+		minRatio?: number;
+	},
 ): DeflattenResult {
 	const minLinks = opts?.minLinks ?? 16;
 	const neutralizePops = opts?.neutralizePops ?? true;
@@ -1489,6 +1514,7 @@ export function deflattenCallfuscation(
 	const popTargets = new Set<number>();
 	for (let o = 0; o + 5 <= len; o++) {
 		if (bytes[o] !== 0xe8) { continue; }           // call rel32
+		if (opts?.instructionOffsets && !opts.instructionOffsets.has(o)) { continue; }
 		const rel = bytes.readInt32LE(o + 1);
 		const targetOff = o + 5 + rel;                 // target relative to buffer start
 		if (popDiscardLen(bytes, targetOff) > 0) {
@@ -1497,8 +1523,11 @@ export function deflattenCallfuscation(
 		}
 	}
 
-	if (linkOffsets.length < minLinks) {
-		return { patched: bytes, linkCount: 0, popsNeutralized: 0, applied: false };
+	const decodedCallCount = opts?.decodedCallCount ?? linkOffsets.length;
+	const ratio = decodedCallCount > 0 ? linkOffsets.length / decodedCallCount : 0;
+	const minRatio = opts?.minRatio ?? (opts?.instructionOffsets ? 0.5 : 0);
+	if (linkOffsets.length < minLinks || ratio < minRatio) {
+		return { patched: bytes, linkCount: 0, popsNeutralized: 0, applied: false, targetAddresses: [] };
 	}
 
 	// Pass 2: rewrite on a copy.
@@ -1526,5 +1555,11 @@ export function deflattenCallfuscation(
 		`neutralized ${popsNeutralized} pop discards in ${len}-byte buffer @0x${baseAddress.toString(16)}`,
 	);
 
-	return { patched, linkCount: linkOffsets.length, popsNeutralized, applied: true };
+	return {
+		patched,
+		linkCount: linkOffsets.length,
+		popsNeutralized,
+		applied: true,
+		targetAddresses: [...popTargets].map(offset => baseAddress + offset).sort((a, b) => a - b),
+	};
 }

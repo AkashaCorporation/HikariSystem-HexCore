@@ -92,8 +92,12 @@ assert(typeof result === 'object', 'optimize() returns an object');
 assert(typeof result.success === 'boolean', 'result.success is boolean');
 assert(typeof result.ir === 'string', 'result.ir is string');
 assert(typeof result.error === 'string', 'result.error is string');
+assert(typeof result.diagnostics === 'string', 'result.diagnostics is string');
 assert(typeof result.candidatesFound === 'number', 'candidatesFound is number');
+assert(typeof result.candidatesAttempted === 'number', 'candidatesAttempted is number');
+assert(typeof result.candidatesInferred === 'number', 'candidatesInferred is number');
 assert(typeof result.candidatesReplaced === 'number', 'candidatesReplaced is number');
+assert(typeof result.solverTimeouts === 'number', 'solverTimeouts is number');
 assert(typeof result.optimizationTimeMs === 'number', 'optimizationTimeMs is number');
 
 if (result.success) {
@@ -106,6 +110,54 @@ if (result.success) {
     // This is still valid — the API contract is honored
     assert(true, 'error result has correct shape');
 }
+
+// Regression: maxCandidates limits solver attempts, not candidates extracted
+// from the first block. It is scoped per function as documented.
+const limitIR = `
+define i32 @test_limit_a(i32 %x) {
+entry:
+  %a = and i32 %x, -1
+  %b = sub i32 %a, %a
+  ret i32 %b
+}
+
+define i32 @test_limit_b(i32 %x) {
+entry:
+  %a = and i32 %x, -1
+  %b = sub i32 %a, %a
+  ret i32 %b
+}
+`;
+
+const limitedResult = opt2.optimize(limitIR, {
+    maxCandidates: 1,
+    timeoutMs: 5000,
+});
+assert(limitedResult.success, 'candidate-limit regression completes');
+assert(limitedResult.candidatesFound >= 4,
+    `candidate-limit regression found ${limitedResult.candidatesFound} candidates`);
+assert(limitedResult.candidatesAttempted === 2,
+    'maxCandidates=1 attempts one candidate per function');
+assert(limitedResult.candidatesInferred === 2,
+    'both bounded candidates produce an inferred RHS');
+assert(limitedResult.candidatesReplaced === 2,
+    'both non-constant RHS replacements are applied');
+assert(limitedResult.ir.includes('%b = sub i32 %x, %x'),
+    'Souper Codegen materializes a non-constant RHS');
+
+const fullResult = opt2.optimize(limitIR, {
+    maxCandidates: 8,
+    timeoutMs: 5000,
+});
+assert(fullResult.success, 'full regression completes');
+assert(fullResult.candidatesAttempted === fullResult.candidatesFound,
+    'a high limit submits every extracted candidate');
+assert(fullResult.candidatesReplaced === fullResult.candidatesInferred,
+    'replacement metric counts only applied LLVM changes');
+assert((fullResult.ir.match(/ret i32 0/g) || []).length === 2,
+    'constant simplifications reach both return sites');
+assert(!fullResult.ir.includes(' and i32 ') && !fullResult.ir.includes(' sub i32 '),
+    'dead instructions are removed after successful replacements');
 
 // ── Error handling — invalid IR ────────────────────────────────────────
 

@@ -93,7 +93,8 @@ function buildSummary(status: PipelineRunStatus): PipelineRunSummary {
 	};
 	let slowest: PipelineStepStatus | undefined;
 	for (const s of status.steps) {
-		if ((s.status === 'ok' || s.status === 'partial') && (!slowest || s.durationMs > slowest.durationMs)) {
+		if ((s.status === 'ok' || s.status === 'partial' || s.status === 'error') &&
+			(!slowest || s.durationMs > slowest.durationMs)) {
 			slowest = s;
 		}
 	}
@@ -164,7 +165,7 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 	});
 
 	suite('slowest-step detection', () => {
-		test('picks the slowest OK step (errors excluded from slowest)', () => {
+		test('picks a failed step when it consumed the most time', () => {
 			const status: PipelineRunStatus = {
 				jobFile: 'j.json', file: 't.exe', outDir: 'out',
 				status: 'partial', startedAt: STARTED, finishedAt: FINISHED,
@@ -175,18 +176,16 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 				]
 			};
 			const s = buildSummary(status);
-			// Slowest-of-ok is hexcore.C (500) — errors are deliberately excluded
-			// so a 9s timeout doesn't poison the "slowest" metric.
-			assert.strictEqual(s.slowestStepCmd, 'hexcore.C');
-			assert.strictEqual(s.slowestStepMs, 500);
+			assert.strictEqual(s.slowestStepCmd, 'hexcore.B');
+			assert.strictEqual(s.slowestStepMs, 9999);
 		});
 
-		test('no ok steps → slowest fields remain undefined', () => {
+		test('skipped steps do not become the slowest executed step', () => {
 			const status: PipelineRunStatus = {
 				jobFile: 'j.json', file: 't.exe', outDir: 'out',
 				status: 'error', startedAt: STARTED, finishedAt: FINISHED,
 				steps: [
-					mkStep({ status: 'error', durationMs: 100, error: 'fail' })
+					mkStep({ status: 'skipped', durationMs: 100 })
 				]
 			};
 			const s = buildSummary(status);
@@ -274,8 +273,8 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 						assert.strictEqual(s.totalSteps, rows.length);
 						assert.ok(s.okCount + s.partialCount + s.errorCount + s.skippedCount <= s.totalSteps,
 							`counts overflow totalSteps: ${JSON.stringify(s)}`);
-						// If no ok step, slowest fields must be undefined.
-						if (s.okCount + s.partialCount === 0) {
+						// Only terminal, executed steps participate in the slowest metric.
+						if (s.okCount + s.partialCount + s.errorCount === 0) {
 							assert.strictEqual(s.slowestStepMs, undefined);
 							assert.strictEqual(s.slowestStepCmd, undefined);
 						} else {
@@ -290,7 +289,7 @@ suite('PipelineRunSummary (v3.8.0)', () => {
 			);
 		});
 
-		test('slowestStepMs is the max durationMs across ok steps', () => {
+		test('slowestStepMs is the max durationMs across executed steps', () => {
 			fc.assert(
 				fc.property(
 					fc.array(fc.integer({ min: 0, max: 60000 }), { minLength: 1, maxLength: 15 }),

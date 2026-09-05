@@ -111,6 +111,9 @@ const value = uc.regRead(X86_REG.RAX);
 // Write register
 uc.regWrite(X86_REG.RAX, 0x1234n);
 
+// Descriptor-table registers use Unicorn's uc_x86_mmr structure.
+uc.regWriteMmr(X86_REG.GDTR, 0, 0x7000n, 0x0fff, 0);
+
 // Batch operations
 const values = uc.regReadBatch([X86_REG.RAX, X86_REG.RBX]);
 uc.regWriteBatch([X86_REG.RAX, X86_REG.RBX], [0x1111n, 0x2222n]);

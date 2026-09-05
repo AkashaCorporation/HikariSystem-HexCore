@@ -224,6 +224,55 @@ suite('Property 2: Preservation — memória e registradores PE32 (x86 + x64)', 
 		);
 	});
 
+	test('PE32 GDT keeps stack writes valid and resolves FS:[0] through the TEB', () => {
+		assert.strictEqual(typeof uc.Unicorn.prototype.regWriteMmr, 'function');
+		const engine = new uc.Unicorn(uc.ARCH.X86, uc.MODE.MODE_32);
+		const codeAddress = 0x1000n;
+		const tebAddress = 0x3000n;
+		const gdtAddress = 0x5000n;
+		const stackAddress = 0x7000n;
+
+		const descriptor = (base: number, limit: number, access: number, flags: number): Buffer => {
+			const result = Buffer.alloc(8);
+			result.writeUInt16LE(limit & 0xFFFF, 0);
+			result.writeUInt16LE(base & 0xFFFF, 2);
+			result[4] = (base >>> 16) & 0xFF;
+			result[5] = access;
+			result[6] = ((limit >>> 16) & 0x0F) | flags;
+			result[7] = (base >>> 24) & 0xFF;
+			return result;
+		};
+
+		try {
+			for (const address of [codeAddress, tebAddress, gdtAddress, stackAddress]) {
+				engine.memMap(address, 0x1000, uc.PROT.ALL);
+			}
+			engine.memWrite(codeAddress, Buffer.from([0x50, 0x64, 0xA1, 0, 0, 0, 0]));
+			const teb = Buffer.alloc(4);
+			teb.writeUInt32LE(0x78563412, 0);
+			engine.memWrite(tebAddress, teb);
+
+			const gdt = Buffer.alloc(32);
+			descriptor(0, 0xFFFFF, 0x9A, 0xC0).copy(gdt, 8);
+			descriptor(0, 0xFFFFF, 0x92, 0xC0).copy(gdt, 16);
+			descriptor(Number(tebAddress), 0x0FFF, 0x92, 0x40).copy(gdt, 24);
+			engine.memWrite(gdtAddress, gdt);
+			engine.regWriteMmr(uc.X86_REG.GDTR, 0, gdtAddress, 31, 0);
+			engine.regWrite(uc.X86_REG.CS, 0x08);
+			for (const register of [uc.X86_REG.DS, uc.X86_REG.ES, uc.X86_REG.SS, uc.X86_REG.GS]) {
+				engine.regWrite(register, 0x10);
+			}
+			engine.regWrite(uc.X86_REG.FS, 0x18);
+			engine.regWrite(uc.X86_REG.ESP, stackAddress + 0x800n);
+			engine.emuStart(codeAddress, codeAddress + 7n);
+
+			assert.strictEqual(engine.regRead(uc.X86_REG.EAX), 0x78563412);
+			assert.strictEqual(engine.regRead(uc.X86_REG.ESP), Number(stackAddress + 0x7FCn));
+		} finally {
+			engine.close();
+		}
+	});
+
 	// -----------------------------------------------------------------------
 	// Property 3: memRegions consistency
 	// -----------------------------------------------------------------------

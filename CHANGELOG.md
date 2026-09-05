@@ -7,6 +7,280 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.4] - Unreleased
 
+### Release candidate preparation (3.8.4-rc.1)
+
+- Integrate Helix 0.9.4-rc.1 from its canonical source line after native, Rust,
+  current-IR A/B and Extension Host acceptance. The LLVM/MLIR upgrade remains a
+  separate later release.
+- Align product identity and installer dispatch with the RC tag; reject mismatched
+  tags and unsupported four-part package versions before the full build.
+- Validate loadable-runtime locations instead of counting any native-looking file
+  as an installed engine. Require bundled DLLs and Remill semantics where needed.
+- Add isolated native loading and Revenant version probes before the full build
+  and against the packaged application before ZIP creation. These are load gates,
+  not substitutes for functional acceptance or a clean-machine installation test.
+- Make lazy function bodies visible and distinguish the Markdown index preview
+  from the full discovered index available in JSON (Disassembler 1.4.65).
+- Refcount evidence contracts, cross-job source/ancestry snapshots, explicit queue
+  self-observation and report signal/IOC interpretation are independently accepted
+  through Disassembler 1.4.64 and Composer 1.0.14.
+
+The candidate is not published by these changes. Native repository synchronization,
+versioned assets, integration acceptance and portable ZIP testing remain release gates.
+
+### Semantic closure and installed acceptance (Disassembler 1.4.60; HQL 0.3.1)
+
+- Installed HQL scans now consume the active target-bound SemanticStore and
+  preserve typed fact counts/hashes, semantic matches, proof status, and
+  provenance. Offline reads validate `target_identity` and expose failures
+  instead of silently returning zero facts.
+- Correct the HQL R33 reader to use `analysis_target_identity` and
+  `owner_function_identity`; real typed xrefs now participate in semantic
+  matching rather than disappearing from the fact set.
+- Equivalent reference edges can be re-observed in later generations without
+  conflicting duplicate dependencies. One active dependency per `(kind,key)`
+  is retained while prior records remain in immutable version history.
+- Persist per-function decode completeness. Partial bodies remain retryable
+  display-only evidence, do not advance the accepted universe, and invalidate
+  unsafe prior edges/summaries without deleting history.
+- Partial closure restore now quarantines only failed functions instead of
+  resetting every successfully restored body.
+- Installed R41 acceptance restored 120/122 replayable bodies, produced 6,548
+  deterministic typed edges, recomputed 122/122 summaries, and reproduced
+  byte-identical HQL artifacts with zero semantic read errors.
+
+### Semantic parity foundation (Disassembler 1.4.59; HQL 0.3.0; Debugger 2.1.22; Report Composer 1.0.13)
+
+- Add HXDB v2 canonical types, full prototypes/ABI locations, bindings,
+  conflicts, generations, typed references, and bounded fixed-point summaries.
+- Add transactional Type Manager and Semantic Explorer views for prototypes,
+  records, xrefs, evidence providers, stale facts, conflicts, and generation
+  diffs.
+- Add validated PDB, DWARF, BTF, and signature providers while keeping their
+  evidence identities separate.
+- Add recursive HQL rules, Atlas fixtures, Function Atlas/BSim evaluation, and
+  pinned capa/FLOSS evidence lanes.
+- Runtime observations are binary/input/trace-bound corroboration and remain
+  separate from static proof in Report Composer.
+- Acceptance gates cover 16 source-known PE variants, equivalent DWARF/BTF
+  layouts, deterministic zlib/libarchive runs, and a 202/202 pinned API
+  callsite reference set without claiming commercial-tool parity.
+
+### Operational recovery provenance (Disassembler 1.4.57)
+
+- Stale-running archives now embed the recovered job revision SHA-256 and
+  recovery metadata, making same-revision evidence self-contained.
+
+### Operational isolation - killable native analysis (Disassembler 1.4.56; Report Composer 1.0.11)
+
+- Whole-binary `analyzeAll` now runs in a child process with an external
+  watchdog, explicit cancellation, phase/heartbeat evidence, and terminal
+  crash/timeout classification. A native synchronous hang no longer blocks the
+  Extension Host timer or UI.
+- Successful children return a target-bound, digest-verified gzip snapshot
+  that hydrates the parent engine for unchanged audit/disassembly workflows.
+- Startup recovery archives stale `running` states before retry, and reports
+  distinguish persisted audit bindings from Helix ownership diagnostics.
+
+### Analysis contract - legacy universe migration (Disassembler 1.4.54)
+
+- Nonzero sessions created before replayable closure manifests advance to a
+  new baseline generation and return an explicit partial/reset state instead
+  of reusing an unverifiable universe identifier.
+
+### Analysis contract - serialized closure restoration (Disassembler 1.4.53)
+
+- `analyzeAll` JSON now preserves the persisted-closure replay status, counts,
+  failures, and universe hash consumed by downstream audits.
+
+### Analysis contract - cross-process semantic identity (Disassembler 1.4.52; Report Composer 1.0.10)
+
+- Canonical audit hashes now exclude only timestamp/self-hash and process-local
+  engine/restoration diagnostics, while retaining the persisted session
+  generation and universe hash. Equivalent restored universes hash equally
+  across fresh processes.
+
+### Analysis contract - cross-job closure and CFG soundness (Disassembler 1.4.51; Report Composer 1.0.9)
+
+- Persisted session generations now bind to a replayable set of materialized
+  function boundaries/body hashes and a deterministic universe hash. Fresh
+  jobs restore the closure before downstream analysis.
+- Deep identity promotion requires producer dominance and scans mutation/
+  escape barriers across the complete producer-to-consumer CFG subgraph,
+  including backward edges.
+- Empty transient decodes remain retryable, and audit artifacts publish an
+  exact canonical normalization algorithm and SHA-256.
+
+### Analysis contract - investigation-state closure (Disassembler 1.4.50; Report Composer 1.0.8)
+
+- Exact investigation of a lazy function now classifies and commits its body
+  back into the active engine indexes, advances persisted analysis generation,
+  and becomes an explicit provenance input to later audits.
+- Bounded disassembly exposes whether it changed the audit universe and cannot
+  return `ok` with zero semantic instructions. Reports distinguish committed
+  refinements from display-only artifacts.
+- Deep value proofs now reject register-alias writes, width-crossing writes,
+  pointer spill/reload escapes, complex/implicit writes, and producer/consumer
+  pairs that have no feasible intra-function CFG path.
+- Error/status message tables no longer generate filesystem roles from their
+  text, and reparse/junction safety remains explicitly `not-assessed` until
+  component traversal is proven.
+
+### Analysis contract - path value preservation (Disassembler 1.4.49; Report Composer 1.0.7)
+
+- Win64 filesystem dataflow now distinguishes matching path-buffer storage
+  from preservation of the bytes stored there. An overlapping direct write or
+  escape to a call without a read-only pointer summary blocks `same-path`
+  proof and keeps `Path -> open` unproven.
+- Downgraded identities remain visible as structured signals with producer,
+  barrier, consumer, canonical storage, and blocker evidence. Report Composer
+  renders them separately from accepted proofs.
+- The Backblaze R13 regression is covered directly: both path buffers passed
+  through `sub_1400A16E0` become signals, while the accepted handle and SID
+  identities remain in the proof lane.
+
+### Wave 2.2 - evidence-backed function ownership (Capstone 1.3.6; Disassembler 1.4.44)
+
+- Function boundaries now use one half-open `[start, endExclusive)` contract across the native Capstone detector and the TypeScript wrapper. The legacy inclusive `end` field remains only as a compatibility bridge, and old native modules are normalized by `size` before containment checks.
+- Capstone structured detail is preserved on an opt-in analysis path without inflating every instruction retained by the IDE. The Disassembler uses operands and register identities, rather than assembly-text parsing, to recover RIP-relative function pointers.
+- MSVC x64 leaf callbacks materialized by `LEA` and stored into callback objects are promoted only when the target is executable, not interior to an existing function, has a bounded memory consumer, decodes contiguously, and reaches a real return terminal. Each function seed records both the materialization and consumer addresses.
+- `analyzeAll` exports each function's discovery evidence, including the address-taking instruction, callback consumer, evidence kind, and confidence, so an agent can audit why a non-prologue leaf entered the index.
+- Bounded disassembly distinguishes physical range bytes from semantic body instructions. Every row carries `context`, `semantic-body`, `alignment-padding`, or `unclassified`; aggregate counts and `semanticEnd` explain why the `race_worker` range contains eight decoded instructions but only seven semantic instructions.
+- The authorized `race_worker` fixture is a release gate: `analyzeAll` discovers `0x140001200`, assigns `[0x140001200,0x140001210)`, retains seven semantic instructions, and never absorbs the adjacent `decode_mode` function. The original PE and source hashes are frozen alongside exact worker and callback bytes.
+- Pathfinder x86 now uses its recursive-descent implementation within a separate semantic `ownershipEnd`, while `scanEnd` continues to describe all bytes supplied to Remill. Confidence is derived from boundary, decode, termination, and indirect-resolution axes; a merely decodable window can no longer receive 90%.
+- Validation: Capstone 5.0.9 native suite passes including the half-open contract; focused Disassembler ownership/Pathfinder suites pass 132/132 after the cache test opts into cache restoration explicitly. The original authorized PE is deterministic at K=10 with one result hash, 85 functions, the exact worker range, four internal CFG leaders, and evidence-gated confidence 86%.
+
+### Wave 2.1 - address, execution, and live-memory truth boundaries (Disassembler 1.4.42; Debugger 2.1.20; Souper 0.2.2; Unicorn 1.3.2; Strings 1.3.3; PE Analyzer 1.1.2; Remill 0.5.4; Elixir 1.0.4; Report Composer 1.0.2)
+
+- Raw/PE position-independent `call $+5` entry idioms are preserved, while relocatable ELF ftrace placeholders and exact kernel preambles remain evidence-backed transformations. Lift diagnostics expose requested/effective addresses and every applied transformation instead of silently changing the byte range.
+- String intelligence separates referenced/terminated literals from lookup-table sequences. Standard CRC32 table fragments are low-confidence evidence rather than plausible plaintext, and callers may apply an explicit confidence gate. Advanced extraction also supports bounded result budgets and opt-in hex-to-ASCII-to-Base64-to-JSON evidence chains.
+- Report composition is compact by default: the final Markdown indexes corroborated findings and source attachments without duplicating full result bodies. Full inline composition remains available explicitly.
+- Remill lift coverage counts the union of decoded byte intervals, clipped to the requested buffer, so overlapping control-flow paths cannot inflate `bytesConsumed`. Translation, lift coverage, and semantic-type confidence are reported as independent axes.
+
+- Authorized managed-loader workflows no longer require an external materialization helper. `hexcore.pe.extractSection` emits a named PE section as a bounded binary artifact; `hexcore.crypto.rc4` accepts UTF-8, hex, Base64, or byte-array keys plus an optional bounded keystream drop. Both commands are stateless, pipeline-safe, provenance-bound, and chain through `$step[N].output`. Binary step capture records size/path without decoding arbitrary payload bytes as UTF-8.
+- UTF-16LE string extraction scans both byte parities, preserves unfinished wide runs across streaming chunks, and flushes an unterminated final run. Odd-offset paths and final unterminated strings no longer disappear with `unicodeCount: 0`.
+- VM compare-ladder detection requires a stable opcode operand, distinct immediate values, and multiple handler destinations. Unrelated anti-sandbox guards that converge on one failure block no longer become fake bytecode interpreters; the existing synthetic and real stack-VM fixtures remain positive.
+- Packer detection distinguishes "no known family" from "no packing evidence". Large high-entropy writable/executable sections produce `family: unknown` with encrypted-payload guidance instead of `packed: false`.
+- Headerless raw binaries accept explicit `arch` and `baseAddress` options in `hexcore.disasm.analyzeAll`, while PE/ELF headers remain authoritative. Disassembler disposal now closes the session database, preventing locked `.hexcore_session.db` handles in short-lived raw-analysis tests.
+- Debugger state exports merge Unicorn's authoritative memory map with allocator names. Raw image and stack mappings remain visible alongside the named heap instead of being replaced by the allocator-only list.
+
+- `hexcore.constraints.solveHeadless` exposes Z3 as a bounded, model-producing analysis command. It accepts explicit Int/BitVec variables, finite domains, structured arithmetic/bitwise/comparison constraints or controlled SMT-LIB assertions over declared variables, returns `sat`/`unsat`/`unknown`, enumerates bounded models, kills the solver at the deadline, and records Z3 version plus executable SHA-256. The Souper runtime now bundles `z3.exe` and resolves it at runtime instead of embedding the build machine's absolute path.
+- `disassembleAtHeadless` no longer reports `truncated:false` merely because a request equals the 10,000-instruction page limit. Results distinguish count limit, function end, decode failure, and binary boundary; expose the authoritative function boundary, crossing state, continuation address, requested-window coverage, and decoded-byte coverage. Lift results likewise separate requested-window, known-function byte, and Remill semantic coverage rather than treating a full requested window as whole-function completeness.
+- Debugger return sentinels take precedence over the expected unmapped-fetch artifact they deliberately produce. `continueHeadless` also accepts bounded 64-bit `terminalAddresses` plus `terminalKind`, clears the consumed error from the live session, preserves it as `expectedTerminalFault` evidence, and reports PE32+ x64 execution as `worker-pe64` instead of the misleading legacy `worker-pe32` label.
+- Elixir/Azoth 1.0.4 no longer labels every clean `uc_emu_start` return as an instruction-limit hit. Stop classification checks the observed instruction counter, and the NAPI bridge defends against legacy cores that report `InsnLimit` below the requested cap. The FlareAuthenticator acceptance case now reports `exit` at RIP `0` after 4,222 instructions instead of the contradictory `insn_limit(2000000)`.
+- Windows CRT runtime models now include page-aware, bounded `strlen` in both Debugger and Elixir/Azoth. Valid emulated strings no longer inherit the generic zero return, while null, unreadable, and unterminated inputs remain bounded rather than expanding host memory or runtime without limit.
+
+- PE virtual-address conversion now distinguishes header bytes, raw-backed section bytes, virtual zero-fill, and unmapped addresses. Section tails present in `SizeOfRawData` remain reachable even when they extend beyond `VirtualSize`; out-of-image RVAs no longer fall through as plausible raw offsets. Headless disassembly returns requested/effective address mapping metadata.
+- PE32 worker execution now installs requested breakpoints as batch terminal addresses, matching the existing ELF64 worker behavior. A breakpoint reached inside a worker batch pauses before execution instead of being crossed silently.
+- `setRegisterHeadless` program-counter writes now synchronize the logical session address after successful x64/x86/ARM64 worker writes, direct Unicorn writes, and deferred mutations. `continueHeadless` therefore starts at the requested `rip`/`eip`/`pc` instead of silently reusing the loader entry. The authorized Vanguard gate now reaches a synthetic-return breakpoint from the Egg export after 10,968 instructions; DriverEntry and the IOCTL candidate advance 26,978/47,678 instructions before honest null reads caused by intentionally absent kernel objects, rather than reproducing the legacy job's identical entry-point fault for all three targets.
+- Debugger headless results classify terminal outcomes explicitly. A null program counter without a recognized exit is `failed`, an exhausted instruction budget is `partial`, and breakpoint/return-sentinel stops are typed `ok`. Session activity is reported separately from the wrapper's active-execution state.
+- The ELF64 loader applies `R_X86_64_RELATIVE` entries before import resolution, traverses complete relocation sections instead of stopping at 4,096 entries, and reports applied, deferred, unsupported, and failed relocation coverage in headless metadata.
+- Elixir/Azoth now declares its current wrapper boundary honestly as PE32+ x86_64. ELF, PE32, ARM, and raw targets are rejected before worker startup and become predictable pipeline skips with guidance to use HexCore Debugger.
+- Validation uses synthetic PE mapping, PE32 batch-breakpoint, headless-outcome, ELF64 RELA, loader-hardening, and Elixir capability fixtures. The private authorized battle-test corpus and its reports remain outside the repository.
+- A new execution attempt clears stale fault metadata before terminal classification, so a repaired PE32 session that reaches a requested breakpoint is no longer mislabeled with an earlier unmapped-read fault. The PE32 worker boundary also normalizes x86 numeric PCs to `bigint`; number-vs-bigint equality could previously hide a reached breakpoint from classification and snapshot capture. `stepHeadless` honors its requested count instead of treating the synchronous post-step `isRunning=false` state as termination.
+- `breakpointConfigs` is accepted as a first-class `emulateFullHeadless` argument. Stops at configured breakpoints capture worker-synchronized registers, stack bytes, optional ranges, and breakpoint-triggered dumps exactly once; output includes an explicit requested/captured/supported snapshot status.
+- `hexcore.debug.disassembleMemoryHeadless` and `hexcore.debug.decompileMemoryHeadless` analyze code directly from the active Unicorn memory map. The Debugger passes bytes in memory to the Disassembler/Remill and Helix, preserves the original target identity, and records the inspected runtime address, byte count, backend, architecture, and SHA-256 without creating a derived executable.
+- Helix's packaging honesty gate now consumes whole-binary callfuscation evidence in both lift-and-decompile and retained-IR workflows. Dominant call-as-jump gadget populations cap otherwise clean-looking High/100% output and add a visible semantic-risk diagnostic.
+- Headless STDIN rejects missing or misspelled input instead of silently setting zero bytes. Elixir smoke output separates `wrapperVersion` from `nativeVersion`; the legacy `version` field remains the native ABI version because wrapper and engine release clocks are independent.
+- Pipeline jobs propagate an earlier ELF/PE PRNG detection into Debugger emulation (`glibc`/`msvcrt` plus the recovered uint32 seed) unless the job supplies an explicit mode. Debugger API traces group consecutive duplicates, support deterministic sampling, cap retained rows, and retain exact total/aggregated/dropped counters.
+- `disassembleAtHeadless` preserves the requested instruction count while exposing its 10,000-instruction effective page, truncation reason, and `nextAddress` cursor.
+- Callfuscation recovery is instruction-boundary gated end to end. Pathfinder promotes genuine decoded call targets without exposing return-address-discard gadgets as functions; Remill 0.5.2 accepts a logical entry inside an executable-section window and emits only CFG-reachable instructions. On the private authorized sample, all six known VM handlers plus `main` enter the function index, 4,096 call-as-jump links recover into one non-truncated `main` lift, and unreachable blocks fall from 4,140 to 978. Opaque-arithmetic simplification remains a separate semantic-quality task.
+- ASCII extraction treats CR/LF as string boundaries, preventing separately referenced adjacent messages from being merged into one misleading result while retaining cross-chunk runs and exact offsets.
+- Headless context recovery emits only a contiguous predecessor chain ending at the effective target. Complete, partial, and unavailable states carry explicit counts and reasons instead of concatenating a decoded prefix across an undecodable gap.
+- Pipeline duration summaries include failed work when selecting the slowest executed step; skipped and transient running records remain excluded.
+- Continue, full-run, and state artifacts use one bounded/grouped API-trace representation with exact counters. Large emulation artifacts also expose compact instruction, address, trace-retention, memory-region, and stdout-size summaries.
+- Direct IR now has an explicit target-ownership boundary. Active Disassembler renames, import symbols, debug types, function starts, and callfuscation confidence evidence are applied only when the IR producer target matches the loaded binary; each result records `matched`, `mismatched`, or `unbound` ownership. Reused Helix engines also clear target-derived rename, data-section, function-start, and debug-type state before every call.
+- Live-memory decompilation runs Helix in a fresh OS process with a deadline five seconds inside the pipeline budget and exposes a real cancellation command. Process isolation is required because terminating a `worker_thread` while LLVM/MLIR is executing inside the native `.node` can restart the entire Extension Host. A timed-out native decompile now terminates only its child process, reaches a terminal pipeline state, and releases queue/session ownership.
+- Pipeline watcher deduplication canonicalizes Windows paths case-insensitively, so drive-letter or component casing cannot launch concurrent attempts for the same job file. Startup auto-run also compares the job mtime with its existing pipeline status: reloading the Extension Host preserves an unchanged prior attempt instead of replaying and overwriting it; editing the job or running it manually remains explicit.
+- Remill now records semantic coverage before LLVM optimization, including decoded, concretely lifted, unsupported, and decode-failure counts plus an XED-backed opcode histogram. Disassembler maps any incomplete lift to `partial`, writes the metrics into the retained `.ll` header, preserves the detailed warning in pipeline/provenance results, and passes it into Helix confidence gating. An authorized AVX-512 validator measures 11.54% coverage and names the missing `KMOVB`, `VPBROADCASTQ`, `VPCOMPRESSQ`, and related semantics instead of returning a false `ok`.
+- Debugger distinguishes Unicorn's `UC_ERR_INSN_INVALID` from memory and engine faults. Headless artifacts retain the live instruction bytes/disassembly, identify AVX-512 requirements from mask/ZMM operands, and state that the current backend has no registered fallback rather than implying that emulation completed.
+- Retained-session function boundaries remain lazy to protect large targets, but a boundary rediscovered by the prologue scanner is now materialized instead of short-circuiting on address presence. `analyzeAll` exposes materialized/lazy/decode-empty body states plus aggregate instruction coverage. Full ASM export streams and decodes lazy bodies one at a time, releases temporary bodies to keep memory bounded, and returns semantic `partial` with typed empty-function evidence rather than a green file containing hollow labels.
+- Retained-session acceptance on the authorized private ELF target is stable across two independent IDE watcher runs: identical 36-start tables, 17 materialized + 19 explicitly lazy + 0 decode-empty bodies before export, and byte-identical 343,730-byte ASM exports containing 3,893 decoded instructions across 36/36 functions. The previous 7,625-byte hollow export does not reproduce. Focused session/export and pipeline contract suites pass 40/40; the separate IDA-differential function-boundary backlog remains open.
+- The private AVX-512 `main` honesty gate is no longer High/95% after losing its observable branch condition. It is now pipeline `partial`, Low/50%, with 30.9% semantic coverage and 47 unsupported instructions preserved in C diagnostics and provenance. This closes the false-success classification; recovering the missing vector predicate and both branch destinations remains a semantic-engine gap, not a completed decompile.
+- Explicit Helix instruction counts are now hard analysis scopes. Known function sizes and callfuscation section recovery cannot silently expand a bounded request; scoped fragments carry a `partial` result, the requested count, and a whole-function confidence cap of 50%.
+- Auto-backtrack is section-safe. A request at an executable section boundary cannot retreat into the preceding section through either pdata or heuristic candidates.
+- PE32 startup now installs a native GDT with valid code, data/stack, and TEB-backed `FS` descriptors in both the loader and worker. The x86 TEB starts with the SEH end-of-chain sentinel, so CRT startup can execute `FS:[0]` accesses without a null-page bypass.
+- VCRuntime/MSVCRT/UCRT memory hooks implement bounded `memset`, `memcpy`, `memmove`, and `memcmp` semantics. Pointer-returning functions preserve the destination address on x86 and x64 instead of returning zero.
+- `hexcore-unicorn` 1.3.2 adds `regWriteMmr()` for GDTR/IDTR/LDTR/TR. These registers now cross N-API as `uc_x86_mmr`, replacing the invalid scalar/ten-byte approximation.
+
+### Analysis Contract - stable object IDs (Common 1.2.0)
+
+- New `analysisIds` module in `hexcore-common` implements work item C1 of the 3.8.4 Analysis Contract plan (`docs/3.8.4.md`): deterministic, canonical IDs for functions, basic blocks, instructions, data objects, strings, types, variables, xrefs, findings, and artifacts. IDs derive exclusively from the target content identity (`sha256` digest) plus kind-specific address/name data — never from run counters, timestamps, randomness, or source paths — so analyzing identical bytes twice yields identical IDs.
+- Serialized forms follow the existing `target:sha256:`/`artifact:sha256:` convention (e.g. `fn:sha256:<digest>:va:0x140001000`, `blk:...:<fnHex>:<blkHex>`, `var:...:global:<slug>`, `finding:...:<category>:token:<slug>`). Addresses reuse contract normalization and reject unsafe JavaScript numbers; free-form names, categories, and xref kinds are normalized to bounded lowercase slugs.
+- `parseAnalysisObjectId`/`isAnalysisObjectId`/`analysisObjectIdTargetId` let integration boundaries validate IDs and recover the owning target for wrong-target rejection (work item C5). Artifact IDs remain content-bound and report no owning target.
+- This slice is additive: no consumer is migrated yet, and volatile identifiers (per-run basic-block counters, address-string function keys, random finding IDs) are replaced in the wave-1 disassembler pass. Validation: `hexcore-common` compiles; focused suites pass 58/58 (outputPathGuard 6/6, analysisContract 18/18, analysisIds 34/34).
+
+### Analysis Contract - command envelopes and boundary rejection (Common 1.3.0; Disassembler 1.4.31)
+
+- New `analysisErrors` module in `hexcore-common` (work item C4): the typed error-code registry (`invalid-input`, `not-found`, `wrong-target`, `stale-generation`, `engine-unavailable`, `engine-fault`, `parse-failed`, `output-unsafe`, `budget-exceeded`, `cancelled`, `timeout`, `partial-result`) with per-code default retryability, plus the `analysisError`/`okResult`/`partialResult`/`failedResult`/`skippedResult` constructors. The registry is contract surface: adding or renaming a code is a contract change.
+- The pipeline headless commands now return contract-decorated responses (work item C4): `runJob`, `validateJob`, `listCapabilities`, `queueJob`, and `jobStatus` carry `contractVersion`, canonical `status`, typed `diagnostics`, and `artifacts` alongside every legacy field. The runner's `error` run status maps to contract `failed`; step outcomes become typed diagnostics (timeout, engine-fault, partial-result, gate classifications) with provenance paths in details. `cancelJob` keeps its boolean return for this wave — migrating it is a consumer-visible break and is deferred deliberately.
+- The pipeline runner adopts the persisted session identity into run provenance (work items C2/C5): when the target's session database exists, sidecars now record the real persisted session ID, the persisted analysis generation, and the session engine manifest instead of a synthetic per-run session with an empty engine list. Adoption only happens when the persisted target digest matches the run's binary content — a mismatch is treated as a wrong-target signal and the persisted state is ignored (no provenance contamination).
+- Cross-target finding references are rejected with a typed `wrong-target` error (work item C5): contract finding IDs embed their owning target, and the Analysis Center finding actions and investigation-job creation now verify the referenced target against the active one. Legacy 24-hex IDs carry no target and remain guarded by the per-binary session DB lookup.
+- Validation: `hexcore-common` compiles and passes 116/116 (outputPathGuard 6/6, analysisContract 18/18, analysisIds 34/34, analysisErrors 58/58). Disassembler compiles; focused suites pass 32/32 — `commandResult` 6/6 (status mapping, typed step diagnostics, validation-report codes), `sessionStoreGenerations` 6/6 (incl. read-only peek and wrong-target drift detection), `sessionStoreContract` 1/1, `investigationModel` 7/7 (incl. wrong-target rejection), `pipelineReliability` 12/12 (100-pair concurrent stress with the adoption path active).
+
+### Analysis Contract - generations, engine manifest, and stable-ID adoption (Disassembler 1.4.30)
+
+- `SessionStore` now implements explicit reanalysis generations (work item C2): `startReanalysis()` advances the persisted session to generation N+1 with parent N, records the generation counter in `session_meta`, and invalidates derived facts (analyze cache, investigations, findings) while user annotations survive by design. `invalidateFunction(address)` performs selective invalidation for single-function reanalysis — only the function's cache row and its unsaved findings are removed, saved findings and every other function's facts are retained, and investigation result counts are recomputed honestly.
+- Per-session engine manifest (work item C3): `recordEngineManifest`/`getEngineManifest`/`diffEngineManifest` store the producing engines and analysis settings in `session_meta` (`analysis_engines_json`) and bind them into the persisted `AnalysisSession`. Manifest drift (recorded vs installed versions) is reported as diagnostics, never as a restore failure. The Analysis Center records the manifest once per session, capturing the disassembler version, the Helix engine version when available, engine availability, and the relevant `hexcore.*` settings.
+- Investigation findings adopt contract identity (work item C1): with a bound target, finding IDs are now derived from the target plus the finding subject (`finding:sha256:<digest>:string-reference:token:...`) instead of a hash salted with a random investigation UUID. Rediscovering the same finding in a re-run or another investigation preserves the analyst's saved mark and the original discovery timestamp; session-less callers keep the legacy 24-hex format, and the Analysis Center accepts both formats during the transition.
+- Basic blocks and CFGs gain additive contract identity: `BasicBlockAnalyzer.buildCFG` accepts the active target and address space and annotates every block with a derived `stableId` (plus `functionStableId` on the graph). The in-memory numeric IDs used for edge wiring are unchanged, so graph rendering is unaffected.
+- Session metadata no longer lies about its writer: `hexcore_version` is read from the extension manifest on fresh databases and refreshed on every target bind, replacing the hardcoded `3.7.4` (hygiene item H1).
+- The pipeline runner's `contextGeneration` remains runner-scoped for now; wiring it to the persisted session generation is wave-2 work and is tracked in `docs/3.8.4-wave-1.md`.
+- Validation: Disassembler TypeScript compiles; focused suites pass — `sessionStoreGenerations` 5/5 (generations, selective invalidation, finding preservation, manifest drift, version honesty), `sessionStoreContract` 1/1, `investigationModel` 6/6 (contract finding IDs stable across investigations), `pdataChainMerge` 15/15, `pipelineReliability` 12/12 (including the 100-pair concurrent stress), `jobQueueManager` 14/14. The full isolated-process sweep of all 46 compiled disassembler test files is green with per-file runner config (44 files under the shared vscode shim, `pipelineReliability` standalone, `resolveInstructionComment.iat` self-mocked).
+
+### Entropy - small-file pipeline reliability (1.1.2)
+
+- ASCII entropy graphs now render zero-, one-, and two-block inputs without passing a negative count to `String.repeat()`. The built-in Full Static and Quick Triage profiles therefore retain valid entropy reports for small PE fixtures instead of terminating at step 3 with `Invalid count value`.
+- Failed artifacts continue to receive provenance entries with `status: failed`; provenance is analysis-contract evidence, not debug output. New runs consolidate all entries under `.hexcore-meta/provenance.json` instead of placing a visible sidecar beside every report. Reusing an `outDir` invalidates the prior step artifact and legacy sidecar before dispatch, preventing a new execution from rebinding stale bytes to a different target or failure.
+
+### Workbench - persistent investigation workflow (Disassembler 1.4.29)
+
+- Function-tree navigation now records the selected address even when no central disassembly editor is active. `Show CFG` also falls back to the function already rendered by Graph View, so opening the central graph from its title action no longer reports `No function selected` after a valid tree selection; its ambiguous step-over icon is replaced by the workbench's hierarchy/CFG symbol.
+- The central Analysis Center adds `Investigate` and `Saved` tabs. An analyst can select a binary already present in the workspace, run a custom string-reference search, or use bounded health/state, anti-debug, network/URL, and credentials/secrets presets.
+- The HexCore Analysis Activity Bar container now acts as an explicit launcher: `Open Analysis Center` appears as a full-width action in Session Overview and in the title actions of both Session Overview and the always-visible Functions view.
+- Search results preserve the matched string and encoding, deduplicate code references, and associate each reference with its containing function when the Disassembler has authoritative bounds. Strings without a code xref remain visible as string-only evidence and cannot be opened or decompiled accidentally.
+- Investigations and all collected findings are stored in the active binary's `.hexcore_session.db`. Starred findings appear in `Saved`; recent investigations can be reopened without rerunning analysis. Derived findings are cleared when the binary hash changes, while existing user annotations retain their prior ownership policy.
+- A new `Jobs` tab turns a saved finding into a named, reproducible pipeline: Analyze All, repeat the evidence search, lift the resolved function, and decompile the retained IR through Helix. Jobs are stored under `hexcore-jobs/`; outputs under `hexcore-reports/investigations/<name>/` inherit the analyst's name instead of an unrelated technical function label.
+- Investigation jobs use the standard automation watcher, queue, preflight, output containment, step references, and consolidated provenance manifest. Creating a job queues it once; because generated definitions live in a subfolder, reopening the workspace does not auto-run every retained investigation.
+- Real Lies of P runs exposed three delivery defects now fixed: generated jobs no longer duplicate the SQLite Analyze All cache as a 35.5 MB JSON file; honesty-capped/low-confidence Helix output propagates as retained `partial` instead of false `ok`; and provenance classifies `.ll`/`.c` media correctly while binding the retained IR SHA-256 as an input of pseudo-C.
+- Result actions reuse owning commands: `Open` navigates to the exact reference in the disassembly/CFG surface. `Decompile` passes a known function address through the existing Remill-to-Helix path or resolves and persists a missing function boundary from the code xref on demand; only an unresolved boundary asks for a full `Analyze`. The UI does not claim semantic HQL or data-flow inference for this first workflow.
+- Webview messages use a typed request union with bounded queries, target paths are restricted to readable files in the current workspace, and finding identifiers must match the persisted session record before any action runs.
+- Validation: Disassembler TypeScript compiles; the focused selection, investigation, session, Helix-quality, generated-job, and pipeline suites pass 40/40; generated jobs pass the real automation preflight; provenance tests bind a retained `.ll` input to `.c` by SHA-256 and reject stale output reuse; a native Better SQLite3 smoke records an investigation, marks a finding, and restores it from `Saved`; desktop and 720 px Playwright renders complete with zero page errors.
+
+### Disassembler/Pathfinder - authoritative boundaries at scale (Disassembler 1.4.28)
+
+- PE64 Exception Directory parsing no longer truncates valid `.pdata` tables at 250,000 records. The parser reports declared/parsed/truncated diagnostics, accepts up to the explicit 500,000-entry safety limit, and restores large session caches as lazy function stubs even after entry-point discovery.
+- `.pdata` reconciliation now preserves entry/export/TLS anchors, folds interior export aliases into their owning range, clamps leaf exports at the next authoritative start, normalizes partially overlapping non-chained records, and leaves a non-overlapping function domain for Pathfinder's binary searches.
+- Materializing a lazy function body no longer shrinks its authoritative unwind extent to the 1,000-instruction UI preview limit. Remill and Helix continue to receive the complete function byte range after a function is opened interactively.
+- Pathfinder always crosses the PE reconciliation barrier and consumes logical reconciled ranges instead of raw chained/nested `RUNTIME_FUNCTION` fragments.
+- ET_REL analysis now treats `.text` as the canonical numeric-address domain. Symbols in `.init.text`, `.exit.text`, `.static_call.text`, and other colliding sections remain available through the section-aware `symbolName` path instead of contaminating the global function table.
+- Exact `.text` `STT_FUNC/st_size` entries create lazy stubs and remove interior prologue discoveries. The old 8,192/16,384 ELF symbol-table ceilings are replaced by an explicit 500,000-entry safety bound.
+- Real gates: Lies of P parses all `368,877/368,877` `.pdata` records, produces 216,642 logical ranges and zero final overlaps while preserving the entry point. `mali_kbase.ko` now matches `llvm-readobj` at exactly 3,680 `.text` functions with zero overlaps; eager load falls from about 72 seconds to 1.1 seconds and load-plus-analysis from about 74 seconds to 14.5 seconds.
+- Real Pathfinder gate on `kbase_jit_allocate` uses the exact `[0x3a20,0x4269)` 2,121-byte window, decodes 471 instructions into 144 leaders at 90% CFG confidence, and emits zero leaders outside the Remill buffer.
+- Validation: all 40 Disassembler test files pass in isolated processes (375 tests), with dedicated PE/ELF boundary suites covering cache restore, large `.pdata`, partial materialization, export anchors, section collisions, and interior discoveries.
+
+### Workbench - integrated Analysis Center (Disassembler 1.4.28)
+
+- The Disassembler activity container is now the always-visible `HexCore Analysis` entry point instead of appearing only while a custom disassembly editor is active.
+- A live `Session Overview` view keeps compact target state and primary analysis actions in the sidebar, followed by the function and binary-index trees. Detailed target, engine, and job state stays in the full `HexCore Analysis Center` editor instead of competing for sidebar height.
+- Control-flow graphs now open as a dedicated central editor from the disassembly `CFG` action. The optional sidebar graph starts collapsed, function selection keeps an existing graph synchronized, and the initial function is registered consistently so CFG-dependent commands work before the user changes the selector.
+- The graph surface reports block/edge counts, separates conditional arrivals, routes long forward edges around intermediate blocks, uses a grid for disconnected thunk regions, and caps very large block previews at 32 instructions with an explicit hidden-instruction count.
+- The Analysis Center adds dedicated `Overview`, `Engines`, and `Automation` tabs. It reports target metadata and index counts from the active `DisassemblerEngine`, checks Capstone/LLVM MC/Remill/Helix/Souper health, marks Rellic as disabled compatibility scope, lists workspace job files, and dispatches existing HexCore commands without duplicating engine logic.
+- The native-status command now follows the shipping engine policy: Souper is checked as active and Rellic no longer produces a false unavailable warning.
+- Interactive and headless Analyze results now separate functions added, functions pruned by reconciliation/ghost cleanup, and net change. `newFunctions` remains backward-compatible but can no longer report a negative count; `removedFunctions` and `functionNetChange` carry the cleanup evidence explicitly.
+- Webviews use a strict nonce-based content security policy, validate every incoming action against a fixed allowlist, preserve the selected tab, and surface command failures both in-panel and through the workbench notification system.
+- Runtime UI smoke on the packaged 3.8.3 application plus the development extension loads `calc_a_baseline.exe` as PE64/x64 with 161 functions, 7 sections, 49 imports and 118 strings. Editor and sidebar layouts render without overlap, all three Analysis Center tabs are interactive, all active native engines report ready, and the final browser console has zero errors. Central CFG smoke renders a branched function as 3 blocks/3 edges and a disconnected 35-block entry region as a bounded grid, also with zero console errors.
+- The same interactive Analyze smoke now reports the reconciliation honestly: 11 functions added, 85 initial candidates pruned, net -74, and 87 retained functions; the in-panel result links the exact `.hexcore_session.db` cache path.
+
+### Hex Viewer - complete large-file navigation (1.2.4)
+
+- Replaces the one-pixel-height-per-row assumption with scaled logical scrolling capped below Chromium's element-height limit. The regression case is the 139,744,768-byte `LOP-Win64-Test.exe`, whose old 16-byte layout requested 157,212,864 physical pixels and could not guarantee access to the file tail.
+- Mouse-wheel and keyboard navigation retain row precision while scrollbar dragging maps across the full logical file. Go-to-offset uses the same logical position, so offsets near EOF remain directly reachable.
+- Selection copy now reads the exact range on the extension host and overlays pending edits instead of silently omitting uncached chunks. Host-side bounds cap chunk, edit, clipboard, bookmark, template, and search inputs.
+- Hex-to-disassembly sync now sends the binary identity and file offset to the Disassembler, which verifies the active target and converts the offset to a virtual address through its parsed section map.
+- The webview now uses nonce-scoped script and style policies, sanitizes persisted bookmark data before embedding it, escapes bookmark/template output, and reports bounded-search truncation explicitly.
+- Packaged-app smoke opens the 133.27 MiB Lies of P executable, jumps to `0x085455E0`, renders through the final byte at `0x085455FF`, refreshes the Data Inspector after the tail chunk arrives, and records zero webview console errors.
+
 ## [3.8.3] - 2026-08-03 - "Honest Analysis at Scale"
 
 ### Workbench - analysis-focused visual refresh

@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "anti-analysis.peb_access",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.peb-field:positive",
+      "branchId": "peb-field",
+      "branchIndex": 0,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "field"
+      ],
+      "contentSha256": "e3ee249c08f14fb45c98c90a222c99cd5aad0f2b81387cd00c564a9d2e048996",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "field",
+            "at": "field",
+            "name": "ProcessEnvironmentBlock",
+            "object": "process",
+            "arrow": true
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.peb-field:negative-1",
+      "branchId": "peb-field",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "0d488ca97fdc229e27fffa34213ead078b555c05bf29f58a992a39312aa7c6a0",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "field",
+            "name": "Environment",
+            "object": "process",
+            "arrow": true
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.peb-field:negative-2",
+      "branchId": "peb-field",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "bc25ad186b6e2540d1ad0be8e150ac7a838f7ce43b2c18724454edef3e5a62a8",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "var",
+            "name": "ProcessEnvironmentBlock"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.nt-query:positive",
+      "branchId": "nt-query",
+      "branchIndex": 1,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "call"
+      ],
+      "contentSha256": "924bbbf3000be603979ddefa0f3b6d7a560187d8c6c33f0204ee941e844e2977",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "call",
+            "name": "NtQueryInformationProcess"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.nt-query:negative-1",
+      "branchId": "nt-query",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "2c9af59b2f4b515f05606171beda887e72b97af8df5f61a1b2eb4622fe8bc20d",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "NtQueryInformationThread"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.nt-query:negative-2",
+      "branchId": "nt-query",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7d4a1ab115944da6d28f2fe360d70b0bdb8ef9b8959e04692a8ac0d93ed1561f",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "ntqueryinformationprocess"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.zw-query:positive",
+      "branchId": "zw-query",
+      "branchIndex": 2,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "call"
+      ],
+      "contentSha256": "fbe67bf90050adb1c1a7f9e8d081db394dcc88334390a5095837a01f63f1237c",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "call",
+            "name": "ZwQueryInformationThread"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.zw-query:negative-1",
+      "branchId": "zw-query",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "11e75ae08c8a227f7079f75ac0dfe408ddc2adc4050bb384092cfd162c62a527",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "ZwSetInformationThread"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.peb_access.zw-query:negative-2",
+      "branchId": "zw-query",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "3e60a1d965abf16754a307624bee473edb22e46602826392ae1b3ac8eed65f57",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "QueryInformationProcess"
+          }
+        ]
+      }
+    }
+  ]
+}

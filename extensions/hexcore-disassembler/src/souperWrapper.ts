@@ -40,8 +40,12 @@ export interface SouperOptimizeResult {
 	success: boolean;
 	ir: string;
 	error: string;
+	diagnostics: string;
 	candidatesFound: number;
+	candidatesAttempted: number;
+	candidatesInferred: number;
 	candidatesReplaced: number;
+	solverTimeouts: number;
 	optimizationTimeMs: number;
 }
 
@@ -49,7 +53,7 @@ export interface SouperOptimizeResult {
  * Options exposed to callers of the Souper wrapper.
  */
 export interface SouperOptions {
-	/** Maximum candidates to extract per function (0 = unlimited). Default: 1000 */
+	/** Maximum candidates to submit to Z3 per function (0 = unlimited). Default: 1000 */
 	maxCandidates?: number;
 	/** Z3 solver timeout in ms per candidate. Default: 30000 */
 	timeoutMs?: number;
@@ -276,8 +280,12 @@ export class SouperWrapper {
 				success: false,
 				ir: '',
 				error: 'hexcore-souper is not available',
+				diagnostics: '',
 				candidatesFound: 0,
+				candidatesAttempted: 0,
+				candidatesInferred: 0,
 				candidatesReplaced: 0,
+				solverTimeouts: 0,
 				optimizationTimeMs: 0,
 			};
 		}
@@ -302,8 +310,12 @@ export class SouperWrapper {
 				success: false,
 				ir: '',
 				error: `Souper optimization failed: ${msg}`,
+				diagnostics: '',
 				candidatesFound: 0,
+				candidatesAttempted: 0,
+				candidatesInferred: 0,
 				candidatesReplaced: 0,
+				solverTimeouts: 0,
 				optimizationTimeMs: 0,
 			};
 		}

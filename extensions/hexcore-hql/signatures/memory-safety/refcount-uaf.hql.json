@@ -1,8 +1,18 @@
 {
   "id": "memory-safety.refcount_free_no_invalidate",
+  "version": "1.0.0",
+  "namespace": "memory-safety",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL rule library", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/memory-safety.refcount_free_no_invalidate.json" },
+  "limitations": ["Function-scoped co-occurrence does not prove order, same object, zero path, or missing invalidation."],
   "name": "Refcount-zero free without handle invalidation (UAF class)",
   "description": "Co-occurrence (function-scoped) of (a) a refcount decrement -- an atomic decrement intrinsic on a struct field such as atomic_dec_and_test/refcount_dec_and_test/_InterlockedDecrement/__atomic_fetch_sub -- and (b) a free of a struct field reached via '->' (e.g. kfree(obj->buf)). This is the structural shape of the userland/kernel refcount use-after-free we triage: the owning object's buffer is released on the refcount==0 path. IMPORTANT over-approximation: the HQL matcher has no ordering, dataflow, or negation operators, so this signature CANNOT by itself prove (i) the freed field belongs to the SAME object that was decremented, (ii) the free is on the refcount==0 path, or (iii) that the owning handle/slot is NOT invalidated (obj->active=0 / obj->buf=NULL) afterwards. It is a HIGH-RECALL candidate filter for manual review, not a proof. The same-object / on-zero-path / no-invalidation refinement requires the deferred dataflow layer (refcountAuditScanner Pattern D / a memory-SSA points-to pass).",
   "severity": "medium",
+  "evidenceLevel": "candidate",
   "mitre": ["T1068"],
   "queries": [
     {

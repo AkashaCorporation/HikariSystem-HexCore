@@ -1,27 +1,39 @@
 {
   "id": "anti-analysis.peb_access",
+  "version": "1.0.0",
+  "namespace": "anti-analysis",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL rule library", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/anti-analysis.peb_access.json" },
+  "limitations": ["PEB access and query APIs have legitimate diagnostic and runtime uses."],
   "name": "Direct PEB Access",
   "description": "Detects direct access to the Process Environment Block via field access (ProcessEnvironmentBlock) or NtQueryInformationProcess(ProcessDebugPort) — both are common anti-debug primitives that bypass IsDebuggerPresent.",
   "severity": "high",
   "mitre": ["T1622"],
-  "queries": [
-    {
+  "evidenceLevel": "signal",
+  "condition": {
+    "any": [
+      { "query": {
       "target": "CFieldAccessExpr",
       "attributes": [
         { "field": "field", "value": "ProcessEnvironmentBlock" }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CCallExpr",
       "attributes": [
         { "field": "callee", "value": "NtQueryInformationProcess" }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CCallExpr",
       "attributes": [
         { "field": "callee", "value": "re:^Zw(QueryInformationProcess|QueryInformationThread)$" }
       ]
-    }
-  ]
+      } }
+    ]
+  }
 }

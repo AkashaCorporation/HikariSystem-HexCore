@@ -180,6 +180,14 @@ The static Capstone core and the N-API addon must use the same MSVC runtime.
 
 ## Changelog
 
+### v1.3.6
+- Define function ranges as `[start, endExclusive)` in the native detector.
+- Retain the legacy inclusive `end` field for the HexCore 3.8.x compatibility bridge.
+- Add native regression coverage for adjacent functions and one-byte returns.
+- Populate `instructionCount`, direct `callTargets`, and reverse `calledBy`
+  from the native detector's decoded instruction/call evidence instead of
+  publishing zero and empty arrays as unassessed facts.
+
 ### v1.3.5
 - Vendor the official Capstone 5.0.9 source.
 - Expose `patch` and `fullString` from `version()` without changing the legacy `string` field.

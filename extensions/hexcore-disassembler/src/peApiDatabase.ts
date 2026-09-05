@@ -267,6 +267,10 @@ const DB: ApiSignature[] = [
 		{ name: 'lpEventAttributes', type: 'LPSECURITY_ATTRIBUTES' }, { name: 'bManualReset', type: 'BOOL' },
 		{ name: 'bInitialState', type: 'BOOL' }, { name: 'lpName', type: 'LPCTSTR' }
 	]},
+	{ name: 'OpenEvent', dll: 'kernel32.dll', returnType: 'HANDLE', category: 'sync', tags: [], parameters: [
+		{ name: 'dwDesiredAccess', type: 'DWORD' }, { name: 'bInheritHandle', type: 'BOOL' },
+		{ name: 'lpName', type: 'LPCTSTR' }
+	]},
 	{ name: 'InitializeCriticalSection', dll: 'kernel32.dll', returnType: 'void', category: 'sync', tags: [], parameters: [
 		{ name: 'lpCriticalSection', type: 'LPCRITICAL_SECTION' }
 	]},

@@ -2,7 +2,7 @@
   "name": "hexcore-elixir",
   "displayName": "HexCore Elixir",
   "description": "HexCore Elixir — Clean-room dynamic analysis, emulation, and instrumentation framework (Project Azoth)",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "publisher": "hikarisystem",
   "license": "Apache-2.0",
   "main": "./out/extension.js",
@@ -18,7 +18,7 @@
     "interceptor",
     "stalker",
     "PE",
-    "ELF"
+    "PE32+"
   ],
   "napi": {
     "binaryName": "hexcore-elixir",

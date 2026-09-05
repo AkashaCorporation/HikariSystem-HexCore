@@ -7,7 +7,7 @@
 // #26 sessionId-based sticky worker routing). Unit tests for JobQueueManager.
 
 import * as assert from 'assert';
-import { JobQueueManager } from './jobQueueManager';
+import { JobQueueManager, jobPathIdentity } from './jobQueueManager';
 
 const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -292,6 +292,41 @@ suite('JobQueueManager — stateless regression (unchanged behavior)', () => {
 		assert.strictEqual(m.getJobStatus(jobId)?.status, 'failed');
 		assert.strictEqual(m.getQueueStats().failed, 1);
 		await m.stop();
+		m.dispose();
+	});
+});
+
+suite('JobQueueManager — watcher path deduplication', () => {
+	test('Windows path identity ignores drive-letter and component casing', () => {
+		assert.strictEqual(
+			jobPathIdentity('C:\\Work\\sample.hexcore_job.json', 'win32'),
+			jobPathIdentity('c:\\work\\SAMPLE.hexcore_job.json', 'win32'),
+		);
+	});
+
+	test('queueJobIfAbsent suppresses a second active submission for the same path', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		const first = m.queueJobIfAbsent('same-job.hexcore_job.json', 'low');
+		await sleep(40);
+		const second = m.queueJobIfAbsent('same-job.hexcore_job.json', 'low');
+		assert.strictEqual(second.deduped, true);
+		assert.strictEqual(second.jobId, first.jobId);
+		assert.strictEqual(m.getQueueStats().running, 1);
+		ctl.releaseAll();
+		await sleep(40);
+		await m.stop();
+		m.dispose();
+	});
+
+	test('queueJobIfAbsent treats Windows path casing as the same active job', () => {
+		const m = new JobQueueManager(1);
+		const first = m.queueJobIfAbsent('C:\\Work\\same.hexcore_job.json', 'low');
+		const second = m.queueJobIfAbsent('c:\\work\\SAME.hexcore_job.json', 'low');
+		assert.strictEqual(second.deduped, true);
+		assert.strictEqual(second.jobId, first.jobId);
 		m.dispose();
 	});
 });

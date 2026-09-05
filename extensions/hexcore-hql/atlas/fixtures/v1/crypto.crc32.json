@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "crypto.crc32",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:crypto.crc32.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "polynomial"
+      ],
+      "contentSha256": "23964f69be34934bd26861da8cc66ba90877b4a688038910b72c129a801a0922",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "int",
+            "at": "polynomial",
+            "value": "3988292384"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.crc32.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "b4cc1aa2af34605a8c311f7517bc388c13bc5ef0f708262db448ec8b98986325",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "int",
+            "value": "3988292385"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:crypto.crc32.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7020fbe6fb13e3b7d2fc8ab9d38f49cbea50aac55793d419f0c36e6db7e38c81",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "str",
+            "value": "0xEDB88320"
+          }
+        ]
+      }
+    }
+  ]
+}

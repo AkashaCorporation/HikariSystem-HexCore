@@ -1,0 +1,17 @@
+{
+  "id": "crypto.fnv1",
+  "version": "1.0.0",
+  "namespace": "crypto",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/crypto.fnv1.json" },
+  "limitations": ["Constant presence and multiplication shape are structural signals, not proof of a complete FNV implementation."],
+  "name": "FNV hash (32-bit)",
+  "description": "A multiply by the 32-bit FNV prime, the core mixing step of FNV-1/FNV-1a hashing.",
+  "severity": "info",
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "re:^\\*=?$" }], "contains": [{ "target": "CIntLitExpr", "attributes": [{ "field": "value", "value": 16777619 }] }] } }
+}

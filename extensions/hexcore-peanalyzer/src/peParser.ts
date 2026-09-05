@@ -4,6 +4,12 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
+import {
+	buildWindowsSecuritySummary,
+	extractExecutionManifest,
+	type ExecutionManifestSummary,
+	type WindowsSecuritySummary,
+} from './windowsSecuritySummary';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -42,6 +48,8 @@ export interface PEAnalysis {
 	packerSignatures: string[];
 	antiDebug: AntiDebugTechnique[];
 	mitigations: SecurityMitigation[];
+	executionManifest?: ExecutionManifestSummary;
+	windowsSecuritySummary?: WindowsSecuritySummary;
 
 	// v3.8.0-nightly: Anti-analysis instruction scanner output (Issue: HEXCORE_DEFEAT Fix #7 + #9)
 	securityIndicators?: SecurityIndicators;
@@ -645,16 +653,23 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		if (peHeader.sizeOfOptionalHeader > 0) {
 			const optionalHeader = parseOptionalHeader(buffer, optionalHeaderOffset, peHeader.sizeOfOptionalHeader);
 			analysis.optionalHeader = optionalHeader;
+			analysis.mitigations = analyzeMitigations(optionalHeader);
 		}
 
 		// Parse Section Headers
 		const sectionOffset = optionalHeaderOffset + peHeader.sizeOfOptionalHeader;
 		analysis.sections = parseSectionHeaders(buffer, sectionOffset, peHeader.numberOfSections, fd);
+		analysis.executionManifest = extractExecutionManifest(filePath, analysis.sections);
 
 		// Parse Imports
 		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[1]?.size > 0) {
 			analysis.imports = parseImports(fd, buffer, analysis.optionalHeader.dataDirectories[1], analysis.sections, analysis.optionalHeader.is64Bit);
 		}
+		analysis.windowsSecuritySummary = buildWindowsSecuritySummary(
+			analysis.executionManifest,
+			analysis.mitigations,
+			analysis.imports,
+		);
 
 		// Calculate overall entropy
 		analysis.entropy = calculateEntropy(buffer);
@@ -1336,9 +1351,9 @@ function analyzeMitigations(optionalHeader?: OptionalHeader): SecurityMitigation
 	});
 
 	mitigations.push({
-		name: 'Stack Cookie (GS)',
+		name: 'Code Integrity',
 		enabled: optionalHeader.dllCharacteristics.some(c => c.includes('FORCE_INTEGRITY')),
-		description: 'Stack buffer overrun protection'
+		description: 'Image enforces integrity checks; this does not assess /GS stack cookies'
 	});
 
 	mitigations.push({

@@ -2,7 +2,7 @@
 	"name": "hexcore-peanalyzer",
 	"displayName": "HexCore PE Analyzer",
 	"description": "Professional PE (Portable Executable) analyzer for malware analysis and reverse engineering",
-	"version": "1.1.1",
+	"version": "1.1.3",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -23,6 +23,8 @@
 	"activationEvents": [
 		"onCommand:hexcore.peanalyzer.analyze",
 		"onCommand:hexcore.pe.analyze",
+		"onCommand:hexcore.pe.extractSection",
+		"onCommand:hexcore.crypto.rc4",
 		"onCommand:hexcore.peanalyzer.analyzeActive",
 		"onView:hexcore.peanalyzer.view"
 	],

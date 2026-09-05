@@ -95,26 +95,64 @@ jobs:
           Expand-Archive -Path $asset -DestinationPath engine -Force
           Remove-Item $asset
 
+          # The historical v0.1.0 dependency bundle predates the external
+          # solver executable. Pin and verify the official runtime so both the
+          # native Souper bridge and the headless model API can invoke Z3.
+          $z3Exe = "engine/deps/z3/z3.exe"
+          $z3Dll = "engine/deps/z3/libz3.dll"
+          if (-not (Test-Path $z3Exe) -or -not (Test-Path $z3Dll)) {
+            $z3Version = "4.16.0"
+            $z3Asset = "z3-$z3Version-x64-win.zip"
+            $z3Url = "https://github.com/Z3Prover/z3/releases/download/z3-$z3Version/$z3Asset"
+            $z3Temp = Join-Path $env:RUNNER_TEMP "hexcore-z3"
+            Remove-Item -LiteralPath $z3Temp -Recurse -Force -ErrorAction SilentlyContinue
+            New-Item -ItemType Directory -Force $z3Temp | Out-Null
+            Invoke-WebRequest -Uri $z3Url -OutFile (Join-Path $z3Temp $z3Asset)
+            Expand-Archive -Path (Join-Path $z3Temp $z3Asset) -DestinationPath $z3Temp -Force
+            $downloadedExe = Get-ChildItem -Path $z3Temp -Recurse -Filter z3.exe | Select-Object -First 1
+            $downloadedDll = Get-ChildItem -Path $z3Temp -Recurse -Filter libz3.dll | Select-Object -First 1
+            if (-not $downloadedExe -or -not $downloadedDll) {
+              throw "Official Z3 runtime is incomplete: $z3Url"
+            }
+            New-Item -ItemType Directory -Force engine/deps/z3 | Out-Null
+            Copy-Item -LiteralPath $downloadedExe.FullName -Destination $z3Exe -Force
+            Copy-Item -LiteralPath $downloadedDll.FullName -Destination $z3Dll -Force
+          }
+
+          $expectedZ3Hash = "469DE2006052E73177412986AE947E82E102984D467EF5430ACA8C84E1ADB23E"
+          $actualZ3Hash = (Get-FileHash -LiteralPath $z3Exe -Algorithm SHA256).Hash
+          if ($actualZ3Hash -ne $expectedZ3Hash) {
+            throw "Unexpected Z3 executable hash: $actualZ3Hash"
+          }
+
       - name: Install Dependencies
         working-directory: engine
         run: npm ci --ignore-scripts
 
       - name: Build Prebuilds
         working-directory: engine
-        run: npm run prebuild
+        run: |
+          if ("${{ matrix.engine.name }}" -eq "hexcore-souper") {
+            npm run package:prebuild
+          } else {
+            npm run prebuild
+          }
 
       - name: Bundle Souper Z3 Runtime
         if: ${{ matrix.engine.name == 'hexcore-souper' }}
         working-directory: engine
         run: |
-          $source = "deps/z3/libz3.dll"
-          $destination = "prebuilds/win32-x64/libz3.dll"
-          if (-not (Test-Path $source)) {
-            throw "Souper runtime DLL not found: $source"
+          $runtimeFiles = @("libz3.dll", "z3.exe")
+          foreach ($runtimeFile in $runtimeFiles) {
+            $source = "deps/z3/$runtimeFile"
+            $destination = "prebuilds/win32-x64/$runtimeFile"
+            if (-not (Test-Path $source)) {
+              throw "Souper runtime not found: $source"
+            }
+            New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination -Force
+            Write-Host "Bundled Souper runtime: $destination"
           }
-          New-Item -ItemType Directory -Force (Split-Path $destination) | Out-Null
-          Copy-Item -LiteralPath $source -Destination $destination -Force
-          Write-Host "Bundled Souper runtime: $destination"
 
       - name: Read Engine Version
         id: engine-version

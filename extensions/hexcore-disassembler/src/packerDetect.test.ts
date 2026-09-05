@@ -48,6 +48,21 @@ suite('packerDetect (#55)', () => {
 		assert.strictEqual(r.family, 'upx');
 	});
 
+	test('reports an unknown encrypted payload instead of no packer markers', () => {
+		const bytes = Buffer.alloc(0x2000);
+		for (let i = 0; i < bytes.length; i++) { bytes[i] = i & 0xff; }
+		const r = detectPacker(bytes, {
+			sections: [{
+				name: '.payload', permissions: 'rw-', rawAddress: 0, rawSize: bytes.length, virtualSize: bytes.length,
+			}],
+		});
+		assert.strictEqual(r.packed, true);
+		assert.strictEqual(r.family, 'unknown');
+		assert.ok(r.confidence >= 55, `conf ${r.confidence}`);
+		assert.ok(r.markers.some(marker => marker.kind === 'entropy'));
+		assert.match(r.recommendation, /encrypted payload|unknown packer/i);
+	});
+
 	test('live HTB ransom packed binary if present', function () {
 		const p = path.join(
 			process.env.USERPROFILE || '',

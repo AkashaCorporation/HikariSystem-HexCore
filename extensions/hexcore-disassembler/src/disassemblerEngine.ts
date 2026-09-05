@@ -4,7 +4,9 @@
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
+import type { AnalysisBinaryFormat } from 'hexcore-common';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
 import { SessionStore } from './sessionStore';
@@ -13,9 +15,18 @@ import {
 	isX86PcRelativeDataRelocation,
 	x86PcRelativeDataSectionOffset,
 } from './elfTextRelocation';
+import { AddressMapping, resolvePeRvaMapping } from './peAddressMapping';
+import { detectCompareDispatcherLadder } from './vmDetection';
+import { FunctionSeedRegistry, type FunctionSeedEvidence } from './functionSeeds';
+import {
+	collectAddressTakenFunctionCandidates,
+	validateAddressTakenFunctionExtent,
+} from './addressTakenFunctionDiscovery';
+import { assessStringEvidence, findCrc32LookupRanges, type ByteRange } from './stringEvidence';
 
 // Types
 export interface Instruction {
+	id?: number;
 	address: number;
 	bytes: Buffer;
 	mnemonic: string;
@@ -27,6 +38,20 @@ export interface Instruction {
 	isRet: boolean;
 	isConditional: boolean;
 	targetAddress?: number;
+	detail?: DisassembledInstruction['detail'];
+}
+
+export type FunctionBodyCompletenessState = 'complete' | 'partial' | 'decode-empty' | 'lazy';
+
+export interface FunctionBodyCompleteness {
+	state: FunctionBodyCompletenessState;
+	authoritativeStart: number;
+	authoritativeEndExclusive: number;
+	decodedEndExclusive: number;
+	semanticEndExclusive: number;
+	boundaryReached: boolean;
+	stopReason: 'function-end' | 'decode-failure' | 'binary-boundary' | 'decode-empty' | 'deferred';
+	byteCoverage: number;
 }
 
 export interface Function {
@@ -37,6 +62,7 @@ export interface Function {
 	instructions: Instruction[];
 	callers: number[];
 	callees: number[];
+	bodyCompleteness?: FunctionBodyCompleteness;
 }
 
 export interface StringReference {
@@ -44,6 +70,11 @@ export interface StringReference {
 	string: string;
 	encoding: 'ascii' | 'unicode';
 	references: number[];
+	fileOffset?: number;
+	terminated?: boolean;
+	literalConfidence?: number;
+	evidenceClass?: 'referenced-literal' | 'terminated-literal' | 'unterminated-sequence' | 'lookup-table-sequence';
+	evidenceReasons?: string[];
 }
 
 export interface XRef {
@@ -388,6 +419,7 @@ export interface DebugDirectoryEntry {
 	pointerToRawData: number;
 	pdbPath?: string;
 	pdbGuid?: string;
+	pdbAge?: number;
 }
 
 export interface DelayImportLibrary {
@@ -476,6 +508,88 @@ export interface DisassemblyOptions {
 	entryPoint?: number;
 }
 
+export type FunctionBodyStatus = 'materialized' | 'partial' | 'lazy' | 'decode-empty';
+
+export interface FunctionAnalysisMaterialization {
+	status: 'committed' | 'already-current' | 'partial' | 'decode-empty' | 'unknown-function';
+	function?: Function;
+	bodyCompleteness?: FunctionBodyCompleteness;
+	changed: boolean;
+	instructionsAdded: number;
+	engineGenerationBefore: number;
+	engineGenerationAfter: number;
+	sessionGenerationBefore?: number;
+	sessionGenerationAfter?: number;
+}
+
+export interface AnalysisClosureRestoration {
+	status: 'none' | 'restored' | 'partial' | 'reset';
+	requested: number;
+	restored: number;
+	failed: string[];
+	universeSha256?: string;
+}
+
+export interface AnalysisEngineSnapshotV1 {
+	schemaVersion: 1;
+	target: { fileSha256: string; fileSize: number };
+	baseAddress: number;
+	architecture: ArchitectureConfig;
+	limits: { maxFunctions: number; maxFunctionSize: number };
+	fileInfo?: FileInfo;
+	sections: Section[];
+	imports: ImportLibrary[];
+	exports: ExportFunction[];
+	peDataDirectories: PEDataDirectories;
+	elfAnalysis?: ELFAnalysis;
+	functions: Function[];
+	strings: StringReference[];
+	comments: Array<[number, string]>;
+	xrefs: Array<[number, XRef[]]>;
+	functionSeeds: Array<[number, FunctionSeedEvidence[]]>;
+	unmaterializedStubs: number[];
+	crc32LookupRanges: ByteRange[];
+	textRelocations: Array<[number, { name: string; type: number; addend: number }]>;
+	dataRelocations: Array<[number, { sectionName: string; type: number; addend: number }]>;
+	elfSectionFileMap: Array<[string, { fileOffset: number; size: number; flags: number }]>;
+	elfFunctionByName: Array<[string, { sectionName: string; offsetInSection: number; size: number }]>;
+	authoritativePdataRanges: Array<{ begin: number; end: number }>;
+	pdataDeclaredEntries: number;
+	pdataEntriesTruncated: boolean;
+	vmDetectionResults?: Array<[number, { vmDetected: boolean; vmType: string; dispatcher: string | null; opcodeCount: number; stackArrays: Array<{ base: string; type: string }>; junkRatio: number }]>;
+	execScan?: Instruction[];
+	pltSymbolMap: Array<[number, string]>;
+	gotSymbolMap: Array<[number, string]>;
+	trapHandlerGate: boolean;
+	lastAnalysisDelta: { added: number; removed: number; netChange: number };
+	analysisComplete: boolean;
+	analysisGeneration: number;
+	closureRestoration: AnalysisClosureRestoration;
+}
+
+export interface AssemblyExportResult {
+	status: 'ok' | 'partial';
+	totalFunctions: number;
+	functionsWithInstructions: number;
+	functionsWithoutInstructions: number;
+	decodedInstructions: number;
+	emptyFunctions: Array<{ address: number; name: string; reason: 'decode-empty' }>;
+	incompleteFunctions: Array<{ address: number; name: string; reason: 'partial-decode'; byteCoverage: number; stopReason: string }>;
+}
+
+function toAnalysisBinaryFormat(format: FileInfo['format']): AnalysisBinaryFormat {
+	if (format === 'PE' || format === 'PE64') {
+		return 'pe';
+	}
+	if (format === 'ELF32' || format === 'ELF64') {
+		return 'elf';
+	}
+	if (format === 'MachO') {
+		return 'macho';
+	}
+	return 'raw';
+}
+
 /**
  * v3.8.5: decode the absolute IAT-slot VA referenced by a memory-indirect `call`/`jmp` operand.
  * Shared single source of truth used by BOTH the engine post-pass (`applyIatCallNames`, which
@@ -512,13 +626,15 @@ export function decodeIatOperandVA(opStr: string, instrAddress: number, instrSiz
 		const signed = ripMatch[1] === '-' ? -disp : disp;
 		// RIP points at the next instruction.
 		const nextVA = instrAddress + instrSize;
-		return (nextVA + signed) >>> 0;
+		const address = nextVA + signed;
+		return Number.isSafeInteger(address) && address >= 0 ? address : undefined;
 	}
 
 	// PE32 absolute: `0x...` (no base/index register). Reject anything with a register inside.
 	const absMatch = inner.match(/^0x([0-9a-f]+)$/);
 	if (absMatch) {
-		return parseInt(absMatch[1], 16) >>> 0;
+		const address = parseInt(absMatch[1], 16);
+		return Number.isSafeInteger(address) && address >= 0 ? address : undefined;
 	}
 
 	return undefined;
@@ -532,8 +648,10 @@ export class DisassemblerEngine {
 	private instructions: Map<number, Instruction> = new Map();
 	private functions: Map<number, Function> = new Map();
 	private strings: Map<number, StringReference> = new Map();
+	private crc32LookupRanges: ByteRange[] = [];
 	private comments: Map<number, string> = new Map();
 	private xrefs: Map<number, XRef[]> = new Map();
+	private readonly functionSeeds = new FunctionSeedRegistry();
 
 	// File analysis data
 	private fileInfo?: FileInfo;
@@ -593,7 +711,11 @@ export class DisassemblerEngine {
 	// ALL .pdata functions register (stubs are ~tens of bytes each, so 40K-159K stubs
 	// cost tens of MB, not the 6 GB an eager body-disassembly of every one would).
 	private unmaterializedStubs: Set<number> = new Set<number>();
-	private maxStubFunctions: number = 250000;
+	private maxStubFunctions: number = 500000;
+	private maxPdataEntries: number = 500000;
+	private maxElfSymbolEntries: number = 500000;
+	private pdataDeclaredEntries: number = 0;
+	private pdataEntriesTruncated: boolean = false;
 	/** One-shot .pdata reconciliation shared by analyzeAll and lift hot paths. */
 	private pdataReconcilePromise?: Promise<void>;
 	/** Reconciled AMD64 .pdata ranges, including contiguous chained-unwind fragments. */
@@ -636,6 +758,10 @@ export class DisassemblerEngine {
 
 	// v3.7.4: Persistent session store (renames, retypes, comments, bookmarks, analyze cache)
 	private sessionStore?: SessionStore;
+	private lastAnalysisDelta = { added: 0, removed: 0, netChange: 0 };
+	private analysisComplete = false;
+	private analysisGeneration = 0;
+	private closureRestoration: AnalysisClosureRestoration = { status: 'none', requested: 0, restored: 0, failed: [] };
 
 	constructor() {
 		this.capstone = new CapstoneWrapper();
@@ -647,7 +773,9 @@ export class DisassemblerEngine {
 	private addXRef(xref: XRef): void {
 		const list = this.xrefs.get(xref.to);
 		if (list) {
-			list.push(xref);
+			if (!list.some(existing => existing.from === xref.from && existing.type === xref.type)) {
+				list.push(xref);
+			}
 		} else {
 			this.xrefs.set(xref.to, [xref]);
 		}
@@ -704,7 +832,7 @@ export class DisassemblerEngine {
 	private async ensureCapstoneInitialized(): Promise<void> {
 		if (!this.capstoneInitialized) {
 			try {
-				await this.capstone.initialize(this.architecture);
+				await this.capstone.initialize(this.architecture, { detail: true });
 				this.capstoneInitialized = true;
 				this.capstoneError = undefined;
 				console.log(`Capstone initialized for ${this.architecture}`);
@@ -734,7 +862,10 @@ export class DisassemblerEngine {
 		}
 	}
 
-	async loadFile(filePath: string): Promise<boolean> {
+	async loadFile(
+		filePath: string,
+		rawOptions?: { architecture?: ArchitectureConfig; baseAddress?: number }
+	): Promise<boolean> {
 		try {
 			this.loadConfig();
 
@@ -755,10 +886,15 @@ export class DisassemblerEngine {
 			this.imports = [];
 			this.exports = [];
 			this.functions.clear();
+			this.analysisComplete = false;
+			this.analysisGeneration++;
+			this.closureRestoration = { status: 'none', requested: 0, restored: 0, failed: [] };
+			this.functionSeeds.clear();
 			this.instructions.clear();
 			this.comments.clear();
 			this.xrefs.clear();
 			this.strings.clear();
+			this.crc32LookupRanges = [];
 			this.textRelocations.clear();
 			this.elfSectionFileMap.clear();
 			this.elfFunctionByName.clear();
@@ -767,8 +903,11 @@ export class DisassemblerEngine {
 			this._pltSymbolMap.clear();
 			this._gotSymbolMap.clear();
 			this.trapHandlerGate = false;
+			this.unmaterializedStubs.clear();
 			this.pdataReconcilePromise = undefined;
 			this.authoritativePdataRanges = [];
+			this.pdataDeclaredEntries = 0;
+			this.pdataEntriesTruncated = false;
 
 			// v3.7.4: Initialize persistent session store
 			try {
@@ -784,8 +923,12 @@ export class DisassemblerEngine {
 				this.sessionStore = undefined;
 			}
 
-			// Initialize architecture first (needed for base address detection in PE)
-			this.architecture = this.detectArchitecture();
+			const rawFile = !this.isPEFile() && !this.isELFFile();
+			// Structured formats remain header-authoritative. Raw blobs have no
+			// machine metadata, so a pipeline may provide the analyst's architecture.
+			this.architecture = rawFile && rawOptions?.architecture
+				? rawOptions.architecture
+				: this.detectArchitecture();
 
 			// Parse file structure (sets baseAddress, fileInfo, sections, imports, exports)
 			if (this.isPEFile()) {
@@ -793,8 +936,18 @@ export class DisassemblerEngine {
 			} else if (this.isELFFile()) {
 				this.parseELFStructure();
 			} else {
-				this.baseAddress = 0x400000;
+				this.baseAddress = rawOptions?.baseAddress ?? 0x400000;
 				this.parseRawFile();
+			}
+
+			if (this.sessionStore && this.fileInfo) {
+				this.sessionStore.bindAnalysisTarget({
+					filePath,
+					fileSize: this.fileBuffer.length,
+					format: toAnalysisBinaryFormat(this.fileInfo.format),
+					architecture: this.architecture,
+					imageBase: this.fileInfo.baseAddress,
+				});
 			}
 
 			await this.ensureCapstoneInitialized();
@@ -802,15 +955,50 @@ export class DisassemblerEngine {
 			// v3.8.5: decide the trap-handler gate BEFORE any function discovery runs, so
 			// analyzeFunction can sweep past ud2/int3/hlt on trap-handler binaries.
 			this.detectTrapHandlerGate();
+			for (const callback of this.peDataDirectories.tls?.callbackAddresses ?? []) {
+				this.functionSeeds.record(callback, { kind: 'tls-callback' });
+			}
 
 			// Initial analysis from entry point
 			const entryPoint = this.detectEntryPoint();
 			if (entryPoint) {
+				this.functionSeeds.record(entryPoint, { kind: 'entry' });
 				await this.analyzeFunction(entryPoint, 'entry_point');
+			}
+			for (const callback of this.peDataDirectories.tls?.callbackAddresses ?? []) {
+				if (!this.functions.has(callback) && this.isAnalyzableFunctionAddress(callback)) {
+					await this.analyzeFunction(callback, `tls_callback_${callback.toString(16).toUpperCase()}`);
+				}
 			}
 
 			// Analyze functions from exports
 			for (const exp of this.exports) {
+				if (!exp.isForwarder && exp.address > 0) {
+					this.functionSeeds.record(exp.address, { kind: 'export' });
+				}
+				if (this.fileInfo?.isRelocatable) {
+					// ET_REL st_value is section-relative. A single numeric function map
+					// cannot mix .text with .init.text/.exit.text/.static_call.text because
+					// they all start at zero. Non-.text symbols remain available through
+					// findFunctionSymbolByName(), which carries the section identity.
+					const symbol = this.elfFunctionByName.get(exp.name);
+					if (!symbol || symbol.sectionName !== '.text') {
+						continue;
+					}
+					if (!exp.isForwarder && exp.address > 0 && symbol.size > 0 && !this.functions.has(exp.address)) {
+						this.functions.set(exp.address, {
+							address: exp.address,
+							name: exp.name,
+							size: symbol.size,
+							endAddress: exp.address + symbol.size,
+							instructions: [],
+							callers: [],
+							callees: []
+						});
+						this.unmaterializedStubs.add(exp.address);
+					}
+					continue;
+				}
 				if (!exp.isForwarder && exp.address > 0 && !this.functions.has(exp.address)) {
 					await this.analyzeFunction(exp.address, exp.name);
 				}
@@ -842,32 +1030,81 @@ export class DisassemblerEngine {
 	/**
 	 * Full analysis: entry point + exports + prolog scan + re-analyze empty functions
 	 */
-	async analyzeAll(options?: { filterJunk?: boolean; detectVM?: boolean; detectPRNG?: boolean }): Promise<number> {
+	async analyzeAll(options?: {
+		filterJunk?: boolean;
+		detectVM?: boolean;
+		detectPRNG?: boolean;
+		/** Restore cached boundaries before analysis. Disabled by default for deterministic full analysis. */
+		useCachedFunctions?: boolean;
+		onPhase?: (phase: string) => void;
+	}): Promise<number> {
+		const phase = (name: string) => options?.onPhase?.(name);
+		phase('start');
 		if (!this.fileBuffer) {
+			this.analysisComplete = false;
+			this.lastAnalysisDelta = { added: 0, removed: 0, netChange: 0 };
 			return 0;
 		}
+		this.analysisComplete = false;
 
-		const countBefore = this.functions.size;
-
-		// v3.7.4: Restore function table from session cache (skip re-analysis)
-		if (this.sessionStore && this.functions.size === 0) {
+		// Restore cached boundaries as lazy stubs. loadFile always discovers the entry point
+		// first, so requiring an empty table made the cache unreachable on normal binaries.
+		// The session hash already binds these entries to the exact binary.
+		if (this.sessionStore && options?.useCachedFunctions === true) {
+			phase('restore-cache');
 			const cached = this.sessionStore.getCachedFunctions();
 			if (cached.length > 0) {
 				for (const entry of cached) {
-					const addr = parseInt(entry.address, 16);
-					if (!this.functions.has(addr)) {
-						try {
-							await this.analyzeFunction(addr, entry.name);
-						} catch {
-							// If analysis fails, skip this cached entry
-						}
+					if (this.functions.size >= this.maxStubFunctions) {
+						break;
 					}
+					const addr = parseInt(entry.address, 16);
+					const endAddress = Number(entry.end_address);
+					const size = Number(entry.size);
+					if (!Number.isSafeInteger(addr) || !Number.isSafeInteger(endAddress) ||
+						!Number.isSafeInteger(size) || endAddress <= addr || size <= 0 ||
+						this.functions.has(addr) || !this.isAnalyzableFunctionAddress(addr)) {
+						continue;
+					}
+					this.functions.set(addr, {
+						address: addr,
+						name: entry.name || `sub_${addr.toString(16).toUpperCase()}`,
+						size,
+						endAddress,
+						instructions: [],
+						callers: [],
+						callees: []
+					});
+					this.functionSeeds.record(addr, { kind: 'cache' });
+					this.unmaterializedStubs.add(addr);
 				}
 			}
 		}
 
+		// Establish authoritative PE64 boundaries as lazy stubs before heuristic
+		// prologue discovery. Reconciling only after the scan made the scanner
+		// eagerly decode every .pdata function, defeating lazy materialization on
+		// large DLLs such as libarchive.
+		if (this.getPdataEntries().length > 0) {
+			phase('pre-reconcile-pdata');
+			await this.reconcileFunctionsWithPdata();
+		}
+
+		const countBefore = this.functions.size;
+		const functionsBefore = new Set(this.functions.keys());
+
+		phase('scan-function-prologs');
 		// Scan for function prologs in code sections
 		await this.scanForFunctionPrologs();
+
+		// Callfuscation removes ordinary prologues and connects tiny nodes with
+		// call-as-jmp edges. Recover logical function entries from genuine decoded
+		// calls, excluding links whose target begins with the return-address pop.
+		phase('detect-callfuscation');
+		const callfuscation = this.detectCallfuscation();
+		if (callfuscation.detected) {
+			await this.buildExecScan();
+		}
 
 		// Re-analyze functions that ended up with 0 bytes (failed disassembly)
 		const emptyFuncs = Array.from(this.functions.values()).filter(f => f.size === 0);
@@ -884,17 +1121,31 @@ export class DisassemblerEngine {
 			}
 		}
 
+		// Recover MSVC/x86 leaf callbacks that have no prologue, direct caller or
+		// .pdata entry. Promotion requires structured RIP-relative LEA operands,
+		// a bounded memory consumer and a separately validated return terminal.
+		phase('discover-address-taken');
+		await this.discoverAddressTakenFunctionEntries();
+
 		// v3.8.3: normalize exact ELF STT_FUNC entries to their authoritative
 		// st_size. Linear discovery can stop at an interior ud2/ret or run into
 		// neighbouring functions; the reconciliation also rebuilds the call graph
 		// after trimming an over-wide discovery.
+		phase('reconcile-symbols');
 		this.reconcileFunctionsWithElfSymbols();
 
 		// v3.8.3 Gap-A: anchor the function table to authoritative PE64 .pdata
 		// boundaries (no-op when .pdata is absent: ELF/x86/ARM64 stay byte-identical).
 		// analyzeAll has just discovered/rebuilt functions, so reconcile again
 		// even if a prior lift already ran the one-shot hot-path barrier.
+		phase('reconcile-pdata');
 		await this.reconcileFunctionsWithPdata();
+
+		// PE32/raw have no unwind table to stop an over-wide linear decode. Clamp
+		// owners at independently confirmed starts before ghost cleanup so a real
+		// callee/tail function cannot remain nested inside its predecessor.
+		phase('normalize-call-graph');
+		this.reconcileFunctionsWithStrongSeeds();
 
 		// v3.8.3 Gap-K: add tail-call / trampoline edges (unconditional jmp/B to another
 		// function entry) that prologue-time wiring missed. Additive; runs after reconcile
@@ -931,8 +1182,14 @@ export class DisassemblerEngine {
 		// nothing. The PE64 path was cleaned by reconcileFunctionsWithPdata's rebuild; this
 		// makes the ELF / no-.pdata call graph consistent too (e.g. mali had ~1600 dangling).
 		this.scrubDanglingCallees();
+		if (callfuscation.detected) {
+			// Run after ordinary ghost cleanup: these entries deliberately have no
+			// conventional contiguous owner and must not be removed as interior labels.
+			this.discoverCallfuscationFunctionEntries();
+		}
 
 		// Build string cross-references
+		phase('build-string-xrefs');
 		this.buildStringXrefs();
 
 		// v3.8.2: Build the obfuscation-resistant linear instruction sweep ONCE when
@@ -945,12 +1202,22 @@ export class DisassemblerEngine {
 
 		// v3.7.1: Apply junk instruction filtering to all analyzed functions
 		if (options?.filterJunk) {
+			phase('filter-junk');
 			for (const func of this.functions.values()) {
 				if (func.instructions.length > 0) {
 					const { filtered } = this.filterJunkInstructions(func.instructions);
 					func.instructions = filtered;
 				}
 			}
+		}
+
+		// Reconstruct the exact incremental closure after whole-analysis body
+		// transforms. Incremental commits happen after analyzeAll, so replaying at
+		// the same phase preserves the body hashes and audit universe exactly.
+		phase('restore-persisted-closure');
+		this.closureRestoration = await this.restorePersistedMaterializedFunctions();
+		if (this.closureRestoration.restored > 0) {
+			this.buildStringXrefs();
 		}
 
 		// v3.7.1: Run VM detection on all analyzed functions
@@ -966,22 +1233,41 @@ export class DisassemblerEngine {
 
 		// v3.7.4: Persist discovered functions to session cache
 		if (this.sessionStore) {
+			phase('persist-function-cache');
 			try {
-				this.sessionStore.clearCache();
-				for (const func of this.functions.values()) {
-					this.sessionStore.cacheFunction(
-						`0x${func.address.toString(16)}`,
-						func.name,
-						func.size,
-						func.endAddress
-					);
-				}
+				const functions = this.functions.values();
+				this.sessionStore.replaceCachedFunctions((function* () {
+					for (const func of functions) {
+						yield {
+							address: `0x${func.address.toString(16)}`,
+							name: func.name,
+							size: func.size,
+							end_address: func.endAddress
+						};
+					}
+				})());
 			} catch {
 				// Non-critical — continue without cache persistence
 			}
 		}
 
-		return this.functions.size - countBefore;
+		let added = 0;
+		for (const address of this.functions.keys()) {
+			if (!functionsBefore.has(address)) {
+				added++;
+			}
+		}
+		let removed = 0;
+		for (const address of functionsBefore) {
+			if (!this.functions.has(address)) {
+				removed++;
+			}
+		}
+		this.lastAnalysisDelta = { added, removed, netChange: this.functions.size - countBefore };
+		this.analysisComplete = true;
+		this.analysisGeneration++;
+		phase('complete');
+		return this.lastAnalysisDelta.netChange;
 	}
 
 
@@ -1024,27 +1310,31 @@ export class DisassemblerEngine {
 		return 'x64';
 	}
 
-	async disassembleRange(startAddr: number, size: number): Promise<Instruction[]> {
+	async disassembleRange(startAddr: number, size: number, maxInstructions: number = 1000): Promise<Instruction[]> {
 		await this.ensureCapstoneInitialized();
+		const instructionLimit = Math.max(1, Math.min(Math.trunc(maxInstructions), 100000));
 
 		const offset = this.addressToOffset(startAddr);
 		if (offset < 0 || offset >= this.fileBuffer!.length) {
 			return [];
 		}
 
-		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
+		const mapping = this.isPEFile() ? this.getAddressMapping(startAddr) : undefined;
+		const readableSize = mapping?.availableBytes === undefined ? size : Math.min(size, mapping.availableBytes);
+		const endOffset = Math.min(offset + readableSize, this.fileBuffer!.length);
 		const bytesToDisasm = this.fileBuffer!.subarray(offset, endOffset);
 
 		if (this.capstoneInitialized) {
-			const rawInstructions = await this.capstone.disassemble(bytesToDisasm, startAddr, 1000);
+			const rawInstructions = await this.capstone.disassemble(bytesToDisasm, startAddr, instructionLimit);
 			return rawInstructions.map(inst => this.convertCapstoneInstruction(inst));
 		}
 
-		return this.disassembleRangeFallback(startAddr, size);
+		return this.disassembleRangeFallback(startAddr, size, instructionLimit);
 	}
 
 	private convertCapstoneInstruction(inst: DisassembledInstruction): Instruction {
 		const instruction: Instruction = {
+			id: inst.id,
 			address: inst.address,
 			bytes: inst.bytes,
 			mnemonic: inst.mnemonic,
@@ -1055,7 +1345,8 @@ export class DisassemblerEngine {
 			isJump: inst.isJump,
 			isRet: inst.isRet,
 			isConditional: inst.isConditional,
-			targetAddress: inst.targetAddress
+			targetAddress: inst.targetAddress,
+			detail: inst.detail,
 		};
 
 		this.instructions.set(inst.address, instruction);
@@ -1066,18 +1357,20 @@ export class DisassemblerEngine {
 	 * Fallback disassembly for when Capstone is not available.
 	 * Supports x86/x64 and basic ARM64/ARM32 decoding.
 	 */
-	private disassembleRangeFallback(startAddr: number, size: number): Instruction[] {
+	private disassembleRangeFallback(startAddr: number, size: number, maxInstructions: number = 1000): Instruction[] {
 		const instructions: Instruction[] = [];
 		let offset = this.addressToOffset(startAddr);
 		let addr = startAddr;
-		const endOffset = Math.min(offset + size, this.fileBuffer!.length);
+		const mapping = this.isPEFile() ? this.getAddressMapping(startAddr) : undefined;
+		const readableSize = mapping?.availableBytes === undefined ? size : Math.min(size, mapping.availableBytes);
+		const endOffset = Math.min(offset + readableSize, this.fileBuffer!.length);
 		const isARM64 = this.architecture === 'arm64';
 		const isARM32 = this.architecture === 'arm';
 		const isStructuredFallback = isARM64 || isARM32 || this.architecture === 'x86' || this.architecture === 'x64';
 
 		if (isARM64 || isARM32) {
 			// ARM: Fixed-width 4-byte instructions
-			while (offset + 4 <= endOffset && instructions.length < 1000) {
+			while (offset + 4 <= endOffset && instructions.length < maxInstructions) {
 				const word = this.fileBuffer!.readUInt32LE(offset);
 				const bytes = this.fileBuffer!.subarray(offset, offset + 4);
 				const inst = isARM64
@@ -1090,7 +1383,7 @@ export class DisassemblerEngine {
 			}
 		} else if (isStructuredFallback) {
 			// x86/x64: Variable-length instructions
-			while (offset < endOffset && instructions.length < 1000) {
+			while (offset < endOffset && instructions.length < maxInstructions) {
 				const inst = this.disassembleInstructionFallback(offset, addr);
 				if (inst) {
 					instructions.push(inst);
@@ -1115,7 +1408,7 @@ export class DisassemblerEngine {
 				}
 			}
 		} else {
-			while (offset < endOffset && instructions.length < 1000) {
+			while (offset < endOffset && instructions.length < maxInstructions) {
 				const dataByte = this.fileBuffer![offset];
 				const inst = this.createInstruction(
 					addr,
@@ -1417,6 +1710,7 @@ export class DisassemblerEngine {
 		if (!this.fileBuffer) {
 			return;
 		}
+		this.crc32LookupRanges = findCrc32LookupRanges(this.fileBuffer);
 
 		// v3.7.4: Compute scan ranges from section names
 		let scanRanges: Array<{ start: number; end: number }>;
@@ -1444,7 +1738,14 @@ export class DisassemblerEngine {
 					const offset = range.start + match.index;
 					const str = match[0];
 					const addr = this.offsetToAddress(offset);
-					this.strings.set(addr, { address: addr, string: str, encoding: 'ascii', references: [] });
+					this.strings.set(addr, {
+						address: addr,
+						string: str,
+						encoding: 'ascii',
+						references: [],
+						fileOffset: offset,
+						terminated: offset + str.length < range.end && this.fileBuffer[offset + str.length] === 0,
+					});
 				}
 			}
 		}
@@ -1465,7 +1766,16 @@ export class DisassemblerEngine {
 					const str = this.fileBuffer.toString('utf16le', i, i + len * 2);
 					const addr = this.offsetToAddress(i);
 					if (!this.strings.has(addr)) {
-						this.strings.set(addr, { address: addr, string: str, encoding: 'unicode', references: [] });
+						const terminatorOffset = i + len * 2;
+						this.strings.set(addr, {
+							address: addr,
+							string: str,
+							encoding: 'unicode',
+							references: [],
+							fileOffset: i,
+							terminated: terminatorOffset + 1 < range.end &&
+								this.fileBuffer.readUInt16LE(terminatorOffset) === 0,
+						});
 					}
 					i += len * 2;
 				}
@@ -2290,6 +2600,7 @@ export class DisassemblerEngine {
 					const p4 = Array.from(guidBytes.subarray(8, 10)).map(b => b.toString(16).padStart(2, '0')).join('');
 					const p5 = Array.from(guidBytes.subarray(10, 16)).map(b => b.toString(16).padStart(2, '0')).join('');
 					entry.pdbGuid = `${p1}-${p2}-${p3}-${p4}-${p5}`.toUpperCase();
+					entry.pdbAge = this.fileBuffer.readUInt32LE(pointerToRawData + 20);
 
 					// PDB path: null-terminated string after GUID + age (4 bytes)
 					const pathStart = pointerToRawData + 24;
@@ -2323,10 +2634,17 @@ export class DisassemblerEngine {
 		if (offset < 0) { return; }
 
 		const entrySize = 12; // RUNTIME_FUNCTION: BeginAddress(4) + EndAddress(4) + UnwindInfoAddress(4)
-		// A-lazy: raised 100K -> 250K so every .pdata function registers as a stub on the largest
-		// real targets (WWZ .pdata = 159,694 entries; ROTTR = 71,280). Stubs are cheap, so the
-		// higher cap costs only the stub registration (tens of MB), not a body disassembly each.
-		const count = Math.min(Math.floor(pdataSize / entrySize), 250000); // Safety cap at 250K
+		const declaredCount = Math.floor(pdataSize / entrySize);
+		const availableCount = Math.max(0, Math.floor((this.fileBuffer.length - offset) / entrySize));
+		const count = Math.min(declaredCount, availableCount, this.maxPdataEntries);
+		this.pdataDeclaredEntries = declaredCount;
+		this.pdataEntriesTruncated = count < declaredCount;
+		if (this.pdataEntriesTruncated) {
+			console.warn(
+				`[HexCore] .pdata table truncated: declared=${declaredCount}, readable=${availableCount}, ` +
+				`limit=${this.maxPdataEntries}, parsing=${count}`
+			);
+		}
 
 		const entries: PdataEntry[] = [];
 		for (let i = 0; i < count; i++) {
@@ -2355,6 +2673,14 @@ export class DisassemblerEngine {
 	 */
 	getPdataEntries(): PdataEntry[] {
 		return this.peDataDirectories.pdata ?? [];
+	}
+
+	getPdataDiagnostics(): { declaredEntries: number; parsedEntries: number; truncated: boolean } {
+		return {
+			declaredEntries: this.pdataDeclaredEntries,
+			parsedEntries: this.getPdataEntries().length,
+			truncated: this.pdataEntriesTruncated
+		};
 	}
 
 	private parsePETLSDirectory(tlsRVA: number, is64: boolean): void {
@@ -2893,9 +3219,106 @@ export class DisassemblerEngine {
 
 		const discardedInstructionAddresses = new Set<number>();
 		let changed = false;
+		if (this.fileInfo?.isRelocatable) {
+			const canonicalSymbols = this.elfAnalysis.symbols.filter(sym =>
+				sym.type === 'FUNC' && !sym.isImport && sym.size > 0 &&
+				sym.sectionName === '.text' && Number.isSafeInteger(sym.value)
+			);
+			const symbolsByBegin = new Map<number, ELFSymbolEntry[]>();
+			for (const sym of canonicalSymbols) {
+				this.functionSeeds.record(sym.value, { kind: 'symbol' });
+				const group = symbolsByBegin.get(sym.value) ?? [];
+				group.push(sym);
+				symbolsByBegin.set(sym.value, group);
+			}
+			const nonCanonicalNames = new Set(this.elfAnalysis.symbols
+				.filter(sym => sym.type === 'FUNC' && !sym.isImport && sym.sectionName !== '.text')
+				.map(sym => sym.name));
+			const begins = Array.from(symbolsByBegin.keys()).sort((a, b) => a - b);
+			const beginSet = new Set(begins);
+			const ranges = begins.map(begin => {
+				const symbols = symbolsByBegin.get(begin)!;
+				const widest = symbols.slice().sort((a, b) => b.size - a.size)[0];
+				return { begin, end: begin + widest.size };
+			});
+			const findContaining = (address: number): { begin: number; end: number } | undefined => {
+				let lo = 0;
+				let hi = ranges.length - 1;
+				while (lo <= hi) {
+					const mid = lo + ((hi - lo) >> 1);
+					const range = ranges[mid];
+					if (address < range.begin) {
+						hi = mid - 1;
+					} else if (address >= range.end) {
+						lo = mid + 1;
+					} else {
+						return range;
+					}
+				}
+				return undefined;
+			};
+
+			for (const [address, fn] of Array.from(this.functions)) {
+				if (beginSet.has(address)) {
+					const symbols = symbolsByBegin.get(address)!;
+					const preferred = symbols.find(sym => sym.name === fn.name) ??
+						symbols.slice().sort((a, b) => b.size - a.size)[0];
+					if (/^sub_[0-9a-f]+$/i.test(fn.name) || nonCanonicalNames.has(fn.name)) {
+						fn.name = preferred.name;
+					}
+					const end = address + preferred.size;
+					if (fn.endAddress !== end || fn.size !== preferred.size) {
+						if (fn.endAddress > end) {
+							fn.instructions = fn.instructions.filter(inst => {
+								const instAddress = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+								if (instAddress >= address && instAddress < end) { return true; }
+								discardedInstructionAddresses.add(instAddress);
+								return false;
+							});
+						}
+						fn.endAddress = end;
+						fn.size = preferred.size;
+						changed = true;
+					}
+					continue;
+				}
+
+				const owner = findContaining(address);
+				if (nonCanonicalNames.has(fn.name) || owner || this.spansAnyBegin(address, fn.endAddress, begins)) {
+					for (const inst of fn.instructions) {
+						discardedInstructionAddresses.add(
+							typeof inst.address === 'bigint' ? Number(inst.address) : inst.address
+						);
+					}
+					this.functions.delete(address);
+					this.unmaterializedStubs.delete(address);
+					changed = true;
+				}
+			}
+
+			for (const begin of begins) {
+				if (this.functions.has(begin)) { continue; }
+				const preferred = symbolsByBegin.get(begin)!.slice().sort((a, b) => b.size - a.size)[0];
+				this.functions.set(begin, {
+					address: begin,
+					name: preferred.name,
+					size: preferred.size,
+					endAddress: begin + preferred.size,
+					instructions: [],
+					callers: [],
+					callees: []
+				});
+				this.unmaterializedStubs.add(begin);
+				changed = true;
+			}
+		}
 		for (const func of this.functions.values()) {
 			const sym = this.getExactElfFunctionSymbol(func.address, func.name);
-			if (!sym || sym.size === func.size) {
+			if (!sym) {
+				continue;
+			}
+			this.functionSeeds.record(func.address, { kind: 'symbol' });
+			if (sym.size === func.size) {
 				continue;
 			}
 			const symbolEnd = func.address + sym.size;
@@ -3194,7 +3617,7 @@ export class DisassemblerEngine {
 			const symCount = Math.floor(sec.size / sec.entsize);
 			const isDynSym = sec.type === 11;
 
-			for (let i = 0; i < symCount && i < 8192; i++) {
+			for (let i = 0; i < symCount && i < this.maxElfSymbolEntries; i++) {
 				const symOff = sec.offset + i * sec.entsize;
 				if (symOff + sec.entsize > this.fileBuffer.length) {
 					break;
@@ -3709,7 +4132,7 @@ export class DisassemblerEngine {
 			const strTabSec = elfSections[sec.link];
 			if (!strTabSec) { continue; }
 
-			const symCount = Math.min(Math.floor(sec.size / sec.entsize), 16384);
+			const symCount = Math.min(Math.floor(sec.size / sec.entsize), this.maxElfSymbolEntries);
 			for (let i = 0; i < symCount; i++) {
 				const symOff = sec.offset + i * sec.entsize;
 				if (symOff + sec.entsize > this.fileBuffer.length) { break; }
@@ -3982,14 +4405,7 @@ export class DisassemblerEngine {
 			return -1;
 		}
 
-		for (const section of this.sections) {
-			const sectionRVA = section.virtualAddress - this.baseAddress;
-			if (rva >= sectionRVA && rva < sectionRVA + section.virtualSize) {
-				return section.rawAddress + (rva - sectionRVA);
-			}
-		}
-
-		return rva;
+		return resolvePeRvaMapping(rva, this.baseAddress, this.sections, this.fileBuffer.length).fileOffset ?? -1;
 	}
 
 	// ============================================================================
@@ -4198,12 +4614,53 @@ export class DisassemblerEngine {
 	 *  - address not in the table        -> undefined (nothing to materialize)
 	 *  - address not a tracked stub      -> already materialized (or never was a stub); return it as-is
 	 *  - otherwise                       -> disassemble [address,endAddress), filter to the function's
-	 *                                       bounds, assign instructions, recompute size, drop the stub flag
+	 *                                       bounds, assign instructions, drop the stub flag
 	 *
 	 * Body disassembly is NON-recursive (it does not follow call/jump children) -- it mirrors
 	 * reconcileFunctionsWithPdata step (2): we already have the authoritative .pdata bounds, so the
 	 * call graph is rebuilt elsewhere and we must not re-explode into ghost children here.
 	 */
+	private assessFunctionBodyCompleteness(fn: Function): FunctionBodyCompleteness {
+		const authoritativeStart = Number(fn.address);
+		const authoritativeEndExclusive = Number(fn.endAddress);
+		const ordered = [...fn.instructions].sort((left, right) => Number(left.address) - Number(right.address));
+		const decodedEndExclusive = ordered.reduce(
+			(maximum, instruction) => Math.max(maximum, Number(instruction.address) + Number(instruction.size)),
+			authoritativeStart,
+		);
+		let semanticEndExclusive = decodedEndExclusive;
+		for (let index = ordered.length - 1; index >= 0; index--) {
+			const instruction = ordered[index];
+			if (!['nop', 'int3'].includes(String(instruction.mnemonic ?? '').toLowerCase())) {
+				semanticEndExclusive = Number(instruction.address) + Number(instruction.size);
+				break;
+			}
+			if (index === 0) { semanticEndExclusive = authoritativeStart; }
+		}
+		const span = Math.max(0, authoritativeEndExclusive - authoritativeStart);
+		const boundaryReached = span > 0 && decodedEndExclusive >= authoritativeEndExclusive;
+		const byteCoverage = span === 0 ? 0 : Math.max(0, Math.min(1,
+			(decodedEndExclusive - authoritativeStart) / span,
+		));
+		const nextOffset = this.fileBuffer ? this.addressToOffset(decodedEndExclusive) : -1;
+		const nextByteAvailable = Boolean(this.fileBuffer && nextOffset >= 0 && nextOffset < this.fileBuffer.length);
+		const state: FunctionBodyCompletenessState = ordered.length === 0
+			? 'decode-empty'
+			: boundaryReached ? 'complete' : 'partial';
+		return Object.freeze({
+			state,
+			authoritativeStart,
+			authoritativeEndExclusive,
+			decodedEndExclusive,
+			semanticEndExclusive,
+			boundaryReached,
+			stopReason: state === 'decode-empty' ? 'decode-empty'
+				: state === 'complete' ? 'function-end'
+					: nextByteAvailable ? 'decode-failure' : 'binary-boundary',
+			byteCoverage,
+		});
+	}
+
 	async materializeFunction(address: number): Promise<Function | undefined> {
 		// Safety: coerce BigInt from Capstone prebuilds to number (same as analyzeFunction).
 		if (typeof address === 'bigint') { address = Number(address); }
@@ -4221,7 +4678,8 @@ export class DisassemblerEngine {
 
 		let insns: Instruction[] = [];
 		try {
-			const rawInsns = await this.disassembleRange(address, size);
+			const instructionBudget = Math.min(Math.max(1, size), 100_000);
+			const rawInsns = await this.disassembleRange(address, size, instructionBudget);
 			// Clamp to the authoritative .pdata bounds [address,endAddress); disassembleRange may
 			// over-read past the real end into a neighbour (same filter as reconcile step 2).
 			insns = rawInsns.filter(inst => {
@@ -4233,21 +4691,237 @@ export class DisassemblerEngine {
 		}
 
 		fn.instructions = insns;
-		// Recompute size/end from the last recovered instruction (reuse analyzeFunction's
-		// BigInt coercion + last-instruction end-handling style), never exceeding the .pdata end.
-		const last = insns[insns.length - 1];
-		if (last) {
-			const la = typeof last.address === 'bigint' ? Number(last.address) : last.address;
-			const ls = typeof last.size === 'bigint' ? Number(last.size) : last.size;
-			const recomputedEnd = Math.min(endAddress, la + ls);
-			fn.endAddress = recomputedEnd;
-			fn.size = recomputedEnd - address;
-		}
-		// else: body could not be linearly recovered (obfuscated/VM-protected) -- keep the
-		// authoritative .pdata bounds the stub already carried.
+		// Materialization is a semantic operation and uses a span-derived instruction
+		// budget above; presentation surfaces remain free to paginate the result. Never
+		// let a presentation limit shrink the authoritative .pdata extent used by
+		// Pathfinder, Remill, and Helix. Obfuscated/VM-protected bodies may also decode only
+		// partially while their unwind-table boundary remains valid.
+		fn.endAddress = endAddress;
+		fn.size = endAddress - address;
+		fn.bodyCompleteness = this.assessFunctionBodyCompleteness(fn);
 
-		this.unmaterializedStubs.delete(address);
+		if (fn.bodyCompleteness.state === 'complete') {
+			this.unmaterializedStubs.delete(address);
+		} else {
+			// Empty or partial decode may be transient. Keep the function retryable
+			// and outside the accepted semantic universe.
+			this.unmaterializedStubs.add(address);
+		}
 		return fn;
+	}
+
+	private functionBodySha256(fn: Function): string {
+		const hash = crypto.createHash('sha256');
+		hash.update(`${fn.address.toString(16)}:${fn.endAddress.toString(16)}:`);
+		for (const instruction of fn.instructions) {
+			hash.update(`${Number(instruction.address).toString(16)}:${instruction.mnemonic}:${instruction.opStr}:`);
+			hash.update(instruction.bytes);
+		}
+		return hash.digest('hex');
+	}
+
+	private async restorePersistedMaterializedFunctions(): Promise<AnalysisClosureRestoration> {
+		const manifest = this.sessionStore?.getAnalysisUniverseManifest();
+		if (!manifest || manifest.materializedFunctions.length === 0) {
+			const session = this.sessionStore?.getAnalysisSession();
+			const binding = this.sessionStore?.getMeta('analysis_generation_universe_json');
+			if (session && session.generation > 0 && !binding) {
+				const baseline = this.sessionStore!.resetAnalysisUniverseManifest();
+				const migrated = this.sessionStore!.startReanalysis();
+				this.sessionStore!.setMeta('analysis_generation_universe_json', JSON.stringify({
+					generation: migrated.generation,
+					universeSha256: baseline.universeSha256,
+				}));
+				return {
+					status: 'reset', requested: 0, restored: 0,
+					failed: ['Legacy persisted generation had no replayable universe manifest; advanced to a new baseline generation.'],
+					universeSha256: baseline.universeSha256,
+				};
+			}
+			return { status: 'none', requested: 0, restored: 0, failed: [] };
+		}
+		const failed: string[] = [];
+		const restoredAddresses: number[] = [];
+		const restoredEntries: typeof manifest.materializedFunctions = [];
+		let restored = 0;
+		for (const entry of manifest.materializedFunctions) {
+			const address = parseInt(entry.address.slice(2), 16);
+			const endExclusive = parseInt(entry.endExclusive.slice(2), 16);
+			const fn = this.functions.get(address);
+			if (!fn || fn.endAddress !== endExclusive) {
+				failed.push(`${entry.address}: authoritative boundary unavailable or changed`);
+				continue;
+			}
+			const body = this.unmaterializedStubs.has(address)
+				? await this.materializeFunction(address)
+				: fn;
+			if (!body || body.instructions.length === 0) {
+				failed.push(`${entry.address}: body decode remained empty`);
+				continue;
+			}
+			const completeness = this.getFunctionBodyCompleteness(address);
+			if (!completeness || completeness.state !== 'complete') {
+				failed.push(`${entry.address}: body decode remained ${completeness?.state ?? 'unknown'} at ${(completeness?.byteCoverage ?? 0).toFixed(6)} coverage`);
+				continue;
+			}
+			const bodySha256 = this.functionBodySha256(body);
+			if (bodySha256 !== entry.bodySha256) {
+				failed.push(`${entry.address}: body hash mismatch`);
+				continue;
+			}
+			restored++;
+			restoredAddresses.push(address);
+			restoredEntries.push({
+				...entry,
+				bodyCompleteness: {
+					...completeness,
+					state: 'complete',
+					boundaryReached: true,
+					stopReason: 'function-end',
+					byteCoverage: 1,
+				},
+			});
+		}
+		let acceptedUniverseSha256 = manifest.universeSha256;
+		if (failed.length > 0) {
+			// Quarantine only failed bodies. Complete entries remain in the accepted
+			// universe and prior immutable manifest/version evidence remains in HXDB.
+			const accepted = this.sessionStore?.replaceAnalysisUniverseManifest(restoredEntries);
+			if (accepted) {
+				acceptedUniverseSha256 = accepted.universeSha256;
+				this.sessionStore?.advanceAnalysisGeneration(
+					'partial-closure-quarantine', undefined, accepted.universeSha256,
+				);
+			}
+		}
+		if (restored > 0) {
+			this.applyIatCallNames();
+			this.rebuildCallGraphFromMaterializedBodies();
+		}
+		return {
+			status: failed.length === 0 ? 'restored' : 'partial',
+			requested: manifest.materializedFunctions.length,
+			restored,
+			failed,
+			universeSha256: acceptedUniverseSha256,
+		};
+	}
+
+	private rebuildCallGraphFromMaterializedBodies(): void {
+		for (const fn of this.functions.values()) {
+			fn.callers = [];
+			fn.callees = [];
+		}
+		for (const fn of this.functions.values()) {
+			const seenCallees = new Set<number>();
+			for (const instruction of fn.instructions) {
+				if (!instruction.isCall || instruction.targetAddress === undefined) { continue; }
+				const targetAddress = Number(instruction.targetAddress);
+				const target = this.functions.get(targetAddress);
+				if (!target) { continue; }
+				if (!seenCallees.has(targetAddress)) {
+					seenCallees.add(targetAddress);
+					fn.callees.push(targetAddress);
+				}
+				const callSite = Number(instruction.address);
+				if (!target.callers.includes(callSite)) {
+					target.callers.push(callSite);
+				}
+			}
+		}
+		this.addTailCallEdges();
+		this.scrubDanglingCallees();
+	}
+
+	/**
+	 * Materialize a lazy function and commit the new body to every in-memory
+	 * index consumed by downstream analysis passes. This is distinct from the
+	 * presentation-only accessor: a successful commit advances both engine and
+	 * persisted analysis generations.
+	 */
+	async materializeFunctionForAnalysis(address: number): Promise<FunctionAnalysisMaterialization> {
+		if (typeof address === 'bigint') { address = Number(address); }
+		const engineGenerationBefore = this.analysisGeneration;
+		const sessionGenerationBefore = this.sessionStore?.getAnalysisSession()?.generation;
+		const existing = this.functions.get(address);
+		if (!existing) {
+			return {
+				status: 'unknown-function', changed: false, instructionsAdded: 0,
+				engineGenerationBefore, engineGenerationAfter: this.analysisGeneration,
+				...(sessionGenerationBefore !== undefined ? { sessionGenerationBefore, sessionGenerationAfter: sessionGenerationBefore } : {}),
+			};
+		}
+		if (!this.unmaterializedStubs.has(address)) {
+			const bodyCompleteness = this.getFunctionBodyCompleteness(address);
+			return {
+				status: existing.instructions.length > 0 ? 'already-current' : 'decode-empty',
+				function: existing, changed: false, instructionsAdded: 0,
+				...(bodyCompleteness ? { bodyCompleteness } : {}),
+				engineGenerationBefore, engineGenerationAfter: this.analysisGeneration,
+				...(sessionGenerationBefore !== undefined ? { sessionGenerationBefore, sessionGenerationAfter: sessionGenerationBefore } : {}),
+			};
+		}
+
+		const materialized = await this.materializeFunction(address);
+		if (!materialized || materialized.instructions.length === 0) {
+			const bodyCompleteness = materialized ? this.getFunctionBodyCompleteness(address) : undefined;
+			return {
+				status: materialized ? 'decode-empty' : 'unknown-function',
+				...(materialized ? { function: materialized } : {}),
+				...(bodyCompleteness ? { bodyCompleteness } : {}),
+				changed: false, instructionsAdded: 0,
+				engineGenerationBefore, engineGenerationAfter: this.analysisGeneration,
+				...(sessionGenerationBefore !== undefined ? { sessionGenerationBefore, sessionGenerationAfter: sessionGenerationBefore } : {}),
+			};
+		}
+		const bodyCompleteness = this.getFunctionBodyCompleteness(address);
+		if (!bodyCompleteness || bodyCompleteness.state !== 'complete') {
+			return {
+				status: 'partial',
+				function: materialized,
+				...(bodyCompleteness ? { bodyCompleteness } : {}),
+				changed: false,
+				instructionsAdded: materialized.instructions.length,
+				engineGenerationBefore,
+				engineGenerationAfter: this.analysisGeneration,
+				...(sessionGenerationBefore !== undefined ? { sessionGenerationBefore, sessionGenerationAfter: sessionGenerationBefore } : {}),
+			};
+		}
+
+		this.applyIatCallNames();
+		this.rebuildCallGraphFromMaterializedBodies();
+		this.buildStringXrefs();
+		this.analysisGeneration++;
+		const addressHex = `0x${address.toString(16).toUpperCase()}`;
+		const endExclusiveHex = `0x${materialized.endAddress.toString(16).toUpperCase()}`;
+		const manifest = this.sessionStore?.recordMaterializedFunction({
+			address: addressHex,
+			endExclusive: endExclusiveHex,
+			bodySha256: this.functionBodySha256(materialized),
+			bodyCompleteness: {
+				...bodyCompleteness,
+				state: 'complete',
+				boundaryReached: true,
+				stopReason: 'function-end',
+				byteCoverage: 1,
+			},
+		});
+		const session = this.sessionStore?.advanceAnalysisGeneration(
+			'function-materialization',
+			addressHex,
+			manifest?.universeSha256,
+		);
+		return {
+			status: 'committed',
+			function: materialized,
+			bodyCompleteness,
+			changed: true,
+			instructionsAdded: materialized.instructions.length,
+			engineGenerationBefore,
+			engineGenerationAfter: this.analysisGeneration,
+			...(sessionGenerationBefore !== undefined ? { sessionGenerationBefore } : {}),
+			...(session ? { sessionGenerationAfter: session.generation } : {}),
+		};
 	}
 
 	async analyzeFunction(address: number, name?: string): Promise<Function> {
@@ -4255,7 +4929,9 @@ export class DisassemblerEngine {
 		if (typeof address === 'bigint') { address = Number(address); }
 		const existing = this.functions.get(address);
 		if (existing) {
-			return existing;
+			// A cached boundary is not an analyzed body. When discovery reaches that
+			// address again, honor the request and decode the lazy stub in place.
+			return (await this.materializeFunction(address)) ?? existing;
 		}
 
 		if (!this.isAnalyzableFunctionAddress(address)) {
@@ -4268,6 +4944,9 @@ export class DisassemblerEngine {
 				callers: [],
 				callees: []
 			};
+		}
+		if (this.hasStrongFunctionEntryPattern(address)) {
+			this.functionSeeds.record(address, { kind: 'prologue' });
 		}
 
 		const instructions = await this.disassembleRange(address, this.maxFunctionSize);
@@ -4418,7 +5097,20 @@ export class DisassemblerEngine {
 			endIdx = lastRetIdx + 1;
 		}
 
-		const funcInstructions = instructions.slice(0, endIdx);
+		let internalBlockTargets = new Set<number>();
+		let funcInstructions = instructions.slice(0, endIdx);
+		const useReachableBlockOwnership =
+			(this.architecture === 'x86' || this.architecture === 'x64') &&
+			this.getPdataEntries().length === 0 &&
+			this.fileInfo?.isRelocatable !== true &&
+			!this.fileInfo?.format.startsWith('ELF');
+		if (useReachableBlockOwnership) {
+			const reachable = this.selectReachableFunctionInstructions(instructions, Number(address));
+			if (reachable.instructions.length > 0) {
+				funcInstructions = reachable.instructions;
+				internalBlockTargets = reachable.internalBlockTargets;
+			}
+		}
 
 		// Coerce address to number — Capstone prebuilds may return BigInt for 64-bit addresses
 		const addrNum = typeof address === 'bigint' ? Number(address) : address;
@@ -4443,13 +5135,20 @@ export class DisassemblerEngine {
 
 		for (const inst of funcInstructions) {
 			if (inst.isCall && inst.targetAddress && this.functions.size < this.maxFunctions) {
+				const instructionAddress = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+				const instructionSize = typeof inst.size === 'bigint' ? Number(inst.size) : inst.size;
+				const isGetPcCall = inst.targetAddress === instructionAddress + instructionSize;
+				if (isGetPcCall) {
+					continue;
+				}
 				// Ghost-function guard: only treat the call target as a function if it
 				// lies in an executable/code section. A direct `call 0x402000` into .data
 				// or .rdata must not spawn a sub_402000 stub — that pollutes the function
 				// list with hundreds of fake entries on obfuscated/packed binaries.
 				// Xref to the target is still recorded (useful for data-ref UI), but we
 				// only add it to callees when it's really code.
-				const targetIsCode = this.isAnalyzableFunctionAddress(inst.targetAddress);
+				const targetIsCode = !internalBlockTargets.has(inst.targetAddress) &&
+					this.isAnalyzableFunctionAddress(inst.targetAddress);
 				this.addXRef({
 					from: inst.address,
 					to: inst.targetAddress,
@@ -4457,6 +5156,10 @@ export class DisassemblerEngine {
 				});
 
 				if (targetIsCode) {
+					this.functionSeeds.record(inst.targetAddress, {
+						kind: 'direct-call',
+						sourceAddress: inst.address,
+					});
 					func.callees.push(inst.targetAddress);
 
 					// Track caller in target function
@@ -4482,10 +5185,10 @@ export class DisassemblerEngine {
 					type: jumpTargetIsCode ? 'jump' : 'data'
 				});
 
-				// Follow unconditional jumps whose targets are outside this function
-				// (trampolines, tail calls, thunks) — treat target as a new function
-				// ONLY when the target is actually in a code section. Otherwise a tail
-				// jmp into an import thunk / absolute data pointer becomes sub_XX ghost.
+				// A jump target is a basic-block leader by default, not a function seed.
+				// Promote only a real tail/thunk candidate whose target has independent
+				// function-entry evidence. This prevents raw CFG joins from becoming five
+				// overlapping functions while retaining register-save/stack-frame thunks.
 				//
 				// v3.8.5: when the trap-handler gate extended this function PAST trap
 				// separators, the body now contains many interior `jmp <join>` edges (the
@@ -4498,13 +5201,20 @@ export class DisassemblerEngine {
 				// stay byte-identical.
 				const interiorToSelf = this.trapHandlerGate &&
 					inst.targetAddress > addrNum && inst.targetAddress < func.endAddress;
-				if (jumpTargetIsCode &&
+				const validatedTailCall = jumpTargetIsCode &&
 					!inst.isConditional &&
 					inst.targetAddress !== address &&
 					!interiorToSelf &&
-					!this.functions.has(inst.targetAddress) &&
-					this.functions.size < this.maxFunctions) {
-					childTargets.push(inst.targetAddress);
+					!internalBlockTargets.has(inst.targetAddress) &&
+					this.hasValidatedTailEntryPattern(inst.targetAddress);
+				if (validatedTailCall) {
+					this.functionSeeds.record(inst.targetAddress, {
+						kind: 'validated-tail-call',
+						sourceAddress: inst.address,
+					});
+					if (!this.functions.has(inst.targetAddress) && this.functions.size < this.maxFunctions) {
+						childTargets.push(inst.targetAddress);
+					}
 				}
 			}
 		}
@@ -4517,6 +5227,220 @@ export class DisassemblerEngine {
 		}
 
 		return func;
+	}
+
+	private selectReachableFunctionInstructions(
+		instructions: Instruction[],
+		functionStart: number,
+	): { instructions: Instruction[]; internalBlockTargets: Set<number> } {
+		const indexByAddress = new Map<number, number>();
+		for (let index = 0; index < instructions.length; index++) {
+			indexByAddress.set(Number(instructions[index].address), index);
+		}
+		if (!indexByAddress.has(functionStart)) {
+			return { instructions: [], internalBlockTargets: new Set() };
+		}
+
+		const conditionalTargets = new Set<number>();
+		for (const instruction of instructions) {
+			if (instruction.isJump && instruction.isConditional && instruction.targetAddress !== undefined &&
+				indexByAddress.has(Number(instruction.targetAddress))) {
+				conditionalTargets.add(Number(instruction.targetAddress));
+			}
+		}
+
+		const pending = [functionStart];
+		const queued = new Set(pending);
+		const visited = new Set<number>();
+		const internalBlockTargets = new Set<number>();
+		while (pending.length > 0) {
+			const leader = pending.shift()!;
+			let index = indexByAddress.get(leader);
+			if (index === undefined) {
+				continue;
+			}
+			while (index < instructions.length) {
+				const instruction = instructions[index];
+				const address = Number(instruction.address);
+				if (visited.has(address)) {
+					break;
+				}
+				if (address !== leader && address !== functionStart && this.functionSeeds.isStrong(address)) {
+					break;
+				}
+				if (!this.trapHandlerGate && instruction.mnemonic.toLowerCase() === 'int3') {
+					break;
+				}
+				visited.add(address);
+
+				if (instruction.isRet &&
+					!(this.trapHandlerGate && this.isTrapMnemonic(instruction.mnemonic))) {
+					break;
+				}
+				if (instruction.isJump) {
+					const target = instruction.targetAddress === undefined ? undefined : Number(instruction.targetAddress);
+					if (target !== undefined && indexByAddress.has(target)) {
+						const internalTarget = instruction.isConditional || conditionalTargets.has(target) ||
+							!this.hasValidatedTailEntryPattern(target);
+						if (internalTarget && !queued.has(target)) {
+							queued.add(target);
+							pending.push(target);
+							if (target !== functionStart) {
+								internalBlockTargets.add(target);
+							}
+						}
+					}
+					if (!instruction.isConditional) {
+						break;
+					}
+				}
+
+				const next = instructions[index + 1];
+				if (!next || Number(next.address) !== address + Number(instruction.size)) {
+					break;
+				}
+				index++;
+			}
+		}
+
+		return {
+			instructions: instructions
+				.filter(instruction => visited.has(Number(instruction.address)))
+				.sort((left, right) => Number(left.address) - Number(right.address)),
+			internalBlockTargets,
+		};
+	}
+
+	/**
+	 * Require byte-level entry evidence before an unconditional jump may create
+	 * a function. Calls, symbols, exports and unwind metadata are already strong
+	 * seeds and do not use this heuristic.
+	 */
+	private hasStrongFunctionEntryPattern(address: number): boolean {
+		if (!this.fileBuffer) {
+			return false;
+		}
+		const offset = this.addressToOffset(address);
+		if (offset < 0 || offset >= this.fileBuffer.length) {
+			return false;
+		}
+		const remaining = this.fileBuffer.subarray(offset, Math.min(this.fileBuffer.length, offset + 16));
+		if (this.architecture === 'x86' || this.architecture === 'x64') {
+			if (remaining.length >= 3 && remaining[0] === 0x55 && remaining[1] === 0x8b && remaining[2] === 0xec) {
+				return true;
+			}
+			if (remaining.length >= 4 && remaining[0] === 0x55 && remaining[1] === 0x48 && remaining[2] === 0x89 && remaining[3] === 0xe5) {
+				return true;
+			}
+			if (remaining.length >= 4 && remaining[0] === 0xf3 && remaining[1] === 0x0f && remaining[2] === 0x1e && remaining[3] === 0xfa) {
+				return true;
+			}
+			if (remaining[0] === 0x55) {
+				let cursor = 1;
+				while (cursor < remaining.length && cursor <= 5 && remaining[cursor] >= 0x50 && remaining[cursor] <= 0x57) {
+					cursor++;
+				}
+				if (cursor >= 4) {
+					return true;
+				}
+				if (cursor + 2 < remaining.length &&
+					(remaining[cursor] === 0x81 || remaining[cursor] === 0x83) &&
+					remaining[cursor + 1] === 0xec) {
+					return true;
+				}
+			}
+			if (remaining.length >= 4 && remaining[0] === 0x48 &&
+				(remaining[1] === 0x81 || remaining[1] === 0x83) && remaining[2] === 0xec) {
+				return true;
+			}
+			if (remaining.length >= 3 && remaining[0] === 0x56 && remaining[1] === 0x8b && remaining[2] === 0xf1) {
+				return true;
+			}
+			if (remaining.length >= 4 && remaining[0] === 0x57 && remaining[1] === 0x56 &&
+				((remaining[2] === 0x8b && remaining[3] === 0xf1) ||
+					((remaining[2] === 0x81 || remaining[2] === 0x83) && remaining[3] === 0xec))) {
+				return true;
+			}
+			if (this.architecture === 'x86' && remaining.length >= 3 &&
+				(remaining[0] === 0x81 || remaining[0] === 0x83) && remaining[1] === 0xec) {
+				return true;
+			}
+			if (this.isKnownImportThunk(address)) {
+				return true;
+			}
+			return false;
+		}
+		if (remaining.length < 4) {
+			return false;
+		}
+		const word = remaining.readUInt32LE(0);
+		if (this.architecture === 'arm64') {
+			return (word & 0xfc407fff) === 0xa8007bfd || word === 0xd503233f;
+		}
+		if (this.architecture === 'arm') {
+			return (word & 0xffff0000) === 0xe92d0000 && (word & (1 << 14)) !== 0;
+		}
+		return false;
+	}
+
+	private hasValidatedTailEntryPattern(address: number): boolean {
+		if (!this.fileBuffer) {
+			return false;
+		}
+		const offset = this.addressToOffset(address);
+		if (offset < 0 || offset >= this.fileBuffer.length) {
+			return false;
+		}
+		const remaining = this.fileBuffer.subarray(offset, Math.min(this.fileBuffer.length, offset + 16));
+		if (this.architecture === 'x86' || this.architecture === 'x64') {
+			if (this.isKnownImportThunk(address)) {
+				return true;
+			}
+			if (remaining.length >= 3 && remaining[0] === 0x55 && remaining[1] === 0x8b && remaining[2] === 0xec) {
+				return true;
+			}
+			if (remaining.length >= 4 && remaining[0] === 0x55 && remaining[1] === 0x48 && remaining[2] === 0x89 && remaining[3] === 0xe5) {
+				return true;
+			}
+			if (remaining.length >= 4 && remaining[0] === 0xf3 && remaining[1] === 0x0f && remaining[2] === 0x1e && remaining[3] === 0xfa) {
+				return true;
+			}
+			if (remaining[0] === 0x55) {
+				let cursor = 1;
+				while (cursor < remaining.length && cursor <= 5 && remaining[cursor] >= 0x50 && remaining[cursor] <= 0x57) {
+					cursor++;
+				}
+				return cursor >= 4 ||
+					(cursor + 2 < remaining.length &&
+						(remaining[cursor] === 0x81 || remaining[cursor] === 0x83) &&
+						remaining[cursor + 1] === 0xec);
+			}
+			return false;
+		}
+		return this.hasStrongFunctionEntryPattern(address);
+	}
+
+	private isKnownImportThunk(address: number): boolean {
+		if (this.architecture !== 'x86' || !this.fileBuffer) {
+			return false;
+		}
+		const offset = this.addressToOffset(address);
+		if (offset < 0 || offset + 6 > this.fileBuffer.length ||
+			this.fileBuffer[offset] !== 0xff || this.fileBuffer[offset + 1] !== 0x25) {
+			return false;
+		}
+		const iatAddress = this.fileBuffer.readUInt32LE(offset + 2);
+		return this.imports.some(library => library.functions.some(fn => fn.address === iatAddress));
+	}
+
+	private hasFunctionBoundaryBefore(address: number): boolean {
+		const offset = this.addressToOffset(address);
+		if (offset <= 0 || !this.fileBuffer) {
+			return offset === 0;
+		}
+		const previous = this.fileBuffer[offset - 1];
+		return previous === 0xc3 || previous === 0xcb || previous === 0xcc || previous === 0x90 ||
+			(offset >= 3 && this.fileBuffer[offset - 3] === 0xc2);
 	}
 
 	private isAnalyzableFunctionAddress(address: number): boolean {
@@ -4575,6 +5499,10 @@ export class DisassemblerEngine {
 			}
 		}
 		return undefined;
+	}
+
+	getAuthoritativePdataRanges(): ReadonlyArray<{ begin: number; end: number }> {
+		return this.authoritativePdataRanges.map(range => ({ ...range }));
 	}
 
 	/**
@@ -4644,8 +5572,6 @@ export class DisassemblerEngine {
 			const buf = this.fileBuffer;
 			if (!buf) { return { chained: false, targetBeginVa: 0 }; }
 			// v3.8.2 FIX-027b (#5): only trust UNWIND_INFO that actually lives inside a section.
-			// rvaToFileOffset returns the RVA UNCHANGED for an out-of-section address (forged PE),
-			// which would otherwise let attacker-chosen bytes be read as unwind info.
 			let unwindInSection = false;
 			for (const section of this.sections) {
 				const sRva = section.virtualAddress - this.baseAddress;
@@ -4716,6 +5642,14 @@ export class DisassemblerEngine {
 					continue;
 				}
 			}
+			if (r.begin < coverEnd && ranges.length > 0) {
+				// A malformed/unusual table can contain two non-chained records that overlap
+				// only partially. Keep both starts, but make the later authoritative begin the
+				// boundary between them. Leaving overlapping ranges here breaks every binary
+				// search downstream and can misclassify interior export aliases as standalone
+				// functions.
+				ranges[ranges.length - 1].end = r.begin;
+			}
 			// v3.8.2 FIX-027b (#2/#3): everything NOT absorbed above -- a non-chained primary,
 			// an ORPHAN continuation (CHAININFO set but its primary is absent from the table),
 			// or a NON-CONTIGUOUS cold/out-of-line continuation -- opens its OWN range. This
@@ -4727,7 +5661,70 @@ export class DisassemblerEngine {
 		}
 		this.authoritativePdataRanges = ranges.map(range => ({ ...range }));
 		const begins = new Set<number>(ranges.map(r => r.begin));
+		for (const begin of begins) {
+			this.functionSeeds.record(begin, { kind: 'unwind' });
+		}
 		const beginsArr = ranges.map(r => r.begin); // sorted ascending (rawRanges was sorted)
+		const findRangeContaining = (address: number): { begin: number; end: number } | undefined => {
+			let lo = 0;
+			let hi = ranges.length - 1;
+			while (lo <= hi) {
+				const mid = lo + ((hi - lo) >> 1);
+				const range = ranges[mid];
+				if (address < range.begin) {
+					hi = mid - 1;
+				} else if (address >= range.end) {
+					lo = mid + 1;
+				} else {
+					return range;
+				}
+			}
+			return undefined;
+		};
+
+		// Entry/export/TLS anchors outside .pdata are authoritative starts too. If an
+		// anchor lies inside a .pdata range, transfer its semantic name to that range's
+		// begin instead of keeping an overlapping interior function.
+		const preferredNames = new Map<number, string>();
+		const protectedOutsideRanges: number[] = [];
+		const anchors: Array<{ address: number; name: string }> = [];
+		for (const exp of this.exports) {
+			if (!exp.isForwarder && exp.address > 0) {
+				anchors.push({ address: exp.address, name: exp.name });
+			}
+		}
+		for (const address of this.peDataDirectories.tls?.callbackAddresses ?? []) {
+			anchors.push({ address, name: `tls_callback_${address.toString(16).toUpperCase()}` });
+		}
+		if (this.fileInfo?.entryPoint) {
+			anchors.push({ address: this.fileInfo.entryPoint, name: 'entry_point' });
+		}
+		for (const anchor of anchors) {
+			const owner = findRangeContaining(anchor.address);
+			if (owner) {
+				preferredNames.set(owner.begin, anchor.name);
+			} else {
+				protectedOutsideRanges.push(anchor.address);
+				preferredNames.set(anchor.address, anchor.name);
+			}
+		}
+		protectedOutsideRanges.sort((a, b) => a - b);
+		const protectedStarts = new Set(protectedOutsideRanges);
+		const authoritativeStarts = Array.from(new Set([...beginsArr, ...protectedOutsideRanges]))
+			.sort((a, b) => a - b);
+		const firstAuthoritativeStartAfter = (address: number): number | undefined => {
+			let lo = 0;
+			let hi = authoritativeStarts.length;
+			while (lo < hi) {
+				const mid = lo + ((hi - lo) >> 1);
+				if (authoritativeStarts[mid] <= address) {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			return authoritativeStarts[lo];
+		};
 
 		// Overlap sweep helper: no function may start strictly inside another. Any NON-begin
 		// whose start is already covered by an earlier function, or whose extent winds across
@@ -4738,8 +5735,24 @@ export class DisassemblerEngine {
 			const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
 			let maxEnd = Number.NEGATIVE_INFINITY;
 			for (const fn of sorted) {
-				if (!begins.has(fn.address)) {
-					if (fn.address < maxEnd || this.spansAnyBegin(fn.address, fn.endAddress, beginsArr)) {
+				if (protectedStarts.has(fn.address)) {
+					// PE leaf functions may be exported but absent from .pdata. Preserve their
+					// authoritative start, while preventing a linear-scan estimate from crossing
+					// into the next unwind-backed function.
+					const nextBegin = firstAuthoritativeStartAfter(fn.address);
+					if (nextBegin !== undefined && nextBegin < fn.endAddress) {
+						fn.instructions = fn.instructions.filter(inst => {
+							const address = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
+							return address < nextBegin;
+						});
+						fn.endAddress = nextBegin;
+						fn.size = nextBegin - fn.address;
+					}
+				}
+				if (!begins.has(fn.address) && !protectedStarts.has(fn.address)) {
+					if (fn.address < maxEnd ||
+						this.spansAnyBegin(fn.address, fn.endAddress, beginsArr) ||
+						this.spansAnyBegin(fn.address, fn.endAddress, protectedOutsideRanges)) {
 						this.functions.delete(fn.address);
 						continue;
 					}
@@ -4778,7 +5791,7 @@ export class DisassemblerEngine {
 			}
 			this.functions.set(r.begin, {
 				address: r.begin,
-				name: `sub_${r.begin.toString(16).toUpperCase()}`,
+				name: preferredNames.get(r.begin) ?? `sub_${r.begin.toString(16).toUpperCase()}`,
 				size: r.end - r.begin,
 				endAddress: r.end,
 				instructions: [],
@@ -4786,6 +5799,12 @@ export class DisassemblerEngine {
 				callees: []
 			});
 			this.unmaterializedStubs.add(r.begin);
+		}
+		for (const [address, name] of preferredNames) {
+			const fn = this.functions.get(address);
+			if (fn && (fn.name.startsWith('sub_') || name === 'entry_point')) {
+				fn.name = name;
+			}
 		}
 
 		// (3) Reconcile each authoritative function's extent to its merged .pdata range:
@@ -4890,6 +5909,149 @@ export class DisassemblerEngine {
 			}
 		}
 		return firstGreater < beginsArr.length && beginsArr[firstGreater] < end;
+	}
+
+	private async discoverAddressTakenFunctionEntries(): Promise<number> {
+		if (!this.fileBuffer || (this.architecture !== 'x86' && this.architecture !== 'x64')) {
+			return 0;
+		}
+		// Text is only a cheap prefilter. Candidate identity comes exclusively
+		// from the structured-detail pass below.
+		const possibleSources = [...this.functions.values()].filter(fn =>
+			fn.instructions.some(instruction =>
+				typeof instruction.mnemonic === 'string' &&
+				instruction.mnemonic.toLowerCase() === 'lea' &&
+				typeof instruction.opStr === 'string' && /\brip\b/i.test(instruction.opStr)));
+		if (possibleSources.length === 0) {
+			return 0;
+		}
+
+		const detailCapstone = new CapstoneWrapper();
+		const candidates = new Map<number, ReturnType<typeof collectAddressTakenFunctionCandidates>[number]>();
+		try {
+			await detailCapstone.initialize(this.architecture, { detail: true });
+			const knownFunctions = [...this.functions.values()].map(fn => ({
+				start: fn.address,
+				endExclusive: fn.endAddress,
+			}));
+			for (const source of possibleSources) {
+				const byteCount = Math.min(Math.max(0, source.endAddress - source.address), this.maxFunctionSize);
+				const bytes = byteCount > 0 ? this.getBytes(source.address, byteCount) : undefined;
+				if (!bytes || bytes.length === 0) {
+					continue;
+				}
+				const detailed = await detailCapstone.disassemble(
+					bytes,
+					source.address,
+					Math.min(65536, Math.max(64, Math.ceil(bytes.length / 2))),
+				);
+				for (const candidate of collectAddressTakenFunctionCandidates(detailed, {
+					isExecutableAddress: address => this.isAnalyzableFunctionAddress(address),
+					registerName: registerId => detailCapstone.getRegisterName(registerId),
+					knownFunctions,
+				})) {
+					if (!candidates.has(candidate.address)) {
+						candidates.set(candidate.address, candidate);
+					}
+				}
+			}
+
+			let added = 0;
+			for (const candidate of [...candidates.values()].sort((left, right) => left.address - right.address)) {
+				if (this.functions.has(candidate.address) || this.functions.size >= this.maxStubFunctions) {
+					continue;
+				}
+				const nextKnownStart = [...this.functions.keys()]
+					.filter(address => address > candidate.address)
+					.sort((left, right) => left - right)[0];
+				const probeSize = Math.min(
+					0x200,
+					nextKnownStart !== undefined ? nextKnownStart - candidate.address : 0x200,
+				);
+				const bytes = probeSize > 0 ? this.getBytes(candidate.address, probeSize) : undefined;
+				if (!bytes || bytes.length === 0) {
+					continue;
+				}
+				const decoded = await detailCapstone.disassemble(bytes, candidate.address, 256);
+				const extent = validateAddressTakenFunctionExtent(candidate.address, decoded, nextKnownStart);
+				if (!extent) {
+					continue;
+				}
+
+				this.functionSeeds.record(candidate.address, {
+					kind: 'address-taken',
+					sourceAddress: candidate.leaAddress,
+					consumerAddress: candidate.storeAddress,
+					confidence: candidate.confidence,
+				});
+				this.addXRef({ from: candidate.leaAddress, to: candidate.address, type: 'data' });
+				const fn = await this.analyzeFunction(candidate.address);
+				fn.instructions = fn.instructions.filter(instruction => instruction.address < extent.semanticEnd);
+				fn.endAddress = extent.endExclusive;
+				fn.size = extent.endExclusive - candidate.address;
+				added++;
+			}
+			return added;
+		} catch (error) {
+			console.warn('[HexCore] address-taken function discovery failed:', error);
+			return 0;
+		} finally {
+			detailCapstone.dispose();
+		}
+	}
+
+	/**
+	 * Clamp heuristic PE32/raw ranges at the next independently confirmed
+	 * function start. PE64 unwind ranges and ELF symbols already provide a
+	 * stronger chunk-aware boundary model and are intentionally left untouched.
+	 */
+	private reconcileFunctionsWithStrongSeeds(): void {
+		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable || this.fileInfo?.format.startsWith('ELF')) {
+			return;
+		}
+		const starts = this.functionSeeds.strongAddresses().filter(address => this.functions.has(address));
+		if (starts.length < 2) {
+			return;
+		}
+		for (const fn of this.functions.values()) {
+			let lo = 0;
+			let hi = starts.length;
+			while (lo < hi) {
+				const mid = lo + ((hi - lo) >> 1);
+				if (starts[mid] <= fn.address) {
+					lo = mid + 1;
+				} else {
+					hi = mid;
+				}
+			}
+			const nextStart = starts[lo];
+			if (nextStart === undefined || nextStart >= fn.endAddress) {
+				continue;
+			}
+			fn.instructions = fn.instructions.filter(instruction => {
+				const address = typeof instruction.address === 'bigint' ? Number(instruction.address) : instruction.address;
+				return address < nextStart;
+			});
+			if (!this.trapHandlerGate) {
+				while (fn.instructions.length > 0) {
+					const last = fn.instructions[fn.instructions.length - 1];
+					const mnemonic = last.mnemonic.toLowerCase();
+					if (mnemonic !== 'int3' && mnemonic !== 'nop' && mnemonic !== 'ud2' && mnemonic !== 'hlt') {
+						break;
+					}
+					fn.instructions.pop();
+				}
+			}
+			const last = fn.instructions[fn.instructions.length - 1];
+			if (last) {
+				const address = typeof last.address === 'bigint' ? Number(last.address) : last.address;
+				const size = typeof last.size === 'bigint' ? Number(last.size) : last.size;
+				fn.endAddress = Math.min(nextStart, address + size);
+			} else {
+				fn.endAddress = nextStart;
+			}
+			fn.size = fn.endAddress - fn.address;
+		}
 	}
 
 	/**
@@ -5047,7 +6209,8 @@ export class DisassemblerEngine {
 	 *    "interior + no callers" pair is a ghost; a real function with callers is never touched.
 	 */
 	private dropInteriorGhostFunctions(): void {
-		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable) {
+		if (this.fileInfo?.format.startsWith('PE') ||
+			this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable) {
 			return;
 		}
 		const sorted = Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
@@ -5139,6 +6302,9 @@ export class DisassemblerEngine {
 			if (!exp.isForwarder && exp.address > 0) {
 				protectedRoots.add(exp.address);
 			}
+		}
+		for (const address of this.functionSeeds.strongAddresses()) {
+			protectedRoots.add(address);
 		}
 
 		// (1) Determine each function's nearest enclosing container (the function whose
@@ -5272,6 +6438,9 @@ export class DisassemblerEngine {
 			return;
 		}
 
+		// Authoritative/cache boundaries already registered as lazy stubs stay lazy.
+		// This scan may add a missing prologue boundary, but it must not eagerly
+		// decode every .pdata entry and defeat the analysis-closure contract.
 		const isARM64 = this.architecture === 'arm64';
 		const isARM32 = this.architecture === 'arm';
 
@@ -5379,6 +6548,18 @@ export class DisassemblerEngine {
 
 				for (let off = secOffset; off < secEnd - 4 && this.functions.size < this.maxFunctions; off++) {
 					const byte = this.fileBuffer[off];
+					const candidateAddress = this.sectionOffsetToAddress(off, section);
+					if (candidateAddress > 0 && this.hasStrongFunctionEntryPattern(candidateAddress)) {
+						if (this.isKnownImportThunk(candidateAddress)) {
+							this.functionSeeds.record(candidateAddress, { kind: 'import-thunk' });
+						} else if (this.hasFunctionBoundaryBefore(candidateAddress)) {
+							this.functionSeeds.record(candidateAddress, { kind: 'validated-prologue' });
+						}
+						if (!this.functions.has(candidateAddress)) {
+							await this.analyzeFunction(candidateAddress);
+						}
+						continue;
+					}
 
 					// v3.7.4: Detect ftrace __pfx_ NOP sled → skip to endbr64/real prologue (FIX-015)
 					// Pattern: (NOP){8,32} [endbr64] [call __fentry__] push rbp
@@ -5478,6 +6659,210 @@ export class DisassemblerEngine {
 
 	getFileInfo(): FileInfo | undefined {
 		return this.fileInfo;
+	}
+
+	getLastAnalysisDelta(): Readonly<{ added: number; removed: number; netChange: number }> {
+		return this.lastAnalysisDelta;
+	}
+
+	isAnalysisComplete(): boolean {
+		return this.analysisComplete;
+	}
+
+	getAnalysisGeneration(): number {
+		return this.analysisGeneration;
+	}
+
+	advanceSemanticGeneration(reason: string, functionIdentity?: string): number {
+		if (!this.sessionStore) { throw new Error('Semantic generation requires a bound analysis session.'); }
+		this.analysisGeneration++;
+		const address = functionIdentity?.replace(/^function:/i, '');
+		this.sessionStore.advanceAnalysisGeneration(
+			reason,
+			address,
+			this.sessionStore.getAnalysisUniverseManifest()?.universeSha256,
+		);
+		return this.analysisGeneration;
+	}
+
+	exportAnalysisSnapshot(options?: { includeExecScan?: boolean }): AnalysisEngineSnapshotV1 {
+		if (!this.fileBuffer) { throw new Error('Cannot snapshot an unloaded analysis engine'); }
+		const cloneInstruction = (instruction: Instruction): Instruction => ({
+			...instruction,
+			bytes: Buffer.from(instruction.bytes),
+		});
+		return {
+			schemaVersion: 1,
+			target: {
+				fileSha256: crypto.createHash('sha256').update(this.fileBuffer).digest('hex'),
+				fileSize: this.fileBuffer.length,
+			},
+			baseAddress: this.baseAddress,
+			architecture: this.architecture,
+			limits: { maxFunctions: this.maxFunctions, maxFunctionSize: this.maxFunctionSize },
+			...(this.fileInfo ? { fileInfo: { ...this.fileInfo } } : {}),
+			sections: this.sections.map(section => ({ ...section })),
+			imports: this.imports.map(library => ({ ...library, functions: library.functions.map(fn => ({ ...fn })) })),
+			exports: this.exports.map(entry => ({ ...entry })),
+			peDataDirectories: { ...this.peDataDirectories },
+			...(this.elfAnalysis ? { elfAnalysis: this.elfAnalysis } : {}),
+			functions: [...this.functions.values()].map(fn => ({
+				...fn,
+				instructions: fn.instructions.map(cloneInstruction),
+				callers: [...fn.callers],
+				callees: [...fn.callees],
+			})),
+			strings: [...this.strings.values()].map(entry => ({ ...entry, references: [...entry.references] })),
+			comments: [...this.comments.entries()],
+			xrefs: [...this.xrefs.entries()].map(([address, entries]) => [address, entries.map(entry => ({ ...entry }))]),
+			functionSeeds: [...this.functions.keys()].map(address => [address, this.functionSeeds.get(address).map(seed => ({ ...seed }))]),
+			unmaterializedStubs: [...this.unmaterializedStubs],
+			crc32LookupRanges: this.crc32LookupRanges.map(range => ({ ...range })),
+			textRelocations: [...this.textRelocations.entries()],
+			dataRelocations: [...this.dataRelocations.entries()],
+			elfSectionFileMap: [...this.elfSectionFileMap.entries()],
+			elfFunctionByName: [...this.elfFunctionByName.entries()],
+			authoritativePdataRanges: this.authoritativePdataRanges.map(range => ({ ...range })),
+			pdataDeclaredEntries: this.pdataDeclaredEntries,
+			pdataEntriesTruncated: this.pdataEntriesTruncated,
+			...(this._vmDetectionResults ? { vmDetectionResults: [...this._vmDetectionResults.entries()] } : {}),
+			...(this._execScan && options?.includeExecScan === true ? { execScan: this._execScan.map(cloneInstruction) } : {}),
+			pltSymbolMap: [...this._pltSymbolMap.entries()],
+			gotSymbolMap: [...this._gotSymbolMap.entries()],
+			trapHandlerGate: this.trapHandlerGate,
+			lastAnalysisDelta: { ...this.lastAnalysisDelta },
+			analysisComplete: this.analysisComplete,
+			analysisGeneration: this.analysisGeneration,
+			closureRestoration: { ...this.closureRestoration, failed: [...this.closureRestoration.failed] },
+		};
+	}
+
+	importAnalysisSnapshot(snapshot: AnalysisEngineSnapshotV1): void {
+		if (snapshot.schemaVersion !== 1) { throw new Error(`Unsupported analysis snapshot schema: ${String((snapshot as any).schemaVersion)}`); }
+		if (!this.fileBuffer) { throw new Error('Load the target before importing an analysis snapshot'); }
+		const currentSha256 = crypto.createHash('sha256').update(this.fileBuffer).digest('hex');
+		if (snapshot.target.fileSha256 !== currentSha256 || snapshot.target.fileSize !== this.fileBuffer.length) {
+			throw new Error('Analysis snapshot target identity does not match the loaded binary');
+		}
+		const cloneInstruction = (instruction: Instruction): Instruction => ({ ...instruction, bytes: Buffer.from(instruction.bytes) });
+		this.baseAddress = snapshot.baseAddress;
+		this.architecture = snapshot.architecture;
+		this.maxFunctions = snapshot.limits.maxFunctions;
+		this.maxFunctionSize = snapshot.limits.maxFunctionSize;
+		this.fileInfo = snapshot.fileInfo ? { ...snapshot.fileInfo } : undefined;
+		this.sections = snapshot.sections.map(section => ({ ...section }));
+		this.imports = snapshot.imports.map(library => ({ ...library, functions: library.functions.map(fn => ({ ...fn })) }));
+		this.exports = snapshot.exports.map(entry => ({ ...entry }));
+		this.peDataDirectories = { ...snapshot.peDataDirectories };
+		this.elfAnalysis = snapshot.elfAnalysis;
+		this.functions = new Map(snapshot.functions.map(fn => [fn.address, {
+			...fn,
+			instructions: fn.instructions.map(cloneInstruction),
+			callers: [...fn.callers],
+			callees: [...fn.callees],
+		}]));
+		this.strings = new Map(snapshot.strings.map(entry => [entry.address, { ...entry, references: [...entry.references] }]));
+		this.comments = new Map(snapshot.comments);
+		this.xrefs = new Map(snapshot.xrefs.map(([address, entries]) => [address, entries.map(entry => ({ ...entry }))]));
+		this.functionSeeds.clear();
+		for (const [address, seeds] of snapshot.functionSeeds) {
+			for (const seed of seeds) { this.functionSeeds.record(address, seed); }
+		}
+		this.unmaterializedStubs = new Set(snapshot.unmaterializedStubs);
+		this.crc32LookupRanges = snapshot.crc32LookupRanges.map(range => ({ ...range }));
+		this.textRelocations = new Map(snapshot.textRelocations);
+		this.dataRelocations = new Map(snapshot.dataRelocations);
+		this.elfSectionFileMap = new Map(snapshot.elfSectionFileMap);
+		this.elfFunctionByName = new Map(snapshot.elfFunctionByName);
+		this.authoritativePdataRanges = snapshot.authoritativePdataRanges.map(range => ({ ...range }));
+		this.pdataDeclaredEntries = snapshot.pdataDeclaredEntries;
+		this.pdataEntriesTruncated = snapshot.pdataEntriesTruncated;
+		this._vmDetectionResults = snapshot.vmDetectionResults ? new Map(snapshot.vmDetectionResults) : undefined;
+		this._execScan = snapshot.execScan?.map(cloneInstruction);
+		this._pltSymbolMap = new Map(snapshot.pltSymbolMap);
+		this._gotSymbolMap = new Map(snapshot.gotSymbolMap);
+		this.trapHandlerGate = snapshot.trapHandlerGate;
+		this.lastAnalysisDelta = { ...snapshot.lastAnalysisDelta };
+		this.analysisComplete = snapshot.analysisComplete;
+		this.analysisGeneration = snapshot.analysisGeneration;
+		this.closureRestoration = { ...snapshot.closureRestoration, failed: [...snapshot.closureRestoration.failed] };
+		this.instructions.clear();
+		for (const fn of this.functions.values()) {
+			for (const instruction of fn.instructions) { this.instructions.set(instruction.address, instruction); }
+		}
+		this.pdataReconcilePromise = undefined;
+	}
+
+	async loadAnalysisSnapshot(filePath: string, snapshot: AnalysisEngineSnapshotV1): Promise<void> {
+		if (!fs.existsSync(filePath)) { throw new Error(`Snapshot target does not exist: ${filePath}`); }
+		const stats = fs.statSync(filePath);
+		const maxFileSize = 512 * 1024 * 1024;
+		if (stats.size > maxFileSize) { throw new Error(`Snapshot target exceeds ${maxFileSize} bytes`); }
+		this.currentFile = filePath;
+		this.fileBuffer = fs.readFileSync(filePath);
+		try {
+			this.sessionStore?.dispose();
+			this.sessionStore = new SessionStore(filePath);
+			this.sessionStore.importAnnotations(path.join(path.dirname(filePath), '.hexcore-annotations.json'));
+		} catch (error: unknown) {
+			this.sessionStore = undefined;
+			console.warn(`[HexCore] SessionStore snapshot bind failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		this.importAnalysisSnapshot(snapshot);
+		if (this.sessionStore && this.fileInfo) {
+			this.sessionStore.bindAnalysisTarget({
+				filePath,
+				fileSize: this.fileBuffer.length,
+				format: toAnalysisBinaryFormat(this.fileInfo.format),
+				architecture: this.architecture,
+				imageBase: this.fileInfo.baseAddress,
+			});
+		}
+		await this.ensureCapstoneInitialized();
+	}
+
+	getAnalysisClosureRestoration(): Readonly<AnalysisClosureRestoration> {
+		return this.closureRestoration;
+	}
+
+	getFunctionBodyStatus(address: number): FunctionBodyStatus {
+		const fn = this.functions.get(address);
+		if (!fn) {
+			return 'decode-empty';
+		}
+		if (fn.bodyCompleteness?.state === 'partial') {
+			return 'partial';
+		}
+		if (fn.bodyCompleteness?.state === 'decode-empty') {
+			return 'decode-empty';
+		}
+		if (fn.bodyCompleteness?.state === 'complete') {
+			return 'materialized';
+		}
+		if (this.unmaterializedStubs.has(address)) {
+			return 'lazy';
+		}
+		return fn.instructions.length > 0 ? 'materialized' : 'decode-empty';
+	}
+
+	getFunctionBodyCompleteness(address: number): Readonly<FunctionBodyCompleteness> | undefined {
+		const fn = this.functions.get(address);
+		if (!fn) { return undefined; }
+		if (fn.bodyCompleteness) { return fn.bodyCompleteness; }
+		if (this.unmaterializedStubs.has(address)) {
+			return Object.freeze({
+				state: 'lazy',
+				authoritativeStart: fn.address,
+				authoritativeEndExclusive: fn.endAddress,
+				decodedEndExclusive: fn.address,
+				semanticEndExclusive: fn.address,
+				boundaryReached: false,
+				stopReason: 'deferred',
+				byteCoverage: 0,
+			});
+		}
+		fn.bodyCompleteness = this.assessFunctionBodyCompleteness(fn);
+		return fn.bodyCompleteness;
 	}
 
 	getSections(): Section[] {
@@ -5598,13 +6983,26 @@ export class DisassemblerEngine {
 		return this.xrefs.get(address) ?? [];
 	}
 
-	async searchStringReferences(query: string): Promise<StringReference[]> {
+	/** Deterministic read-only view of the legacy xref index. */
+	getAllCrossReferences(): XRef[] {
+		return [...this.xrefs.values()]
+			.flatMap(entries => entries.map(entry => ({ ...entry })))
+			.sort((left, right) => left.from - right.from || left.to - right.to || left.type.localeCompare(right.type));
+	}
+
+	async searchStringReferences(query: string, maxResults = Number.MAX_SAFE_INTEGER): Promise<StringReference[]> {
 		const results: StringReference[] = [];
 		const lowerQuery = query.toLowerCase();
+		const boundedMaxResults = Number.isFinite(maxResults)
+			? Math.max(1, Math.floor(maxResults))
+			: Number.MAX_SAFE_INTEGER;
 
 		for (const strRef of this.strings.values()) {
 			if (strRef.string.toLowerCase().includes(lowerQuery)) {
 				results.push(strRef);
+				if (results.length >= boundedMaxResults) {
+					break;
+				}
 			}
 		}
 
@@ -5631,39 +7029,102 @@ export class DisassemblerEngine {
 			}
 		}
 
+		for (const strRef of results) {
+			const assessment = assessStringEvidence(
+				strRef.fileOffset ?? this.addressToOffset(strRef.address),
+				strRef.terminated === true,
+				strRef.references.length,
+				this.crc32LookupRanges,
+			);
+			strRef.literalConfidence = assessment.literalConfidence;
+			strRef.evidenceClass = assessment.evidenceClass;
+			strRef.evidenceReasons = assessment.evidenceReasons;
+		}
+
 		return results;
 	}
 
 
 
-	async exportAssembly(filePath: string): Promise<void> {
-		const lines: string[] = [];
-		lines.push(`; Disassembly of ${path.basename(this.currentFile || 'unknown')}`);
-		lines.push(`; Generated by HexCore Disassembler (Capstone Engine)`);
-		lines.push(`; Architecture: ${this.architecture}`);
-		lines.push('');
-		lines.push(this.architecture.includes('64') ? 'BITS 64' : 'BITS 32');
-		lines.push(`ORG 0x${this.baseAddress.toString(16).toUpperCase()}`);
-		lines.push('');
+	async exportAssembly(filePath: string): Promise<AssemblyExportResult> {
+		const fd = fs.openSync(filePath, 'w');
+		let functionsWithInstructions = 0;
+		let decodedInstructions = 0;
+		const emptyFunctions: AssemblyExportResult['emptyFunctions'] = [];
+		const incompleteFunctions: AssemblyExportResult['incompleteFunctions'] = [];
+		const write = (lines: string[]): void => {
+			fs.writeSync(fd, `${lines.join('\n')}\n`);
+		};
 
-		for (const func of this.functions.values()) {
-			lines.push(`; ============================================`);
-			lines.push(`; Function: ${func.name}`);
-			lines.push(`; Address: 0x${func.address.toString(16).toUpperCase()}`);
-			lines.push(`; Size: ${func.size} bytes`);
-			lines.push(`; ============================================`);
-			lines.push(`${func.name}:`);
+		try {
+			write([
+				`; Disassembly of ${path.basename(this.currentFile || 'unknown')}`,
+				'; Generated by HexCore Disassembler (Capstone Engine)',
+				`; Architecture: ${this.architecture}`,
+				'',
+				this.architecture.includes('64') ? 'BITS 64' : 'BITS 32',
+				`ORG 0x${this.baseAddress.toString(16).toUpperCase()}`,
+				''
+			]);
 
-			for (const inst of func.instructions) {
-				const addrStr = inst.address.toString(16).toUpperCase().padStart(16, '0');
-				const bytesStr = Array.from(inst.bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
-				const comment = inst.comment ? ` ; ${inst.comment}` : '';
-				lines.push(`    ${inst.mnemonic.toLowerCase().padEnd(10)} ${inst.opStr.padEnd(30)} ; 0x${addrStr} | ${bytesStr}${comment}`);
+			for (const indexed of this.functions.values()) {
+				const wasLazy = this.unmaterializedStubs.has(indexed.address);
+				const func = await this.materializeFunction(indexed.address) ?? indexed;
+				const lines = [
+					'; ============================================',
+					`; Function: ${func.name}`,
+					`; Address: 0x${func.address.toString(16).toUpperCase()}`,
+					`; Size: ${func.size} bytes`,
+					'; ============================================',
+					`${func.name}:`
+				];
+
+				for (const inst of func.instructions) {
+					const addrStr = inst.address.toString(16).toUpperCase().padStart(16, '0');
+					const bytesStr = Array.from(inst.bytes).map(b => b.toString(16).padStart(2, '0')).join(' ');
+					const comment = inst.comment ? ` ; ${inst.comment}` : '';
+					lines.push(`    ${inst.mnemonic.toLowerCase().padEnd(10)} ${inst.opStr.padEnd(30)} ; 0x${addrStr} | ${bytesStr}${comment}`);
+				}
+				lines.push('');
+				write(lines);
+
+				if (func.instructions.length > 0) {
+					functionsWithInstructions++;
+					decodedInstructions += func.instructions.length;
+					const completeness = this.getFunctionBodyCompleteness(func.address);
+					if (completeness?.state === 'partial') {
+						incompleteFunctions.push({
+							address: func.address,
+							name: func.name,
+							reason: 'partial-decode',
+							byteCoverage: completeness.byteCoverage,
+							stopReason: completeness.stopReason,
+						});
+					}
+				} else {
+					emptyFunctions.push({ address: func.address, name: func.name, reason: 'decode-empty' });
+				}
+				// A whole-program export can contain hundreds of thousands of functions.
+				// Release bodies that were lazy before this request after streaming them,
+				// otherwise a correct export would turn into an avoidable multi-GB cache.
+				if (wasLazy) {
+					func.instructions = [];
+					this.unmaterializedStubs.add(func.address);
+				}
 			}
-			lines.push('');
+		} finally {
+			fs.closeSync(fd);
 		}
 
-		fs.writeFileSync(filePath, lines.join('\n'));
+		return {
+			status: emptyFunctions.length > 0 || incompleteFunctions.length > 0 ? 'partial' : 'ok',
+			totalFunctions: this.functions.size,
+			functionsWithInstructions,
+			functionsWithoutInstructions: emptyFunctions.length,
+			decodedInstructions,
+			emptyFunctions: emptyFunctions.slice(0, 100),
+			incompleteFunctions: incompleteFunctions.slice(0, 100),
+		};
 	}
 
 	addComment(address: number, comment: string): void {
@@ -5731,6 +7192,10 @@ export class DisassemblerEngine {
 		return Array.from(this.functions.values()).sort((a, b) => a.address - b.address);
 	}
 
+	getFunctionDiscoveryEvidence(address: number): readonly FunctionSeedEvidence[] {
+		return this.functionSeeds.get(address);
+	}
+
 	getStrings(): StringReference[] {
 		return Array.from(this.strings.values()).sort((a, b) => a.address - b.address);
 	}
@@ -5782,7 +7247,6 @@ export class DisassemblerEngine {
 				return func.address;
 			}
 		}
-
 		// ET_REL code in fileBuffer is not relocation-patched. Native prologue
 		// probing here can select an internal/adjacent function and any caller
 		// that widens its lift window would then discard its patched bytes.
@@ -5993,6 +7457,11 @@ export class DisassemblerEngine {
 		return this.architecture;
 	}
 
+	/** Resolve a structured Capstone register id for semantic producers. */
+	getRegisterName(registerId: number): string | undefined {
+		return this.capstoneInitialized ? this.capstone.getRegisterName(registerId) : undefined;
+	}
+
 	/**
 	 * Returns per-function VM detection results from the last `analyzeAll({ detectVM: true })` call.
 	 * Returns undefined if VM detection was not run.
@@ -6040,11 +7509,49 @@ export class DisassemblerEngine {
 		return this.fileBuffer.subarray(offset, end);
 	}
 
+	fileOffsetToAddress(offset: number): number | undefined {
+		if (!this.fileBuffer || !Number.isSafeInteger(offset) || offset < 0 || offset >= this.fileBuffer.length) {
+			return undefined;
+		}
+		return this.offsetToAddress(offset);
+	}
+
+	getAddressMapping(address: number): AddressMapping {
+		if (!this.fileBuffer) {
+			return {
+				address, rva: address - this.baseAddress, source: 'unmapped', valid: false,
+				reason: 'No binary is loaded.'
+			};
+		}
+		if (this.isPEFile()) {
+			return resolvePeRvaMapping(address - this.baseAddress, this.baseAddress, this.sections, this.fileBuffer.length);
+		}
+
+		const fileOffset = this.addressToOffset(address);
+		if (fileOffset < 0 || fileOffset >= this.fileBuffer.length) {
+			return {
+				address, rva: address - this.baseAddress, source: 'unmapped', valid: false,
+				reason: 'The address is not backed by the loaded file.'
+			};
+		}
+		const section = this.sections.find(candidate =>
+			address >= candidate.virtualAddress && address < candidate.virtualAddress + candidate.virtualSize);
+		return {
+			address,
+			rva: address - this.baseAddress,
+			fileOffset,
+			availableBytes: this.fileBuffer.length - fileOffset,
+			section: section?.name,
+			source: section ? 'file-section' : 'file-header',
+			valid: true
+		};
+	}
+
 	private addressToOffset(address: number): number {
 		const rva = address - this.baseAddress;
 
 		if (this.isPEFile() && this.fileBuffer) {
-			return this.rvaToFileOffset(rva);
+			return resolvePeRvaMapping(rva, this.baseAddress, this.sections, this.fileBuffer.length).fileOffset ?? -1;
 		}
 
 		// For ELF, use section mapping
@@ -6426,7 +7933,11 @@ export class DisassemblerEngine {
 			const budget = Math.min(sectionBytes, MAX_SCAN_BYTES - scanned);
 			if (budget <= 0) { break; }
 			try {
-				const instrs = await this.disassembleRange(startVA, budget);
+				const instructionBudget = Math.min(
+					Math.max(Math.ceil(budget / 2) + 4096, 8000),
+					256_000,
+				);
+				const instrs = await this.disassembleRange(startVA, budget, instructionBudget);
 				for (const inst of instrs) { byAddr.set(inst.address, inst); }
 			} catch {
 				// Section decode failed (Capstone hiccup) — skip; per-function path
@@ -6475,6 +7986,69 @@ export class DisassemblerEngine {
 		out.sort((a, b) => a.address - b.address);
 		this._execScan = out;
 		return out;
+	}
+
+	/** Promote real call targets exposed by the callfuscation-resistant scan. */
+	private discoverCallfuscationFunctionEntries(): number {
+		if (!this._execScan || !this.fileBuffer) { return 0; }
+		let added = 0;
+		const promote = (target: number, name?: string): void => {
+			if (this.functions.has(target) || !this.isAnalyzableFunctionAddress(target) ||
+				this.functions.size >= this.maxStubFunctions) {
+				return;
+			}
+			this.functions.set(target, {
+				address: target,
+				name: name ?? `sub_${target.toString(16).toUpperCase()}`,
+				size: 1,
+				endAddress: target + 1,
+				instructions: [],
+				callers: [],
+				callees: [],
+			});
+			this.unmaterializedStubs.add(target);
+			added++;
+		};
+		const isDiscardPop = (address: number): boolean => {
+			const bytes = this.getBytes(address, 2);
+			if (!bytes || bytes.length === 0) { return false; }
+			if (bytes[0] >= 0x58 && bytes[0] <= 0x5f) { return true; }
+			return bytes.length >= 2 && bytes[0] === 0x41 &&
+				bytes[1] >= 0x58 && bytes[1] <= 0x5f;
+		};
+
+		for (const instruction of this._execScan) {
+			const target = instruction.targetAddress;
+			if (!instruction.isCall || target === undefined || isDiscardPop(target)) {
+				continue;
+			}
+			promote(target);
+		}
+
+		// SysV _start passes main as an immediate in RDI immediately before
+		// __libc_start_main. It is a data operand rather than a call target, so
+		// recover it explicitly from the short entry-point window.
+		const entryPoint = this.fileInfo?.entryPoint;
+		if (entryPoint !== undefined) {
+			const entryWindow = this._execScan.filter(instruction =>
+				instruction.address >= entryPoint && instruction.address < entryPoint + 96);
+			for (let i = 0; i < entryWindow.length; ++i) {
+				const instruction = entryWindow[i];
+				const match = instruction.mnemonic.toLowerCase() === 'mov'
+					? /^rdi,\s*(0x[0-9a-f]+)$/i.exec(instruction.opStr.trim())
+					: null;
+				if (!match || !entryWindow.slice(i + 1, i + 5).some(next => next.isCall)) {
+					continue;
+				}
+				promote(Number.parseInt(match[1], 16), 'main');
+				break;
+			}
+		}
+
+		if (added > 0) {
+			console.log(`[HexCore] callfuscation discovery: promoted ${added} logical call target(s); gadget links remained hidden`);
+		}
+		return added;
 	}
 
 	// ============ v3.7: VM Detection & Analysis ============
@@ -6528,33 +8102,14 @@ export class DisassemblerEngine {
 		// Junk ratio
 		const { junkRatio } = this.filterJunkInstructions(instrs);
 
-		// Dispatcher detection: find sequences of cmp reg,imm + jcc
-		let dispatcherAddr: string | null = null;
-		let maxOpcodeCount = 0;
-
-		for (let i = 0; i < instrs.length - 2; i++) {
-			let cmpCount = 0;
-			let startIdx = i;
-
-			while (i < instrs.length) {
-				const mn = instrs[i].mnemonic.toLowerCase();
-				if (mn === 'cmp') {
-					cmpCount++;
-					i++;
-					// Expect a conditional jump after cmp
-					if (i < instrs.length && instrs[i].isConditional && instrs[i].isJump) {
-						i++;
-					}
-				} else {
-					break;
-				}
-			}
-
-			if (cmpCount >= 3 && cmpCount > maxOpcodeCount) {
-				maxOpcodeCount = cmpCount;
-				dispatcherAddr = '0x' + instrs[startIdx].address.toString(16);
-			}
-		}
+		// Dispatcher detection requires one opcode operand, distinct immediate
+		// values, and distinct handler targets. A sequence of unrelated guards
+		// that all branch to one failure block is not a bytecode dispatcher.
+		const compareLadder = detectCompareDispatcherLadder(instrs);
+		const dispatcherAddr = compareLadder.address === null
+			? null
+			: '0x' + compareLadder.address.toString(16);
+		const maxOpcodeCount = compareLadder.opcodeCount;
 
 		// Operand stack detection: look for indexed [reg+reg*N-offset] accesses --
 		// the hallmark of a stack-VM operand stack / VM-program array, e.g.
@@ -6935,6 +8490,8 @@ export class DisassemblerEngine {
 	}
 
 	dispose(): void {
+		this.sessionStore?.dispose();
+		this.sessionStore = undefined;
 		this.capstone.dispose();
 		this.capstoneInitialized = false;
 		this.llvmMc.dispose();

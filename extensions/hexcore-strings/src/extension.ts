@@ -1,5 +1,5 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Strings Extractor v1.3.0
+ *  HexCore Strings Extractor v1.3.3
  *  Extract ASCII and Unicode strings from binary files
  *  PE section-aware prioritization (FEAT-STRINGS-001) + streaming fallback
  *  Copyright (c) HikariSystem. All rights reserved.
@@ -21,6 +21,10 @@ import { parsePESections, getSectionForOffset, type PESectionMap, type PESection
 import { scoreString } from './scoringEngine';
 import { scanDotNetMetadata } from './dotnetMetadata';
 import type { MultiByteXorOptions } from './multiByteXor';
+import { extractASCIIFromChunk } from './asciiExtractor';
+import { extractUnicodeFromChunk } from './unicodeExtractor';
+import { applyDeobfuscationBudget, type DeobfuscationBudgetStats } from './deobfuscationBudget';
+import { detectEvidenceTransformChains, type EvidenceTransformChain, type TransformChainBudget } from './evidenceTransformChain';
 
 type OutputFormat = 'json' | 'md';
 
@@ -41,6 +45,16 @@ interface StringsCommandOptions {
 	crib?: string;
 	/** Multiple cribs (OR semantics): keep decodes containing ANY of these. */
 	cribs?: string[];
+	/** Minimum confidence for scored deobfuscation candidates (0..1). */
+	minConfidence?: number;
+	/** Maximum deobfuscation candidates returned after filtering. */
+	maxDeobfuscated?: number;
+	/** Keep only strong-score or security-relevant deobfuscation candidates. */
+	highSignalOnly?: boolean;
+	/** Opt in to bounded hex -> ASCII -> Base64 -> JSON evidence chains. */
+	decodeChains?: boolean;
+	/** Maximum evidence transform chains returned. */
+	maxTransformChains?: number;
 }
 
 interface ExtractedString {
@@ -71,19 +85,11 @@ interface StringsExtractionResult {
 	deobfuscated?: DeobfuscatedString[];
 	/** Count of deobfuscated strings per method (quick summary for pipelines). */
 	deobfuscationSummary?: Record<string, number>;
+	/** Output-budget accounting for extractAdvanced. */
+	deobfuscationBudget?: DeobfuscationBudgetStats;
+	transformChains?: EvidenceTransformChain[];
+	transformChainBudget?: TransformChainBudget;
 	reportMarkdown: string;
-}
-
-interface ChunkResult {
-	strings: ExtractedString[];
-	carryover: string;
-	carryoverOffset: number;
-}
-
-interface UnicodeChunkResult {
-	strings: ExtractedString[];
-	carryover: Buffer;
-	carryoverOffset: number;
 }
 
 interface DeobfuscatedString {
@@ -118,6 +124,7 @@ interface CoreExtractionResult {
 	truncated: boolean;
 	cancelled: boolean;
 	deobfuscated?: DeobfuscatedString[];
+	deobfuscationBudget?: DeobfuscationBudgetStats;
 }
 
 const CHUNK_SIZE = 64 * 1024;
@@ -229,7 +236,7 @@ function buildSectionPlan(
 }
 
 export function activate(context: vscode.ExtensionContext) {
-	console.log('HexCore Strings Extractor v1.3.0 activated');
+	console.log('HexCore Strings Extractor v1.3.3 activated');
 
 	// Original command — backward compatible
 	context.subscriptions.push(
@@ -398,7 +405,14 @@ async function extractStrings(uri: vscode.Uri, minLength: number, options: Strin
 
 	// Run deobfuscation if requested
 	if (options.deobfuscate && !coreResult.cancelled) {
-		coreResult.deobfuscated = runDeobfuscation(filePath, minLength, options);
+		const generated = runDeobfuscation(filePath, minLength, options);
+		const budgeted = applyDeobfuscationBudget(generated, {
+			minConfidence: options.minConfidence,
+			maxResults: options.maxDeobfuscated,
+			highSignalOnly: options.highSignalOnly,
+		});
+		coreResult.deobfuscated = budgeted.results;
+		coreResult.deobfuscationBudget = budgeted.stats;
 	}
 
 	const summary = summarizeStrings(coreResult.strings);
@@ -407,6 +421,23 @@ async function extractStrings(uri: vscode.Uri, minLength: number, options: Strin
 	// Append deobfuscation section if we found anything
 	if (coreResult.deobfuscated && coreResult.deobfuscated.length > 0) {
 		report += generateDeobfuscationReport(coreResult.deobfuscated);
+	}
+
+	const chainResult = options.decodeChains === true
+		? detectEvidenceTransformChains([
+			...coreResult.strings.map(item => ({ value: item.value, offset: item.offset, source: 'extracted' as const })),
+			...(coreResult.deobfuscated ?? []).map(item => ({ value: item.value, offset: item.offset, source: 'deobfuscated' as const })),
+		], options.maxTransformChains)
+		: undefined;
+	if (chainResult && chainResult.chains.length > 0) {
+		report += '\n---\n\n## Evidence Transform Chains\n\n';
+		report += '| Offset | Chain | Confidence | Decoded preview | SHA-256 |\n';
+		report += '|--------|-------|------------|-----------------|---------|\n';
+		for (const chain of chainResult.chains) {
+			const decoded = chain.decodedPreview.replace(/\|/g, '\\|');
+			report += `| 0x${chain.offset.toString(16)} | ${chain.transforms.join(' -> ')} | ${Math.round(chain.confidence * 100)}% | \`${decoded}\` | \`${chain.decodedSha256}\` |\n`;
+		}
+		report += '\n';
 	}
 
 	const result: StringsExtractionResult = {
@@ -418,6 +449,8 @@ async function extractStrings(uri: vscode.Uri, minLength: number, options: Strin
 		truncated: coreResult.truncated,
 		summary,
 		strings: coreResult.strings,
+		transformChains: chainResult?.chains,
+		transformChainBudget: chainResult?.budget,
 		reportMarkdown: report
 	};
 
@@ -431,6 +464,10 @@ async function extractStrings(uri: vscode.Uri, minLength: number, options: Strin
 			summaryByMethod[d.method] = (summaryByMethod[d.method] ?? 0) + 1;
 		}
 		result.deobfuscationSummary = summaryByMethod;
+	}
+	const budget = coreResult.deobfuscationBudget;
+	if (budget) {
+		result.deobfuscationBudget = budget;
 	}
 
 	if (options.output) {
@@ -640,6 +677,16 @@ function extractStringsFromRange(
 		}
 	}
 
+	if (!cancelled && unicodeCarryover.length > 0) {
+		const unicodeFinal = extractUnicodeFromChunk(
+			Buffer.alloc(0), offset, minLength, unicodeCarryover, unicodeCarryoverOffset, true
+		);
+		for (const entry of unicodeFinal.strings) {
+			if (sectionName) { entry.section = sectionName; }
+			strings.push(entry);
+		}
+	}
+
 	return { strings, truncated, cancelled };
 }
 
@@ -771,6 +818,13 @@ function extractStringsLinear(
 		});
 	}
 
+	if (!cancelled && unicodeCarryover.length > 0) {
+		const unicodeFinal = extractUnicodeFromChunk(
+			Buffer.alloc(0), offset, minLength, unicodeCarryover, unicodeCarryoverOffset, true
+		);
+		allStrings.push(...unicodeFinal.strings);
+	}
+
 	categorizeStrings(allStrings);
 	allStrings.sort((a, b) => a.offset - b.offset);
 	const uniqueStrings = deduplicateStrings(allStrings);
@@ -810,6 +864,9 @@ function writeOutput(result: StringsExtractionResult, output: CommandOutputOptio
 				// extractAdvanced produced at least one deob hit.
 				deobfuscated: result.deobfuscated,
 				deobfuscationSummary: result.deobfuscationSummary,
+				deobfuscationBudget: result.deobfuscationBudget,
+				transformChains: result.transformChains,
+				transformChainBudget: result.transformChainBudget,
 				generatedAt: new Date().toISOString()
 			},
 			null,
@@ -824,95 +881,6 @@ function normalizeOutputFormat(outputPath: string, format?: OutputFormat): Outpu
 		return format;
 	}
 	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
-}
-
-function extractASCIIFromChunk(
-	buffer: Buffer,
-	baseOffset: number,
-	minLength: number,
-	carryover: string,
-	carryoverOffset: number
-): ChunkResult {
-	const strings: ExtractedString[] = [];
-	let currentString = carryover;
-	let startOffset = carryover.length > 0 ? carryoverOffset : baseOffset;
-
-	for (let i = 0; i < buffer.length; i++) {
-		const byte = buffer[i];
-
-		if ((byte >= 32 && byte <= 126) || byte === 9 || byte === 10 || byte === 13) {
-			if (currentString.length === 0) {
-				startOffset = baseOffset + i;
-			}
-			currentString += String.fromCharCode(byte);
-		} else {
-			if (currentString.length >= minLength) {
-				const trimmed = currentString.trim();
-				if (trimmed.length >= minLength) {
-					strings.push({
-						offset: startOffset,
-						value: trimmed,
-						encoding: 'ASCII'
-					});
-				}
-			}
-			currentString = '';
-		}
-	}
-
-	return {
-		strings,
-		carryover: currentString,
-		carryoverOffset: startOffset
-	};
-}
-
-function extractUnicodeFromChunk(
-	buffer: Buffer,
-	baseOffset: number,
-	minLength: number,
-	carryover: Buffer,
-	carryoverOffset: number
-): UnicodeChunkResult {
-	const strings: ExtractedString[] = [];
-
-	const combined = carryover.length > 0 ? Buffer.concat([carryover, buffer]) : buffer;
-	const combinedOffset = carryover.length > 0 ? carryoverOffset : baseOffset;
-
-	let currentString = '';
-	let startOffset = combinedOffset;
-
-	for (let i = 0; i < combined.length - 1; i += 2) {
-		const low = combined[i];
-		const high = combined[i + 1];
-
-		if (high === 0 && ((low >= 32 && low <= 126) || low === 9 || low === 10 || low === 13)) {
-			if (currentString.length === 0) {
-				startOffset = combinedOffset + i;
-			}
-			currentString += String.fromCharCode(low);
-		} else {
-			if (currentString.length >= minLength) {
-				const trimmed = currentString.trim();
-				if (trimmed.length >= minLength) {
-					strings.push({
-						offset: startOffset,
-						value: trimmed,
-						encoding: 'UTF-16LE'
-					});
-				}
-			}
-			currentString = '';
-		}
-	}
-
-	const newCarryover = combined.length % 2 === 1 ? Buffer.from(combined.subarray(-1)) : Buffer.alloc(0);
-
-	return {
-		strings,
-		carryover: newCarryover,
-		carryoverOffset: baseOffset + buffer.length - 1
-	};
 }
 
 function deduplicateStrings(strings: ExtractedString[]): ExtractedString[] {
@@ -1096,7 +1064,7 @@ ${sectionBreakdown}
 	}
 
 	report += `---
-*Generated by HexCore Strings Extractor v1.3.0 (${hasSections ? 'Section-Aware' : 'Streaming'})*
+*Generated by HexCore Strings Extractor v1.3.3 (${hasSections ? 'Section-Aware' : 'Streaming'})*
 `;
 
 	return report;

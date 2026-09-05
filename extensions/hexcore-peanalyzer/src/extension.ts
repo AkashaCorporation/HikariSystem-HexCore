@@ -5,8 +5,15 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import { PEAnalyzerViewProvider } from './peAnalyzerView';
 import { analyzePEFile, PEAnalysis } from './peParser';
+import {
+	decodeTransformKey,
+	extractPESectionBytes,
+	normalizeTransformLimit,
+	rc4Transform,
+} from './binaryTransforms';
 
 type OutputFormat = 'json' | 'md';
 
@@ -19,6 +26,20 @@ interface PEAnalyzeCommandOptions {
 	file?: string;
 	output?: CommandOutputOptions;
 	quiet?: boolean;
+}
+
+interface ExtractSectionCommandOptions extends PEAnalyzeCommandOptions {
+	section?: string;
+	maxBytes?: number;
+}
+
+interface Rc4CommandOptions extends PEAnalyzeCommandOptions {
+	inputPath?: string;
+	key?: string | number[];
+	keyHex?: string;
+	keyBase64?: string;
+	drop?: number;
+	maxBytes?: number;
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -67,6 +88,54 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.pe.analyze', async (arg?: vscode.Uri | PEAnalyzeCommandOptions) => {
 			return vscode.commands.executeCommand('hexcore.peanalyzer.analyze', arg);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.pe.extractSection', async (arg?: ExtractSectionCommandOptions) => {
+			if (!arg?.file || !arg.section || !arg.output?.path) {
+				throw new Error('extractSection requires file, section, and output.path');
+			}
+			const extracted = await extractPESectionBytes(arg.file, arg.section, arg.maxBytes);
+			fs.mkdirSync(path.dirname(arg.output.path), { recursive: true });
+			fs.writeFileSync(arg.output.path, extracted.bytes);
+			return {
+				ok: true,
+				file: arg.file,
+				section: extracted.section.name,
+				rawOffset: extracted.section.pointerToRawData,
+				size: extracted.bytes.length,
+				sha256: crypto.createHash('sha256').update(extracted.bytes).digest('hex'),
+				outputPath: arg.output.path,
+			};
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.crypto.rc4', async (arg?: Rc4CommandOptions) => {
+			const inputPath = arg?.inputPath ?? arg?.file;
+			if (!arg || !inputPath || !arg.output?.path) {
+				throw new Error('crypto.rc4 requires inputPath (or file) and output.path');
+			}
+			const maxBytes = normalizeTransformLimit(arg.maxBytes);
+			const size = fs.statSync(inputPath).size;
+			if (size > maxBytes) {
+				throw new Error(`RC4 input is ${size} bytes, above maxBytes=${maxBytes}`);
+			}
+			const input = fs.readFileSync(inputPath);
+			const key = decodeTransformKey(arg);
+			const transformed = rc4Transform(input, key, arg.drop ?? 0);
+			fs.mkdirSync(path.dirname(arg.output.path), { recursive: true });
+			fs.writeFileSync(arg.output.path, transformed);
+			return {
+				ok: true,
+				inputPath,
+				inputSize: input.length,
+				keyLength: key.length,
+				drop: arg.drop ?? 0,
+				sha256: crypto.createHash('sha256').update(transformed).digest('hex'),
+				outputPath: arg.output.path,
+			};
 		})
 	);
 	// Public API
@@ -289,6 +358,13 @@ function buildMarkdownReport(analysis: PEAnalysis): string {
 
 	lines.push('## Security');
 	lines.push('');
+	if (analysis.executionManifest) {
+		lines.push(`- Requested execution level: ${analysis.executionManifest.requestedExecutionLevel ?? 'not found'}`);
+		lines.push(`- uiAccess: ${analysis.executionManifest.uiAccess === null ? 'not assessed' : String(analysis.executionManifest.uiAccess)}`);
+		if (analysis.executionManifest.source) {
+			lines.push(`- Manifest evidence: ${analysis.executionManifest.source.section} @ file+0x${analysis.executionManifest.source.fileOffset.toString(16).toUpperCase()} (${analysis.executionManifest.source.encoding})`);
+		}
+	}
 	if (analysis.mitigations.length === 0) {
 		lines.push('- No mitigation data');
 	} else {
@@ -297,6 +373,22 @@ function buildMarkdownReport(analysis: PEAnalysis): string {
 		}
 	}
 	lines.push('');
+	if (analysis.windowsSecuritySummary) {
+		lines.push('### Windows Filesystem/Security Capability Signals');
+		lines.push('');
+		if (analysis.windowsSecuritySummary.capabilities.length === 0) {
+			lines.push('- No catalogued imports.');
+		} else {
+			for (const capability of analysis.windowsSecuritySummary.capabilities) {
+				lines.push(`- ${capability.dll}!${capability.api}: ${capability.roles.join(', ')} (import signal only)`);
+			}
+		}
+		lines.push('');
+		for (const limitation of analysis.windowsSecuritySummary.limitations) {
+			lines.push(`- Limitation: ${limitation}`);
+		}
+		lines.push('');
+	}
 
 	if (analysis.packerSignatures.length > 0) {
 		lines.push('## Packer Signatures');

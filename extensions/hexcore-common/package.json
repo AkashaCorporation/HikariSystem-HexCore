@@ -2,7 +2,7 @@
 	"name": "hexcore-common",
 	"displayName": "HexCore Common Utilities",
 	"description": "Shared utilities for HexCore extensions",
-	"version": "1.1.1",
+	"version": "1.3.0",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -13,7 +13,7 @@
 	"activationEvents": [],
 	"scripts": {
 		"compile": "tsc -p ./",
-		"test": "npm run compile && node out/outputPathGuard.test.js",
+		"test": "npm run compile && node out/outputPathGuard.test.js && node out/analysisContract.test.js && node out/analysisIds.test.js && node out/analysisErrors.test.js",
 		"watch": "tsc -watch -p ./"
 	},
 	"devDependencies": {

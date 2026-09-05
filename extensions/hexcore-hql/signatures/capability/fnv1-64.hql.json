@@ -1,0 +1,17 @@
+{
+  "id": "crypto.fnv1_64",
+  "version": "1.0.0",
+  "namespace": "crypto",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/crypto.fnv1_64.json" },
+  "limitations": ["Constant presence and multiplication shape are structural signals, not proof of a complete FNV implementation."],
+  "name": "FNV hash (64-bit)",
+  "description": "A multiply by the exact 64-bit FNV prime 0x100000001b3.",
+  "severity": "info",
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "re:^\\*=?$" }], "contains": [{ "target": "CIntLitExpr", "attributes": [{ "field": "value", "value": "1099511628211" }] }] } }
+}

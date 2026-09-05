@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "helix": {
+    "version": "helix-js=0.1.9 native=0.1.9",
+    "nodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776",
+    "hastSchema": 1
+  },
+  "remill": {
+    "version": "0.5.4",
+    "upstreamVersion": "6.0.1",
+    "upstreamCommit": "0e324aee8c67a63ec759ef379dcfafa0b3cb1448",
+    "nodeSha256": "1002fd9b85a6f1e68c52d8b1f451dc5bd536ed27df404b769149ae17f22ac257"
+  }
+}

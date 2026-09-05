@@ -1,6 +1,38 @@
-# HexCore Job Templates - v3.8.3 RC
+# HexCore Job Templates - v3.8.4 Analysis Contract
 
 Safe default job templates for users and AI agents.
+
+For 3.8.4 RC discovery, prefer `analyzeAll` JSON with `includeInstructions:false`
+when enumerating functions. It includes lazy index entries. Markdown only previews
+the first 100 functions by address. Materialize selected bodies explicitly and
+check closure/completeness; neither `allowLazy:false` nor a ratio threshold forces
+eager decoding. A lazy body or missing xref is not a negative behavioral result.
+
+## Downstream Audit Quality
+
+Chain decompilation output explicitly using `input: "$step[N].output"` for
+`hexcore.audit.refcountScan`. In exploratory jobs use `allowPartial:true` to
+retain inconclusive results, then inspect `inputQuality` and
+`negativeEvidenceUsable`. Do not interpret zero findings as Clean. Missing
+source provenance also returns partial, including externally supplied C.
+
+On Disassembler 1.4.63, also inspect `scanCoverage`: unparsed functions, skipped
+lines or unsupported syntax block negative evidence. Refcount matches are
+`pattern-signals`, not proven defects. Assertion/warning/termination calls are
+listed separately in `observations`, never counted as reachable vulnerabilities.
+
+Disassembler 1.4.64 retains consumed provenance in `.hexcore-meta/inputs` and
+emits cross-job source/snapshot references in audit `inputs`. Keep these metadata
+files with the report when handing it to another agent. They are evidence, not
+new analyses. Queue-wide `jobStatus` inside a job may include itself as running;
+inspect `includesCurrentJob` and use terminal `summary.queueSnapshot` for final
+counts. A direct query without pipeline context reports that inclusion as unknown.
+
+For reconnaissance, `allowLazy:true` permits an incomplete index but the output
+declares its analysis depth. For a whole-scope disassembly gate, additionally
+set `minMaterializedRatio` explicitly; targeted jobs must check the selected
+functions' body completeness instead. Keep each persistent target in its own
+directory while session databases retain a fixed filename.
 
 ## Rules
 
@@ -16,6 +48,40 @@ Safe default job templates for users and AI agents.
 - Root-level jobs are discovered at startup. The recursive watcher auto-runs later create/change events; it does not replay every pre-existing nested job at startup.
 - Top-level `continueOnError` is inherited by steps unless a step overrides it.
 - See `docs/HEXCORE_AUTOMATION.md` for full command reference and naming convention details.
+
+## Generated Investigation Jobs (3.8.4)
+
+The Analysis Center `Jobs` tab can generate this workflow from a starred
+finding. The analyst supplies the job name; HexCore resolves the owning
+function and uses the sanitized name for the job and every retained artifact.
+
+```json
+{
+  "file": "..\\target.exe",
+  "outDir": "..\\hexcore-reports\\investigations\\health-points",
+  "quiet": true,
+  "priority": "normal",
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "forceReload": true, "allowLazy": true, "allowDecodeEmpty": false }, "expectOutput": false, "allowPartial": true, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.searchStringHeadless", "args": { "query": "health_percent" }, "output": { "path": "health-points.references.json", "format": "json" }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.disasm.liftToIR", "args": { "address": "0x14000e620", "count": 300 }, "output": { "path": "health-points.ll" }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.helix.decompileIR", "args": { "irPath": "$step[2].output" }, "output": { "path": "health-points.helix.c" }, "allowPartial": true, "timeoutMs": 180000 }
+  ]
+}
+```
+
+Do not move the job into its own output directory: the watcher deliberately
+ignores job files beside generated pipeline status files to prevent loops.
+`Analyze All` persists its function cache in `.hexcore_session.db`, so generated
+investigation jobs do not retain its multi-megabyte JSON response. A low-confidence
+or honesty-capped Helix result is retained as `partial`, including its `.c` file,
+instead of being presented as a fully successful decompilation.
+
+Finding identity (3.8.4): starred findings use stable contract IDs
+(`finding:sha256:<digest>:string-reference:token:...`), so re-running the
+investigation keeps saved marks and original timestamps. A job created from a
+finding validates that the finding's embedded target matches the active binary
+and rejects mismatches as `wrong-target`.
 
 ---
 
@@ -56,10 +122,10 @@ Comprehensive static analysis with advanced strings, Base64 detection, hex inspe
     { "cmd": "hexcore.strings.extractAdvanced", "timeoutMs": 180000 },
     { "cmd": "hexcore.base64.decodeHeadless", "timeoutMs": 90000 },
     { "cmd": "hexcore.hexview.dumpHeadless", "args": { "offset": 0, "size": 512 }, "output": { "path": "header-dump.json" }, "timeoutMs": 60000 },
-    { "cmd": "hexcore.disasm.analyzeAll", "args": { "maxFunctions": 3000, "maxFunctionSize": 65536, "forceReload": true }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "maxFunctions": 3000, "maxFunctionSize": 65536, "forceReload": true, "allowLazy": true, "allowDecodeEmpty": false }, "allowPartial": true, "timeoutMs": 300000 },
     { "cmd": "hexcore.yara.scan", "timeoutMs": 180000 },
     { "cmd": "hexcore.ioc.extract", "timeoutMs": 120000 },
-    { "cmd": "hexcore.helix.decompile", "args": { "address": "entry", "count": 200 }, "output": { "path": "decompiled-entry.helix.c" }, "timeoutMs": 180000, "continueOnError": true },
+    { "cmd": "hexcore.helix.decompile", "args": { "address": "entry", "count": 200 }, "output": { "path": "decompiled-entry.helix.c" }, "allowPartial": true, "timeoutMs": 180000, "continueOnError": true },
     { "cmd": "hexcore.pipeline.composeReport", "output": { "path": "FINAL_REPORT.md", "format": "md" }, "timeoutMs": 60000 }
   ]
 }
@@ -80,7 +146,7 @@ Focused on disassembly, formula extraction, constant checking, string references
     { "cmd": "hexcore.filetype.detect", "timeoutMs": 60000 },
     {
       "cmd": "hexcore.disasm.analyzeAll",
-      "args": { "maxFunctions": 2500, "maxFunctionSize": 65536, "forceReload": true },
+      "args": { "maxFunctions": 2500, "maxFunctionSize": 65536, "forceReload": true, "allowLazy": true, "allowDecodeEmpty": false },
       "timeoutMs": 300000
     },
     {
@@ -221,13 +287,13 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
     },
     {
       "cmd": "hexcore.disasm.disassembleAtHeadless",
-      "args": { "address": "0x401000", "count": 200 },
+      "args": { "address": "0x401000", "endExclusive": "0x4012A0", "stopAtFunctionBoundary": true, "autoBacktrack": false },
       "output": { "path": "01-disasm-at.json" },
       "timeoutMs": 120000
     },
     {
       "cmd": "hexcore.disasm.liftToIR",
-      "args": { "address": "0x401000", "count": 200 },
+      "args": { "address": "0x401000", "endExclusive": "0x4012A0", "stopAtFunctionBoundary": true, "autoBacktrack": false },
       "output": { "path": "02-lifted.ll" },
       "timeoutMs": 120000
     },
@@ -235,6 +301,7 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
       "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[3].output" },
       "output": { "path": "03-decompiled.helix.c" },
+      "allowPartial": true,
       "timeoutMs": 180000
     },
     {
@@ -258,9 +325,74 @@ Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to ps
 
 **Notes:**
 - Replace `0x401000` with the function VA you want to decompile.
+- Replace `0x4012A0` with its authoritative `endExclusive`. Do not copy an
+  instruction count from another decoder; counting domains are not portable.
+- `allowLazy:true` is an explicit reconnaissance policy. Omit it when the job
+  requires every discovered body to be materialized.
+- Helix retains imperfect C but returns `partial` for placeholders,
+  self-references, uninitialized returns, or duplicate locals, hence the
+  explicit step-level `allowPartial:true`.
 - The current Remill package supports x86, x86-64, and AArch64 lifting. Helix x86/x64 is the qualified route; treat AArch64 output as experimental and retain IR/disassembly for verification.
 - `irPath` uses `$step[3].output` (the 0-based index of the `liftToIR` step) so the IR path resolves at runtime — never hardcode it (a mismatch fails with a masked `Expected output file was not created`; the real error is in the Extension Host console).
 - Rellic is disabled legacy compatibility. Do not substitute it into new jobs.
+
+---
+
+## Template: Windows Filesystem Boundary Audit
+
+Use this after static PE reconnaissance to turn manifest, API, string, xref,
+and call-graph evidence into an explicit incomplete/confirmed edge map.
+
+```json
+{
+  "file": "C:\\path\\to\\elevated-consumer.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\filesystem-audit",
+  "quiet": true,
+  "continueOnError": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "forceReload": true, "allowLazy": true, "allowDecodeEmpty": false },
+      "output": { "path": "00-analysis.json" },
+      "timeoutMs": 600000
+    },
+    {
+      "cmd": "hexcore.disasm.windowsFilesystemAuditHeadless",
+      "args": { "maxStringSignals": 250 },
+      "output": { "path": "01-windows-filesystem-audit.json" },
+      "allowPartial": true,
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.pipeline.composeReport",
+      "output": { "path": "WINDOWS_FILESYSTEM_AUDIT_REPORT.md", "format": "md" }
+    }
+  ]
+}
+```
+
+`partial` is expected until every required edge has evidence. Do not turn
+import presence or an owned callsite into a vulnerability claim without
+argument/data-flow, effective ACL, lifecycle, and attacker-control proof.
+Inspect `dataflow.typedPaths`, `dataflow.handleLifecycles`, and
+`topCandidateChains` before the isolated ranking. A typed path remains a
+neighborhood signal while `sameValueProven:false`; an access-mask immediate is
+also a candidate until its register def-use reaches the API argument.
+Use `criticalHelpers` for depth-1/depth-2 product routes and Boundary API
+Owners for SID/ACL/open/write callsites; neither list is a severity score.
+On Win64, inspect `dataflow.deepValueFlow.proofs` for exact canonical
+producer/consumer identity. Promote only the individual route whose
+`sameValueProven` or `sameHandleProven` became `true`; neighboring routes stay
+unproven. Inspect `dataflow.deepValueFlow.signals` separately: for path
+buffers, matching storage is downgraded when the region is overwritten or its
+address escapes to a callee without a read-only pointer summary. A
+`same-path/status:signal` entry must not be reported as preserved path content
+or used to promote `Path -> open`.
+
+Repeating the same audit is a determinism control, not independent evidence.
+The report groups normalized-identical reruns under `Replicated Evidence` and
+compares different `maxStringSignals` variants without duplicating full audit
+sections.
 
 ---
 
@@ -355,8 +487,9 @@ Run deep analysis then validate constants. No large intermediate files.
   "steps": [
     {
       "cmd": "hexcore.disasm.analyzeAll",
-      "args": { "maxFunctions": 2500, "maxFunctionSize": 65536, "forceReload": true },
+      "args": { "maxFunctions": 2500, "maxFunctionSize": 65536, "forceReload": true, "allowLazy": true, "allowDecodeEmpty": false },
       "timeoutMs": 240000,
+      "allowPartial": true,
       "expectOutput": false
     },
     {
@@ -374,8 +507,8 @@ Run deep analysis then validate constants. No large intermediate files.
 ## Troubleshooting
 
 - **`No .hexcore_job.json file was found.`** — Ensure the file exists in the workspace root opened in HexCore.
-- **`timed out after ...`** — Increase `timeoutMs` for heavy binaries. Lower `maxFunctions`/`maxFunctionSize` on `analyzeAll`.
-- **Missing report file** — Confirm step status is `ok` in `hexcore-pipeline.status.json`. Failed/timed-out steps do not produce output.
+- **`Isolated analyzeAll timed out ... (lastPhase=...)`** — The external watchdog killed the native worker and preserved its heartbeat. Increase `timeoutMs` only after inspecting the recorded phase; lower `maxFunctions`/`maxFunctionSize` when the scope itself is excessive.
+- **Missing/small report file** — Confirm step status in `hexcore-pipeline.status.json`. A failed/timed-out command may write a typed error stub (`stub:true`, `ok:false`, `status:"error"`) at the expected path, but never a successful analysis artifact.
 - **`Command is not headless-safe`** — The command requires UI interaction. Check `docs/HEXCORE_AUTOMATION.md` for headless alternatives.
 
 ---
@@ -444,6 +577,7 @@ Emulate a crackme that uses glibc `rand()` with a known seed. Permissive memory 
         "permissiveMemoryMapping": true,
         "prngMode": "glibc",
         "prngSeed": 4919,
+		"trace": { "maxEntries": 20000, "sampleEvery": 1, "groupRepeated": true },
         "collectSideChannels": true,
         "memoryDumps": [
           { "address": "0x600000", "size": 4096, "trigger": "end" }
@@ -464,7 +598,12 @@ Emulate a crackme that uses glibc `rand()` with a known seed. Permissive memory 
 - Use `"msvcrt"` for Windows crackmes (LCG: `seed * 214013 + 2531011`).
 - `permissiveMemoryMapping: true` maps all segments with RWX — required for VMs that execute from .rodata/.data.
 - `collectSideChannels: true` captures instruction counts per basic block and branch statistics.
-- `breakpointConfigs` with `autoSnapshot: true` captures registers + stack at breakpoint, then continues.
+- `breakpointConfigs` with `autoSnapshot: true` captures registers + stack at the stop. Add an explicit `continueHeadless` step when execution should resume.
+- Omit `prngMode`/`prngSeed` when an earlier `analyzeAll` step already detected
+  them; the runner propagates ELF -> `glibc` or PE -> `msvcrt` automatically.
+- `trace` groups consecutive duplicate calls by default. Raise `sampleEvery`
+  for deterministic sampling or lower `maxEntries`; exact totals remain in the
+  export summary.
 
 ---
 
@@ -527,7 +666,8 @@ Capture the API trace of a stable PE/x64 runtime loop after a long `continueHead
       "cmd": "hexcore.debug.emulateHeadless",
       "args": {
         "arch": "x64",
-        "permissiveMemoryMapping": true
+        "permissiveMemoryMapping": true,
+        "trace": { "maxEntries": 20000, "sampleEvery": 1, "groupRepeated": true }
       },
       "output": { "path": "01-init.json" },
       "timeoutMs": 30000
@@ -561,6 +701,8 @@ Capture the API trace of a stable PE/x64 runtime loop after a long `continueHead
 - `executionBackend` in `01-init.json`, `02-run-50000.json`, and `03-state.json` should show which runtime path actually ran.
 - `03-state.json` is the easiest place to inspect the loop PC before adding breakpoints.
 - `04-trace.json` is the best artifact for comparing repeated API cycles between builds.
+- Trace exports distinguish `totalCalls`, retained rows, grouped calls,
+  sampled-out calls, and cap drops; `totalEntries` remains as a legacy alias.
 
 ---
 
@@ -683,6 +825,50 @@ New templates covering dynamic memory search, RTTI class hierarchy extraction, A
 
 ---
 
+## Template: Direct Function Entry (v3.8.4)
+
+Start a keep-alive session, prepare a synthetic x64 call frame, and continue
+from a known function address. This is the supported replacement for legacy
+jobs that passed `address` and `maxSteps` to `emulateFullHeadless`; those fields
+were not consumed by that single-shot command.
+
+```json
+{
+  "file": "C:\\path\\to\\target.sys",
+  "outDir": "./hexcore-reports/direct-entry",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 },
+    {
+      "cmd": "hexcore.debug.emulateHeadless",
+      "args": { "arch": "x64", "permissiveMemoryMapping": true },
+      "output": { "path": "01-session.json" },
+      "timeoutMs": 60000
+    },
+    { "cmd": "hexcore.debug.setRegisterHeadless", "args": { "name": "rsp", "value": "0x7fffe000" } },
+    { "cmd": "hexcore.debug.writeMemoryHeadless", "args": { "address": "0x7fffe000", "data": "0x0000007000000000" } },
+    { "cmd": "hexcore.debug.setRegisterHeadless", "args": { "name": "rip", "value": "0x140001000" } },
+    { "cmd": "hexcore.debug.setBreakpointHeadless", "args": { "address": "0x70000000" } },
+    {
+      "cmd": "hexcore.debug.continueHeadless",
+      "args": { "maxSteps": 50000 },
+      "output": { "path": "02-run.json" },
+      "timeoutMs": 180000
+    },
+    { "cmd": "hexcore.debug.getStateHeadless", "output": { "path": "03-state.json" } },
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 }
+  ]
+}
+```
+
+The return address is little-endian `0x70000000`. For a real call contract,
+also initialize argument registers and pointed-to structures before writing the
+program counter. A kernel routine that receives null or placeholder
+`DRIVER_OBJECT`/IRP state is expected to stop honestly on missing kernel data;
+that is different from failing to honor the requested start address.
+
+---
+
 ## Template: Dynamic Analysis with Memory Search (v3.7.3)
 
 Emulate a PE in headless mode, run it forward, then search RAM for decrypted payload markers (MZ header and ASCII strings) while the session is still alive.
@@ -695,7 +881,7 @@ Emulate a PE in headless mode, run it forward, then search RAM for decrypted pay
   "outDir": "./results",
   "steps": [
     { "cmd": "hexcore.debug.emulateHeadless", "args": { "file": "${file}", "arch": "x64", "keepAlive": true }, "timeoutMs": 60000 },
-    { "cmd": "hexcore.debug.continueHeadless", "args": { "maxInstructions": 500000 }, "timeoutMs": 120000 },
+    { "cmd": "hexcore.debug.continueHeadless", "args": { "maxSteps": 500000 }, "timeoutMs": 120000 },
     { "cmd": "hexcore.debug.searchMemoryHeadless", "args": { "pattern": "4D 5A 90 00", "encoding": "hex", "regions": "heap" }, "timeoutMs": 60000 },
     { "cmd": "hexcore.debug.searchMemoryHeadless", "args": { "pattern": "This program", "encoding": "ascii", "regions": "all" }, "timeoutMs": 60000 },
     { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 }
@@ -711,6 +897,63 @@ Emulate a PE in headless mode, run it forward, then search RAM for decrypted pay
 
 ---
 
+## Template: Unpacked Live Memory to Helix (v3.8.4)
+
+Stop after a payload has been unpacked, inspect and decompile the live bytes, then
+release the session. No temporary executable copy is created.
+
+```json
+{
+  "name": "Live Memory Disassembly and Decompile",
+  "file": "${file}",
+  "outDir": "./hexcore-reports/live-memory",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 },
+    {
+      "cmd": "hexcore.debug.emulateHeadless",
+      "args": { "arch": "x86", "keepAlive": true },
+      "output": { "path": "01-session.json" },
+      "timeoutMs": 60000
+    },
+    {
+      "cmd": "hexcore.debug.setBreakpointHeadless",
+      "args": { "address": "0x401000" },
+      "output": { "path": "02-breakpoint.json" },
+      "timeoutMs": 30000
+    },
+    {
+      "cmd": "hexcore.debug.continueHeadless",
+      "args": { "maxSteps": 1000000 },
+      "output": { "path": "03-stop.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.debug.disassembleMemoryHeadless",
+      "args": { "address": "0x500000", "size": 1444 },
+      "output": { "path": "04-live.disasm.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.debug.decompileMemoryHeadless",
+      "args": { "address": "0x500000", "size": 1444 },
+      "output": { "path": "05-live.helix.c" },
+      "timeoutMs": 300000
+    },
+    { "cmd": "hexcore.debug.disposeHeadless", "timeoutMs": 30000 }
+  ]
+}
+```
+
+Replace both addresses and the size with evidence from the active session. Keep
+the emulation session alive through both memory commands and dispose it explicitly.
+The decompile step runs Helix in a cancellable worker whose internal deadline is
+five seconds shorter than the step budget. Its log entry records target-context
+ownership; `activeEngineEvidenceUsed=false` is the required result when a
+different binary remains loaded in the Disassembler.
+
+---
+
 ## Template: RTTI Class Hierarchy Analysis (v3.7.3)
 
 Extract C++ class names and inheritance chains from a PE binary via the RTTI scanner. Requires a prior `analyzeAll` pass to populate the function index.
@@ -722,7 +965,7 @@ Extract C++ class names and inheritance chains from a PE binary via the RTTI sca
   "file": "${file}",
   "outDir": "./results",
   "steps": [
-    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}", "allowLazy": true, "allowDecodeEmpty": false }, "allowPartial": true, "timeoutMs": 300000 },
     { "cmd": "hexcore.disasm.rttiScanHeadless", "args": { "file": "${file}" }, "timeoutMs": 120000 }
   ]
 }
@@ -774,7 +1017,8 @@ Submit multiple search terms in a single `searchStringHeadless` call. More effic
     {
       "cmd": "hexcore.disasm.searchStringHeadless",
       "args": {
-        "queries": ["password", "encrypt", "decrypt", "key", "token", "secret", "admin", "root"]
+        "queries": ["password", "encrypt", "decrypt", "key", "token", "secret", "admin", "root"],
+        "minConfidence": 0.7
       },
       "output": { "path": "string-intel.json" },
       "timeoutMs": 120000
@@ -785,8 +1029,28 @@ Submit multiple search terms in a single `searchStringHeadless` call. More effic
 
 **Notes:**
 - `queries` accepts an array of strings — all terms are searched in one pass against the string index built by `analyzeAll`.
-- Results are grouped per query in the output JSON, each with address, section, and surrounding context.
+- Results are grouped per query and carry literal confidence, evidence class, and evidence reasons. `discardedLowConfidence` makes the gate auditable.
 - Case-insensitive by default; add `"caseSensitive": true` to `args` if exact casing matters.
+
+For bounded deobfuscation and passive transform-chain evidence, add:
+
+```json
+{
+  "cmd": "hexcore.strings.extractAdvanced",
+  "args": {
+    "minConfidence": 0.7,
+    "maxDeobfuscated": 500,
+    "highSignalOnly": true,
+    "decodeChains": true,
+    "maxTransformChains": 100
+  },
+  "output": { "path": "advanced-string-evidence.json" },
+  "timeoutMs": 180000
+}
+```
+
+The result includes deobfuscation and transform-chain budget counters. These
+limits bound report volume, not the underlying file read or function analysis.
 
 ---
 
@@ -801,7 +1065,7 @@ Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler usi
   "file": "${file}",
   "outDir": "./results",
   "steps": [
-    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}" }, "timeoutMs": 300000 },
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "file": "${file}", "allowLazy": true, "allowDecodeEmpty": false }, "allowPartial": true, "timeoutMs": 300000 },
     {
       "cmd": "hexcore.disasm.liftToIR",
       "args": { "address": "0x140001000", "size": 4096 },
@@ -809,9 +1073,10 @@ Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler usi
       "timeoutMs": 120000
     },
     {
-      "cmd": "hexcore.helix.decompile",
+      "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[1].output" },
       "output": { "path": "decompiled.helix.c" },
+      "allowPartial": true,
       "timeoutMs": 180000,
       "continueOnError": true
     }
@@ -824,6 +1089,42 @@ Lift a code region to LLVM IR, then pass the IR path to the Helix decompiler usi
 - This eliminates hardcoded paths and makes the template portable across machines and `outDir` values.
 - `size` (bytes) is used instead of `count` (instructions) when the region boundary is known; both are accepted by `liftToIR`.
 - `continueOnError: true` continues to later steps after a failed decompile; it does not convert semantic failure into success. Use `allowPartial: true` separately only when a partial result is an accepted input.
+
+---
+
+## Template: Extract and RC4-Decode a Managed Payload (v3.8.4)
+
+Materialize a named PE section and apply only the passive RC4 transformation recovered from managed code. The encrypted artifact and decoded artifact are both retained and provenance-hashed.
+
+```json
+{
+  "name": "Extract and RC4-Decode PE Section",
+  "file": "C:\\path\\to\\managed-loader.exe",
+  "outDir": "C:\\path\\to\\hexcore-reports\\materialized-stage",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.pe.extractSection",
+      "args": { "section": ".payload", "maxBytes": 268435456 },
+      "output": { "path": "01-section.encrypted.bin" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.crypto.rc4",
+      "args": {
+        "inputPath": "$step[0].output",
+        "key": [1, 2, 3, 4],
+        "drop": 0,
+        "maxBytes": 268435456
+      },
+      "output": { "path": "02-section.decoded.bin" },
+      "timeoutMs": 120000
+    }
+  ]
+}
+```
+
+Use exactly one RC4 key form: `key` (UTF-8 or byte array), `keyHex`, or `keyBase64`. The commands never infer keys from C#/IL and never execute the output. Note that legacy file-oriented commands still consume the job target; when a downstream command has no `inputPath` contract, start a second job whose `file` is the decoded artifact.
 
 ---
 
@@ -1036,7 +1337,7 @@ Queue multiple analysis jobs with different priorities. High-priority jobs execu
 - `hexcore.pipeline.queue.poolSize` configures logical slots (default `2`, range `1`–`16`). Stateful jobs are serialized for their whole lifetime because engine state is shared in one Extension Host; audited stateless byte tools can still run concurrently. A change applies on the next window reload.
 - For `keepAlive` emulation jobs that share state across steps, pass a `sessionId` on `queueJob` (v3.8.2) — every job with that id is pinned to ONE worker, so the session is never split across workers.
 - Semantic child failures fail a step even when the command returned normally. Use `allowPartial: true` only for a step whose consumer explicitly tolerates incomplete results; the job remains `partial`.
-- Every artifact receives a `.provenance.json` sidecar. Compare `binarySha256`, `contextGeneration`, and `artifact.sha256` before using cached evidence.
+- Every retained artifact receives an entry in `.hexcore-meta/provenance.json`. Compare `binarySha256`, `analysisSession.generation`, and `artifact.sha256` before using cached evidence. Per-artifact sidecars are no longer emitted by new jobs. Since 3.8.4, when the target's session DB exists the manifest records the **persisted** session ID and analysis generation plus the engine manifest; `contextGeneration` remains the runner's per-process execution counter and is only comparable within a single run set.
 
 ---
 
@@ -1336,7 +1637,11 @@ Requires `hexcore.emulator: "both"`.
 
     {
       "cmd": "hexcore.debug.emulateFullHeadless",
-      "args": { "address": "entry", "maxSteps": 50000, "permissiveMemoryMapping": true, "traceAPIs": true },
+      "args": {
+        "maxInstructions": 50000,
+        "permissiveMemoryMapping": true,
+        "trace": { "maxEntries": 20000, "sampleEvery": 1, "groupRepeated": true }
+      },
       "output": { "path": "18-emulation-unicorn.json" },
       "timeoutMs": 300000,
       "continueOnError": true
@@ -1422,7 +1727,7 @@ Requires `hexcore.emulator: "both"`.
 **Why this works.**
 
 - `$step[0].output` resolves at step 1's dispatch time to the literal path step 0 wrote (whether set explicitly in `output.path` or auto-derived by the runner)
-- If step 0 errored, Wave 3.3 error-stub writes `{"ok": false, "error": ...}` to that path, and step 1's `audit.refcountScan` fails with a clear "read file JSON parse error" instead of ENOENT — the stub makes failure visible at every link in the chain
+- If step 0 produced an error stub, it is not usable decompiled C. The refcount scanner reports partial/inconclusive input quality and no qualified negative; use `allowPartial:true` only when intentionally retaining that result. A missing input still raises a read error.
 - With `continueOnError: true` the job completes to `status: "partial"` when a link fails, so downstream orchestration scripts can branch on partial vs error
 
 **When to use `$step[N].output` vs separate jobs**
@@ -1643,6 +1948,8 @@ Replace `0x140001000` with a function VA selected from `analyzeAll`. Keep the fi
 
 Because `continueOnError` is inherited, the wrong format-specific analyzer is expected to fail without suppressing later evidence. Before comparing two HexCore versions, keep `file`, function VA, instruction count, architecture, args, and the input hash identical.
 
+The HQL `irPath` above is the Remill-compatible artifact produced by `liftToIR`; arbitrary LLVM IR is not a supported substitute. Preserve `signatureSetSha256`, clean function records, `adapterCoverage`, and unsupported-node counts when comparing runs. Findings report structural completeness and an evidence level; confidence is absent unless a named corpus calibration exists.
+
 ## Template: Managed .NET Route - C# + IL (v3.8.3 RC)
 
 This template deliberately runs Helix once to preserve the managed-routing marker, then sends the same target to Revenant.
@@ -1747,3 +2054,178 @@ Use this only after selecting a bitwise/MBA/crypto-heavy function. It retains ra
 ```
 
 Judge the experiment by replacements, runtime, deterministic re-runs, retained semantics, and downstream pseudo-C/HQL differences. Zero replacements is valid and is not a regression.
+The HQL input in this template remains Remill-compatible IR. Do not treat a changed finding count as improvement until the function identity, adapter coverage, signature-set hash, and semantic output are held constant.
+
+## Template: Constraint Model (v3.8.4)
+
+Use the packaged Z3 solver after the Disassembler or Debugger has reduced a
+verification routine to bounded variables and explicit constraints.
+
+```json
+{
+  "file": ".\\challenge.exe",
+  "outDir": ".\\hexcore-reports\\constraint-model",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.constraints.solveHeadless",
+      "args": {
+        "variables": [
+          { "name": "digit_0", "type": "int", "domain": [0, 9] },
+          { "name": "digit_1", "type": "int", "domain": [0, 9] }
+        ],
+        "constraints": [
+          { "op": "eq", "args": [
+            { "op": "add", "args": [
+              { "op": "mul", "args": ["digit_0", 7] },
+              "digit_1"
+            ] },
+            43
+          ] }
+        ],
+        "maxModels": 4,
+        "timeoutMs": 30000
+      },
+      "output": { "path": "00-models.json" },
+      "timeoutMs": 35000
+    }
+  ]
+}
+```
+
+Keep the command timeout slightly below the pipeline timeout so Z3 is killed
+and returns `unknown` before the runner deadline. Large integer constants must
+be decimal strings inside `{ "type": "int", "value": "..." }`; use
+`{ "bits": 64, "value": "..." }` for exact bitvector constants.
+
+The result contains `status`, `models`, `modelCount`, `truncated`, `timeout`,
+`semanticStatus`, metrics, and solver provenance. Model values are decimal strings. In this
+result, `truncated:true` means model enumeration reached `maxModels`; it does
+not describe a disassembly window. Preserve `unsat` results as negative
+evidence and use `unknown` only with the reported timeout/solver diagnostics.
+By default `unknown` or timeout fails the step. A deliberate
+`allowUnknown:true`/`allowTimeout:true` opt-in yields `partial`, never `ok`, and
+requires `allowPartial:true` on that pipeline step.
+
+## Template: Exact Function Boundary and Helix Handoff (v3.8.4)
+
+```json
+{
+  "file": ".\\challenge.exe",
+  "outDir": ".\\hexcore-reports\\bounded-function",
+  "quiet": true,
+  "steps": [
+    {
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "allowLazy": true, "allowDecodeEmpty": false },
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x140001000",
+        "endExclusive": "0x1400012A0",
+        "stopAtFunctionBoundary": true,
+        "autoBacktrack": false
+      },
+      "output": { "path": "00-function.disassembly.json" },
+      "timeoutMs": 120000
+    },
+    {
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x140001000",
+        "endExclusive": "0x1400012A0",
+        "stopAtFunctionBoundary": true,
+        "autoBacktrack": false
+      },
+      "output": { "path": "01-function.ll" },
+      "allowPartial": true,
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[2].output" },
+      "output": { "path": "02-function.helix.c" },
+      "allowPartial": true,
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+Replace both addresses with one authoritative half-open function range. The
+disassembly acceptance result must report `countingDomain:"byte-range"`,
+`requestedByteRange.reached:true`, `functionBoundary.crossed:false`, and byte
+coverage 1.0. For a lazy function, additionally require
+`analysisClosure.status:"committed"`, `auditUniverseChanged:true`, and a
+strictly increasing engine/session generation. A later audit should list the
+materialization artifact as provenance input. `display-only`, `decode-empty`,
+or zero semantic instructions is an intentional `partial`, not successful
+analysis closure. The `.ll` header must retain the same `RequestedByteRange`,
+`FunctionByteRange`, and `SemanticBodyRange`; `RemillDecodedByteSet` is a union
+of decoded intervals, not a linear endpoint cursor.
+
+When no trustworthy `endExclusive` exists, use `count` only as pagination and
+follow `nextAddress`; do not label that artifact a complete function. A Helix
+result with `semanticCoverage:1` still covers only decoded instructions.
+Require zero unsupported/decode failures, no damning `qualityIssues`,
+`securityEvidenceUsable:true`, and inspect all `confidenceAxes` before using C
+as security evidence.
+
+For cross-job acceptance, start a fresh HexCore process and rerun `analyzeAll`.
+Require `closureRestoration.status:"restored"`, the same session generation and
+`universeSha256`, and the same materialized/lazy counts as the prior closed
+universe. Audit repeat equality should use the artifact's declared
+`normalization.sha256`, not an undocumented local JSON rewrite.
+
+## Template: Semantic Prototype and Closure
+
+```json
+{
+  "file": ".\\target.exe",
+  "outDir": ".\\hexcore-reports\\semantic-model",
+  "quiet": true,
+  "steps": [
+    { "cmd": "hexcore.disasm.analyzeAll", "args": { "allowLazy": true }, "timeoutMs": 600000 },
+    {
+      "cmd": "hexcore.types.applyPrototype",
+      "args": {
+        "functionIdentity": "function:0x140001000",
+        "functionAddress": "0x140001000",
+        "callingConventionId": "win64",
+        "returnType": "void *",
+        "parameters": [
+          { "ordinal": 0, "name": "out", "type": "void *" },
+          { "ordinal": 1, "name": "base", "type": "const void *" },
+          { "ordinal": 2, "name": "child", "type": "const void *" }
+        ]
+      },
+      "output": { "path": "01-prototype.json" },
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.propagation.solve",
+      "args": {
+        "changedFunctions": ["function:0x140001000"],
+        "maxMilliseconds": 300000
+      },
+      "output": { "path": "02-propagation.json" },
+      "allowPartial": true,
+      "timeoutMs": 360000
+    },
+    { "cmd": "hexcore.records.recover", "output": { "path": "03-records.json" }, "allowPartial": true, "timeoutMs": 360000 },
+    { "cmd": "hexcore.references.export", "output": { "path": "04-references.json" }, "timeoutMs": 180000 },
+    { "cmd": "hexcore.hql.scanHeadless", "args": { "address": "0x140001000" }, "output": { "path": "05-hql.json" }, "allowPartial": true, "timeoutMs": 180000 }
+  ]
+}
+```
+
+Replace the illustrative prototype with evidence-backed types. Accept record
+recovery only when `sameObjectProven:true`; overlaps remain union candidates.
+Require `run.status:"committed"`, zero callback failures, and stable normalized
+hashes on a fresh-process repeat. The propagation/record artifacts must also
+show `worker.transport:"perseus-sab-v1"` and `hardTerminated:false`. A committed
+run can still be semantically `partial` when references contain deferred future-
+generation invalidations; treat that barrier as conservative evidence, not as
+complete closure.

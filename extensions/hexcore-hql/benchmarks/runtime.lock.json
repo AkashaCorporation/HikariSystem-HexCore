@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "platform": "win32-x64",
+  "executables": [
+    {
+      "toolId": "mandiant.capa",
+      "relativePath": "venv-capa/Scripts/capa.exe",
+      "sha256": "3526ac51cc98f938e22d1f96b0e48ed6ffed7223c10705d426101c25e3971d85"
+    },
+    {
+      "toolId": "mandiant.flare-floss",
+      "relativePath": "venv-floss/Scripts/floss.exe",
+      "sha256": "4050e2f29f5e365f1cf7f6ffe6e4d2a944353319a668a1424f2a63dc9ddc6b77"
+    }
+  ]
+}

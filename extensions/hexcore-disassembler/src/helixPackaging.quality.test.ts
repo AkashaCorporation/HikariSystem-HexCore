@@ -9,6 +9,9 @@ import {
 	buildHelixFunctionStarts,
 	wantsHelixFunctionStarts,
 	resolveLiftByteSize,
+	assessByteRangeCompletion,
+	assessLiftRangeCompletion,
+	isBacktrackWithinSection,
 	coercePositiveInt,
 	getAuthoritativeFunctionExtent,
 	shouldHonorExplicitLiftWindow,
@@ -28,6 +31,44 @@ function makeEngineStub(opts: {
 }
 
 suite('FIX-QUALITY-001 Helix packaging', () => {
+	test('exact half-open range completion rejects both under-run and crossing', () => {
+		assert.deepStrictEqual(assessByteRangeCompletion(2090, 2090), {
+			status: 'ok', reached: true, crossed: false, coverage: 1,
+		});
+		const short = assessByteRangeCompletion(2068, 2090);
+		assert.strictEqual(short.status, 'partial');
+		assert.strictEqual(short.reached, false);
+		assert.strictEqual(short.crossed, false);
+		assert.match(short.reason ?? '', /not reached/);
+		const crossed = assessByteRangeCompletion(2091, 2090);
+		assert.strictEqual(crossed.status, 'partial');
+		assert.strictEqual(crossed.reached, true);
+		assert.strictEqual(crossed.crossed, true);
+	});
+
+	test('recursive-descent completion does not mistake decoded-byte union size for an endpoint', () => {
+		const complete = assessLiftRangeCompletion({
+			startAddress: 0x14018D720,
+			endExclusive: 0x14018DF4A,
+			semanticEndExclusive: 0x14018DF4A,
+			pathfinderOwnershipEnd: 0x14018DF4A,
+			nativeTruncated: false,
+		});
+		assert.deepStrictEqual(
+			{ status: complete.status, reached: complete.reached, crossed: complete.crossed },
+			{ status: 'ok', reached: true, crossed: false },
+		);
+
+		const truncated = assessLiftRangeCompletion({
+			startAddress: 0x14018D720,
+			endExclusive: 0x14018DF4A,
+			semanticEndExclusive: 0x14018DF4A,
+			pathfinderOwnershipEnd: 0x14018DF4A,
+			nativeTruncated: true,
+		});
+		assert.strictEqual(truncated.status, 'partial');
+		assert.match(truncated.reason ?? '', /configured limit/);
+	});
 	test('decompileIR treats irPath as headless input', () => {
 		assert.strictEqual(hasHeadlessHelixIrInput({ irPath: 'lifted.ll' }), true);
 		assert.strictEqual(hasHeadlessHelixIrInput({ irText: 'define void @f() {}' }), true);
@@ -143,6 +184,65 @@ define ptr @lifted_5368865820() {
 		assert.ok(r.reason.includes('raised-to-known'));
 	});
 
+	test('resolveLiftByteSize treats count as a hard scoped request', () => {
+		const r = resolveLiftByteSize({
+			count: 80,
+			knownFunctionSize: 13_568,
+			bufferSize: 1_000_000,
+		});
+		assert.strictEqual(r.size, 1_200);
+		assert.strictEqual(r.reason, 'count*15-hard-limit');
+		assert.strictEqual(r.scopeLimited, true);
+		assert.strictEqual(r.countingDomain, 'instruction-count-heuristic');
+	});
+
+	test('resolveLiftByteSize uses explicit endExclusive instead of a foreign decoder count', () => {
+		const r = resolveLiftByteSize({
+			startAddress: 0x14018D720,
+			endExclusive: '0x14018DF4A',
+			count: 525,
+			knownFunctionSize: 2090,
+			bufferSize: 1_000_000,
+		});
+		assert.strictEqual(r.size, 2090);
+		assert.strictEqual(r.endExclusive, 0x14018DF4A);
+		assert.strictEqual(r.reason, 'explicit-endExclusive');
+		assert.strictEqual(r.countingDomain, 'byte-range');
+		assert.strictEqual(r.scopeLimited, undefined);
+	});
+
+	test('resolveLiftByteSize stopAtFunctionBoundary selects the exact known extent', () => {
+		const r = resolveLiftByteSize({
+			startAddress: 0x140190370,
+			stopAtFunctionBoundary: true,
+			count: 920,
+			knownFunctionSize: 3904,
+			bufferSize: 1_000_000,
+		});
+		assert.strictEqual(r.size, 3904);
+		assert.strictEqual(r.endExclusive, 0x1401912B0);
+		assert.strictEqual(r.reason, 'authoritative-function-boundary');
+		assert.strictEqual(r.countingDomain, 'byte-range');
+	});
+
+	test('resolveLiftByteSize rejects invalid explicit boundaries', () => {
+		assert.throws(() => resolveLiftByteSize({
+			startAddress: 0x401000,
+			endExclusive: 0x400FFF,
+			knownFunctionSize: 16,
+			bufferSize: 4096,
+		}), /endExclusive must be greater/);
+	});
+
+	test('auto-backtrack section guard rejects previous-section padding', () => {
+		const sections = [
+			{ name: '.text', virtualAddress: 0x401000, virtualSize: 0x6000, rawSize: 0x6000 },
+			{ name: '.oisc', virtualAddress: 0x407000, virtualSize: 0x1000, rawSize: 0x1000 },
+		];
+		assert.strictEqual(isBacktrackWithinSection(sections, 0x406FFA, 0x407000), false);
+		assert.strictEqual(isBacktrackWithinSection(sections, 0x407000, 0x407020), true);
+	});
+
 	test('resolveLiftByteSize allowOversizedLift keeps huge window', () => {
 		const r = resolveLiftByteSize({
 			size: 65536,
@@ -210,6 +310,20 @@ define ptr @lifted_5368865820() {
 		};
 		const ext = getAuthoritativeFunctionExtent(eng as any, 0x401000);
 		assert.strictEqual(ext.size, 100);
+		assert.strictEqual(ext.source, 'function-table');
+	});
+
+	test('getAuthoritativeFunctionExtent clamps stale heuristic end at a newly known adjacent function', () => {
+		const eng = {
+			getFunctionAt: () => ({ address: 0x1408359d0, size: 0x20, endAddress: 0x1408359f0 }),
+			getFunctions: () => [{ address: 0x1408359d0 }, { address: 0x1408359e0 }],
+			getPdataEntries: () => [],
+			getBaseAddress: () => 0x140000000,
+			getRecommendedLiftSize: () => 0,
+		};
+		const ext = getAuthoritativeFunctionExtent(eng as any, 0x1408359d0);
+		assert.strictEqual(ext.end, 0x1408359e0);
+		assert.strictEqual(ext.size, 0x10);
 		assert.strictEqual(ext.source, 'function-table');
 	});
 });

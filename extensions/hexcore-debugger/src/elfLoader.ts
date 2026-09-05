@@ -7,6 +7,11 @@
 
 import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
+import {
+	ElfRelocationCoverage,
+	emptyElfRelocationCoverage,
+	planElf64RelaDyn,
+} from './elfRelocations';
 
 export interface ELFSection {
 	name: string;
@@ -35,6 +40,7 @@ export interface ELFInfo {
 	sections: ELFSection[];
 	programHeaders: ELFSegment[];
 	imports: ELFImportEntry[];
+	relocations: ElfRelocationCoverage;
 }
 
 interface ELFSegment {
@@ -199,6 +205,7 @@ export class ELFLoader {
 
 		// Parse section headers for names/metadata
 		const sections = this.parseSectionHeaders(fileBuffer);
+		const relocations = this.applyBaseRelocations(fileBuffer, sections);
 
 		// Resolve imports: parse .dynsym, .rela.plt, patch GOT entries
 		const imports = this.resolveImports(fileBuffer, sections);
@@ -212,12 +219,45 @@ export class ELFLoader {
 			baseAddress,
 			sections,
 			programHeaders: segments,
-			imports
+			imports,
+			relocations
 		};
 
-		console.log(`ELF loaded: ${this.is64Bit ? '64-bit' : '32-bit'}, PIE=${isPIE}, base=0x${baseAddress.toString(16)}, entry=0x${entryPoint.toString(16)}, ${segments.filter(s => s.type === PT_LOAD).length} LOAD segments, ${imports.length} imports`);
+		console.log(`ELF loaded: ${this.is64Bit ? '64-bit' : '32-bit'}, PIE=${isPIE}, base=0x${baseAddress.toString(16)}, entry=0x${entryPoint.toString(16)}, ${segments.filter(s => s.type === PT_LOAD).length} LOAD segments, ${imports.length} imports, relocations=${relocations.appliedRelative}/${relocations.relative} relative`);
 
 		return this.elfInfo;
+	}
+
+	private applyBaseRelocations(buf: Buffer, sections: ELFSection[]): ElfRelocationCoverage {
+		const coverage = emptyElfRelocationCoverage();
+		const relocationSections = sections.filter(section => section.name === '.rela.dyn' || section.name === '.rel.dyn');
+		for (const section of relocationSections) {
+			if (!this.is64Bit || section.name !== '.rela.dyn') {
+				const entrySize = section.name === '.rela.dyn' ? (this.is64Bit ? 24 : 12) : (this.is64Bit ? 16 : 8);
+				coverage.total += Math.floor(section.size / entrySize);
+				coverage.unsupported += Math.floor(section.size / entrySize);
+				continue;
+			}
+
+			const plan = planElf64RelaDyn(buf, section, this.pieBase);
+			coverage.total += plan.coverage.total;
+			coverage.relative += plan.coverage.relative;
+			coverage.deferredImports += plan.coverage.deferredImports;
+			coverage.unsupported += plan.coverage.unsupported;
+			coverage.failed += plan.coverage.failed;
+			for (const relocation of plan.relocations) {
+				try {
+					const value = Buffer.alloc(8);
+					value.writeBigUInt64LE(relocation.value);
+					this.emulator.writeMemory(relocation.targetAddress, value);
+					coverage.appliedRelative++;
+				} catch (error) {
+					coverage.failed++;
+					console.warn(`Failed to apply ELF RELATIVE relocation at 0x${relocation.targetAddress.toString(16)}: ${error}`);
+				}
+			}
+		}
+		return coverage;
 	}
 
 	/**
@@ -299,7 +339,7 @@ export class ELFLoader {
 			const JUMP_SLOT_TYPE = 7;
 			const GLOB_DAT_TYPE = 6;
 
-			for (let i = 0; i < numRel && i < 4096; i++) {
+			for (let i = 0; i < numRel; i++) {
 				const relOff = relSec.offset + i * relEntSize;
 				if (relOff + relEntSize > buf.length) { break; }
 

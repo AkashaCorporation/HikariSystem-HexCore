@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
+import { preflightPeMachine } from './pePreflight';
 
 interface EmulatorConfig {
 	arch: 'x86_64';
@@ -93,42 +94,6 @@ function normalizeStartVa(value: unknown, command: string): string | undefined {
 		// fallthrough to the thrown error below
 	}
 	throw new Error(`${command}: invalid startVa "${String(value)}" — use a 0x-hex or decimal address string`);
-}
-
-const PE_MACHINE_LABELS: Record<number, string> = {
-	0x014c: 'x86 (PE32, IMAGE_FILE_MACHINE_I386)',
-	0x0200: 'ia64 (IMAGE_FILE_MACHINE_IA64)',
-	0x8664: 'x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64)',
-	0x01c0: 'ARM (IMAGE_FILE_MACHINE_ARM)',
-	0xaa64: 'ARM64 (IMAGE_FILE_MACHINE_ARM64)',
-	0x01c4: 'ARM Thumb-2 (IMAGE_FILE_MACHINE_ARMNT)'
-};
-
-// Matches the preflight in worker/emulateWorker.js — duplicated intentionally
-// for the in-process paths (snapshotRoundTripHeadless etc) that don't fork.
-function preflightPeMachine(data: Buffer, binaryPath: string): void {
-	if (data.length < 0x40) {
-		throw new Error(`Binary too small to be a PE (${data.length} bytes): ${binaryPath}`);
-	}
-	if (data[0] !== 0x4d || data[1] !== 0x5a) {
-		throw new Error(`Not a PE file (missing MZ magic): ${binaryPath}`);
-	}
-	const lfanew = data.readUInt32LE(0x3c);
-	if (lfanew + 24 > data.length) {
-		throw new Error(`Invalid PE header offset 0x${lfanew.toString(16)}: ${binaryPath}`);
-	}
-	if (data.readUInt32LE(lfanew) !== 0x00004550) {
-		throw new Error(`Not a PE file (missing PE\\0\\0 signature): ${binaryPath}`);
-	}
-	const machine = data.readUInt16LE(lfanew + 4);
-	if (machine !== 0x8664) {
-		const label = PE_MACHINE_LABELS[machine] ?? `unknown (0x${machine.toString(16)})`;
-		throw new Error(
-			`Elixir requires x86_64 (PE32+, IMAGE_FILE_MACHINE_AMD64=0x8664); ` +
-			`got ${label} — ${path.basename(binaryPath)}. ` +
-			`Rebuild the binary as 64-bit or use the legacy debugger (hexcore.emulator="debugger").`
-		);
-	}
 }
 
 /**
@@ -440,13 +405,21 @@ export function activate(context: vscode.ExtensionContext): void {
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.elixir.smokeTestHeadless', (args: HeadlessArgs = {}) => {
 			const n = loadNative();
+			const wrapperVersion = String(context.extension.packageJSON.version ?? 'unknown');
+			const nativeVersion = n && n.isAvailable !== false ? n.getVersion() : null;
 			const result = {
 				ok: !!(n && n.isAvailable !== false && n.Emulator),
-				version: n && n.isAvailable !== false ? n.getVersion() : null,
+				// Keep the legacy field as the native ABI version. Wrapper and native
+				// packages have independent release clocks and must not impersonate one another.
+				version: nativeVersion,
+				wrapperVersion,
+				nativeVersion,
+				versionAligned: nativeVersion === wrapperVersion,
 				loadError: loadError?.message ?? n?.loadError ?? null,
 				platform: process.platform,
 				arch: process.arch,
 				codename: 'Project Azoth',
+				supportedFormats: ['PE32+ x86_64'],
 				surface: n && n.Emulator
 					? ['getVersion', 'Emulator', 'Interceptor', 'Stalker', 'snapshotSave', 'snapshotRestore']
 					: ['getVersion']
@@ -482,6 +455,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				// above for the ACG-reasoning. In-host execution of uc_emu_start crashes
 				// the Extension Host with STATUS_ACCESS_VIOLATION.
 				const file = resolveBinary(args, 'hexcore.elixir.emulateHeadless');
+				preflightPeMachine(fs.readFileSync(file), file);
 				const maxInstructions = args.maxInstructions ?? 1_000_000;
 				// Optional start-address override. When AddressOfEntryPoint is 0 (packed/
 				// protected PE), load()'s entry is the non-executable image header and the
@@ -602,6 +576,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			'hexcore.elixir.stalkerDrcovHeadless',
 			async (args: HeadlessArgs = {}) => {
 				const file = resolveBinary(args, 'hexcore.elixir.stalkerDrcovHeadless');
+				preflightPeMachine(fs.readFileSync(file), file);
 				const maxInstructions = args.maxInstructions ?? 1_000_000;
 				const startVa = normalizeStartVa(args.startVa, 'hexcore.elixir.stalkerDrcovHeadless');
 				output.appendLine(`[elixir] stalkerDrcovHeadless ${path.basename(file)} — delegating to worker`);

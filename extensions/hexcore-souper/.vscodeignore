@@ -13,3 +13,11 @@ deps/**
 !prebuilds/
 !prebuilds/**
 !deps/z3/libz3.dll
+!deps/z3/z3.exe
+
+# Keep solver runtime dependencies; exclude local compiler diagnostics.
+**/mlir_debug_dump.txt
+**/helix_dump_*.mlir
+**/*.node.*
+**/.hexcore-meta/**
+**/.hexcore_session.db*

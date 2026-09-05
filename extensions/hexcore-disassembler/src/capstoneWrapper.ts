@@ -11,6 +11,7 @@ type CapstoneModule = typeof import('hexcore-capstone');
 export type ArchitectureConfig = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'mips64';
 
 export interface DisassembledInstruction {
+	id: number;
 	address: number;
 	bytes: Buffer;
 	mnemonic: string;
@@ -21,6 +22,53 @@ export interface DisassembledInstruction {
 	isRet: boolean;
 	isConditional: boolean;
 	targetAddress?: number;
+	/** Structured operands, register access and groups from Capstone detail mode. */
+	detail?: CapstoneInstruction['detail'];
+}
+
+export interface DetectedFunctionBoundary {
+	start: bigint;
+	/** First byte after the function. */
+	endExclusive: bigint;
+	/** @deprecated Inclusive compatibility endpoint from older native modules. */
+	end?: bigint;
+	size: number;
+	detectionMethod: string;
+	confidence: number;
+	hasReturn: boolean;
+	isThunk: boolean;
+}
+
+type NativeFunctionBoundary = Omit<DetectedFunctionBoundary, 'endExclusive'> & {
+	endExclusive?: bigint | number;
+	end?: bigint | number;
+	start: bigint | number;
+};
+
+/** Normalize old and new native boundary payloads to one half-open contract. */
+export function normalizeDetectedFunctionBoundary(boundary: NativeFunctionBoundary): DetectedFunctionBoundary {
+	const start = typeof boundary.start === 'bigint' ? boundary.start : BigInt(boundary.start);
+	const endExclusive = boundary.endExclusive !== undefined
+		? (typeof boundary.endExclusive === 'bigint' ? boundary.endExclusive : BigInt(boundary.endExclusive))
+		: boundary.size > 0
+			? start + BigInt(boundary.size)
+			: boundary.end !== undefined
+				? (typeof boundary.end === 'bigint' ? boundary.end : BigInt(boundary.end)) + 1n
+				: start;
+	if (endExclusive < start) {
+		throw new Error(`Invalid native function boundary: endExclusive ${endExclusive} precedes start ${start}`);
+	}
+	const size = Number(endExclusive - start);
+	if (!Number.isSafeInteger(size)) {
+		throw new Error(`Invalid native function boundary size: ${endExclusive - start}`);
+	}
+	return {
+		...boundary,
+		start,
+		endExclusive,
+		end: endExclusive > start ? endExclusive - 1n : start,
+		size,
+	};
 }
 
 /**
@@ -32,6 +80,7 @@ export class CapstoneWrapper {
 	private capstone: InstanceType<CapstoneModule['Capstone']> | null = null;
 	private architecture: ArchitectureConfig = 'x64';
 	private initialized: boolean = false;
+	private detailEnabled: boolean = false;
 	private lastError?: string;
 
 	private loadModule(): CapstoneModule | undefined {
@@ -63,8 +112,9 @@ export class CapstoneWrapper {
 	 * Initialize Capstone with the specified architecture
 	 * Must be called before disassembly
 	 */
-	async initialize(arch: ArchitectureConfig = 'x64'): Promise<void> {
+	async initialize(arch: ArchitectureConfig = 'x64', options: { detail?: boolean } = {}): Promise<void> {
 		this.architecture = arch;
+		this.detailEnabled = options.detail === true;
 
 		try {
 			const module = this.loadModule();
@@ -81,6 +131,9 @@ export class CapstoneWrapper {
 			const config = this.getArchConfig(module, arch);
 			// Native N-API - initialization is synchronous and fast (does not block like WASM)
 			this.capstone = new module.Capstone(config.arch, config.mode);
+			if (options.detail === true && !this.capstone.setOption(module.OPT.DETAIL, module.OPT_VALUE.ON)) {
+				throw new Error('Capstone detail mode could not be enabled');
+			}
 			this.initialized = true;
 			console.log(`Capstone ${arch} initialized successfully (native N-API)`);
 		} catch (error: unknown) {
@@ -263,6 +316,7 @@ export class CapstoneWrapper {
 			?? (typeof instAny.address === 'bigint' ? Number(instAny.address) : instAny.address);
 
 		return {
+			id: inst.id,
 			address,
 			bytes: inst.bytes,
 			mnemonic: inst.mnemonic,
@@ -272,8 +326,18 @@ export class CapstoneWrapper {
 			isJump,
 			isRet,
 			isConditional,
-			targetAddress
+			targetAddress,
+			detail: inst.detail,
 		};
+	}
+
+	/** Resolve a structured Capstone register id using the active architecture. */
+	getRegisterName(registerId: number): string | undefined {
+		if (!this.initialized || !this.capstone || !Number.isInteger(registerId) || registerId <= 0) {
+			return undefined;
+		}
+		const name = this.capstone.regName(registerId);
+		return name || undefined;
 	}
 
 	/**
@@ -303,22 +367,14 @@ export class CapstoneWrapper {
 			this.capstone = null;
 		}
 		this.initialized = false;
-		await this.initialize(arch);
+		await this.initialize(arch, { detail: this.detailEnabled });
 	}
 
 	/**
 	 * Detect function boundaries in a code buffer using native prologue scanning
 	 * and call target analysis. Returns sorted array of function boundaries.
 	 */
-	async detectFunctions(buffer: Buffer | Uint8Array, baseAddress: number | bigint, maxFunctions: number = 5000): Promise<Array<{
-		start: bigint;
-		end: bigint;
-		size: number;
-		detectionMethod: string;
-		confidence: number;
-		hasReturn: boolean;
-		isThunk: boolean;
-	}>> {
+	async detectFunctions(buffer: Buffer | Uint8Array, baseAddress: number | bigint, maxFunctions: number = 5000): Promise<DetectedFunctionBoundary[]> {
 		if (!this.initialized || !this.capstone) {
 			throw new Error('Capstone not initialized. Call initialize() first.');
 		}
@@ -327,7 +383,8 @@ export class CapstoneWrapper {
 
 		// Check if native detectFunctions is available (requires hexcore-capstone >= 1.3.3)
 		if (typeof (this.capstone as any).detectFunctions === 'function') {
-			return (this.capstone as any).detectFunctions(bytes, baseAddress, maxFunctions);
+			const nativeBoundaries = await (this.capstone as any).detectFunctions(bytes, baseAddress, maxFunctions) as NativeFunctionBoundary[];
+			return nativeBoundaries.map(normalizeDetectedFunctionBoundary);
 		}
 
 		// Fallback: simple prologue scan in JS for older native modules
@@ -348,46 +405,30 @@ export class CapstoneWrapper {
 		// Binary search for the function containing targetAddress
 		let lo = 0;
 		let hi = functions.length - 1;
-		let best = target; // default: return the address itself
 
 		while (lo <= hi) {
 			const mid = (lo + hi) >> 1;
 			const fn = functions[mid];
-			if (fn.start <= target && fn.end >= target) {
+			if (fn.start <= target && target < fn.endExclusive) {
 				return fn.start; // exact match
 			} else if (fn.start > target) {
 				hi = mid - 1;
 			} else {
-				// fn.start < target, this could be our function if end >= target
-				best = fn.start;
 				lo = mid + 1;
 			}
 		}
 
-		// If best is close enough (within reasonable function size), use it
-		if (target - best < 0x100000n) { // 1MB max function size
-			return best;
-		}
+		// Proximity is not ownership. A missed candidate between two known
+		// functions must remain unresolved instead of being attributed to the
+		// preceding function merely because it is less than 1 MiB away.
 		return target;
 	}
 
 	/**
 	 * Fallback JS-based prologue detection for when native detectFunctions is unavailable
 	 */
-	private detectFunctionsFallback(buffer: Buffer, baseAddress: number): Array<{
-		start: bigint;
-		end: bigint;
-		size: number;
-		detectionMethod: string;
-		confidence: number;
-		hasReturn: boolean;
-		isThunk: boolean;
-	}> {
-		const functions: Array<{
-			start: bigint; end: bigint; size: number;
-			detectionMethod: string; confidence: number;
-			hasReturn: boolean; isThunk: boolean;
-		}> = [];
+	private detectFunctionsFallback(buffer: Buffer, baseAddress: number): DetectedFunctionBoundary[] {
+		const functions: DetectedFunctionBoundary[] = [];
 
 		const arch = this.architecture;
 		const isX86 = arch === 'x86' || arch === 'x64';
@@ -413,7 +454,8 @@ export class CapstoneWrapper {
 				const addr = BigInt(baseAddress + offset);
 				functions.push({
 					start: addr,
-					end: addr + 1n,
+					endExclusive: addr,
+					end: addr,
 					size: 0,
 					detectionMethod: 'prologue',
 					confidence: 0.7,
@@ -421,6 +463,15 @@ export class CapstoneWrapper {
 					isThunk: false
 				});
 			}
+		}
+		const bufferEnd = BigInt(baseAddress + buffer.length);
+		for (let index = 0; index < functions.length; index++) {
+			const boundary = functions[index];
+			boundary.endExclusive = functions[index + 1]?.start ?? bufferEnd;
+			boundary.end = boundary.endExclusive > boundary.start
+				? boundary.endExclusive - 1n
+				: boundary.start;
+			boundary.size = Number(boundary.endExclusive - boundary.start);
 		}
 
 		return functions;

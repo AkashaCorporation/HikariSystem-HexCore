@@ -1,0 +1,17 @@
+{
+  "id": "algo.multiply_xor_loop",
+  "version": "1.0.0",
+  "namespace": "algo",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/algo.multiply_xor_loop.json" },
+  "limitations": ["Multiply and XOR co-occurrence is only a rolling-mix signal and is not algorithm identity."],
+  "name": "Multiply-XOR hash loop",
+  "description": "A function containing both multiplication and XOR expressions.",
+  "severity": "low",
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CFunctionDecl", "contains": [{ "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "re:^\\*=?$" }] }, { "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "re:^\\^=?$" }] }] } }
+}

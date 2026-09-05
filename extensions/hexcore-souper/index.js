@@ -14,36 +14,44 @@ if (process.platform === 'win32') {
     if (fs.existsSync(path.join(z3PrebuildsDir, 'libz3.dll'))) {
         process.env.PATH = `${z3PrebuildsDir};${process.env.PATH || ''}`;
     }
+    // The native Souper build must not depend on the build machine's absolute
+    // Z3 path. Point it at the executable shipped beside the selected runtime.
+    for (const dir of [z3PrebuildsDir, z3DepsDir]) {
+        const executable = path.join(dir, 'z3.exe');
+        if (fs.existsSync(executable)) {
+            process.env.HEXCORE_Z3_PATH = executable;
+            break;
+        }
+    }
 }
 
 let binding;
-try {
-    // 1. Prebuild (underscore convention — prebuildify target_name)
-    binding = require('./prebuilds/' + process.platform + '-' + process.arch + '/hexcore_souper.node');
-} catch (e1) {
+const errors = [];
+const platformDir = './prebuilds/' + process.platform + '-' + process.arch + '/';
+
+// A checkout must prefer its fresh local build. Published packages do not
+// contain build/ and therefore fall through to their packaged prebuild.
+const candidates = [
+    { label: 'build/Release', path: './build/Release/hexcore_souper.node' },
+    { label: 'build/Debug', path: './build/Debug/hexcore_souper.node' },
+    { label: 'prebuild (underscore)', path: platformDir + 'hexcore_souper.node' },
+    { label: 'prebuild (hyphen)', path: platformDir + 'hexcore-souper.node' },
+];
+
+for (const candidate of candidates) {
     try {
-        // 2. Prebuild (hyphen convention — prebuild-install package name)
-        binding = require('./prebuilds/' + process.platform + '-' + process.arch + '/hexcore-souper.node');
-    } catch (e2) {
-        try {
-            // 3. Local Release build
-            binding = require('./build/Release/hexcore_souper.node');
-        } catch (e3) {
-            try {
-                // 4. Local Debug build
-                binding = require('./build/Debug/hexcore_souper.node');
-            } catch (e4) {
-                throw new Error(
-                    'Failed to load hexcore-souper native module. ' +
-                    'Errors:\n' +
-                    `  Prebuild (underscore): ${e1.message}\n` +
-                    `  Prebuild (hyphen):     ${e2.message}\n` +
-                    `  Release build:         ${e3.message}\n` +
-                    `  Debug build:           ${e4.message}`
-                );
-            }
-        }
+        binding = require(candidate.path);
+        break;
+    } catch (error) {
+        errors.push(`  ${candidate.label}: ${error.message}`);
     }
+}
+
+if (!binding) {
+    throw new Error(
+        'Failed to load hexcore-souper native module.\nErrors:\n' +
+        errors.join('\n')
+    );
 }
 
 module.exports = binding;

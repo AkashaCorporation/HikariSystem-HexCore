@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g., v3.8.3-rc)"
+        description: "Version tag matching product.json (e.g., v3.8.4-rc.1)"
         required: true
-        default: "v3.8.3-rc"
+        default: "v3.8.4-rc.1"
       build_linux:
         description: "Build the experimental Linux package"
         required: true
@@ -22,6 +22,7 @@ env:
   VSCODE_SKIP_NODE_VERSION_CHECK: 1
   npm_config_maxsockets: 8
   npm_config_loglevel: warn
+  HEXCORE_RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.version }}
 
 jobs:
   build-windows:
@@ -41,10 +42,20 @@ jobs:
         with:
           node-version: "22.21.1"
 
+      - name: Verify release identity
+        run: node scripts/verify-hexcore-release.cjs
+
+      - name: Test release identity
+        run: node scripts/verify-hexcore-release.test.cjs
+
       - name: HexCore Preflight (Command/Build Coverage)
-        run: |
-          node scripts/verify-hexcore-preflight.cjs
-          node scripts/generate-hexcore-engine-manifest.test.cjs
+        run: node scripts/verify-hexcore-preflight.cjs
+
+      - name: Test engine manifest
+        run: node scripts/generate-hexcore-engine-manifest.test.cjs
+
+      - name: Test runtime smoke controller
+        run: node scripts/verify-hexcore-runtimes.test.cjs
 
       - name: Setup Python
         uses: actions/setup-python@v6
@@ -121,7 +132,6 @@ jobs:
           cd ../hexcore-llvm-mc && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-better-sqlite3 && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-remill && node ../../scripts/hexcore-native-install.js
-          cd ../hexcore-rellic && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-souper && node ../../scripts/hexcore-native-install.js
           cd ../hexcore-elixir && node ../../scripts/hexcore-native-install.js
 
@@ -200,6 +210,13 @@ jobs:
           }
           Write-Host "Revenant backend installed: $((Get-Item bin/win-x64/revenant-engine.exe).Length) bytes"
 
+      - name: Verify staged native runtimes before full build
+        run: |
+          node scripts/generate-hexcore-engine-manifest.cjs --app-root . --output "$env:RUNNER_TEMP/hexcore-staged-engines.json"
+          if ($LASTEXITCODE -ne 0) { throw "Staged engine inventory failed" }
+          node scripts/verify-hexcore-runtimes.cjs --app-root . --manifest "$env:RUNNER_TEMP/hexcore-staged-engines.json" --output "$env:RUNNER_TEMP/hexcore-staged-runtime-smoke.json"
+          if ($LASTEXITCODE -ne 0) { throw "Staged engine loading failed" }
+
       - name: Compile HexCore Extensions
         env:
           npm_config_ignore_scripts: true
@@ -246,8 +263,19 @@ jobs:
             --output ../VSCode-win32-x64/resources/app/hexcore-engine-manifest.json
 
       - name: Create ZIP archive
+        # Load checks run against resources/app, not the development checkout.
+        # Analysis/emulation correctness is qualified by the separate acceptance corpus.
         run: |
+          node scripts/verify-hexcore-runtimes.cjs `
+            --app-root ../VSCode-win32-x64/resources/app `
+            --manifest ../VSCode-win32-x64/resources/app/hexcore-engine-manifest.json `
+            --output ../VSCode-win32-x64/resources/app/hexcore-runtime-smoke.json
+          if ($LASTEXITCODE -ne 0) { throw "Packaged engine loading failed; refusing ZIP" }
           Compress-Archive -Path "../VSCode-win32-x64/*" -DestinationPath "HexCore-win32-x64.zip"
+
+      - name: Validate ZIP created
+        run: |
+          if (-not (Test-Path "HexCore-win32-x64.zip")) { throw "ZIP missing" }
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -276,10 +304,17 @@ jobs:
         with:
           node-version: "22.21.1"
 
+      - name: Verify release identity
+        run: node scripts/verify-hexcore-release.cjs
+
+      - name: Test release identity
+        run: node scripts/verify-hexcore-release.test.cjs
+
       - name: HexCore Preflight (Command/Build Coverage)
-        run: |
-          node scripts/verify-hexcore-preflight.cjs
-          node scripts/generate-hexcore-engine-manifest.test.cjs
+        run: node scripts/verify-hexcore-preflight.cjs
+
+      - name: Test engine manifest
+        run: node scripts/generate-hexcore-engine-manifest.test.cjs
 
       - name: Raise File Descriptor Limit
         run: ulimit -n 65535 || true
@@ -360,11 +395,6 @@ jobs:
         continue-on-error: true
         run: |
           cd extensions/hexcore-remill && node ../../scripts/hexcore-native-install.js
-
-      - name: Fetch HexCore Rellic Prebuilds (Linux)
-        continue-on-error: true
-        run: |
-          cd extensions/hexcore-rellic && node ../../scripts/hexcore-native-install.js
 
       - name: Fetch HexCore Souper Prebuilds (Linux)
         continue-on-error: true

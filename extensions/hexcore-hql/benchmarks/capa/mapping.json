@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "capaVersion": "9.4.0",
+  "rulesVersion": "9.4.0",
+  "mappings": [
+    {
+      "hqlRuleId": "crypto.xor_present",
+      "relationship": "overlap",
+      "aggregation": "any",
+      "capaRules": ["encode data using XOR"],
+      "limitations": "capa requires a tight loop and non-zero XOR; HQL currently reports any XOR expression."
+    },
+    {
+      "hqlRuleId": "crypto.crc32",
+      "relationship": "overlap",
+      "aggregation": "any",
+      "capaRules": ["hash data with CRC32"],
+      "limitations": "HQL matches the polynomial constant while capa recognizes a broader implementation shape."
+    },
+    {
+      "hqlRuleId": "crypto.fnv1",
+      "relationship": "overlap",
+      "aggregation": "any",
+      "capaRules": ["hash data using fnv"],
+      "limitations": "capa does not split the HQL 32-bit and 64-bit rule identities."
+    },
+    {
+      "hqlRuleId": "crypto.fnv1_64",
+      "relationship": "overlap",
+      "aggregation": "any",
+      "capaRules": ["hash data using fnv"],
+      "limitations": "capa does not split the HQL 32-bit and 64-bit rule identities."
+    },
+    {
+      "hqlRuleId": "anti-analysis.timing_check",
+      "relationship": "direct",
+      "aggregation": "any",
+      "capaRules": ["check for time delay via QueryPerformanceCounter"],
+      "limitations": "Both remain behavioral signals; legitimate performance instrumentation is a negative class."
+    },
+    {
+      "hqlRuleId": "anti-analysis.vm_detection",
+      "relationship": "composite-overlap",
+      "aggregation": "all",
+      "capaRules": ["query or enumerate registry value", "reference anti-VM strings targeting VMWare"],
+      "limitations": "This comparison covers only the HQL registry branch, not WMI or firmware enumeration."
+    },
+    {
+      "hqlRuleId": "anti-analysis.peb_access",
+      "relationship": "library-overlap",
+      "aggregation": "any",
+      "capaRules": ["PEB access"],
+      "limitations": "capa's PEB library rule may support parent capability rules and is not necessarily emitted as a top-level match."
+    },
+    {
+      "hqlRuleId": "anti-analysis.api_hash_lookup",
+      "relationship": "partial-overlap",
+      "aggregation": "any",
+      "capaRules": ["resolve function by FNV-1a hash", "resolve function by hash"],
+      "limitations": "HQL's generic loop shape is broader and does not prove export traversal or API resolution."
+    }
+  ]
+}

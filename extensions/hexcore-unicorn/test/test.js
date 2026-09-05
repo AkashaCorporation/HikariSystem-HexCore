@@ -407,6 +407,52 @@ test('X86_REG constants are defined', () => {
     assert(typeof X86_REG.RSP === 'number', 'X86_REG.RSP should be number');
 });
 
+test('regWriteMmr() configures a GDT-backed FS segment in x86 mode', () => {
+    const uc = new Unicorn(ARCH.X86, MODE.MODE_32);
+    const codeAddress = 0x1000n;
+    const tebAddress = 0x3000n;
+    const gdtAddress = 0x5000n;
+	const stackAddress = 0x7000n;
+
+    uc.memMap(codeAddress, 0x1000, PROT.ALL);
+    uc.memMap(tebAddress, 0x1000, PROT.ALL);
+    uc.memMap(gdtAddress, 0x1000, PROT.ALL);
+	uc.memMap(stackAddress, 0x1000, PROT.ALL);
+    uc.memWrite(codeAddress, Buffer.from([0x50, 0x64, 0xA1, 0, 0, 0, 0])); // push eax; mov eax, fs:[0]
+    const expected = 0x78563412;
+    const teb = Buffer.alloc(4);
+    teb.writeUInt32LE(expected, 0);
+    uc.memWrite(tebAddress, teb);
+
+    const makeDescriptor = (base, limit, access, flags) => {
+        const descriptor = Buffer.alloc(8);
+        descriptor.writeUInt16LE(limit & 0xFFFF, 0);
+        descriptor.writeUInt16LE(base & 0xFFFF, 2);
+        descriptor[4] = (base >>> 16) & 0xFF;
+        descriptor[5] = access;
+        descriptor[6] = ((limit >>> 16) & 0x0F) | flags;
+        descriptor[7] = (base >>> 24) & 0xFF;
+        return descriptor;
+    };
+    const gdt = Buffer.alloc(32);
+    makeDescriptor(0, 0xFFFFF, 0x9A, 0xC0).copy(gdt, 8);
+    makeDescriptor(0, 0xFFFFF, 0x92, 0xC0).copy(gdt, 16);
+    makeDescriptor(Number(tebAddress), 0x0FFF, 0x92, 0x40).copy(gdt, 24);
+    uc.memWrite(gdtAddress, gdt);
+
+    uc.regWriteMmr(X86_REG.GDTR, 0, gdtAddress, 31, 0);
+    uc.regWrite(X86_REG.CS, 0x08);
+    for (const register of [X86_REG.DS, X86_REG.ES, X86_REG.SS, X86_REG.GS]) {
+        uc.regWrite(register, 0x10);
+    }
+    uc.regWrite(X86_REG.FS, 0x18);
+	uc.regWrite(X86_REG.ESP, stackAddress + 0x800n);
+    uc.emuStart(codeAddress, codeAddress + 7n);
+
+    assert(uc.regRead(X86_REG.EAX) === expected, 'FS:[0] should resolve through the GDT to the TEB');
+    uc.close();
+});
+
 // ============== Error Handling Tests ==============
 
 console.log('\n=== Error Handling Tests ===');

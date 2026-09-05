@@ -57,7 +57,7 @@ suite('Wide String XOR Properties', () => {
 	// **Validates: Requirements 5.5, 8.6**
 	// -----------------------------------------------------------------------
 
-	test('P13: score of UTF-16LE with ignoreNullBytes ≈ score of ASCII narrow (diff ≤ 0.1)', () => {
+	test('P13: score of UTF-16LE with ignoreNullBytes ≈ score of ASCII narrow (diff ≤ 0.15)', () => {
 		fc.assert(
 			fc.property(
 				// Generate printable ASCII strings with reasonable length
@@ -79,7 +79,7 @@ suite('Wide String XOR Properties', () => {
 					// Tolerance of 0.15 accounts for bigram detection differences:
 					// in UTF-16LE mode, interleaved null bytes prevent bigram matching
 					// between adjacent characters, and length bonus differs (byte vs char length).
-					return diff <= 0.15;
+					return diff <= 0.15 + Number.EPSILON;
 				}
 			),
 			{ numRuns: 100 }

@@ -5,8 +5,9 @@ import * as path from 'path';
 
 type PipelineStep = any;
 let findStepThatMaySkip: (steps: PipelineStep[], targetIndex: number) => number | undefined;
-let readStepOutputForCapture: (outputPath: string, kind: 'json' | 'text') => Record<string, unknown> | undefined;
+let readStepOutputForCapture: (outputPath: string, kind: 'json' | 'text' | 'binary') => Record<string, unknown> | undefined;
 let resolveStepReferences: (args: Record<string, unknown>, records: any[], currentIndex: number) => Record<string, unknown>;
+let findPipelinePrngRecommendation: (records: any[], filePath: string) => { prngMode: string; prngSeed?: number; sourceStep: number } | undefined;
 
 function installVscodeMock(): void {
 	const Module = require('module');
@@ -33,6 +34,7 @@ suite('pipeline step records (#44/#59)', () => {
 		findStepThatMaySkip = runner.findStepThatMaySkip;
 		readStepOutputForCapture = runner.readStepOutputForCapture;
 		resolveStepReferences = runner.resolveStepReferences;
+		findPipelinePrngRecommendation = runner.findPipelinePrngRecommendation;
 	});
 
 	test('$step[N] uses declared index and rejects a skipped hole', () => {
@@ -90,6 +92,35 @@ suite('pipeline step records (#44/#59)', () => {
 		try {
 			fs.writeFileSync(file, '{"score":7}', 'utf8');
 			assert.deepStrictEqual(readStepOutputForCapture(file, 'json'), { score: 7 });
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('binary artifacts are captured without UTF-8 decoding', () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-step-binary-'));
+		const file = path.join(dir, 'stage.bin');
+		try {
+			fs.writeFileSync(file, Buffer.from([0xff, 0x00, 0x80, 0x41]));
+			assert.deepStrictEqual(readStepOutputForCapture(file, 'binary'), {
+				path: file,
+				bytes: 4,
+				kind: 'binary',
+			});
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('propagates detected ELF PRNG mode and seed to a later debugger step', () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-prng-'));
+		const elf = path.join(dir, 'sample');
+		try {
+			fs.writeFileSync(elf, Buffer.from([0x7f, 0x45, 0x4c, 0x46]));
+			const recommendation = findPipelinePrngRecommendation([
+				{ result: { prngDetection: { prngDetected: true, seedValue: 1337 } } },
+			], elf);
+			assert.deepStrictEqual(recommendation, { prngMode: 'glibc', prngSeed: 1337, sourceStep: 0 });
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

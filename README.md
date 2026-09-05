@@ -11,6 +11,7 @@
 <p align="center">
   <a href="#features">Features</a> |
   <a href="#extensions">Extensions</a> |
+  <a href="#semantic-analysis-384-development">Semantic Analysis</a> |
   <a href="#debugger--emulator">Debugger</a> |
   <a href="#automation-pipeline">Automation</a> |
   <a href="#installation">Installation</a> |
@@ -30,10 +31,16 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 **Stable release:** [`v3.8.3`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3). This release focuses on truthful pipeline outcomes, whole-job engine isolation, artifact provenance, parser format gates, YARA evidence qualification, native-engine refreshes, the canonical Helix `0.9.3` migration, and a restrained analysis-focused interface refresh. See the [changelog](CHANGELOG.md) for the release record.
 
+**Current development line:** `v3.8.4`. The active work adds the HXDB v2
+semantic model, full prototype/ABI editing, typed references, bounded
+whole-program propagation, PDB/DWARF/BTF providers, Semantic Explorer, HQL
+`0.3.1`, Function Atlas, and runtime-evidence separation. These capabilities
+remain unreleased until the 3.8.4 acceptance and packaging gates are frozen.
+
 > **Platform status:** the supported packaged application is currently **Windows 10/11 x64**. HexCore analyzes both PE and ELF targets, but that does not imply a supported Linux-host distribution. Linux packaging remains a separate Docker/CI effort and is not part of the 3.8.3 release claim.
 
 **What makes HexCore different:**
-- **Agentic-first decompilation** — output designed for both human and LLM consumption; paired with HQL (HikariSystem Query Language) semantic query layer over Helix IR
+- **Agentic-first decompilation** — output designed for both human and LLM consumption; paired with HQL (Helix Query Language) over typed HAST and HXDB evidence
 - **Full PE and ELF emulation** with 70+ API hooks, plus clean-room Project Azoth engine (replaces Qiling)
 - **Native Capstone / Unicorn / LLVM MC / Remill / Helix / Souper / Azoth** engines via N-API (no external installs)
 - **Decompilation pipeline:** machine code → Pathfinder CFG hints → Remill lift → LLVM IR → Helix MLIR engine (Low/Mid/High lowering) → pseudo-C with debug-info-guided type recovery
@@ -47,10 +54,14 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 ## Features
 
 - **Disassembly** — Native multi-architecture disassembler (x86, x64, ARM, ARM64, MIPS, RISC-V)
-- **Pathfinder CFG Engine** (v3.8.0) — Pre-lift CFG analysis using `.pdata`/`.symtab` boundaries, recursive descent, jump table resolution, NOP range detection, and gap scanning with prologue heuristics. Feeds Remill via `additionalLeaders` for 2-3× more basic blocks than stock linear sweep
+- **Pathfinder CFG Engine** (v3.8.0) — Pre-lift CFG analysis using reconciled logical `.pdata` ranges and section-safe `.symtab` boundaries, recursive descent, jump table resolution, NOP range detection, and gap scanning with prologue heuristics. PE ranges are non-overlapping before binary search; ET_REL numeric navigation is canonicalized to `.text`, while other colliding sections use `symbolName`. Feeds Remill through bounded `additionalLeaders`
 - **IR Lifting** — Machine code → LLVM IR translation via patched Remill fork (FIX-023/024/025: CET preamble handling, XED-ILD exotic-ISA recovery, CALL fall-through wiring)
 - **Decompilation** — LLVM IR → pseudo-C via the Helix MLIR engine, with Low/Mid/High dialect lowering, a documented 19-pass pipeline, structured control flow, type recovery, and evidence-gated confidence
 - **Helix MLIR Decompiler** — C++23/MLIR pipeline, C AST layer with 16+ optimizer passes, SysV/Win64/Cdecl32 ABI auto-detection, SSA variable splitting via reverse post-order traversal, Ghidra-inspired type recovery with pointer propagation
+- **HXDB Semantic Model** (3.8.4 development) — Target-bound canonical types, full function prototypes, ABI locations, type bindings, evidence/conflicts, generations, typed references, and propagation summaries persisted in `.hexcore_session.db`
+- **Semantic Explorer** (3.8.4 development) — Evidence-first prototype/type editor with xrefs, conflicts, providers, stale facts, generation diffs, transactional edits, and undo
+- **HQL 0.3.1 + Atlas** (3.8.4 development) — Recursive `all`/`any`/`not`/`count` rules over HAST plus typed HXDB facts, explicit signal/candidate/proven levels, deterministic fixtures, and target-bound semantic hashes
+- **Function Atlas** (3.8.4 development) — Deterministic function-family similarity across compiler, architecture, optimization, and debug variants, evaluated separately from Ghidra BSim
 - **DWARF + BTF + PDB Debug Info Ingestion** (v3.8.0) — Pure-TypeScript DWARF 5 parser with split-form resolution (`DW_FORM_strx*`/`DW_FORM_addrx*`) and in-process ET_REL relocation application for kernel modules. PDB function boundary feeder via `llvm-pdbutil`. End-to-end: `mali_kbase.ko` recovers 792 structs + 3,864 function signatures with real parameter names and types
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis, KUSER_SHARED_DATA + synthetic DLL PE images for hash-resolved imports
 - **Project Azoth** — Clean-room Apache-2.0 Rust+C++23 dynamic analysis framework replacing Qiling. Frida-style Interceptor/Stalker. 5/5 parity gates passed on the reference controlled corpus. Standalone repo at `AkashaCorporation/HexCore-Elixir`
@@ -87,21 +98,22 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.10 | PE/ELF emulation with Unicorn Engine, API hooks, stdin emulation, snapshots, traces, and headless lifecycle commands |
-| **Disassembler** | 1.4.27 | Multi-arch disassembly, PE/ELF parsing, function discovery, Pathfinder, Remill lifting, Helix integration, and automation |
+| **Debugger** | 2.1.22 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, and binary/input/trace-bound runtime corroboration |
+| **Disassembler** | 1.4.60 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
 | **Revenant** | 0.4.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 10 backend |
-| **Hex Viewer** | 1.2.3 | Professional binary file viewer with virtual scrolling |
-| **PE Analyzer** | 1.1.1 | Comprehensive PE executable analysis with headless mode |
-| **Strings Extractor** | 1.2.0 | Memory-efficient string extraction with XOR deobfuscation and stack string detection |
+| **Hex Viewer** | 1.2.4 | Chunk-backed binary viewer with scaled large-file scrolling, data inspection, editing, templates, and offset sync |
+| **PE Analyzer** | 1.1.3 | Comprehensive PE analysis with binary transforms, Windows security summaries, and headless mode |
+| **Strings Extractor** | 1.3.3 | Memory-efficient ASCII/UTF-16 extraction, bounded deobfuscation, provenance-bound transform chains, and stack strings |
 | **Hash Calculator** | 1.1.2 | Fast file hashing with VirusTotal integration |
-| **Entropy Analyzer** | 1.1.1 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
+| **Entropy Analyzer** | 1.1.2 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
 | **File Type Detector** | 1.0.2 | Magic bytes signature detection |
 | **Base64 Decoder** | 2.0.2 | Detect and decode Base64 strings |
 | **YARA Scanner** | 2.1.3 | YARA scanning with qualified condition/ISA evidence and headless pipeline support |
 | **IOC Extractor** | 1.1.2 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
 | **Minidump Parser** | 1.0.1 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
 | **ELF Analyzer** | 1.0.1 | Structural analysis of ELF binaries — sections, segments, symbols, and security mitigations |
-| **Report Composer** | 1.0.1 | Aggregates pipeline outputs into unified Markdown reports with TOC and evidence links |
+| **HQL** | 0.3.1 | Typed HAST/HXDB rule engine with recursive conditions, Atlas fixtures, provenance, and deterministic semantic cache identities |
+| **Report Composer** | 1.0.13 | Aggregates outputs while separating proofs, signals, barriers, semantic providers, and runtime corroboration |
 
 ### Native Engines (Standalone N-API Packages)
 
@@ -109,23 +121,60 @@ These engines ship with HexCore and can also be used independently in Node.js pr
 
 | Package | Version | Description |
 |---------|---------|-------------|
-| **hexcore-capstone** | 1.3.5 | Capstone v5 N-API binding — async disassembly, detail mode, all architectures |
-| **hexcore-unicorn** | 1.3.1 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory, and Perseus SAB delivery |
+| **hexcore-capstone** | 1.3.6 | Capstone v5 N-API binding — async disassembly, structured detail, half-open function boundaries, all architectures |
+| **hexcore-unicorn** | 1.3.2 | Unicorn N-API binding — CPU emulation, hooks, breakpoints, snapshots, shared memory, and Perseus SAB delivery |
 | **hexcore-llvm-mc** | 1.0.2 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.3 | SQLite N-API wrapper with safe prepared-statement lifecycle for persistent sessions |
-| **hexcore-remill** | 0.5.1 | Patched Remill N-API lifter — machine code to LLVM IR with current call, relocation, preamble, and fallback hardening |
+| **hexcore-remill** | 0.5.4 | Patched Remill N-API lifter — machine code to LLVM IR with logical-entry/reachable-only CFG recovery plus current call, relocation, preamble, and fallback hardening |
 | **hexcore-helix** | 0.9.3 | Canonical Helix MLIR decompiler with structured control flow and debug-info-guided type recovery |
-| **hexcore-souper** | 0.2.0 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |
-| **hexcore-elixir** *(Azoth)* | 1.0.3 | Project Azoth clean-room dynamic analysis framework — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
+| **hexcore-souper** | 0.2.2 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |
+| **hexcore-elixir** *(Azoth)* | 1.0.4 | Project Azoth clean-room dynamic analysis framework for PE32+ x86_64 — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
-> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The `.node` binary is pre-built and ships with HexCore — no compilation needed for end users. Building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build (~131 MB deps).
+> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The extension/package version (`0.9.3`), native engine API (`0.1.9`), and HAST producer version (`0.1.9`) are separate provenance identities. The `.node` binary is pre-built and ships with HexCore — no compilation needed for end users. Building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build (~131 MB deps).
 
 > **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and Remill. End users receive the pre-built `.node` binary via CI; source builds require the documented native toolchain.
 
 > **Note on hexcore-souper:** Depends on the bundled Z3 runtime. Use `souper: true` to force execution, `souper: false` to disable it, or omit/use `"auto"` for the density gate.
 
 > **Note on hexcore-elixir (Project Azoth):** Apache-2.0 clean-room implementation derived from public specifications (PE/COFF, ELF, MSDN, man pages, Unicorn C API). The wrapper downloads its `.node` at `postinstall`, matching the HexCore-Helix delivery pattern.
+
+---
+
+## Semantic Analysis (3.8.4 development)
+
+HexCore's semantic layer is evidence-driven. A successful command means the
+operation completed; it does not by itself prove that a behavior, type, or
+security finding is correct.
+
+- **HXDB v2** stores canonical types/prototypes, independent evidence,
+  conflicts, generations, typed references, propagation summaries, and
+  immutable history for one exact binary identity.
+- **Typed references** distinguish direct calls, qualified indirect
+  candidates, imports, strings, data reads/writes, address-taken facts,
+  fields, globals, and unresolved barriers.
+- **Whole-program propagation** runs to a bounded fixed point. Cancellation,
+  timeout, conflict, and budget exhaustion preserve the prior accepted
+  generation.
+- **Partial decode honesty** records authoritative and decoded ranges, stop
+  reason, byte coverage, and body state. Incomplete bodies remain retryable
+  display-only evidence and cannot enter accepted graph/summary inputs.
+- **HQL** combines HAST structure with the active SemanticStore. It preserves
+  semantic fact counts/hashes, matched-fact provenance, proof status, and
+  explicit read failures.
+- **capa, FLOSS, and Ghidra BSim are external benchmark tools**, pinned only in
+  the development/evaluation lane. They are not bundled HexCore extensions or
+  native engines. Benchmark adapters normalize their output for comparison;
+  external evidence cannot directly promote a HexCore claim to `proven`.
+
+Current source-known gates cover 16 MSVC/clang-cl PE variants with exact
+boundaries and 60/60 calling conventions, equivalent DWARF/BTF layouts, a
+202/202 pinned API-callsite reference set, deterministic zlib/libarchive
+semantic runs, and byte-identical installed HQL reruns. These are regression
+gates, not a claim of parity with IDA, Ghidra, capa, FLOSS, or BSim.
+
+See [HexCore Automation](docs/HEXCORE_AUTOMATION.md) and the
+[semantic acceptance ledger](docs/HEXCORE_SEMANTIC_PARITY_ACCEPTANCE_2026-08-30.md).
 
 ---
 
@@ -174,9 +223,10 @@ Native multi-architecture disassembler powered by **Capstone Engine v5.0** with 
 - **Architectures**: x86, x64, ARM, ARM64, MIPS, RISC-V
 - **IR Lifting** — Lift machine code to LLVM IR via Remill engine (experimental)
 - **Inline PE/ELF parsing** — Imports, exports, sections without external dependencies
-- **Function detection** — Native C++ prologue scanner with auto-backtrack, call target analysis, up to 1000 functions
+- **Function detection** — Native prologue scanning with auto-backtrack, call-target analysis, authoritative PE/ELF boundaries, and candidate reconciliation
 - **String cross-references** — Track which instructions reference which strings
-- **Graph View** — IDA-style control flow graph visualization
+- **Graph Editor** — Central control-flow workspace with branch labels, routed edges, bounded block previews, pan/zoom, and an optional compact sidebar view
+- **Analysis Center** — Session summary, workspace target selection, persistent string/xref investigations, saved findings, engine health, automation jobs, and primary actions without crowding the navigation sidebar
 - **Patching** — Assemble, patch instructions, NOP sleds (LLVM MC)
 - **Headless mode** — `hexcore.disasm.analyzeAll` for automation with JSON/MD output
 
@@ -254,7 +304,7 @@ Clean-room Apache-2.0 Rust+C++23 dynamic analysis framework that replaces Qiling
 
 ### Usage
 
-HexCore currently exposes `azoth`, `debugger`, and `both` modes through `hexcore.emulator`; the default is `both` so the engines remain available side by side during the 3.8.3 validation cycle.
+HexCore currently exposes `azoth`, `debugger`, and `both` modes through `hexcore.emulator`; the default is `both` so the engines remain available side by side during the 3.8.4 development cycle.
 
 ---
 
@@ -330,15 +380,16 @@ See [docs/HEXCORE_AUTOMATION.md](docs/HEXCORE_AUTOMATION.md) for full documentat
 
 ## Hex Viewer
 
-Professional binary file viewer with virtual scrolling for large files.
+Professional raw-byte viewer with chunk-backed, scaled virtual scrolling for large files.
 
-- **Virtual Scrolling** — Handles files of any size efficiently
+- **Scaled Virtual Scrolling** — Reaches the complete file without exceeding Chromium's element-height limit
 - **Data Inspector** — View bytes as Int8/16/32/64, Float, Unix timestamp
 - **Bookmarks** — Save and navigate to important offsets
 - **Structure Templates** — Parse common binary structures
 - **Search** — Find hex patterns (e.g., `4D 5A` for PE headers)
 - **Go to Offset** — Jump directly to any offset
-- **Copy Selection** — Export as Hex, C Array, or Python bytes
+- **Copy Selection** — Reads the exact selected range from disk and exports as Hex, C Array, or Python bytes
+- **Disassembler Sync** — Maps file offsets to the loaded image's virtual addresses through section metadata
 - **Little/Big Endian** toggle
 
 ---
@@ -396,6 +447,7 @@ HikariSystem-HexCore/
 │   ├── hexcore-keystone/          # Legacy assembler binding (superseded by LLVM MC)
 │   ├── hexcore-remill/            # Remill lifter (machine code → LLVM IR), HikariSystem fork
 │   ├── hexcore-helix/             # Helix MLIR decompiler (LLVM IR → pseudo-C)
+│   ├── hexcore-hql/               # HAST/HXDB semantic query engine + Atlas
 │   ├── hexcore-souper/            # Google Souper superoptimizer (Windows N-API build)
 │   ├── hexcore-elixir/            # Project Azoth clean-room dynamic analysis
 │   ├── hexcore-yara/              # YARA scanner + built-in anti-analysis pack (55 rules)

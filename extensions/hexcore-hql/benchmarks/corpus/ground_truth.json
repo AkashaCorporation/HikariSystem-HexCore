@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "corpusId": "hexcore-semantic-benchmark-v1",
+  "source": "semantic_benchmark.c",
+  "functions": {
+    "bench_fnv1_32": ["crypto.fnv1", "crypto.xor_present", "algo.multiply_xor_loop", "anti-analysis.api_hash_lookup"],
+    "bench_fnv1_64": ["crypto.fnv1_64", "crypto.xor_present", "algo.multiply_xor_loop", "anti-analysis.api_hash_lookup"],
+    "bench_crc32_step": ["crypto.crc32", "crypto.xor_present"],
+    "bench_xor_buffer": ["crypto.xor_present"],
+    "bench_multiply_xor": ["crypto.xor_present", "algo.multiply_xor_loop"],
+    "bench_guarded_loop": ["struct.guarded_loop"],
+    "bench_timing_probe": ["anti-analysis.timing_check"],
+    "bench_vm_registry_probe": ["anti-analysis.vm_detection"],
+    "bench_peb_query_probe": ["anti-analysis.peb_access"],
+    "bench_refcount_release": ["memory-safety.refcount_free_no_invalidate"],
+    "bench_refcount_binary": ["memory-safety.refcount_free_no_invalidate_binary"],
+    "bench_plain_add": [],
+    "bench_plain_rotate": [],
+    "bench_plain_copy": []
+  }
+}

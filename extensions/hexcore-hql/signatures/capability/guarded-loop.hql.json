@@ -1,0 +1,17 @@
+{
+  "id": "struct.guarded_loop",
+  "version": "1.0.0",
+  "namespace": "struct",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/struct.guarded_loop.json" },
+  "limitations": ["Guarded loops include ordinary initialization, stack probes, and lazy initialization."],
+  "name": "Guarded loop",
+  "description": "A do-while loop nested inside an if guard.",
+  "severity": "info",
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CIfStmt", "contains": [{ "target": "CDoWhileStmt" }] } }
+}

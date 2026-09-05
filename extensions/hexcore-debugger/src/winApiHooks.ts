@@ -4,6 +4,7 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
+import * as crypto from 'crypto';
 import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
 import { TraceManager, TraceEntry } from './traceManager';
@@ -18,16 +19,117 @@ export interface ApiCallLog {
 	arguments: string[];
 	/** Program counter address at the point of the call */
 	pcAddress: bigint;
+	callingConvention?: 'win64' | 'stdcall' | 'cdecl' | 'unknown';
+	stackBytesPopped?: number;
+	semanticLevel?: 'implemented' | 'modeled' | 'return-only' | 'unsupported';
+	signatureSource?: 'win64-abi' | 'win32-signature-table' | 'decorated-name' | 'unknown';
+}
+
+export interface WinApiCallContract {
+	argumentCount: number;
+	callingConvention: 'win64' | 'stdcall' | 'cdecl' | 'unknown';
+	stackBytesPopped: number;
+	semanticLevel: 'implemented' | 'modeled' | 'return-only' | 'unsupported';
+	signatureSource: 'win64-abi' | 'win32-signature-table' | 'decorated-name' | 'unknown';
 }
 
 type ApiHandler = (args: bigint[]) => bigint;
+
+const API_CALL_LOG_MAX_ENTRIES = 20000;
+const CRT_MEMORY_OPERATION_MAX_BYTES = 64 * 1024 * 1024;
+const CRT_STRING_MAX_BYTES = 16 * 1024 * 1024;
+
+const WIN32_STDCALL_ARGUMENT_COUNTS: Readonly<Record<string, number>> = {
+	VirtualAlloc: 4, VirtualFree: 3, VirtualProtect: 4,
+	HeapCreate: 3, HeapAlloc: 3, HeapFree: 3, GetProcessHeap: 0,
+	GetModuleHandleA: 1, GetModuleHandleW: 1, LoadLibraryA: 1, LoadLibraryW: 1,
+	LoadLibraryExA: 3, LoadLibraryExW: 3, GetProcAddress: 2,
+	GetCurrentProcess: 0, GetCurrentProcessId: 0, GetCurrentThreadId: 0,
+	IsDebuggerPresent: 0, CheckRemoteDebuggerPresent: 2, GetThreadContext: 2,
+	RaiseException: 4, InitializeCriticalSection: 1, InitializeCriticalSectionAndSpinCount: 2,
+	InitializeCriticalSectionEx: 3, EnterCriticalSection: 1, LeaveCriticalSection: 1,
+	DeleteCriticalSection: 1, TryEnterCriticalSection: 1,
+	TlsAlloc: 0, TlsSetValue: 2, TlsGetValue: 1, TlsFree: 1,
+	FlsAlloc: 1, FlsSetValue: 2, FlsGetValue: 1, FlsFree: 1,
+	GetLastError: 0, SetLastError: 1, GetTickCount: 0, GetTickCount64: 0, Sleep: 1,
+	QueryPerformanceCounter: 1, QueryPerformanceFrequency: 1, GetSystemTimeAsFileTime: 1,
+	GetSystemInfo: 1, GetNativeSystemInfo: 1, K32GetProcessMemoryInfo: 3, GetProcessMemoryInfo: 3,
+	CreateFileA: 7, CreateFileW: 7, ReadFile: 5, WriteFile: 5, CloseHandle: 1,
+	lstrlenA: 1, lstrcpyA: 2, GetStdHandle: 1, WriteConsoleA: 5, WriteConsoleW: 5,
+	GetCommandLineA: 0, GetCommandLineW: 0, GetStartupInfoA: 1, GetStartupInfoW: 1,
+	WideCharToMultiByte: 8, MultiByteToWideChar: 6, ExitProcess: 1,
+	ShellExecuteA: 6, ShellExecuteW: 6, ShellExecuteExA: 1, ShellExecuteExW: 1,
+	RegOpenKeyA: 3, RegOpenKeyW: 3, RegOpenKeyExA: 5, RegOpenKeyExW: 5,
+	RegCloseKey: 1, RegQueryValueExA: 6, RegQueryValueExW: 6,
+	GetComputerNameA: 2, GetComputerNameW: 2,
+	BCryptOpenAlgorithmProvider: 4, BCryptSetProperty: 5, BCryptCreateHash: 7,
+	BCryptHashData: 4, BCryptFinishHash: 4, BCryptDestroyHash: 1,
+	BCryptCloseAlgorithmProvider: 2, BCryptGenerateSymmetricKey: 7, BCryptDecrypt: 10,
+};
+
+export function resolveWinApiCallContract(
+	architecture: ArchitectureType,
+	name: string,
+	hasHandler: boolean,
+	semanticLevel?: WinApiCallContract['semanticLevel'],
+): WinApiCallContract {
+	const registeredLevel = semanticLevel ?? (hasHandler ? 'modeled' : 'unsupported');
+	if (architecture === 'x64') {
+		return {
+			argumentCount: WIN32_STDCALL_ARGUMENT_COUNTS[name] ?? 8,
+			callingConvention: 'win64',
+			stackBytesPopped: 0,
+			semanticLevel: registeredLevel,
+			signatureSource: 'win64-abi',
+		};
+	}
+	const decorated = /@(\d+)$/.exec(name);
+	if (decorated) {
+		const stackBytesPopped = Number(decorated[1]);
+		return {
+			argumentCount: stackBytesPopped / 4,
+			callingConvention: 'stdcall',
+			stackBytesPopped,
+			semanticLevel: registeredLevel,
+			signatureSource: 'decorated-name',
+		};
+	}
+	const argumentCount = WIN32_STDCALL_ARGUMENT_COUNTS[name];
+	if (argumentCount !== undefined) {
+		return {
+			argumentCount,
+			callingConvention: 'stdcall',
+			stackBytesPopped: argumentCount * 4,
+			semanticLevel: registeredLevel,
+			signatureSource: 'win32-signature-table',
+		};
+	}
+	return {
+		argumentCount: 8,
+		callingConvention: 'unknown',
+		stackBytesPopped: 0,
+		semanticLevel: registeredLevel,
+		signatureSource: 'unknown',
+	};
+}
+
+export function decryptAesCbc(input: Buffer, key: Buffer, iv: Buffer, blockPadding: boolean): Buffer {
+	if (![16, 24, 32].includes(key.length) || iv.length !== 16 || input.length % 16 !== 0) {
+		throw new Error('AES-CBC requires a 128/192/256-bit key, 16-byte IV, and block-aligned input.');
+	}
+	const decipher = crypto.createDecipheriv(`aes-${key.length * 8}-cbc`, key, iv);
+	decipher.setAutoPadding(blockPadding);
+	return Buffer.concat([decipher.update(input), decipher.final()]);
+}
 
 export class WinApiHooks {
 	private emulator: UnicornWrapper;
 	private memoryManager: MemoryManager;
 	private architecture: ArchitectureType;
 	private handlers: Map<string, ApiHandler> = new Map();
+	private semanticLevels: Map<string, WinApiCallContract['semanticLevel']> = new Map();
 	private callLog: ApiCallLog[] = [];
+	private lastCall: ApiCallLog | undefined;
 	private lastError: number = 0;
 	private tickCount: number = 0;
 	private performanceCounter: bigint = 0n;
@@ -37,6 +139,9 @@ export class WinApiHooks {
 	private commandLineAPtr: bigint = 0n;
 	private commandLineWPtr: bigint = 0n;
 	private winMainCommandLineWPtr: bigint = 0n;
+	private cngAlgorithms: Map<bigint, { algorithm: 'SHA256' | 'AES'; chainingMode: 'CBC' }> = new Map();
+	private cngHashes: Map<bigint, { algorithm: 'SHA256'; chunks: Buffer[] }> = new Map();
+	private cngKeys: Map<bigint, { algorithm: 'AES'; key: Buffer; chainingMode: 'CBC' }> = new Map();
 
 	// v3.8.0-nightly: CRT data block (HEXCORE_DEFEAT Fix #3). MSVC CRT init
 	// calls __p___argv / __p___argc / _get_initial_narrow_environment to obtain
@@ -100,10 +205,12 @@ export class WinApiHooks {
 		const keyNoExt = `${dll.toLowerCase().replace('.dll', '')}!${name}`;
 
 		const handler = this.handlers.get(key) || this.handlers.get(keyNoExt);
+		const semanticLevel = this.semanticLevels.get(key) || this.semanticLevels.get(keyNoExt);
+		const contract = resolveWinApiCallContract(this.architecture, name, handler !== undefined, semanticLevel);
 
 		// Read arguments based on calling convention.
 		// A few Win32 APIs we emulate here use 7-8 parameters.
-		const args = this.readArguments(8);
+		const args = this.readArguments(contract.argumentCount);
 
 		let returnValue = 0n;
 		if (handler) {
@@ -131,7 +238,7 @@ export class WinApiHooks {
 		const formattedArgs = args.map(a => '0x' + a.toString(16));
 		const timestamp = Date.now();
 
-		this.callLog.push({
+		this.recordCallLog({
 			dll,
 			name,
 			args,
@@ -139,6 +246,10 @@ export class WinApiHooks {
 			timestamp,
 			arguments: formattedArgs,
 			pcAddress,
+			callingConvention: contract.callingConvention,
+			stackBytesPopped: contract.stackBytesPopped,
+			semanticLevel: contract.semanticLevel,
+			signatureSource: contract.signatureSource,
 		});
 
 		// Notify TraceManager if available
@@ -150,6 +261,10 @@ export class WinApiHooks {
 				returnValue: '0x' + returnValue.toString(16),
 				pcAddress: '0x' + pcAddress.toString(16),
 				timestamp,
+				callingConvention: contract.callingConvention,
+				stackBytesPopped: contract.stackBytesPopped,
+				semanticLevel: contract.semanticLevel,
+				signatureSource: contract.signatureSource,
 			};
 			this.traceManager.record(entry);
 		}
@@ -516,6 +631,68 @@ export class WinApiHooks {
 		this.handlers.set('kernel32!GetProcessHeap', (_args) => {
 			return 0x00050000n; // Fake heap handle matching our heap base
 		});
+
+		// ===== CRT memory primitives =====
+		// These functions are commonly imported from VCRUNTIME rather than the
+		// UCRT. Falling through to the generic unknown-API return value used to
+		// make a successful memset look like a NULL result to the caller.
+		const checkedLength = (raw: bigint): number | undefined => {
+			if (raw < 0n || raw > BigInt(CRT_MEMORY_OPERATION_MAX_BYTES)) {
+				this.lastError = 87; // ERROR_INVALID_PARAMETER
+				return undefined;
+			}
+			return Number(raw);
+		};
+		const crtMemset = (args: bigint[]): bigint => {
+			const [destination, value, rawLength] = args;
+			const length = checkedLength(rawLength);
+			if (length === undefined || (destination === 0n && length > 0)) { return 0n; }
+			const chunkSize = 64 * 1024;
+			const chunk = Buffer.alloc(Math.min(length, chunkSize), Number(value & 0xFFn));
+			for (let offset = 0; offset < length; offset += chunkSize) {
+				const writeSize = Math.min(chunkSize, length - offset);
+				this.emulator.writeMemorySync(destination + BigInt(offset), chunk.subarray(0, writeSize));
+			}
+			return destination;
+		};
+		const crtMemcpy = (args: bigint[]): bigint => {
+			const [destination, source, rawLength] = args;
+			const length = checkedLength(rawLength);
+			if (length === undefined || ((destination === 0n || source === 0n) && length > 0)) { return 0n; }
+			if (length > 0) {
+				const snapshot = Buffer.from(this.emulator.readMemorySync(source, length));
+				this.emulator.writeMemorySync(destination, snapshot);
+			}
+			return destination;
+		};
+		const crtMemcmp = (args: bigint[]): bigint => {
+			const [left, right, rawLength] = args;
+			const length = checkedLength(rawLength);
+			if (length === undefined || ((left === 0n || right === 0n) && length > 0)) { return 0n; }
+			const a = length > 0 ? this.emulator.readMemorySync(left, length) : Buffer.alloc(0);
+			const b = length > 0 ? this.emulator.readMemorySync(right, length) : Buffer.alloc(0);
+			for (let i = 0; i < length; i++) {
+				if (a[i] !== b[i]) { return a[i] < b[i] ? -1n : 1n; }
+			}
+			return 0n;
+		};
+		for (const dll of [
+			'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcrt.dll', 'ucrtbase.dll',
+			'api-ms-win-crt-string-l1-1-0.dll',
+		]) {
+			this.handlers.set(`${dll}!memset`, crtMemset);
+			this.handlers.set(`${dll}!memcpy`, crtMemcpy);
+			this.handlers.set(`${dll}!memmove`, crtMemcpy); // snapshot preserves overlap semantics
+			this.handlers.set(`${dll}!memcmp`, crtMemcmp);
+			this.handlers.set(`${dll}!strlen`, (args) => {
+				const length = this.readStringLengthA(args[0] ?? 0n);
+				if (length === undefined) {
+					this.lastError = 998; // ERROR_NOACCESS
+					return 0n;
+				}
+				return BigInt(length);
+			});
+		}
 
 		// ===== Module Management =====
 		this.handlers.set('kernel32!GetModuleHandleA', (args) => {
@@ -1302,6 +1479,169 @@ export class WinApiHooks {
 			this.handlers.set(`msvcp140.dll!${name}`, handler);
 		}
 
+		// ── Windows CNG (BCrypt) ─────────────────────────────────────────
+		// Stateful SHA-256 and AES-CBC are sufficient for the native analysis
+		// corpus. Unsupported algorithms fail with NTSTATUS instead of claiming
+		// success without creating handles or writing output.
+		const STATUS_SUCCESS = 0n;
+		const STATUS_INVALID_HANDLE = 0xC0000008n;
+		const STATUS_INVALID_PARAMETER = 0xC000000Dn;
+		const STATUS_BUFFER_TOO_SMALL = 0xC0000023n;
+		const STATUS_DATA_ERROR = 0xC000003En;
+		const STATUS_NOT_SUPPORTED = 0xC00000BBn;
+		const writePointer = (address: bigint, value: bigint): boolean => {
+			if (address === 0n) { return false; }
+			try {
+				const buffer = Buffer.alloc(this.architecture === 'x64' ? 8 : 4);
+				if (this.architecture === 'x64') {
+					buffer.writeBigUInt64LE(value);
+				} else {
+					buffer.writeUInt32LE(Number(value & 0xFFFFFFFFn));
+				}
+				this.emulator.writeMemorySync(address, buffer);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const writeUInt32 = (address: bigint, value: number): boolean => {
+			if (address === 0n) { return false; }
+			try {
+				const buffer = Buffer.alloc(4);
+				buffer.writeUInt32LE(value >>> 0);
+				this.emulator.writeMemorySync(address, buffer);
+				return true;
+			} catch {
+				return false;
+			}
+		};
+		const cngKey = (name: string) => `bcrypt.dll!${name}`;
+		this.handlers.set(cngKey('BCryptOpenAlgorithmProvider'), (args) => {
+			const [handleSlot, algorithmNamePtr] = args;
+			const requested = this.readStringW(algorithmNamePtr).replace(/[-_]/g, '').toUpperCase();
+			const algorithm = requested === 'SHA256' ? 'SHA256' : requested === 'AES' ? 'AES' : undefined;
+			if (!algorithm) { return STATUS_NOT_SUPPORTED; }
+			const handle = this.allocHandle();
+			if (!writePointer(handleSlot, handle)) { return STATUS_INVALID_PARAMETER; }
+			this.cngAlgorithms.set(handle, { algorithm, chainingMode: 'CBC' });
+			return STATUS_SUCCESS;
+		});
+		this.handlers.set(cngKey('BCryptSetProperty'), (args) => {
+			const [handle, propertyNamePtr, inputPtr] = args;
+			const algorithm = this.cngAlgorithms.get(handle);
+			const key = this.cngKeys.get(handle);
+			if (!algorithm && !key) { return STATUS_INVALID_HANDLE; }
+			const propertyName = this.readStringW(propertyNamePtr);
+			if (propertyName !== 'ChainingMode') { return STATUS_NOT_SUPPORTED; }
+			const value = this.readStringW(inputPtr);
+			if (value !== 'ChainingModeCBC') { return STATUS_NOT_SUPPORTED; }
+			if (algorithm) { algorithm.chainingMode = 'CBC'; }
+			if (key) { key.chainingMode = 'CBC'; }
+			return STATUS_SUCCESS;
+		});
+		this.handlers.set(cngKey('BCryptCreateHash'), (args) => {
+			const [algorithmHandle, hashSlot, _hashObject, _hashObjectSize, secret, secretSize] = args;
+			const algorithm = this.cngAlgorithms.get(algorithmHandle);
+			if (!algorithm) { return STATUS_INVALID_HANDLE; }
+			if (algorithm.algorithm !== 'SHA256' || secret !== 0n || secretSize !== 0n) {
+				return STATUS_NOT_SUPPORTED;
+			}
+			const hashHandle = this.allocHandle();
+			if (!writePointer(hashSlot, hashHandle)) { return STATUS_INVALID_PARAMETER; }
+			this.cngHashes.set(hashHandle, { algorithm: 'SHA256', chunks: [] });
+			return STATUS_SUCCESS;
+		});
+		this.handlers.set(cngKey('BCryptHashData'), (args) => {
+			const [hashHandle, inputPtr, rawInputSize] = args;
+			const hash = this.cngHashes.get(hashHandle);
+			if (!hash) { return STATUS_INVALID_HANDLE; }
+			const inputSize = Number(rawInputSize);
+			if (!Number.isSafeInteger(inputSize) || inputSize < 0 || (inputPtr === 0n && inputSize > 0)) {
+				return STATUS_INVALID_PARAMETER;
+			}
+			try {
+				hash.chunks.push(inputSize > 0 ? Buffer.from(this.emulator.readMemorySync(inputPtr, inputSize)) : Buffer.alloc(0));
+				return STATUS_SUCCESS;
+			} catch {
+				return STATUS_INVALID_PARAMETER;
+			}
+		});
+		this.handlers.set(cngKey('BCryptFinishHash'), (args) => {
+			const [hashHandle, outputPtr, rawOutputSize] = args;
+			const hash = this.cngHashes.get(hashHandle);
+			if (!hash) { return STATUS_INVALID_HANDLE; }
+			const outputSize = Number(rawOutputSize);
+			if (outputPtr === 0n || !Number.isSafeInteger(outputSize) || outputSize < 32) {
+				return STATUS_BUFFER_TOO_SMALL;
+			}
+			const digest = crypto.createHash('sha256').update(Buffer.concat(hash.chunks)).digest();
+			try {
+				this.emulator.writeMemorySync(outputPtr, digest);
+				return STATUS_SUCCESS;
+			} catch {
+				return STATUS_INVALID_PARAMETER;
+			}
+		});
+		this.handlers.set(cngKey('BCryptDestroyHash'), (args) =>
+			this.cngHashes.delete(args[0]) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE);
+		this.handlers.set(cngKey('BCryptCloseAlgorithmProvider'), (args) =>
+			this.cngAlgorithms.delete(args[0]) ? STATUS_SUCCESS : STATUS_INVALID_HANDLE);
+		this.handlers.set(cngKey('BCryptGenerateSymmetricKey'), (args) => {
+			const [algorithmHandle, keySlot, _keyObject, _keyObjectSize, secretPtr, rawSecretSize] = args;
+			const algorithm = this.cngAlgorithms.get(algorithmHandle);
+			const secretSize = Number(rawSecretSize);
+			if (!algorithm) { return STATUS_INVALID_HANDLE; }
+			if (algorithm.algorithm !== 'AES' || ![16, 24, 32].includes(secretSize) || secretPtr === 0n) {
+				return STATUS_NOT_SUPPORTED;
+			}
+			try {
+				const keyHandle = this.allocHandle();
+				const key = Buffer.from(this.emulator.readMemorySync(secretPtr, secretSize));
+				if (!writePointer(keySlot, keyHandle)) { return STATUS_INVALID_PARAMETER; }
+				this.cngKeys.set(keyHandle, { algorithm: 'AES', key, chainingMode: algorithm.chainingMode });
+				return STATUS_SUCCESS;
+			} catch {
+				return STATUS_INVALID_PARAMETER;
+			}
+		});
+		this.handlers.set(cngKey('BCryptDecrypt'), (args) => {
+			const [keyHandle, inputPtr, rawInputSize, paddingInfo, ivPtr, rawIvSize,
+				outputPtr, rawOutputSize, resultSizePtr, rawFlags] = args;
+			const key = this.cngKeys.get(keyHandle);
+			if (!key) { return STATUS_INVALID_HANDLE; }
+			if (key.chainingMode !== 'CBC' || paddingInfo !== 0n) { return STATUS_NOT_SUPPORTED; }
+			const inputSize = Number(rawInputSize);
+			const ivSize = Number(rawIvSize);
+			const outputSize = Number(rawOutputSize);
+			if (inputPtr === 0n || ivPtr === 0n || ivSize !== 16 || !Number.isSafeInteger(inputSize) || inputSize < 0) {
+				return STATUS_INVALID_PARAMETER;
+			}
+			// CNG permits a size-probe call with pbOutput == NULL. Do not attempt
+			// padding validation yet: the caller is only asking how much storage
+			// to allocate, and the ciphertext size is a safe upper bound.
+			if (outputPtr === 0n) {
+				return writeUInt32(resultSizePtr, inputSize) ? STATUS_SUCCESS : STATUS_INVALID_PARAMETER;
+			}
+			try {
+				const input = Buffer.from(this.emulator.readMemorySync(inputPtr, inputSize));
+				const iv = Buffer.from(this.emulator.readMemorySync(ivPtr, ivSize));
+				const plaintext = decryptAesCbc(input, key.key, iv, (Number(rawFlags) & 0x1) !== 0);
+				if (!writeUInt32(resultSizePtr, plaintext.length)) { return STATUS_INVALID_PARAMETER; }
+				if (outputSize < plaintext.length) { return STATUS_BUFFER_TOO_SMALL; }
+				this.emulator.writeMemorySync(outputPtr, plaintext);
+				return STATUS_SUCCESS;
+			} catch {
+				return STATUS_DATA_ERROR;
+			}
+		});
+		for (const name of [
+			'BCryptOpenAlgorithmProvider', 'BCryptSetProperty', 'BCryptCreateHash', 'BCryptHashData',
+			'BCryptFinishHash', 'BCryptDestroyHash', 'BCryptCloseAlgorithmProvider',
+			'BCryptGenerateSymmetricKey', 'BCryptDecrypt',
+		]) {
+			this.semanticLevels.set(cngKey(name), 'implemented');
+		}
+
 		// ── shell32 ShellExecute* stubs ──────────────────────────────────
 		// v3.8.0-nightly: return 42 (any value > 32) to signal "success"
 		// per MSDN ShellExecute return codes. Legitimate ShellExecute would
@@ -1402,13 +1742,42 @@ export class WinApiHooks {
 	 */
 	clearCallLog(): void {
 		this.callLog = [];
+		this.lastCall = undefined;
 	}
 
 	/**
 	 * Get the most recent API call
 	 */
 	getLastCall(): ApiCallLog | undefined {
-		return this.callLog[this.callLog.length - 1];
+		return this.lastCall;
+	}
+
+	private readStringLengthA(address: bigint): number | undefined {
+		if (address === 0n) { return undefined; }
+		let length = 0;
+		while (length < CRT_STRING_MAX_BYTES) {
+			const cursor = address + BigInt(length);
+			const pageRemaining = 0x1000 - Number(cursor & 0xFFFn);
+			const readSize = Math.min(pageRemaining, CRT_STRING_MAX_BYTES - length);
+			let chunk: Buffer;
+			try {
+				chunk = this.emulator.readMemorySync(cursor, readSize);
+			} catch {
+				return undefined;
+			}
+			const terminator = chunk.indexOf(0);
+			if (terminator >= 0) { return length + terminator; }
+			length += chunk.length;
+			if (chunk.length !== readSize) { return undefined; }
+		}
+		return undefined;
+	}
+
+	private recordCallLog(entry: ApiCallLog): void {
+		this.lastCall = entry;
+		if (this.callLog.length < API_CALL_LOG_MAX_ENTRIES) {
+			this.callLog.push(entry);
+		}
 	}
 
 	/**

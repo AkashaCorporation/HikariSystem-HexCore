@@ -1,10 +1,64 @@
-# HexCore Automation - v3.8.3 RC
+# HexCore Automation - v3.8.4 (Analysis Contract)
 
 HexCore supports running analysis pipelines from workspace job files.
 
-This document describes the `3.8.3` release-candidate contract. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
+This document describes the `3.8.4` analysis-contract surface. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.27`, debugger `2.1.10`, Revenant `0.4.0`, Capstone `1.3.5`, Remill `0.5.1`, Unicorn `1.3.1`, Souper `0.2.0`, Helix `0.9.3`, and Elixir `1.0.3`.
+Relevant integrated versions: disassembler `1.4.66`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.1`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+
+For nonstandard LLVM installations, set `HEXCORE_PDBUTIL` to the intended
+llvm-pdbutil executable before starting HexCore. PDB discovery no longer searches
+a developer's Desktop. Missing tools are not proof that a PDB has no symbols.
+
+### Lazy discovery contract (1.4.65)
+
+`analyzeAll` JSON includes every function in the discovered index, including
+`bodyStatus:lazy`; this is not a guarantee that discovery found every real function.
+Its Markdown table is only the first 100 entries by address, not a ranking or a
+complete index. Prefer JSON for agent enumeration and check the reported counts.
+
+Lazy means a known boundary with deferred body decoding, not an absent function.
+Select the indexed address for a bounded `disassembleAtHeadless` investigation,
+then inspect `analysisClosure` and body completeness. Do not infer absence from
+zero known callers/callees or no matches over unmaterialized bodies. `allowLazy`
+and `minMaterializedRatio` are acceptance policy, not switches that force decoding.
+Automatic critical-neighborhood materialization remains separate product work.
+
+In 1.4.64, `jobStatus` queue-wide results expose `observationScope:queue-at-query-time`,
+`terminalSnapshot:false`, `currentJobId`, `currentExecutionId` and `includesCurrentJob`.
+Counts remain inclusive: a running status-query job legitimately contributes one.
+Direct queries without pipeline context report `includesCurrentJob:null` (unknown).
+Use the terminal `summary.queueSnapshot` for counts excluding the completed job.
+
+### Evidence Interpretation (1.4.62 / Composer 1.0.14)
+
+- `analyzeAll.status` describes completion under the declared policy. Inspect
+  `analysisDepth`, `functionsMaterialized`, `partialFunctions`, and
+  `materializedFunctionRatio` before using its results. Reconnaissance may be
+  operationally `ok`; disassembly is never by itself negative security evidence.
+- Security jobs should declare `minMaterializedRatio` for their intended scope
+  or materialize a targeted function set and check each body's completeness.
+  Do not choose a global ratio as a substitute for caller/consumer coverage.
+- `refcountScan.inputQuality` checks the source SHA-256 against the nearest
+  `.hexcore-meta/provenance.json` and walks recorded upstream statuses. Missing
+  provenance, hash mismatch, incomplete ancestors, zero scanned functions, or
+  Helix issue annotations give `status:partial`, `negativeEvidenceUsable:false`,
+  and an inconclusive zero-match result. Raw source without provenance is also
+  unverified. A qualified negative remains limited to this scanner's patterns.
+- Composer parser agreement is `signal`, with `independentCorroboration:false`.
+  Rejected IOC assertions remain available in original attachments and in a
+  bounded table of rejection reasons. HQL adapter coverage is not correctness.
+- Refcount schema v2: `findings` are `evidenceLevel:signal`, `proofStatus:unproven`.
+  `confidenceKind:heuristic-pattern-score` and `severityKind:review-priority`
+  explicitly qualify the legacy numeric/qualitative fields; neither is a
+  vulnerability assessment. `observations` contains assertion/warning/termination
+  calls with reachability and vulnerability status `not-assessed`. BUG_ON alone
+  is not a finding and does not justify replacing an assertion with a return.
+  `scanCoverage.status:partial` blocks qualified negative evidence even when
+  upstream provenance is complete. Preprocessor, line-splicing, raw literals,
+  unparsed source and line/function limits are not silently treated as complete.
+- Session storage currently uses one `.hexcore_session.db` per binary directory.
+  Keep independent targets in separate directories to preserve their sessions.
 
 ## How It Works
 
@@ -46,6 +100,42 @@ my-project/
 - Schema validation via `hexcore-disassembler/schemas/hexcore-job.schema.json`.
 - Job execution writes `hexcore-pipeline.log` and `hexcore-pipeline.status.json` to `outDir`.
 - Execution has a mandatory preflight. Validation errors write `hexcore-pipeline.validation.json` and a terminal error status; no command is dispatched.
+
+### Analysis Center Investigation Jobs (3.8.4)
+
+The Analysis Center separates three persistence layers:
+
+- `Analyze All` stores the current function index in the binary's
+  `.hexcore_session.db`.
+- Investigations and starred findings are stored in the same session database.
+- The `Jobs` tab converts a starred finding into a shareable
+  `hexcore-jobs/<name>.hexcore_job.json` pipeline.
+
+The generated job resolves the finding to an owning function and runs Analyze
+All, the evidence search, Remill lifting, and Helix decompilation. Retained
+artifacts are written to `hexcore-reports/investigations/<name>/` as:
+
+```text
+<name>.references.json
+<name>.ll
+<name>.helix.c
+```
+
+The Analyze All step sets `expectOutput:false`: its function index already
+lives in `.hexcore_session.db`, avoiding a duplicate JSON artifact that can be
+tens of megabytes. The Helix step sets `allowPartial:true`; low-confidence or
+honesty-capped pseudo-C is retained with terminal `partial` status rather than
+being mislabeled as `ok` or discarded as a hard failure. Provenance records the
+`.ll` content hash as an input of the `.helix.c` artifact and assigns media
+types from the actual file extension.
+
+Creating the file triggers the normal recursive watcher and queues one run.
+Investigation jobs live in a subfolder, so they are not part of root-only
+startup auto-run. Another analyst or agent can rerun one through `Run Job` or
+`Queue Job`; the job remains subject to normal validation, target isolation,
+output containment, and provenance rules. Targets inside the workspace and the
+output directory are stored relative to `hexcore-jobs/` so the definition can
+move with the workspace; an external target retains its absolute path.
 
 ### Output Directory Security
 
@@ -249,8 +339,10 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.hashcalc.calculate` | 90s | MD5, SHA1, SHA256, SHA512 hashes | All |
 | `hexcore.entropy.analyze` | 90s | Shannon entropy analysis, packing detection | All |
 | `hexcore.strings.extract` | 120s | ASCII/Unicode string extraction with categorization | All |
-| `hexcore.strings.extractAdvanced` | 180s | 9-scanner deobfuscation: single-byte XOR, multi-byte/rolling/increment XOR, known-plaintext, composite cipher (ADD/SUB/ROT), wide-string (UTF-16LE) XOR, positional (counter/block-rotate) XOR, rolling-ext XOR, layered XOR, and stack-string detection. Confidence-scored, deduped, PE section-attributed. | All |
-| `hexcore.peanalyzer.analyze` | 120s | PE header, sections, entropy, packer detection, security mitigations (legacy) | PE only |
+| `hexcore.strings.extractAdvanced` | 180s | Confidence-scored, deduplicated and section-attributed deobfuscation with bounded output budgets. Optional evidence chains decode hex to ASCII to Base64 and probe JSON without hiding intermediate transformations. | All |
+| `hexcore.peanalyzer.analyze` | 120s | PE headers, sections, embedded execution manifest, DLL-characteristics mitigations, and Windows capability signals | PE only |
+| `hexcore.pe.extractSection` | 120s | Extract one named PE section as a bounded binary artifact for later pipeline steps | PE only |
+| `hexcore.crypto.rc4` | 120s | Apply bounded passive RC4 to an explicit input artifact; supports UTF-8, hex, Base64, or byte-array keys | All |
 | `hexcore.disasm.analyzePEHeadless` | 120s | **Deep PE analysis**: typed imports (180+ API signatures), exports, sections, TLS/Debug/CLR/DelayImport, security indicators, category summary | PE only |
 | `hexcore.elfanalyzer.analyze` | 120s | ELF header, sections, segments, symbols, security mitigations (RELRO, NX, PIE, Canary) (legacy) | ELF only |
 | `hexcore.disasm.analyzeELFHeadless` | 120s | **Deep ELF analysis**: program headers, full symtab/dynsym, all relocations, dynamic entries, .ko modinfo, symbol stats | ELF only |
@@ -264,12 +356,13 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
 | `hexcore.disasm.analyzeAll` | 180s | Deep analysis: prolog scan, function discovery, xrefs | x86, x64, ARM, ARM64, MIPS |
+| `hexcore.disasm.windowsFilesystemAuditHeadless` | 300s | Evidence-gated PE filesystem boundary chain and owner pivots | x86, x64 PE |
 | `hexcore.disasm.detectPacker` | 60s | Detect UPX, Themida, VMProtect, ASPack, Enigma, MPRESS, or unknown packing evidence. Detection only: no unpacking and no external UPX dependency. | All |
 | `hexcore.disasm.buildFormula` | 90s | Symbolic expression extraction from instruction chains | x86, x64, ARM, ARM64 |
 | `hexcore.disasm.checkConstants` | 90s | Validate numeric annotations against instruction immediates | All |
-| `hexcore.disasm.searchStringHeadless` | 120s | Search string references (headless variant) | All |
+| `hexcore.disasm.searchStringHeadless` | 120s | Search string references with termination/reference/lookup-table evidence and an optional confidence gate | All |
 | `hexcore.disasm.exportASMHeadless` | 180s | Export disassembly to file (headless variant) | All |
-| `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble N instructions starting at a given address | x86, x64, ARM, ARM64, MIPS |
+| `hexcore.disasm.disassembleAtHeadless` | 120s | Disassemble a paged instruction count or exact `[address,endExclusive)` byte range with reach/crossing evidence | x86, x64, ARM, ARM64, MIPS |
 | `hexcore.disasm.liftToIR` | 120s | Lift machine code to LLVM IR via Remill engine | x86, x64 |
 | `hexcore.rellic.decompile` | 180s | Legacy compatibility surface. Rellic is disabled for new development; use Helix. | x86, x64 |
 | `hexcore.rellic.decompileIR` | 120s | Legacy compatibility surface for pre-lifted IR; use Helix. | x86, x64 |
@@ -279,6 +372,7 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.revenant.decompileIL` | 180s | Recover IL from classic CLR PE or a supported .NET single-file apphost. | Managed .NET |
 | `hexcore.hql.scanHeadless` | 180s | Decompile one or more functions and evaluate semantic signatures over Helix HAST. | Helix-supported targets / IR |
 | `hexcore.souper.optimize` | 60s | Optimize LLVM IR with Souper/Z3. Intended for explicit `.ll` experiments, MBA, crypto, and bitwise-heavy code. | LLVM IR |
+| `hexcore.constraints.solveHeadless` | 300s | Solve bounded Int/BitVec constraints with Z3 and return concrete models plus solver provenance. | JSON / SMT-LIB assertions |
 | `hexcore.extractStructInfo` | 30s | Export BTF/DWARF struct and function type information from the loaded ELF analysis. | ELF with BTF or DWARF |
 | `hexcore.disasm.rttiScanHeadless` | 120s | Scan PE binary for MSVC RTTI Type Descriptors, returns class names and offsets **(v3.7.3)** | PE only |
 | `hexcore.disasm.searchBytesHeadless` | 120s | AOB scan with wildcard support — finds byte patterns across the entire binary **(v3.7.3)** | All |
@@ -307,6 +401,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.debug.continueHeadless` | 30s | Continue active emulation session for `maxSteps` instructions | x86, x64, ARM64 |
 | `hexcore.debug.stepHeadless` | 30s | Single-step or N-step active session | x86, x64, ARM64 |
 | `hexcore.debug.readMemoryHeadless` | 30s | Read arbitrary memory range from active session | x86, x64, ARM64 |
+| `hexcore.debug.disassembleMemoryHeadless` | 120s | Disassemble bytes directly from the active debugger memory map | x86, x64, ARM64 |
+| `hexcore.debug.decompileMemoryHeadless` | 300s | Read live memory, lift it with Remill, and decompile it with Helix in a killable child process without a derived executable. Set `retainIr:true` to preserve `<output.path>.ll` before Helix runs; results include the IR byte count and SHA-256. | x86, x64, ARM64 |
 | `hexcore.debug.getRegistersHeadless` | 30s | Export current register set from active session | x86, x64, ARM64 |
 | `hexcore.debug.getStateHeadless` | 30s | Export current emulation state, regions, and API call log | x86, x64, ARM64 |
 | `hexcore.debug.setBreakpointHeadless` | 30s | Set one or more breakpoints in active session | x86, x64, ARM64 |
@@ -326,6 +422,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 - `continueHeadless` and `getStateHeadless` may also include `faultInfo` when emulation stops on `UC_ERR_FETCH_UNMAPPED`, `UC_ERR_READ_UNMAPPED`, or `UC_ERR_WRITE_UNMAPPED`.
 - `hexcore.debug.emulateHeadless` accepts `permissiveMemoryMapping: true` for PE/ELF worker paths.
 - `hexcore.debug.setBreakpointHeadless` now supports `output.path` correctly in pipeline jobs.
+- `hexcore.debug.continueHeadless` uses `maxSteps`; `maxInstructions` belongs to the single-shot `emulateFullHeadless` command. Optional `terminalAddresses` accepts up to 256 unsigned 64-bit address strings and `terminalKind` labels the expected stop. A deliberate sentinel fetch is returned as `ok`, while the observed backend fault remains under `expectedTerminalFault` for auditability.
+- To start at a known function or unpacked payload, create a keep-alive session with `emulateHeadless`, write the architecture's program counter with `setRegisterHeadless` (`rip`, `eip`, or `pc`), then call `continueHeadless`. Program-counter writes update both Unicorn and the logical session address used by continue/step.
 
 ### Emulator — Project Azoth / Elixir (v3.8.0) 🜇
 
@@ -334,10 +432,10 @@ Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's 
 | Command | Timeout | Description | Arch |
 |---------|---------|-------------|------|
 | `hexcore.elixir.version` | — | Show the native Elixir engine version string (interactive toast). Not pipeline-safe. | n/a |
-| `hexcore.elixir.smokeTestHeadless` | 30s | Verify the native `.node` loaded and capability surface is exposed. Returns `{ok, version, loadError, platform, arch, codename: "Project Azoth", surface: [...] }`. | n/a |
-| `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE/ELF → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, runStart, stopReason, apiCallCount, apiCalls, apiCallsPath, apiCallsTotal, warning}` — `runStart` is the actual start address used (= `entry` unless `startVa` was set); `warning` is non-null when `AddressOfEntryPoint==0` and no `startVa` was given (packed-PE hint). When the API-call log is large, the full list is spilled to a `<output-base>.apicalls.json` companion (`apiCallsPath` points to it; `apiCalls` then holds a capped preview, `apiCallsTotal` the true count). **Accepts an optional `startVa` (start-address override, see the args table — essential for packed PEs) and an optional `oracle` arg that switches it to AI-driven mode (see "Oracle Hook" below).** | x86_64, ELF x86_64 |
-| `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes DRCOV v2 binary (IDA Lighthouse format) to `output.path.drcov`. Returns `{file, entry, stopReason, blockCount, drcovBytes}`. | x86_64, ELF x86_64 |
-| `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. **Runs IN-HOST (no worker fork) — it loads + snapshots but never calls `run()`/`uc_emu_start`, so ACG does not apply; uses a fixed 100k cap and ignores the `maxInstructions` arg.** | x86_64, ELF x86_64 |
+| `hexcore.elixir.smokeTestHeadless` | 30s | Verify the native `.node` loaded and capability surface is exposed. Returns the legacy native `version` plus explicit `wrapperVersion`, `nativeVersion`, and `versionAligned`; wrapper and native use independent release clocks. | n/a |
+| `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE32+ → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, runStart, stopReason, apiCallCount, apiCalls, apiCallsPath, apiCallsTotal, warning}` — `runStart` is the actual start address used (= `entry` unless `startVa` was set); `warning` is non-null when `AddressOfEntryPoint==0` and no `startVa` was given (packed-PE hint). When the API-call log is large, the full list is spilled to a `<output-base>.apicalls.json` companion (`apiCallsPath` points to it; `apiCalls` then holds a capped preview, `apiCallsTotal` the true count). **Accepts an optional `startVa` (start-address override, see the args table — essential for packed PEs) and an optional `oracle` arg that switches it to AI-driven mode (see "Oracle Hook" below). ELF targets are deliberately gated to HexCore Debugger until the Azoth loader supports them.** | PE32+ x86_64 |
+| `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes DRCOV v2 binary (IDA Lighthouse format) to `output.path.drcov`. Returns `{file, entry, stopReason, blockCount, drcovBytes}`. | PE32+ x86_64 |
+| `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. **Runs IN-HOST (no worker fork) — it loads + snapshots but never calls `run()`/`uc_emu_start`, so ACG does not apply; uses a fixed 100k cap and ignores the `maxInstructions` arg.** | PE32+ x86_64 |
 
 **Args for emulateHeadless / stalkerDrcovHeadless / snapshotRoundTripHeadless:**
 
@@ -378,38 +476,44 @@ When the oracle op runs, the result gains an `oracle` block — `{ pauseCount, p
 
 The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command to the `"azoth"` setting value. If `hexcore.emulator` is `"debugger"`, elixir steps are marked `skipped` (not `error`); if `"both"` or `"azoth"`, they run. See "Pipeline Administration" → `hexcore.emulator.switch` (status-bar QuickPick) for the UX entry point.
 
-### Vulnerability Audit Engine (v3.8.0) 🛡
+### Textual Refcount Review (schema v2)
 
-> Automates the refcount / error-path / BUG_ON patterns that produced the 4 bounty bugs found during HexCore battle-testing. Operates on decompiled C output (Helix `.c` files or raw sources) — no emulator or Unicorn required.
+Reviews textual patterns in decompiled C or raw sources. It does not prove control flow, object identity, reachability, concurrency or vulnerability impact. No emulator is required.
 
 | Command | Timeout | Description |
 |---------|---------|-------------|
-| `hexcore.audit.refcountScan` | 60s | Scan a decompiled C file for 4 vulnerability patterns (A/B/C/E). Returns `RefcountAuditReport` with per-finding severity, confidence, snippet, affected symbol, and bounty-bug attribution. |
+| `hexcore.audit.refcountScan` | 60s | Return unproven textual signals (A/B/C/F), separate diagnostic observations, input-quality assessment and scanner coverage. |
 
 **Args for `hexcore.audit.refcountScan`:**
 
 | Arg | Type | Default | Description |
 |-----|------|---------|-------------|
-| `input` | string | — **required** | Path to a `.c` / `.helix.c` / raw C file to audit. `file` is accepted as an alias. |
+| `input` | string | — **required** | Absolute `.c` / `.helix.c` path or resolved `$step[N].output`. `file` is an alias. Relative `args.input` is process-cwd-relative, not job-directory-relative. |
 | `output.path` | string | — | Write JSON report to this path. |
 | `quiet` | boolean | `false` | Suppress the VS Code toast showing finding count + scan time. |
 
-**Patterns detected (v0.2):**
+**Textual signals and diagnostic observations:**
 
-| Pattern | What it catches | Class |
+| Pattern | What is observed | Evidence status |
 |---------|-----------------|-------|
-| **A** | A reference is acquired and not released on an error path: a `get()`-family call **OR a raw struct-field increment** (`x->...count++` / `+= 1`) followed by `goto err:` / `return -E*` without the matching `put()` / decrement | Refcount leak on error path (CWE-911) |
-| **B** | Functions named `*_force` that never call any `put()` primitive, OR callers invoking a `*_force(...)` variant | Refcount-bypass via force variant (CWE-911) |
-| **C** | `if (!foo_get(obj)) { ... }` where the success branch dereferences `obj` without bail-out on failure | Dereference after failed get (CWE-416) |
-| **E** | `BUG_ON` / `panic` / `KeBugCheck` / `WARN_ON` / `assert` / `__builtin_trap` reachable from error paths (NULL / OOM / `copy_from_user` gated) | Reachable crash primitive / DoS (CWE-617) |
-| **F** | Locking asymmetry between antonym-paired functions (enable/disable, lock/unlock, acquire/release, start/stop, suspend/resume, open/close, create/destroy): one sibling acquires a named lock around shared state, the other manipulates the same state without it | Locking asymmetry / race (CWE-667, CWE-362) |
+| **A** | Textual get/increment and exit imbalance | signal / unproven; no leak proof |
+| **B** | Force-named helper or caller | signal / unproven; naming does not prove bypass |
+| **C** | Conditional get with nearby member access | signal / unproven; no failed-get or UAF proof |
+| **E (legacy identifier)** | Assertion, warning or termination call, including BUG_ON, WARN_ON and panic | `observations` only; reachability and vulnerability status `not-assessed`; zero Pattern E findings |
+| **F** | Lock-name asymmetry between similarly named functions | signal / unproven; shared object, concurrent execution and caller-held locks are not established |
 
-**Pattern D (lock-drop-reacquire with stale pointer)** is deferred — it requires flow-sensitive dataflow that regex + label tracking cannot safely approximate. Pattern F (v0.2) covers the common case of a missing lock in a paired function. Comment text is stripped before lock detection so commented-out / mentioned APIs do not produce false positives.
+Pattern D remains unimplemented. Comments and literal contents are excluded from matching. Unsupported syntax, skipped lines and incomplete function boundaries produce partial scanner coverage. Do not repair code solely on the basis of these textual signals.
 
 **Output shape (`RefcountAuditReport`):**
 
 ```json
 {
+  "schemaVersion": 2,
+  "status": "partial",
+  "negativeEvidenceUsable": false,
+  "conclusion": "pattern-signals",
+  "evidenceLevel": "signal",
+  "proofStatus": "unproven",
   "inputFile": "...helix.c",
   "fileSize": 12345,
   "scannedLines": 456,
@@ -417,40 +521,52 @@ The pipeline runner's emulator-gate check maps each `hexcore.elixir.*` command t
   "findings": [
     {
       "pattern": "A",
+      "evidenceLevel": "signal",
+      "proofStatus": "unproven",
       "severity": "high",
+      "severityKind": "review-priority",
       "confidence": 95,
-      "title": "Possible refcount leak: get without matching put on error path",
+      "confidenceKind": "heuristic-pattern-score",
+      "title": "Textual increment/exit imbalance: obj",
       "description": "...",
-      "functionName": "vulnerable_get",
+      "functionName": "sample_get",
       "line": 6,
       "snippet": ">>> 6:    kref_get(&obj->ref);\n    7:    err = ...",
       "affectedSymbol": "obj",
-      "suggestion": "...",
-      "referenceBug": "CWE-911 (refcount leak on error path)"
+      "suggestion": "Review original source and calling contracts before changing code."
     }
   ],
   "summary": {
-    "total": 4,
-    "byPattern": { "A": 1, "B": 1, "C": 1, "E": 1, "F": 0 },
-    "bySeverity": { "high": 4, "medium": 0, "low": 0 },
+    "total": 1,
+    "byPattern": { "A": 1, "B": 0, "C": 0, "E": 0, "F": 0 },
+    "bySeverity": { "high": 1, "medium": 0, "low": 0 },
     "highestConfidence": 95
   },
+  "observations": [],
   "scanTimeMs": 7
 }
 ```
 
-**Typical usage:** chain after `hexcore.helix.decompile` using `$step[N].output`:
+The abbreviated example omits `inputQuality`, `scanCoverage` and `limitations`;
+consumers must inspect those fields, not only counts or legacy review scores.
+When output is requested, the exact consulted provenance revision is retained
+under `.hexcore-meta/inputs/<sha256>.json`. Audit lineage references the source
+SHA-256 actually scanned and this snapshot, including inputs from previous jobs.
+The snapshot is supporting evidence, not a new successful analysis or an automatic
+import of old facts into the current session. Snapshot failure stays partial.
+
+**Typical exploratory usage:** chain after `hexcore.helix.decompile` using `$step[N].output`:
 
 ```json
 { "cmd": "hexcore.helix.decompile", "args": { "address": "0x140001000", "count": 300 }, "output": { "path": "func.helix.c" } },
-{ "cmd": "hexcore.audit.refcountScan", "args": { "input": "$step[0].output" }, "output": { "path": "audit.json" } }
+{ "cmd": "hexcore.audit.refcountScan", "args": { "input": "$step[0].output" }, "output": { "path": "audit.json" }, "allowPartial": true }
 ```
 
 ### Report Composer
 
 | Command | Timeout | Description |
 |---------|---------|-------------|
-| `hexcore.pipeline.composeReport` | 60s | Aggregate all reports from `hexcore-reports/` into unified Markdown with TOC and analyst notes |
+| `hexcore.pipeline.composeReport` | 60s | Build a compact Markdown evidence index with analyst notes and links to source attachments; full source inlining is opt-in |
 
 ### Minidump Analysis
 
@@ -568,6 +684,7 @@ Get status of a specific job or all jobs.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `jobId` | `string` | — | Specific job ID. If omitted, returns all jobs. |
+| `output` | `string \| { path? }` | — | Optional JSON artifact path. Pipeline steps with an `output` now create and validate this file. |
 
 **Returns (single job):**
 
@@ -734,10 +851,10 @@ The HQL matcher reads the session DB via `SessionDbReader` to apply analyst-defi
 Use one of these input forms:
 
 - Binary target plus `address` or `addresses`.
-- `irPath` for one retained LLVM IR artifact.
-- `irText` for one inline IR target.
+- `irPath` for one retained Remill-compatible LLVM IR artifact.
+- `irText` for one inline Remill-compatible IR target.
 
-The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`, and per-target results. Each finding contains `signatureId`, `confidence`, and `matchCount`.
+Ordinary LLVM IR is not currently part of this command contract. The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`, and every scanned function, including clean negatives. Per-target records carry function/address identity, AST node count, adapter coverage and unsupported-node counts, plus the active `signatureSetSha256`. Findings carry `signatureId`, `structuralCompleteness`, `evidenceLevel`, and `matchCount`; `confidence` exists only for an explicitly corpus-calibrated signature. HQL signature `severity` is presentation priority, not vulnerability severity.
 
 ```json
 {
@@ -750,17 +867,66 @@ The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`,
 }
 ```
 
-### Schema
+### Schema (current, 3.8.4)
 
 ```sql
-CREATE TABLE session_meta (binary_hash TEXT PRIMARY KEY, version INTEGER, created_at TEXT);
-CREATE TABLE functions (address TEXT PRIMARY KEY, name TEXT, return_type TEXT);
-CREATE TABLE variables (func_address TEXT, original_name TEXT, new_name TEXT, new_type TEXT);
-CREATE TABLE fields (struct_type TEXT, offset INTEGER, name TEXT, type TEXT);
-CREATE TABLE comments (address TEXT PRIMARY KEY, comment TEXT);
-CREATE TABLE bookmarks (address TEXT PRIMARY KEY, label TEXT);
-CREATE TABLE analyze_cache (address TEXT PRIMARY KEY, name TEXT, size INTEGER, instruction_count INTEGER);
+CREATE TABLE session_meta (key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE functions (address TEXT PRIMARY KEY, name TEXT, return_type TEXT, calling_convention TEXT, updated_at TEXT);
+CREATE TABLE variables (id INTEGER PRIMARY KEY AUTOINCREMENT, func_address TEXT, original_name TEXT, new_name TEXT, new_type TEXT, updated_at TEXT, UNIQUE(func_address, original_name));
+CREATE TABLE fields (id INTEGER PRIMARY KEY AUTOINCREMENT, struct_type TEXT, offset INTEGER, name TEXT, type TEXT, updated_at TEXT, UNIQUE(struct_type, offset));
+CREATE TABLE comments (address TEXT PRIMARY KEY, comment TEXT, updated_at TEXT);
+CREATE TABLE bookmarks (address TEXT PRIMARY KEY, label TEXT, updated_at TEXT);
+CREATE TABLE analyze_cache (address TEXT PRIMARY KEY, name TEXT, size INTEGER, end_address INTEGER);
+CREATE TABLE investigations (id TEXT PRIMARY KEY, title TEXT, kind TEXT, query TEXT, status TEXT, result_count INTEGER, created_at TEXT, updated_at TEXT);
+CREATE TABLE investigation_findings (id TEXT PRIMARY KEY, investigation_id TEXT REFERENCES investigations(id) ON DELETE CASCADE, kind TEXT, query TEXT, label TEXT, string_address TEXT, reference_address TEXT, function_address TEXT, function_name TEXT, encoding TEXT, evidence_json TEXT, saved INTEGER, created_at TEXT, updated_at TEXT);
+
+-- HXDB v2 semantic catalog and evidence history
+CREATE TABLE hxdb_meta (...);
+CREATE TABLE types (...);
+CREATE TABLE type_members (...);
+CREATE TABLE enum_members (...);
+CREATE TABLE type_aliases (...);
+CREATE TABLE type_dependencies (...);
+CREATE TABLE function_prototypes (...);
+CREATE TABLE function_parameters (...);
+CREATE TABLE type_bindings (...);
+CREATE TABLE fact_conflicts (...);
+CREATE TABLE fact_dependencies (...);
+CREATE TABLE fact_generations (...);
+CREATE TABLE fact_history (...);
+CREATE TABLE legacy_migrations (...);
+
+-- R33 typed references and immutable versions
+CREATE TABLE reference_edges (...);
+CREATE TABLE reference_edge_versions (...);
+CREATE TABLE reference_edge_dependencies (...);
+CREATE TABLE reference_edge_conflicts (...);
+
+-- R34 accepted propagation state, versions, dependencies, and dirty closure
+CREATE TABLE propagation_summaries (...);
+CREATE TABLE propagation_summary_versions (...);
+CREATE TABLE propagation_dependencies (...);
+CREATE TABLE propagation_dirty (...);
+CREATE TABLE propagation_runs (...);
 ```
+
+### Analysis Contract keys in `session_meta` (3.8.4)
+
+Alongside `binary_sha256`, `binary_path`, and `created_at`, the store maintains:
+
+- `hexcore_version` — the real extension version, refreshed on every target bind (no longer hardcoded).
+- `analysis_contract_version` — the contract version (`1`).
+- `analysis_target_json` — the canonical `AnalysisTarget` (`target:sha256:<digest>` identity).
+- `analysis_session_json` — the persisted `AnalysisSession` (ID, generation, parent generation, engines).
+- `analysis_generation_counter` — the persisted analysis generation counter. `SessionStore.startReanalysis()` advances it and invalidates derived facts; `invalidateFunction(address)` invalidates only one function's dependents.
+- `analysis_engines_json` — the recorded engine manifest (engine IDs, versions, settings snapshot). Drift vs the installed engines is reported as diagnostics via `diffEngineManifest`, never as a restore failure.
+- `analysis_universe_manifest_json` — replayable closure manifest binding each incrementally materialized function range to its decoded-body SHA-256 and the aggregate `universeSha256`.
+- `analysis_generation_universe_json` — exact generation-to-universe binding. A nonzero legacy generation without this binding is reset to a new baseline generation with explicit `partial/reset` status.
+- `analysis_last_incremental_update_json` — latest incremental materialization reason, function address, generation, universe hash, and timestamp.
+
+Native `analyzeAll` snapshots are transient, target/digest/size-verified gzip/V8 artifacts under `.hexcore-meta`; they are deleted after successful parent hydration. Durable analysis JSON retains `nativeExecution` (worker PID/outcome/phase/snapshot sizes/heartbeat), while provenance retains the session generation and universe manifest used by downstream artifacts.
+
+Investigation finding IDs are stable contract IDs when a target is bound (`finding:sha256:<digest>:string-reference:token:...`); rediscovering a finding preserves its saved mark and original discovery timestamp. Legacy 24-hex IDs remain valid for session-less callers, and the Analysis Center accepts both formats. Finding references whose embedded target differs from the active one are rejected as `wrong-target`.
 
 ---
 
@@ -913,13 +1079,13 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 ## Architecture Notes
 
 - **Arch-agnostic commands** (filetype, hash, entropy, strings, YARA, IOC, base64) operate on raw bytes — no architecture dependency.
-- **Disassembler** auto-detects architecture from ELF `e_machine` and PE `Machine` headers. Defaults to x64 for raw files.
+- **Disassembler** auto-detects architecture from ELF `e_machine` and PE `Machine` headers. Raw files default to x64, but `analyzeAll` accepts explicit `arch` and `baseAddress`; structured PE/ELF headers remain authoritative.
 - **buildFormula** recognizes x86/x64 registers AND ARM64 (`x0`-`x30`, `w0`-`w30`, `sp`, `lr`, `fp`, `xzr`, `wzr`) and ARM32 (`r0`-`r15`) registers, plus ARM mnemonics (`movz`/`movk`/`movn`, 3-operand `add`/`sub`). It is NOT x86/x64-only.
 - **checkConstants** is architecture-neutral — it only compares numeric literals.
 - **PE Analyzer** is PE-format only. Use `hexcore.elfanalyzer.analyze` for ELF binaries.
 - **ELF Analyzer** is ELF-format only. TypeScript-pure parser, no native dependencies. Detects RELRO, NX, PIE, Stack Canary.
 - **Minidump** supports x86/x64 Windows crash dumps only.
-- **Remill IR Lifter** supports x86, x86-64, and AArch64 in the current `0.5.1` package. ISA-extension coverage is not uniform; low AArch64 coverage is reported rather than hidden.
+- **Remill IR Lifter** supports x86, x86-64, and AArch64 in the current `0.5.4` package. ISA-extension coverage is not uniform; low AArch64 coverage is reported rather than hidden.
 - **Rellic Decompiler** is a disabled legacy compatibility surface. Its commands remain directly addressable for old jobs, but new work must use Helix. Do not claim a removal date that has not been scheduled.
 - **Helix Decompiler** runs the MLIR lowering/pass pipeline on Remill IR: type propagation, calling-convention recovery, structured control-flow reconstruction, and PseudoC emission with confidence scoring. x86/x64 is the qualified route; AArch64 remains experimental and must be judged against retained IR/disassembly. Use `hexcore.helix.decompile` or `liftToIR` + `hexcore.helix.decompileIR`. Pass `optimizeIR: false` only when isolating pass-pipeline behavior.
 - **Managed routing** is explicit: classic CLR PE and detected .NET single-file apphosts are not native Helix inputs. Helix emits `managed: true`, `managedFormat`, and `confidence: 0`; use Revenant for C# or IL.
@@ -947,9 +1113,13 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
     "maxFunctions": 2500,
     "maxFunctionSize": 65536,
     "forceReload": true,
+    "arch": "x86",
+    "baseAddress": "0x400000",
     "filterJunk": true,
     "detectVM": true,
-    "detectPRNG": true
+    "detectPRNG": true,
+    "allowLazy": true,
+    "allowDecodeEmpty": false
   }
 }
 ```
@@ -959,9 +1129,102 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 | `maxFunctions` | `number` | `1000` | Maximum functions to analyze. |
 | `maxFunctionSize` | `number` | `65536` | Maximum function size in bytes. |
 | `forceReload` | `boolean` | `false` | Force reload of binary file. |
+| `arch` | `string` | `x64` for raw | Architecture override for headerless raw binaries: `x86`, `x64`, `arm`, `arm64`, `mips`, or `mips64`. Ignored for PE/ELF, whose headers are authoritative. |
+| `baseAddress` | `string \| number` | `0x400000` for raw | Non-negative virtual load base for a headerless raw binary. |
 | `filterJunk` | `boolean` | `false` | Filter junk instructions (callfuscation, nop sleds, identity ops). Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
 | `detectVM` | `boolean` | `false` | Run VM obfuscation heuristics (dispatcher, handler tables, operand stacks). Reports `vmDetected`, `vmType`, `dispatcher`, `opcodeCount`. **(v3.7.1)** |
 | `detectPRNG` | `boolean` | `false` | Detect PRNG usage patterns (srand/rand call sites, seed extraction). Reports `prngDetected`, `seedSource`, `seedValue`, `randCallCount`. **(v3.7.1)** |
+| `allowLazy` | `boolean` | `false` | Explicitly accept discovered functions whose bodies remain lazy. Without this opt-in, any lazy population makes the result `partial`. |
+| `allowDecodeEmpty` | `boolean` | `false` | Accept a materialized function whose body decoded empty. Keep `false` for correctness gates. |
+| `minMaterializedRatio` | `number` | `1` (`0` with `allowLazy`) | Required materialized/total ratio in the inclusive range 0..1. |
+
+The result exposes `materializedFunctionRatio`, `functionsWithInstructions`,
+`lazyFunctions`, `decodeEmptyFunctions`, and the effective
+`materializationPolicy`. Reconnaissance jobs may set `allowLazy:true`, but the
+report still foregrounds the unanalyzed population.
+
+`analyzeAll` executes native discovery in a child process. The Extension Host
+owns the external deadline and can terminate the worker even when native code
+is synchronously blocked. Successful runs return a digest-verified gzip/V8
+engine snapshot, hydrate the parent without repeating whole-binary analysis,
+and delete the transient snapshot. `nativeExecution` records outcome, worker
+PID, duration, final phase, heartbeat path, and compressed/raw snapshot sizes.
+The heartbeat under `.hexcore-meta` is updated by the supervisor independently
+of the worker and remains as terminal evidence for success, timeout, cancel,
+or crash. Pipeline timeout automatically invokes
+`hexcore.disasm.cancelAnalyzeAll`.
+
+On startup, an unchanged job left `running` by a dead prior host is archived
+and marked terminal after `hexcore.pipeline.staleRunningMs` (default 15 min),
+then becomes eligible for retry. Recovery never overwrites the archived status.
+
+### `hexcore.disasm.windowsFilesystemAuditHeadless`
+
+Build an evidence-gated Windows filesystem boundary map after `analyzeAll`.
+The command is PE-only and requires both the Disassembler and PE Analyzer.
+
+```json
+{
+  "cmd": "hexcore.disasm.windowsFilesystemAuditHeadless",
+  "args": { "maxStringSignals": 250 },
+  "output": { "path": "windows-filesystem-audit.json" },
+  "allowPartial": true,
+  "timeoutMs": 300000
+}
+```
+
+The result separates `import-signal` from `owned-callsite`, maps referenced
+path/archive/security strings to owning functions, and emits consolidated
+`candidateFunctions`, direct `candidateEdges`, and eight chain edges:
+principal, state location, writer, lifecycle, parser, path property,
+`reparse-safety`, and sink.
+It returns `partial` while any required edge is missing or blocked. An owned
+callsite is still not proof of argument values, handle identity, ordering,
+attacker control, or exploitability; the command never assigns severity.
+
+`dataflow.facts` retains bounded pre-call contexts and labelled immediate
+candidates for SID, ACL, access-mask, path, handle, and write APIs.
+`dataflow.typedPaths` connects compatible facts through a maximum four-hop call
+neighborhood; `sameValueProven:false` is mandatory until register/SSA def-use
+and aliasing prove identity. `dataflow.handleLifecycles` similarly records
+co-located open/write/close sequences with `sameHandleProven:false`.
+
+For Win64, `dataflow.deepValueFlow` performs bounded intra-function def-use for
+argument registers and stack arguments. A proof is emitted only when producer
+and consumer reduce to the same canonical storage or return token. Only those
+specific routes may set `sameValueProven:true` or `sameHandleProven:true`.
+For `same-path`, equal storage is only the first gate: an overlapping direct
+write or passing the buffer address to a call without a proven read-only
+pointer summary invalidates stored-value preservation. Such matches are
+retained under `dataflow.deepValueFlow.signals` with `status:"signal"` and an
+exact blocker; they do not promote `Path -> open`. Calls that clobber volatile
+registers, unresolved aliases, heap/object fields, and interprocedural
+transfers remain unproven.
+
+Candidate ranking combines direct evidence, role diversity, graph degree,
+typed-path participation, and product/third-party attribution. Use
+`topCandidateChains` before isolated `candidateFunctions`; `rankScore` is a
+navigation score, never vulnerability severity.
+`criticalHelpers` expands product-attributed candidates through bounded
+depth-1/depth-2 callees, while `product-candidate-route` and
+`product-helper-route` preserve concrete routes without promoting helpers to
+semantic findings. Reports render these separately from Boundary API Owners so
+SID/ACL functions are not hidden by generic string volume.
+
+Dense enum-to-message tables retain matching path/security text under
+`stringPivots` with `evidenceClass:"message-table"`, but those strings do not
+create path/archive roles. The chain also includes `reparse-safety`: absence of
+component-level reparse evidence is `not-assessed`, never an implicit safe
+result. Even a `signal` still requires proof of reparse tags, handle-relative
+traversal, and final-path descendant enforcement.
+
+Every filesystem audit also includes `normalization` using
+`hexcore-canonical-json-v1`. Reproduce `sha256` by deleting the two top-level
+members identified by `excludedJsonPointers` (`/generatedAt` and
+`/normalization`, plus process-local `/analysisContext/engineGeneration` and
+`/analysisContext/closureRestoration`), recursively sorting object keys,
+serializing compact JSON in UTF-8, and hashing those bytes with SHA-256. The
+persisted session generation and `universeSha256` remain included.
 
 ### `hexcore.disasm.buildFormula`
 ```json
@@ -1025,7 +1288,36 @@ Batch mode **(v3.7.3)** — accepts a `queries` array and searches all terms in 
 }
 ```
 
-Use `query` (string) for single-term lookups and `queries` (array) for batch lookups. Providing both is an error.
+Use `query` (string) for single-term lookups or `queries` (array) for batch
+lookups. If both are present, the deduplicated `queries` array takes precedence.
+Set `minConfidence` from `0` to `1` to discard weak literal candidates. Each
+match reports `literalConfidence`, `evidenceClass`, and `evidenceReasons`; the
+result reports `discardedLowConfidence`. Standard CRC32 lookup-table sequences
+are classified as low-confidence evidence rather than ordinary text.
+
+### `hexcore.strings.extractAdvanced`
+
+The default remains backward-compatible and returns all scored candidates.
+Use explicit budgets for large binaries, and opt in to multi-stage decoding:
+
+```json
+{
+  "cmd": "hexcore.strings.extractAdvanced",
+  "args": {
+    "minConfidence": 0.7,
+    "maxDeobfuscated": 500,
+    "highSignalOnly": true,
+    "decodeChains": true,
+    "maxTransformChains": 100
+  }
+}
+```
+
+`deobfuscationBudget` records generated, retained, and discarded candidates.
+`transformChains` preserves every hex/ASCII/Base64/JSON step with source
+offset, bounded previews, SHA-256, confidence, and JSON validity;
+`transformChainBudget` records its output gate. A transform chain is evidence,
+not automatic proof that the decoded payload is trustworthy or executable.
 
 ### `hexcore.disasm.rttiScanHeadless` **(v3.7.3)**
 
@@ -1098,14 +1390,16 @@ AOB (array-of-bytes) scan across the entire binary with wildcard support.
 
 ### `hexcore.disasm.disassembleAtHeadless`
 
-Disassemble N instructions starting at a given virtual address. Requires prior `analyzeAll` or a loaded binary.
+Disassemble either a paged instruction count or an exact half-open byte range.
+Requires prior `analyzeAll` or a loaded binary.
 
 ```json
 {
   "cmd": "hexcore.disasm.disassembleAtHeadless",
   "args": {
     "address": "0x401000",
-    "count": 50,
+    "endExclusive": "0x4012A0",
+    "stopAtFunctionBoundary": true,
     "filterJunk": true
   },
   "output": { "path": "disasm-at-result.json" },
@@ -1116,10 +1410,85 @@ Disassemble N instructions starting at a given virtual address. Requires prior `
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
-| `count` | `number` | `20` | Number of instructions to disassemble. |
+| `count` | `number` | `30` | Number of instructions to disassemble in legacy pagination mode. |
+| `endExclusive` | `string` | — | Authoritative first byte after the requested range. Takes precedence over instruction-count scope. |
+| `stopAtFunctionBoundary` | `boolean` | `false` | Use the known function extent exactly; fails when no authoritative extent exists. |
 | `filterJunk` | `boolean` | `false` | Filter junk instructions from output. Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
 | `autoBacktrack` | `boolean` | `true` | When `true`, auto-detects function boundaries — if the address lands mid-function, backtracks to the real function start. Set to `false` to disable. **(v3.7.3)** |
 | `output` | `{ path? }` | — | JSON output file path. |
+
+`count` is paged at 10,000 instructions and remains an
+`instruction-count` domain. Exact requests use the `byte-range` domain and
+report `requestedByteRange`, `functionBoundary`, reach/crossing and byte
+coverage. `stopReason` is one of `count-limit`, `requested-end`,
+`function-end`, `decode-failure`, or `binary-boundary`. An exact range that is
+not reached returns `partial`; a full count page is never proof that the
+function ended.
+
+When the range belongs to a known lazy function, the command materializes and
+commits that body to the active analysis universe. `analysisClosure` records
+whether the result was `committed`, `already-current`, `decode-empty`,
+`unknown-function`, or `display-only`, plus semantic instruction count,
+engine/session generation transitions, and `auditUniverseChanged`. A decoded
+window with zero semantic instructions is `partial` even when byte coverage is
+1.0. Downstream shared-analysis commands inherit committed disassembly
+artifacts in provenance and consume the new generation.
+
+Committed closures survive process/job boundaries. The session stores a
+replayable manifest of exact function ranges and decoded-body hashes; the next
+`analyzeAll` restores that set before exposing the persisted generation.
+`closureRestoration` reports requested/restored/failed counts and
+`universeSha256`. A partial replay advances away from the old generation and
+returns `partial` instead of assigning one generation to two universes.
+Legacy nonzero generations created before closure manifests are reset to a new
+baseline generation with `closureRestoration.status:"reset"`; jobs must opt in
+to that `partial` result instead of silently trusting unreplayable state.
+
+### `hexcore.constraints.solveHeadless`
+
+Run the packaged Z3 process with an internal deadline and return concrete models.
+Use decimal strings for integer constants larger than JavaScript's safe integer range.
+
+```json
+{
+  "cmd": "hexcore.constraints.solveHeadless",
+  "args": {
+    "variables": [
+      { "name": "digit", "type": "int", "domain": [0, 9] },
+      { "name": "mask", "type": "bv", "bits": 32 }
+    ],
+    "constraints": [
+      { "op": "eq", "args": [
+        { "op": "mul", "args": ["digit", 7] },
+        42
+      ] }
+    ],
+    "maxModels": 2,
+    "timeoutMs": 30000
+  },
+  "output": { "path": "constraints.json" },
+  "timeoutMs": 35000
+}
+```
+
+Supported structured operations are `add`, `sub`, `mul`, `xor`, `and`, `or`,
+`shl`, `lshr`, `ashr`, `concat`, `extract`, `ite`, `not`, `neg`, equality,
+signed comparisons, and unsigned bitvector comparisons. A large exact integer
+literal uses `{ "type": "int", "value": "847851805715481601" }`; a bitvector
+literal uses `{ "bits": 64, "value": "847851805715481601" }`. Controlled
+`smt2` assertions over variables declared in `variables` are also accepted, but solver-control commands
+are added by HexCore. Results include `sat | unsat | unknown`, models, timeout,
+enumeration truncation, call/time metrics, Z3 version, and executable SHA-256.
+Models are returned as decimal strings to preserve exact widths. Solver result
+`truncated:true` means enumeration stopped at `maxModels`; it is independent
+from disassembly truncation. Bounds are 2,048 variables, 10,000 constraints,
+4 MiB generated SMT, a 300-second internal timeout, and 100 models.
+
+`unknown` and `timeout:true` are semantic errors by default and therefore make
+the pipeline step fail. Set `allowUnknown:true` or `allowTimeout:true` only when
+an inconclusive result is expected; the result then has
+`semanticStatus:"partial"`, and the step must also set `allowPartial:true`.
+Neither option converts an inconclusive solve to `ok`.
 
 ### `hexcore.disasm.liftToIR`
 
@@ -1130,7 +1499,8 @@ Lift machine code to LLVM IR using the Remill engine. Requires a loaded binary w
   "cmd": "hexcore.disasm.liftToIR",
   "args": {
     "address": "0x401000",
-    "count": 100
+    "endExclusive": "0x4012A0",
+    "stopAtFunctionBoundary": true
   },
   "output": { "path": "lifted-ir.ll" },
   "timeoutMs": 120000
@@ -1141,8 +1511,37 @@ Lift machine code to LLVM IR using the Remill engine. Requires a loaded binary w
 |-----------|------|---------|-------------|
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `50` | Number of instructions to lift. |
+| `endExclusive` | `string \| number` | — | Exact half-open function endpoint; preferred whenever known. |
+| `stopAtFunctionBoundary` | `boolean` | `false` | Select the known function extent exactly instead of estimating `count * 15`. |
 | `allExecutableSections` | `boolean` | `false` | When `true`, lifts ALL executable sections (`.text`, `.init.text`, `.exit.text`) with per-section grouping. **(v3.8.0)** |
 | `output` | `{ path? }` | — | Output file path for LLVM IR text. |
+
+The result and generated `LiftDiag` keep requested and effective addresses
+separate and list entry transformations as `kind@address+bytes`. CET/ftrace
+and the exact nine-byte Linux kernel NOP are skipped only when their format
+and byte evidence match. In raw and PE inputs, `E8 00 00 00 00` is preserved
+because it may be the observable PIC sequence `call $+5; pop reg`.
+
+### Lift and decompiler honesty
+
+Do not interpret `semanticCoverage` as whole-function correctness. It measures
+the fraction of decoded instructions for which Remill supplied semantics.
+Therefore it may be 100% for an explicitly scoped fragment while the complete
+CFG or function boundary is unknown. Judge completeness using all of:
+
+- `requestedByteRange`, `functionByteRange`, `semanticBodyRange`, and their
+  boundary reach/crossing fields;
+- `remillDecodedByteSet`/`decodedByteCoverage`, which are union-of-intervals
+  coverage metrics and are not linear endpoint cursors;
+- `scopeLimited`, unsupported/decode-failure counts, and `LiftDiag`;
+- Helix `qualityIssues` and canonical `ok|partial|failed|skipped` status;
+- `confidenceAxes.translation`, `confidenceAxes.liftCoverage`, and
+  `confidenceAxes.semanticType`.
+
+`semanticType:null` with `semanticTypeStatus:"not-assessed"` means no type
+identity conclusion was made. Placeholders, suspicious self-references,
+unrecovered control flow, under-lift, unsupported instructions, or a scoped
+fragment cap presentation confidence and must remain visible in the artifact.
 
 ### `hexcore.rellic.decompile` *(Deprecated — use `hexcore.helix.decompile`)*
 
@@ -1318,6 +1717,38 @@ Detect-only packer triage. It does not unpack a sample and does not call a user-
 
 The result exposes flat `packed`, `family`, and `confidence` fields suitable for `onResult`, plus markers, detected families, recommendation, capability tags, file size, and an optional UPX version hint. Known families are `upx`, `themida`, `vmprotect`, `aspack`, `enigma`, `mpress`, `unknown`, and `none`. Run after `analyzeAll` when richer loaded-section/string evidence is useful; direct raw-file detection also works.
 
+Large high-entropy writable/executable sections are reported as `family: "unknown"` even when no commercial-family marker exists. This means "encrypted payload or unknown packer evidence", not a claim that a named packer was identified.
+
+### `hexcore.pe.extractSection` / `hexcore.crypto.rc4`
+
+These passive transforms materialize a payload without loading or executing it. Binary outputs are provenance-hashed and can be chained with `$step[N].output` through `inputPath`.
+
+```json
+{
+  "file": "managed-loader.exe",
+  "outDir": "./hexcore-reports/materialized",
+  "steps": [
+    {
+      "cmd": "hexcore.pe.extractSection",
+      "args": { "section": ".payload", "maxBytes": 268435456 },
+      "output": { "path": "stage.encrypted.bin" }
+    },
+    {
+      "cmd": "hexcore.crypto.rc4",
+      "args": {
+        "inputPath": "$step[0].output",
+        "key": [1, 2, 3, 4],
+        "drop": 0,
+        "maxBytes": 268435456
+      },
+      "output": { "path": "stage.decoded.bin" }
+    }
+  ]
+}
+```
+
+`crypto.rc4` requires exactly one of `key`, `keyHex`, or `keyBase64`. `key` may be a UTF-8 string or an array of byte values. The default input/section limit is 256 MiB and the hard ceiling is 1 GiB; `drop` is bounded to 16 MiB. The commands do not infer a key from decompiler text and do not execute the transformed bytes.
+
 ### `hexcore.revenant.decompile` / `hexcore.revenant.decompileIL`
 
 Use Revenant for managed .NET inputs. C# mode optionally accepts `type` to target a specific type. Both commands accept the pipeline-injected `file`, `quiet`, and `output` contract.
@@ -1345,7 +1776,7 @@ The bundled self-contained engine is preferred. A system `ilspycmd` fallback can
 
 ### `hexcore.hql.scanHeadless`
 
-Pass binary `address`/`addresses`, or one `irPath`/`irText` target. The output is a semantic HAST-signature report.
+Pass binary `address`/`addresses`, or one Remill-compatible `irPath`/`irText` target. Ordinary LLVM IR is not accepted by the current Helix/HQL lane. The output is a semantic HAST-signature report that preserves clean function identity, adapter fidelity, and signature-set identity.
 
 ```json
 {
@@ -1356,7 +1787,7 @@ Pass binary `address`/`addresses`, or one `irPath`/`irText` target. The output i
 }
 ```
 
-The report declares `status: "ok" | "partial" | "failed"`, `completedTargetCount`, and `failedTargetCount`. A partial child result fails the pipeline step by default. Add step-level `"allowPartial": true` only when downstream logic explicitly accepts incomplete semantic coverage; the step and terminal job remain visibly `partial`.
+The report declares `status: "ok" | "partial" | "failed"`, `completedTargetCount`, and `failedTargetCount`. A partial child result fails the pipeline step by default. Add step-level `"allowPartial": true` only when downstream logic explicitly accepts incomplete semantic coverage; the step and terminal job remain visibly `partial`. Treat `signal` and `candidate` as discovery evidence. A completed HQL job, structural completeness `1`, or a high presentation severity does not prove maliciousness, exploitability, or a vulnerability.
 
 ### `hexcore.souper.optimize`
 
@@ -1482,6 +1913,7 @@ Unified single-shot emulation: loads the binary, optionally configures STDIN and
 		"permissiveMemoryMapping": false,
 		"prngMode": "glibc",
 		"prngSeed": 4919,
+		"trace": { "maxEntries": 20000, "sampleEvery": 1, "groupRepeated": true },
 		"collectSideChannels": true,
 		"memoryDumps": [
 			{ "address": "0x600000", "size": 4096, "trigger": "end" }
@@ -1506,11 +1938,17 @@ Unified single-shot emulation: loads the binary, optionally configures STDIN and
 | `permissiveMemoryMapping` | `boolean` | `false` | When `true`, maps all segments with RWX permissions. Required for self-modifying VMs that jump to .rodata/.data. **(v3.7.1)** |
 | `prngMode` | `string` | `'stub'` | PRNG implementation: `'glibc'` (344-state TYPE_3), `'msvcrt'` (LCG), `'stub'` (returns 0). **(v3.7.1)** |
 | `prngSeed` | `number` | `1` | Initial seed for PRNG. Only used when `prngMode` is `'glibc'` or `'msvcrt'`. **(v3.7.1)** |
+| `trace` | `object` | bounded/grouped | `{ maxEntries, sampleEvery, groupRepeated }`. Retention and sampling never change the exact observed-call total. **(v3.8.4)** |
 | `collectSideChannels` | `boolean` | `false` | When `true`, collects instruction counts per basic block, memory access patterns, and branch statistics. **(v3.7.1)** |
 | `memoryDumps` | `array` | — | Array of `{ address, size, trigger }` objects. `trigger` is `'breakpoint'` or `'end'`. **(v3.7.1)** |
-| `breakpointConfigs` | `array` | — | Array of `{ address, autoSnapshot?, dumpRanges? }` objects. When `autoSnapshot: true`, captures registers + stack + optional memory ranges at breakpoint, then continues. **(v3.7.1)** |
+| `breakpointConfigs` | `array` | — | Array of `{ address, autoSnapshot?, dumpRanges? }` objects. When `autoSnapshot: true`, captures registers + stack + optional memory ranges when execution stops at that breakpoint. **(v3.8.4)** |
 | `output` | `{ path? }` | — | JSON output file path. Parent directories are created recursively. |
 | `quiet` | `boolean` | `false` | Suppress VS Code notification messages. |
+
+When a prior `analyzeAll` step reports `prngDetection.prngDetected=true`, the
+pipeline runner supplies `glibc` for ELF or `msvcrt` for PE plus the recovered
+uint32 seed to a later Debugger emulation step. Explicit job arguments always
+win; a seed without a non-`stub` mode is rejected.
 
 **Returns** `FullEmulationResult`:
 
@@ -1582,6 +2020,8 @@ Write data to emulation memory. Requires an active emulation session (use `emula
 
 **Errors:**
 - `No active emulation session.` — no session is active.
+- A missing or non-string `input` is rejected. The legacy/misspelled `data`
+  argument is not silently converted to an empty STDIN buffer.
 - `Invalid data format. Use base64 or 0x-prefixed hex.` — `data` is neither valid base64 nor `0x`-prefixed hex.
 
 ---
@@ -1739,15 +2179,79 @@ Pattern search across emulated RAM. Requires an active emulation session (call `
 
 ---
 
+### Live-memory disassembly and decompilation **(v3.8.4)**
+
+Use these commands after a keep-alive emulation reaches an unpacked or transformed
+code region. The bytes stay in process: the Debugger reads the live Unicorn memory,
+the Disassembler lifts the exact byte buffer, and Helix consumes the resulting IR.
+The original binary remains the session target.
+
+```json
+{
+  "cmd": "hexcore.debug.disassembleMemoryHeadless",
+  "args": { "address": "0x500000", "size": 1444 },
+  "output": { "path": "live-payload.disasm.json" },
+  "timeoutMs": 120000
+}
+```
+
+```json
+{
+  "cmd": "hexcore.debug.decompileMemoryHeadless",
+  "args": { "address": "0x500000", "size": 1444 },
+  "output": { "path": "live-payload.helix.c" },
+  "timeoutMs": 300000
+}
+```
+
+Both results identify `source: "debugger-live-memory"`, the original `targetFile`,
+the live address, region size, architecture, execution backend, and SHA-256. The
+decompile result additionally reports `bytesConsumed`, confidence, and quality
+issues. It also reports `analysisContext`: `matched`, `mismatched`, or `unbound`,
+plus `activeEngineEvidenceUsed`. A mismatch is expected when another target is
+open in the Disassembler and proves that its renames, symbols, debug types,
+function starts, and confidence evidence were not applied. The pipeline log
+retains this decision even when the output artifact is plain `.c`.
+
+Live-memory Helix work runs in a fresh worker. Its internal deadline accounts
+for time already spent reading and lifting memory and settles five seconds
+inside the step timeout. The pipeline then has time to write a terminal status
+and release queue/session ownership; the timeout capability can also cancel the
+live-worker group explicitly. Sizes are bounded to 4 MiB per command; split
+larger regions along verified code boundaries.
+
+The internal `hexcore.disasm.liftMemoryHeadless` command accepts `bytesBase64`,
+`address`, and `arch`. Pipeline authors normally use the Debugger commands so the
+live-memory provenance is assembled automatically.
+
+---
+
 ### `hexcore.pipeline.composeReport`
 ```json
 {
   "cmd": "hexcore.pipeline.composeReport",
-  "args": { "notes": "ANALYST_NOTES.md" },
+  "args": { "notes": "ANALYST_NOTES.md", "includeFullSources": false },
   "output": { "path": "FINAL_REPORT.md", "format": "md" },
   "timeoutMs": 60000
 }
 ```
+
+The default compact report summarizes corroborated findings and links each
+attachment; it does not duplicate complete JSON/Markdown bodies. Set
+`includeFullSources: true` only when a self-contained, substantially larger
+report is required.
+
+When this command is the final pipeline step, the runner persists terminal
+status first and automatically recomposes the report. The destination report
+is excluded from its own source scan; its finalized hash appears in
+`.hexcore-meta/provenance.json`.
+
+The final report provenance inputs are the exact source artifacts returned by
+the composer, including terminal status, and never the report itself. Composer
+lineage uses target, producer/version, command, configuration hash, and input
+artifact IDs. Same-lineage normalized-identical reruns are rendered as
+`Replicated Evidence`; they do not increase independent corroboration. Audit
+parameter variants are compared once and exact replicas are collapsed.
 
 ### Output Override
 
@@ -1776,13 +2280,18 @@ Output paths must be relative to and contained inside `outDir`. Absolute paths, 
 - If command activation fails, `hexcore-pipeline.status.json` includes owner-extension diagnostics.
 - `outputPath` is only reported for steps that actually request/provide output.
 - Commands marked as interactive are blocked with a clear error.
+- Startup/watcher auto-run executes each saved job revision once. On Extension
+  Host reload, an existing status whose `startedAt` is newer than the job file's
+  mtime suppresses replay and preserves that attempt. Edit/save the job or use
+  the manual Run Job command to request a new execution.
 
 ### Observability fields (v3.8.0)
 
 `hexcore-pipeline.status.json` exposes extra metrics for dashboards and report
 composers (all backward compatible — missing on older runs):
 
-- **Per-step** — `attemptCount`, `outputBytes`, and `artifactProvenancePath`. Each existing output receives a `.provenance.json` sidecar containing artifact SHA-256, binary identity, command, semantic status, context generation, worker/job identity, and owner-extension versions.
+- **Per-step** — `attemptCount`, `outputBytes`, and `artifactProvenancePath`. The path points to the run's consolidated `.hexcore-meta/provenance.json` manifest. Each artifact entry contains its SHA-256, binary identity, command, semantic status, context generation, worker/job identity, owner-extension versions, and input-artifact chain.
+- **Run-level `provenanceManifestPath`** — the same hidden manifest path, exposed once for consumers that do not need to walk step status. Normal report directories no longer receive a visible `.provenance.json` beside every artifact.
 - **Run-level `provenance`** — `executionId`, optional queue/session IDs, `contextGeneration`, `binaryPath`, `binarySha256`, detected `binaryFormat`, architecture, and PE image base when available.
 - **Run-level `summary`** (populated on terminal status — `ok` / `error` /
   `partial`):
@@ -1794,6 +2303,19 @@ composers (all backward compatible — missing on older runs):
 
 The runner writes `status.json` after every step (progressive observability),
 so a watcher tailing the file sees each transition live.
+
+---
+
+### Command contract envelopes (3.8.4)
+
+The pipeline administration commands now return contract-decorated responses. Legacy fields are preserved; the contract fields are authoritative on name conflicts:
+
+- `hexcore.pipeline.runJob`, `validateJob`, `listCapabilities`, `queueJob`, and `jobStatus` responses carry `contractVersion: 1`, canonical `status`, typed `diagnostics`, and `artifacts`.
+- Canonical status vocabulary in command responses: `ok | partial | failed | skipped`. The file-level `hexcore-pipeline.status.json` keeps its legacy `error` run status; the command response maps it to contract `failed`. A `running` snapshot maps to `partial` with a warning diagnostic, never a fake terminal state.
+- Step outcomes become typed diagnostics: `timeout` (retryable) vs `engine-fault`, `partial-result` warnings for retained partial output, and gate classifications (`parse-failed` for format gates, `engine-unavailable` for missing engines). Validation issues map to `output-unsafe` / `not-found` / `invalid-input`, with the original issue code preserved in `details.issueCode`.
+- Artifact references are never fabricated: artifact hashes live in the provenance manifest, so decorated responses carry sidecar paths in diagnostic `details` instead of inventing `AnalysisArtifactReference` entries.
+- `hexcore.pipeline.cancelJob` still returns a bare boolean this wave; migrating it is a consumer-visible break and is deferred with the analysis-command tail (`searchStringHeadless`, `liftToIR`, `helix.decompileIR`, `hql.scanHeadless`, ...).
+- Error codes come from the contract registry (`ANALYSIS_ERROR_CODES` in `hexcore-common`): adding or renaming a code is a contract change.
 
 ---
 
@@ -1819,13 +2341,13 @@ so a watcher tailing the file sees each transition live.
 - Start a session first with `emulateFullHeadless` (set `keepAlive: true`) or the existing `emulateHeadless`.
 
 ### `timed out after ...`
-- Increase `timeoutMs` for heavy binaries.
-- Lower `maxFunctions` and `maxFunctionSize` on `analyzeAll`.
+- For isolated `analyzeAll`, inspect `nativeExecution.lastPhase` and the terminal heartbeat before changing scope or deadline. The external watchdog has already terminated the worker.
+- Increase `timeoutMs` only for justified heavy analysis; lower `maxFunctions` and `maxFunctionSize` when the requested scope is excessive.
 - Helix decompile can take up to 90s for large functions — use `timeoutMs: 180000` or higher.
 
 ### Missing report file
 - Check step status in `hexcore-pipeline.status.json`.
-- If step failed/timed out, output file will not be created.
+- A failed/timed-out step never creates a successful analysis artifact. Commands with validated output contracts may create an explicit error stub at the requested path (`stub:true`, `ok:false`, `status:"error"`); provenance and step status remain `error`.
 
 ### `Invalid "outDir"` / output resolves outside the allowed directory
 - Keep `outDir` under the workspace or the job-file directory.
@@ -1968,3 +2490,59 @@ Generate a job from a preset via `Create HexCore Job from Preset` (`hexcore.pipe
 | `ctf-reverse` | Focused on CTF challenges: strings + disasm + decompile + emulation |
 
 Presets generate a `.hexcore_job.json` in the workspace root.
+
+## HXDB Semantic Commands (3.8.4 / Disassembler 1.4.61)
+
+The semantic model is target-bound in `.hexcore_session.db`.
+
+| Command family | Purpose |
+|----------------|---------|
+| `hexcore.types.*` | Apply, edit, explain, import/export, or undo full prototypes |
+| `hexcore.references.query/export` | Query/export typed R33 references |
+| `hexcore.propagation.solve/status/export` | Run and inspect the bounded R34 fixed point |
+| `hexcore.typeManager.*` | Transactional type create/edit/rename/delete/undo/import/export |
+| `hexcore.types.ingestDebug` | Normalize BTF/DWARF records into HXDB |
+| `hexcore.records.recover` | Infer records only from proven scoped object identities |
+| `hexcore.pdb.importSemantics/resolveSymbols` | Validate/import PDB or resolve symbol cache entries |
+| `hexcore.signatures.apply` | Apply API/header facts as signature evidence |
+| `hexcore.semanticExplorer.open` | Interactive-only prototype/type/xref/history editor |
+
+An edit is `partial` unless caller/consumer closure commits. Cancellation,
+timeout, or budget exhaustion preserves the prior accepted generation. An
+unresolved direct target remains an `address`; an indirect target remains a
+qualified candidate until points-to/runtime evidence resolves it.
+
+`hexcore.propagation.solve` and `hexcore.records.recover` run the fixed point
+in a pure TypeScript Worker Thread over a read-only semantic snapshot. Their
+artifacts expose `worker.transport:"perseus-sab-v1"`, worker duration,
+heartbeat count, last phase/iteration, affected-function count, terminal state,
+snapshot hash, `snapshotPreparationMs`, and `hardTerminated`. The sibling
+`preparation` block separates reference sync, input collection, and summary
+invalidation time. Accepted summaries/type bindings are
+committed only in the parent after the live HXDB snapshot is revalidated.
+Hard timeout returns a terminal non-committed result immediately and reaps the
+worker asynchronously; do not increase the deadline to hide an oversized
+closure. Prefer an evidence-backed `changedFunctions` set.
+
+Operational worker/preparation diagnostics are deliberately excluded from the
+semantic `outputHash`. Thread ids, heartbeat cadence, and timings may change
+between runs without manufacturing a semantic diff.
+
+If a restored analysis generation is older than active reference edges, the
+producer preserves those edges and reports
+`futureGenerationInvalidationDeferred` with `status:"partial"`. This is a
+soundness barrier, not a command failure: consumers may inspect the conservative
+model, but must not promote it as a complete proof until a monotonic generation
+rebuild removes the barrier.
+
+HQL 0.3.1 reads the active target-bound SemanticStore directly in the IDE;
+offline scans use a read-only `SessionDbReader` that verifies `target_identity`.
+Both combine HAST structure with typed facts and expose read failures instead
+of silently returning zero facts. Preserve
+`semanticFactCount`, `semanticFactsSha256`, match provenance, and `proofStatus`.
+Runtime observations are binary/input/trace-bound corroboration and cannot by
+themselves promote static evidence to `proven`.
+
+Helix version identities are separate: extension/package `0.9.3`, native/JS
+engine API `0.1.9`, and HAST producer schema version `0.1.9`. Reports must label
+these fields independently instead of comparing them as one version stream.

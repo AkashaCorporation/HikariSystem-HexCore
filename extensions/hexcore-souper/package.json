@@ -1,6 +1,6 @@
 {
   "name": "hexcore-souper",
-  "version": "0.2.0",
+  "version": "0.2.2",
   "description": "HexCore Souper — LLVM IR superoptimizer via Z3 SMT solving",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -16,7 +16,7 @@
     "install": "node ../../scripts/hexcore-native-install.js",
     "build": "node-gyp rebuild",
     "build:debug": "node-gyp rebuild --debug",
-    "prebuild": "prebuildify --napi --strip",
+    "package:prebuild": "prebuildify --napi --strip",
     "test": "node test/test.js",
     "clean": "node-gyp clean"
   },

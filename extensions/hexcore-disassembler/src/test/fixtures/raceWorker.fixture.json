@@ -1,0 +1,23 @@
+{
+	"name": "msvc-x64-address-taken-leaf-race-worker",
+	"binarySha256": "6e7f2c6a45509297265ec677835532dcf4a40c3abac6e29d20a5e0c9c88fb09b",
+	"sourceSha256": "322c0fedf58ec47e8cbcb217de44f41803e7dd43dc075b3ccf410350e51f7509",
+	"toolchain": "MSVC cl /O0, aggressive stress-suite profile",
+	"sourceFunction": "void race_worker(SharedState *state, int rounds) { for (int i = 0; i < rounds; ++i) { state->inc(); } }",
+	"imageBase": "0x140000000",
+	"worker": {
+		"start": "0x140001200",
+		"endExclusive": "0x140001210",
+		"bytesHex": "85d27e0a8bc2ff014883e80175f8c3cc"
+	},
+	"adjacentFunction": {
+		"start": "0x140001210",
+		"prefixHex": "48895c24105556574154415541564157"
+	},
+	"callbackEvidence": {
+		"leaAddress": "0x140001e5f",
+		"leaHex": "488d1d9af3ffff",
+		"storeAddress": "0x140001e66",
+		"storeHex": "48895810"
+	}
+}

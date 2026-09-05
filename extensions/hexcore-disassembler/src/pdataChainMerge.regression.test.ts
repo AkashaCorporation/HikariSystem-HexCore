@@ -25,6 +25,9 @@
  */
 
 import * as assert from 'assert';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import 'mocha';
 import type { DisassemblerEngine as DisassemblerEngineType } from './disassemblerEngine';
 
@@ -96,7 +99,7 @@ function buildEngine(frags: Frag[], seed: { address: number; endAddress: number 
 
 	const engine = new DisassemblerEngine() as unknown as {
 		architecture: string; baseAddress: number; fileBuffer: Buffer;
-		sections: { name: string; virtualAddress: number; virtualSize: number; rawAddress: number }[];
+		sections: { name: string; virtualAddress: number; virtualSize: number; rawAddress: number; rawSize: number; isCode: boolean }[];
 		peDataDirectories: { pdata: unknown[] };
 		functions: Map<number, { address: number; name: string; size: number; endAddress: number; instructions: unknown[]; callers: number[]; callees: number[] }>;
 		ensurePdataFunctionsReconciled: () => Promise<void>;
@@ -104,7 +107,10 @@ function buildEngine(frags: Frag[], seed: { address: number; endAddress: number 
 	engine.architecture = 'x64';
 	engine.baseAddress = BASE;
 	engine.fileBuffer = buf;
-	engine.sections = [{ name: '.text', virtualAddress: BASE, virtualSize: 0x10000, rawAddress: 0 }];
+	engine.sections = [{
+		name: '.text', virtualAddress: BASE, virtualSize: 0x10000,
+		rawAddress: 0, rawSize: 0x10000, isCode: true
+	}];
 	engine.peDataDirectories = { pdata };
 	const map = new Map<number, { address: number; name: string; size: number; endAddress: number; instructions: unknown[]; callers: number[]; callees: number[] }>();
 	for (const s of seed) {
@@ -168,6 +174,218 @@ suite('MSVC chained-unwind .pdata fragment merge (v3.8.2 FIX-027 / FIX-027b)', (
 		);
 	});
 
+	test('a heuristic container cannot delete an entry point outside .pdata', async () => {
+		const entry = BASE + 0x1080;
+		const { engine, reconcile } = buildEngine(
+			[{ begin: 0x2000, end: 0x2040 }],
+			[
+				{ address: BASE + 0x1000, endAddress: BASE + 0x1100 },
+				{ address: entry, endAddress: entry + 5 }
+			]
+		);
+		const internals = engine as unknown as {
+			fileInfo: { entryPoint: number };
+			functions: Map<number, { name: string }>;
+		};
+		internals.fileInfo = { entryPoint: entry };
+		internals.functions.get(entry)!.name = 'entry_point';
+
+		await reconcile();
+		const result = funcs(engine);
+		assert.ok(!result.has(BASE + 0x1000), 'earlier false container removed');
+		assert.ok(result.has(entry), 'entry point preserved as its own function');
+	});
+
+	test('parser accepts a valid Exception Directory beyond the former 250K ceiling', () => {
+		const count = 250001;
+		const buffer = Buffer.alloc(count * 12);
+		for (let i = 0; i < count; i++) {
+			const offset = i * 12;
+			const begin = i * 2 + 1;
+			buffer.writeUInt32LE(begin, offset);
+			buffer.writeUInt32LE(begin + 1, offset + 4);
+		}
+		const engine = new DisassemblerEngine() as unknown as {
+			fileBuffer: Buffer;
+			rvaToFileOffset: (_rva: number) => number;
+			parsePdataDirectory: (rva: number, size: number) => void;
+			getPdataEntries: () => unknown[];
+			getPdataDiagnostics: () => { declaredEntries: number; parsedEntries: number; truncated: boolean };
+		};
+		engine.fileBuffer = buffer;
+		engine.rvaToFileOffset = () => 0;
+		engine.parsePdataDirectory(1, buffer.length);
+
+		assert.strictEqual(engine.getPdataEntries().length, count);
+		assert.deepStrictEqual(engine.getPdataDiagnostics(), {
+			declaredEntries: count,
+			parsedEntries: count,
+			truncated: false
+		});
+	});
+
+	test('analyzeAll restores cached boundaries as lazy stubs even after entry discovery', async () => {
+		const existing = BASE + 0x1000;
+		const cached = BASE + 0x2000;
+		const { engine } = buildEngine([], [{ address: existing, endAddress: existing + 5 }]);
+		let persisted = 0;
+		const internals = engine as unknown as {
+			sessionStore: {
+				getCachedFunctions: () => Array<{ address: string; name: string; size: number; end_address: number }>;
+				replaceCachedFunctions: (entries: Iterable<unknown>) => void;
+				getAnalysisUniverseManifest: () => undefined;
+				getAnalysisSession: () => undefined;
+				getMeta: (_key: string) => undefined;
+			};
+			scanForFunctionPrologs: () => Promise<void>;
+			unmaterializedStubs: Set<number>;
+		};
+		internals.sessionStore = {
+			getCachedFunctions: () => [{
+				address: `0x${cached.toString(16)}`,
+				name: 'cached_fn',
+				size: 0x20,
+				end_address: cached + 0x20
+			}],
+			replaceCachedFunctions: entries => {
+				persisted = Array.from(entries).length;
+			},
+			getAnalysisUniverseManifest: () => undefined,
+			getAnalysisSession: () => undefined,
+			getMeta: () => undefined,
+		};
+		internals.scanForFunctionPrologs = async () => undefined;
+
+		await engine.analyzeAll({ useCachedFunctions: true });
+		const restored = engine.getFunctionAt(cached);
+		assert.ok(restored, 'cached boundary restored despite an existing entry function');
+		assert.strictEqual(restored!.instructions.length, 0, 'body remains lazy');
+		assert.ok(internals.unmaterializedStubs.has(cached));
+		assert.strictEqual(persisted, 2, 'cache replacement receives the complete table');
+	});
+
+	test('a rediscovered cached boundary materializes instead of returning a hollow function', async () => {
+		const cached = BASE + 0x2000;
+		const { engine } = buildEngine([]);
+		const internals = engine as unknown as {
+			sessionStore: {
+				getCachedFunctions: () => Array<{ address: string; name: string; size: number; end_address: number }>;
+				replaceCachedFunctions: (_entries: Iterable<unknown>) => void;
+				getAnalysisUniverseManifest: () => undefined;
+				getAnalysisSession: () => undefined;
+				getMeta: (_key: string) => undefined;
+			};
+			scanForFunctionPrologs: () => Promise<void>;
+			disassembleRange: (address: number, size: number) => Promise<Array<{
+				address: number; size: number; bytes: Buffer; mnemonic: string; opStr: string; isCall: boolean;
+			}>>;
+		};
+		internals.sessionStore = {
+			getCachedFunctions: () => [{
+				address: `0x${cached.toString(16)}`,
+				name: 'cached_fn',
+				size: 0x20,
+				end_address: cached + 0x20
+			}],
+			replaceCachedFunctions: () => undefined,
+			getAnalysisUniverseManifest: () => undefined,
+			getAnalysisSession: () => undefined,
+			getMeta: () => undefined,
+		};
+		internals.scanForFunctionPrologs = async () => {
+			await engine.analyzeFunction(cached);
+		};
+		internals.disassembleRange = async address => [{
+			address,
+			size: 1,
+			bytes: Buffer.from([0x90]),
+			mnemonic: 'nop',
+			opStr: '',
+			isCall: false
+		}];
+
+		await engine.analyzeAll();
+		const restored = engine.getFunctionAt(cached);
+		assert.ok(restored);
+		assert.strictEqual(restored!.instructions.length, 1);
+		assert.strictEqual(engine.getFunctionBodyStatus(cached), 'materialized');
+	});
+
+	test('full assembly export materializes lazy bodies and reports decode completeness', async () => {
+		const start = BASE + 0x1000;
+		const { engine, reconcile } = buildEngine([{ begin: 0x1000, end: 0x1020 }]);
+		await reconcile();
+		const internals = engine as unknown as {
+			disassembleRange: (address: number, size: number) => Promise<Array<{
+				address: number; size: number; bytes: Buffer; mnemonic: string; opStr: string; isCall: boolean;
+			}>>;
+		};
+		internals.disassembleRange = async address => [{
+			address,
+			size: 1,
+			bytes: Buffer.from([0x90]),
+			mnemonic: 'nop',
+			opStr: '',
+			isCall: false
+		}];
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-asm-export-'));
+		const output = path.join(dir, 'body.asm');
+		try {
+			const result = await engine.exportAssembly(output);
+			assert.strictEqual(result.status, 'partial');
+			assert.strictEqual(result.functionsWithInstructions, 1);
+			assert.strictEqual(result.functionsWithoutInstructions, 0);
+			assert.strictEqual(result.decodedInstructions, 1);
+			assert.match(fs.readFileSync(output, 'utf8'), /nop/);
+			assert.strictEqual(result.incompleteFunctions.length, 1);
+			assert.strictEqual(engine.getFunctionBodyStatus(start), 'partial', 'partial decode remains explicit and retryable after streaming');
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('full assembly export reports partial when a requested body decodes empty', async () => {
+		const { engine, reconcile } = buildEngine([{ begin: 0x1000, end: 0x1020 }]);
+		await reconcile();
+		const internals = engine as unknown as {
+			disassembleRange: (_address: number, _size: number) => Promise<[]>;
+		};
+		internals.disassembleRange = async () => [];
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-asm-partial-'));
+		try {
+			const result = await engine.exportAssembly(path.join(dir, 'empty.asm'));
+			assert.strictEqual(result.status, 'partial');
+			assert.strictEqual(result.functionsWithInstructions, 0);
+			assert.strictEqual(result.functionsWithoutInstructions, 1);
+			assert.deepStrictEqual(result.emptyFunctions.map(fn => fn.reason), ['decode-empty']);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	test('materializing a partial body never shrinks its authoritative .pdata range', async () => {
+		const start = BASE + 0x1000;
+		const end = BASE + 0x3000;
+		const { engine, reconcile } = buildEngine([{ begin: 0x1000, end: 0x3000 }]);
+		await reconcile();
+
+		const internals = engine as unknown as {
+			disassembleRange: (address: number, size: number) => Promise<Array<{ address: number; size: number; isCall: boolean }>>;
+		};
+		internals.disassembleRange = async address => Array.from({ length: 1000 }, (_, index) => ({
+			address: address + index,
+			size: 1,
+			isCall: false
+		}));
+
+		const materialized = await engine.materializeFunction(start);
+		assert.ok(materialized);
+		assert.strictEqual(materialized!.instructions.length, 1000, 'body preview remains bounded');
+		assert.strictEqual(materialized!.endAddress, end, 'authoritative end survives partial decoding');
+		assert.strictEqual(materialized!.size, end - start, 'authoritative size survives partial decoding');
+		assert.strictEqual(engine.getFunctionBodyStatus(start), 'partial');
+	});
+
 	test('#1 extend-UP: a pre-discovered SHORT primary is grown to the merged .pdata end', async () => {
 		// Prologue scan discovered the primary ending early at 0x1010 (interior ret); the real
 		// chained-unwind function runs to 0x1030. Without extend-up, knownFunctionEnds would
@@ -192,6 +410,85 @@ suite('MSVC chained-unwind .pdata fragment merge (v3.8.2 FIX-027 / FIX-027b)', (
 		const m = funcs(engine);
 		assert.ok(m.has(BASE + 0x1000), 'first primary kept');
 		assert.ok(m.has(BASE + 0x1010), 'second adjacent primary kept (NOT absorbed)');
+	});
+
+	test('normalizes partially overlapping non-chained records at the later begin', async () => {
+		const { engine, reconcile } = buildEngine([
+			{ begin: 0x1000, end: 0x1040 },
+			{ begin: 0x1020, end: 0x1060 }
+		]);
+		await reconcile();
+
+		assert.deepStrictEqual(engine.getAuthoritativePdataRanges(), [
+			{ begin: BASE + 0x1000, end: BASE + 0x1020 },
+			{ begin: BASE + 0x1020, end: BASE + 0x1060 }
+		]);
+		assert.strictEqual(funcs(engine).get(BASE + 0x1000)!.endAddress, BASE + 0x1020);
+		assert.strictEqual(funcs(engine).get(BASE + 0x1020)!.endAddress, BASE + 0x1060);
+	});
+
+	test('folds an interior export alias into its owning authoritative function', async () => {
+		const owner = BASE + 0x1000;
+		const alias = BASE + 0x1020;
+		const { engine, reconcile } = buildEngine(
+			[
+				{ begin: 0x1000, end: 0x1040 },
+				{ begin: 0x1020, end: 0x1040 }
+			],
+			[
+				{ address: owner, endAddress: BASE + 0x1040 },
+				{ address: alias, endAddress: BASE + 0x1040 }
+			]
+		);
+		const internals = engine as unknown as {
+			exports: Array<{ name: string; address: number; ordinal: number; isForwarder: boolean }>;
+		};
+		internals.exports = [{ name: 'export_alias', address: alias, ordinal: 1, isForwarder: false }];
+
+		await reconcile();
+		assert.strictEqual(engine.getFunctionAt(alias), undefined, 'interior alias is not a second overlapping function');
+		assert.strictEqual(engine.getFunctionAt(owner)?.name, 'export_alias', 'alias name is retained on the owner');
+	});
+
+	test('clamps an exported leaf without .pdata at the next authoritative begin', async () => {
+		const exportedLeaf = BASE + 0x1000;
+		const pdataBegin = BASE + 0x1020;
+		const { engine, reconcile } = buildEngine(
+			[{ begin: 0x1020, end: 0x1060 }],
+			[{ address: exportedLeaf, endAddress: BASE + 0x1040 }]
+		);
+		const internals = engine as unknown as {
+			exports: Array<{ name: string; address: number; ordinal: number; isForwarder: boolean }>;
+		};
+		internals.exports = [{ name: 'leaf_export', address: exportedLeaf, ordinal: 1, isForwarder: false }];
+
+		await reconcile();
+		assert.strictEqual(engine.getFunctionAt(exportedLeaf)?.endAddress, pdataBegin);
+		assert.strictEqual(engine.getFunctionAt(exportedLeaf)?.name, 'leaf_export');
+		assert.strictEqual(engine.getFunctionAt(pdataBegin)?.endAddress, BASE + 0x1060);
+	});
+
+	test('uses the next exported leaf as an authoritative boundary', async () => {
+		const first = BASE + 0x1000;
+		const second = BASE + 0x1020;
+		const { engine, reconcile } = buildEngine(
+			[{ begin: 0x1100, end: 0x1140 }],
+			[
+				{ address: first, endAddress: BASE + 0x1040 },
+				{ address: second, endAddress: BASE + 0x1040 }
+			]
+		);
+		const internals = engine as unknown as {
+			exports: Array<{ name: string; address: number; ordinal: number; isForwarder: boolean }>;
+		};
+		internals.exports = [
+			{ name: 'first_leaf', address: first, ordinal: 1, isForwarder: false },
+			{ name: 'second_leaf', address: second, ordinal: 2, isForwarder: false }
+		];
+
+		await reconcile();
+		assert.strictEqual(engine.getFunctionAt(first)?.endAddress, second);
+		assert.strictEqual(engine.getFunctionAt(second)?.endAddress, BASE + 0x1040);
 	});
 
 	test('#2 no-drop: an ORPHAN continuation (primary absent from the table) stays a function', async () => {

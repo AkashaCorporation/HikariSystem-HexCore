@@ -32,7 +32,10 @@ const result = await optimizer.optimizeAsync(llvmIrText);
 console.log(result.success);            // boolean
 console.log(result.ir);                 // optimized LLVM IR text
 console.log(result.candidatesFound);    // number
-console.log(result.candidatesReplaced); // number
+console.log(result.candidatesAttempted);// number sent to Z3
+console.log(result.candidatesInferred); // number solved by Z3
+console.log(result.candidatesReplaced); // number applied to LLVM IR
+console.log(result.solverTimeouts);      // number
 console.log(result.optimizationTimeMs); // number
 
 optimizer.close();
@@ -40,7 +43,10 @@ optimizer.close();
 
 ## Build
 
-Requires pre-compiled dependencies (LLVM 18, Z3, Souper). See `deps/` structure.
+Requires pre-compiled dependencies (LLVM 18, Z3, Souper). The Windows runtime
+ships both `z3.exe` and `libz3.dll`; `HEXCORE_Z3_PATH` may override the packaged
+solver for controlled development. Release builds must never rely on the build
+machine's absolute Z3 path.
 
 ```bash
 npm run build        # node-gyp rebuild

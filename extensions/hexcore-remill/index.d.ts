@@ -62,6 +62,18 @@ export interface LiftResult {
 	address: number;
 	/** Number of input bytes that were successfully consumed */
 	bytesConsumed: number;
+	/** Instructions decoded in the requested lift range before LLVM optimization */
+	decodedInstructions: number;
+	/** Instructions with concrete Remill semantics */
+	liftedInstructions: number;
+	/** Decoded instructions that fell back to HandleUnsupported */
+	unsupportedInstructions: number;
+	/** Non-unsupported instructions rejected by decode, ISEL, or the semantic lifter */
+	decodeFailureInstructions: number;
+	/** Pre-optimization lifted / (lifted + unsupported + decode failures), in the range 0..1 */
+	semanticCoverage: number;
+	/** Missing Remill semantic handlers and their occurrence counts */
+	unsupportedOpcodes: Record<string, number>;
 	/** Whether lifting stopped early because a configured limit was hit */
 	truncated?: boolean;
 	/** Address where lifting should continue when truncated is true */
@@ -101,6 +113,10 @@ export interface LiftOptions {
 	optimizeIR?: boolean;
 	/** Inline semantic helper functions into the lifted body instead of preserving named semantic calls */
 	inlineSemantics?: boolean;
+	/** Logical function entry when the supplied buffer begins at an earlier virtual address. */
+	entryAddress?: number | bigint;
+	/** Emit only instructions reachable from entryAddress after decoding the larger buffer. */
+	reachableOnly?: boolean;
 
 	/**
 	 * Extra basic block entry points discovered by external analysis.

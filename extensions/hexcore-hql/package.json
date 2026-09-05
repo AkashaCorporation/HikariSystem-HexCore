@@ -1,12 +1,19 @@
 {
   "name": "hexcore-hql",
-  "version": "0.1.2",
+  "version": "0.3.1",
   "description": "Helix Query Language — Semantic Pattern Matching engine for C-AST analysis",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "test": "tsx test/smoke.ts && tsx test/signatureLoader.ts"
+    "build": "tsc && tsx src/atlas/cli.ts build",
+    "atlas:build": "tsx src/atlas/cli.ts build",
+    "atlas:verify": "tsx src/atlas/cli.ts verify",
+    "benchmark:test": "tsx benchmarks/test/contracts.ts",
+    "benchmark:capa": "tsx benchmarks/capa/run.ts",
+    "benchmark:floss": "tsx benchmarks/floss/run.ts",
+    "benchmark:function-atlas": "tsx benchmarks/function-atlas/run.ts",
+    "benchmark:function-atlas:regression": "node benchmarks/function-atlas/regressions/reproduce.js",
+    "test": "tsx test/smoke.ts && tsx test/signatureLoader.ts && tsx test/antiAnalysisSignatures.ts && tsx test/adapterLoss.ts && tsx test/hastV1Contract.ts && tsx test/semanticFacts.ts && tsx test/atlasFixtures.ts && tsx test/atlasBuilder.ts && tsx test/functionAtlas.ts && npm run benchmark:test && npm run benchmark:function-atlas:regression"
   },
   "dependencies": {
     "flatbuffers": "^24.3.25",

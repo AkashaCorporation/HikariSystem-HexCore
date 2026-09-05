@@ -6,7 +6,19 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
+import {
+	ANALYSIS_CONTRACT_VERSION,
+	createAnalysisArtifactProvenance,
+	createAnalysisSession,
+	createAnalysisTarget,
+	type AnalysisBinaryFormat,
+	type AnalysisArtifactReference,
+	type AnalysisSession,
+	type AnalysisStatus,
+	type AnalysisTarget,
+} from 'hexcore-common';
 import { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
+import { peekAnalysisContractState } from './sessionStore';
 
 export type PipelineOutputFormat = 'json' | 'md';
 export { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
@@ -82,17 +94,21 @@ export interface PipelineStepStatus {
 	 * this field.
 	 */
 	outputBytes?: number;
-	/** Sidecar that binds this artifact to its binary and execution context. */
+	/** Manifest that binds this artifact to its binary and execution context. */
 	artifactProvenancePath?: string;
 	error?: string;
 }
 
 export interface PipelineRunProvenance {
+	analysisContractVersion: typeof ANALYSIS_CONTRACT_VERSION;
 	executionId: string;
+	jobFileSha256: string;
 	jobId?: string;
 	workerId?: number;
 	sessionId?: string;
 	contextGeneration: number;
+	analysisTarget?: AnalysisTarget;
+	analysisSession?: AnalysisSession;
 	binaryPath: string;
 	binarySha256: string;
 	binaryFormat: BinaryFormat;
@@ -100,7 +116,7 @@ export interface PipelineRunProvenance {
 	imageBase?: string;
 }
 
-export type BinaryFormat = 'pe' | 'elf' | 'minidump' | 'macho' | 'unknown';
+export type BinaryFormat = AnalysisBinaryFormat;
 
 export interface BinaryIdentity {
 	format: BinaryFormat;
@@ -136,6 +152,7 @@ export interface PipelineRunSummary {
 
 export interface PipelineRunStatus {
 	jobFile: string;
+	jobFileSha256?: string;
 	file: string;
 	outDir: string;
 	status: 'running' | 'ok' | 'error' | 'partial';
@@ -143,6 +160,8 @@ export interface PipelineRunStatus {
 	finishedAt?: string;
 	steps: PipelineStepStatus[];
 	provenance: PipelineRunProvenance;
+	/** Consolidated artifact provenance stored outside the visible report list. */
+	provenanceManifestPath?: string;
 	/**
 	 * v3.8.0: populated when the job transitions to a terminal status
 	 * (`ok` / `error` / `partial`). Absent while `status === 'running'`.
@@ -240,7 +259,7 @@ interface NormalizedPipelineJob {
 interface StepOutputPath {
 	path: string;
 	format: PipelineOutputFormat;
-	captureKind: 'json' | 'text';
+	captureKind: 'json' | 'text' | 'binary';
 }
 
 /**
@@ -252,6 +271,7 @@ interface StepOutputPath {
 interface StepRecord {
 	outputPath: string | undefined;
 	result: Record<string, unknown> | undefined;
+	resolvedCommand?: string;
 }
 
 export interface PipelineRunContext {
@@ -285,6 +305,30 @@ export function findStepThatMaySkip(
 
 type StepRecordTable = Array<StepRecord | undefined>;
 
+const SHARED_ANALYSIS_CONSUMERS = new Set<string>([
+	'hexcore.disasm.windowsFilesystemAuditHeadless',
+	'hexcore.disasm.disassembleAtHeadless',
+	'hexcore.disasm.liftToIR',
+	'hexcore.disasm.searchStringHeadless',
+	'hexcore.disasm.rttiScanHeadless',
+	'hexcore.disasm.exportASMHeadless',
+	'hexcore.disasm.buildFormula',
+	'hexcore.disasm.checkConstants',
+	'hexcore.hql.scanHeadless',
+	'hexcore.hql.scanFunction',
+]);
+
+interface TerminalReportFinalizer {
+	stepIndex: number;
+	step: PipelineStep;
+	resolvedCommand: string;
+	outputPath: string;
+	commandOptions: PipelineCommandOptions;
+	semanticStatus: 'ok' | 'partial';
+	stepStatus: PipelineStepStatus;
+	timeoutMs: number;
+}
+
 interface CommandCapability {
 	headless: boolean;
 	defaultTimeoutMs: number;
@@ -317,6 +361,8 @@ const STATELESS_PIPELINE_COMMANDS = new Set<string>([
 	'hexcore.entropy.analyze',
 	'hexcore.strings.extract',
 	'hexcore.strings.extractAdvanced',
+	'hexcore.pe.extractSection',
+	'hexcore.crypto.rc4',
 	'hexcore.base64.decodeHeadless',
 	'hexcore.ioc.extract',
 	'hexcore.hexview.dumpHeadless',
@@ -337,9 +383,15 @@ const STATELESS_PIPELINE_COMMANDS = new Set<string>([
 	'hexcore.pipeline.queueJob',
 	'hexcore.pipeline.cancelJob',
 	'hexcore.pipeline.jobStatus',
+	'hexcore.constraints.solveHeadless',
 	'hexcore.oracle.inspectConfig',
 	'hexcore.oracle.listSessions',
 	'hexcore.oracle.demoHeadless',
+]);
+
+const BINARY_OUTPUT_COMMANDS = new Set([
+	'hexcore.pe.extractSection',
+	'hexcore.crypto.rc4',
 ]);
 
 class AsyncExclusiveGate {
@@ -370,7 +422,9 @@ export function jobRequiresExclusiveEngine(steps: readonly PipelineStep[]): bool
 
 const PE_ONLY_COMMANDS = new Set([
 	'hexcore.peanalyzer.analyze',
+	'hexcore.pe.extractSection',
 	'hexcore.disasm.analyzePEHeadless',
+	'hexcore.disasm.windowsFilesystemAuditHeadless',
 	'hexcore.disasm.rttiScanHeadless',
 ]);
 const ELF_ONLY_COMMANDS = new Set([
@@ -472,6 +526,8 @@ const COMMAND_ALIASES = new Map<string, string>([
 	['hexcore.hex.search', 'hexcore.hexview.searchHeadless'],
 	['hexcore.debug.emulate.full', 'hexcore.debug.emulateFullHeadless'],
 	['hexcore.debug.run', 'hexcore.debug.emulateFullHeadless'],
+	['hexcore.debug.disassembleMemory', 'hexcore.debug.disassembleMemoryHeadless'],
+	['hexcore.debug.decompileMemory', 'hexcore.debug.decompileMemoryHeadless'],
 	// v3.8.2: repoint to Helix. Rellic is deprecated (superseded by the Helix
 	// MLIR pipeline in v3.7.0); the docs already describe these aliases as
 	// resolving to Helix, so the map was the lie. The rellic.* commands remain
@@ -587,9 +643,15 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.entropy.analyze', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.strings.extract', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.peanalyzer.analyze', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.pe.extractSection', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.crypto.rc4', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.analyzePEHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.analyzeELFHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
-	['hexcore.disasm.analyzeAll', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.disasm.analyzeAll', {
+		headless: true, defaultTimeoutMs: 180000, validateOutput: true,
+		cancelCommand: 'hexcore.disasm.cancelAnalyzeAll',
+	}],
+	['hexcore.disasm.windowsFilesystemAuditHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
 	['hexcore.yara.scan', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.ioc.extract', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.strings.extractAdvanced', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
@@ -612,6 +674,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.oracle.listSessions', { headless: true, defaultTimeoutMs: 10000, validateOutput: false }],
 	['hexcore.oracle.demoHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.disasm.buildFormula', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
+	['hexcore.constraints.solveHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
 	['hexcore.disasm.checkConstants', { headless: true, defaultTimeoutMs: 90000, validateOutput: true }],
 	['hexcore.disasm.searchStringHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	// Issue #55 — packer detect only (MIT; no external UPX PATH)
@@ -620,6 +683,8 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.rellic.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.rellic.decompileIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.liftToIR', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.liftMemoryHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.disasm.disassembleBufferHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.helix.decompile', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.helix.decompileIR', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	// Revenant — managed (.NET / CIL) decompiler. The native Remill->Helix
@@ -645,6 +710,34 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.searchBytesHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.extractStrings', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.disasm.getSessionDbPath', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	// R32 semantic model commands. Every headless invocation writes a deterministic
+	// JSON artifact; edits remain partial until typed caller propagation is proven.
+	['hexcore.types.applyPrototype', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.types.setCallingConvention', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.types.setParameter', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.types.clearOverride', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.types.explainPrototype', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.types.export', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.types.import', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.references.query', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.references.export', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.propagation.solve', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.propagation.status', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.propagation.export', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.typeManager.list', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.create', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.update', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.rename', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.delete', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.undo', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.typeManager.export', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.typeManager.import', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.types.ingestDebug', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.records.recover', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.pdb.importSemantics', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.pdb.resolveSymbols', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.signatures.apply', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.semanticExplorer.open', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive semantic model editor and evidence explorer.' }],
 	['hexcore.disasm.renameFunction', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.disasm.renameVariable', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.disasm.retypeFunction', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
@@ -667,6 +760,13 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.debug.continueHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
 	['hexcore.debug.stepHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.debug.readMemoryHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
+	['hexcore.debug.disassembleMemoryHeadless', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
+	['hexcore.debug.decompileMemoryHeadless', {
+		headless: true,
+		defaultTimeoutMs: 300000,
+		validateOutput: true,
+		cancelCommand: 'hexcore.helix.cancelActiveLiveDecompile',
+	}],
 	['hexcore.debug.getRegistersHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.debug.setBreakpointHeadless', { headless: true, defaultTimeoutMs: 30000, validateOutput: false }],
 	['hexcore.debug.getStateHeadless', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
@@ -701,7 +801,13 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.entropy.analyze', ['hikarisystem.hexcore-entropy']],
 	['hexcore.strings.extract', ['hikarisystem.hexcore-strings']],
 	['hexcore.peanalyzer.analyze', ['hikarisystem.hexcore-peanalyzer']],
+	['hexcore.pe.extractSection', ['hikarisystem.hexcore-peanalyzer']],
+	['hexcore.crypto.rc4', ['hikarisystem.hexcore-peanalyzer']],
 	['hexcore.disasm.analyzeAll', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.windowsFilesystemAuditHeadless', [
+		'hikarisystem.hexcore-disassembler',
+		'hikarisystem.hexcore-peanalyzer',
+	]],
 	['hexcore.yara.scan', ['hikarisystem.hexcore-yara']],
 	['hexcore.ioc.extract', ['hikarisystem.hexcore-ioc']],
 	['hexcore.pipeline.listCapabilities', ['hikarisystem.hexcore-disassembler']],
@@ -722,6 +828,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.debug.continueHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.stepHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.readMemoryHeadless', ['hikarisystem.hexcore-debugger']],
+	['hexcore.debug.disassembleMemoryHeadless', ['hikarisystem.hexcore-debugger', 'hikarisystem.hexcore-disassembler']],
+	['hexcore.debug.decompileMemoryHeadless', ['hikarisystem.hexcore-debugger', 'hikarisystem.hexcore-disassembler']],
 	['hexcore.debug.getRegistersHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.setBreakpointHeadless', ['hikarisystem.hexcore-debugger']],
 	['hexcore.debug.getStateHeadless', ['hikarisystem.hexcore-debugger']],
@@ -735,6 +843,7 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.detectPacker', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.exportASMHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.buildFormula', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.constraints.solveHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.checkConstants', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.validateJob', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.pipeline.validateWorkspace', ['hikarisystem.hexcore-disassembler']],
@@ -766,6 +875,8 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.rellic.decompile', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.rellic.decompileIR', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.liftToIR', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.liftMemoryHeadless', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.disassembleBufferHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.disassembleAtHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.rttiScanHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.audit.refcountScan', ['hikarisystem.hexcore-disassembler']],
@@ -782,6 +893,32 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.disasm.analyzePEHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.analyzeELFHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.getSessionDbPath', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.applyPrototype', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.setCallingConvention', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.setParameter', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.clearOverride', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.explainPrototype', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.export', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.import', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.references.query', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.references.export', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.propagation.solve', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.propagation.status', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.propagation.export', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.list', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.create', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.update', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.rename', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.delete', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.undo', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.export', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.typeManager.import', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.types.ingestDebug', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.records.recover', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pdb.importSemantics', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.pdb.resolveSymbols', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.signatures.apply', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.semanticExplorer.open', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.renameFunction', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.renameVariable', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.retypeFunction', ['hikarisystem.hexcore-disassembler']],
@@ -805,6 +942,8 @@ const EMULATOR_GATED_COMMANDS = new Map<string, 'debugger' | 'azoth'>([
 	['hexcore.debug.continueHeadless', 'debugger'],
 	['hexcore.debug.stepHeadless', 'debugger'],
 	['hexcore.debug.readMemoryHeadless', 'debugger'],
+	['hexcore.debug.disassembleMemoryHeadless', 'debugger'],
+	['hexcore.debug.decompileMemoryHeadless', 'debugger'],
 	['hexcore.debug.getRegistersHeadless', 'debugger'],
 	['hexcore.debug.setBreakpointHeadless', 'debugger'],
 	['hexcore.debug.getStateHeadless', 'debugger'],
@@ -836,19 +975,19 @@ function checkEmulatorGate(command: string): { skip: true; reason: string } | { 
 	};
 }
 
-// Elixir commands that require PE32+ (x86_64). Running them against a PE32
-// (x86) binary produces a legitimate but noisy "error" status; arch mismatch
+// Elixir commands that require PE32+ (x86_64). Running them against another
+// format or architecture produces a legitimate but noisy "error" status; mismatch
 // is better modelled as `skipped` so pipelines targeting mixed-arch corpora
 // don't halt on `continueOnError: false` and don't pollute partial-status
 // reports with predictable incompatibilities.
-const ELIXIR_X64_ONLY_COMMANDS = new Set<string>([
+const ELIXIR_PE64_ONLY_COMMANDS = new Set<string>([
 	'hexcore.elixir.emulateHeadless',
 	'hexcore.elixir.stalkerDrcovHeadless',
 	'hexcore.elixir.snapshotRoundTripHeadless'
 ]);
 
-function checkBinaryArchGate(command: string, targetPath: string): { skip: true; reason: string } | { skip: false } {
-	if (!ELIXIR_X64_ONLY_COMMANDS.has(command)) { return { skip: false }; }
+export function checkBinaryArchGate(command: string, targetPath: string): { skip: true; reason: string } | { skip: false } {
+	if (!ELIXIR_PE64_ONLY_COMMANDS.has(command)) { return { skip: false }; }
 	try {
 		if (!fs.existsSync(targetPath)) { return { skip: false }; }
 		const fd = fs.openSync(targetPath, 'r');
@@ -856,7 +995,15 @@ function checkBinaryArchGate(command: string, targetPath: string): { skip: true;
 			const head = Buffer.alloc(0x400);
 			const n = fs.readSync(fd, head, 0, head.length, 0);
 			if (n < 0x40) { return { skip: false }; }
-			if (head[0] !== 0x4d || head[1] !== 0x5a) { return { skip: false }; } // not PE, let the command handle it
+			if (head[0] === 0x7f && head[1] === 0x45 && head[2] === 0x4c && head[3] === 0x46) {
+				return {
+					skip: true,
+					reason: `${command} currently supports PE32+ x86_64 only; ${path.basename(targetPath)} is ELF. Use hexcore.emulator="debugger" for ELF targets.`
+				};
+			}
+			if (head[0] !== 0x4d || head[1] !== 0x5a) {
+				return { skip: true, reason: `${command} currently supports PE32+ x86_64 only; ${path.basename(targetPath)} is not PE.` };
+			}
 			const lfanew = head.readUInt32LE(0x3c);
 			if (lfanew + 6 > n) { return { skip: false }; }
 			if (head.readUInt32LE(lfanew) !== 0x00004550) { return { skip: false }; }
@@ -884,8 +1031,10 @@ export interface PipelineCapabilityEntry {
 	headless: boolean;
 	defaultTimeoutMs: number;
 	validateOutput: boolean;
+	cancelCommand?: string;
 	reason?: string;
 	requiredExtension: string[];
+	supportedTargets?: string[];
 }
 
 export function listCapabilities(): PipelineCapabilityEntry[] {
@@ -903,8 +1052,10 @@ export function listCapabilities(): PipelineCapabilityEntry[] {
 			headless: cap.headless,
 			defaultTimeoutMs: cap.defaultTimeoutMs,
 			validateOutput: cap.validateOutput,
+			cancelCommand: cap.cancelCommand,
 			reason: cap.reason,
-			requiredExtension: [...(COMMAND_OWNERS.get(cmd) ?? [])]
+			requiredExtension: [...(COMMAND_OWNERS.get(cmd) ?? [])],
+			supportedTargets: ELIXIR_PE64_ONLY_COMMANDS.has(cmd) ? ['PE32+ x86_64'] : undefined
 		});
 	}
 	return entries;
@@ -1083,16 +1234,21 @@ export function inspectSemanticResult(value: unknown): SemanticResultInspection 
 
 	const directError = nonEmptyError(value.error) ?? nonEmptyError(value.crashError);
 	const status = typeof value.status === 'string' ? value.status.toLowerCase() : '';
+	const semanticStatus = typeof value.semanticStatus === 'string' ? value.semanticStatus.toLowerCase() : '';
 	if (value.success === false || value.ok === false || value.failed === true ||
 		value.error === true || value.crashed === true || value.terminatedWithError === true ||
-		status === 'failed' || status === 'failure' || status === 'error') {
-		return { status: 'failed', reason: directError ?? `command reported semantic status ${status || 'failed'}` };
+		status === 'failed' || status === 'failure' || status === 'error' || semanticStatus === 'error') {
+		return { status: 'failed', reason: directError ?? `command reported semantic status ${semanticStatus || status || 'failed'}` };
 	}
 	if (directError) {
 		return { status: 'failed', reason: directError };
 	}
-	if (status === 'partial') {
-		return { status: 'partial', reason: 'command reported semantic status partial' };
+	if (status === 'partial' || semanticStatus === 'partial') {
+		return {
+			status: 'partial',
+			reason: nonEmptyError(value.semanticWarning) ?? nonEmptyError(value.warning) ??
+				'command reported semantic status partial'
+		};
 	}
 
 	if (Array.isArray(value.results) && value.results.length > 0) {
@@ -1123,13 +1279,148 @@ async function sha256File(filePath: string): Promise<string> {
 	});
 }
 
+export function resolveArtifactMediaType(outputPath: string, format?: PipelineOutputFormat): string {
+	if (format === 'md') { return 'text/markdown'; }
+	if (format === 'json') { return 'application/json'; }
+	switch (path.extname(outputPath).toLowerCase()) {
+		case '.json': return 'application/json';
+		case '.md': return 'text/markdown';
+		case '.c':
+		case '.h': return 'text/x-c';
+		case '.ll': return 'text/x-llvm';
+		case '.asm':
+		case '.s': return 'text/x-asm';
+		case '.txt':
+		case '.log': return 'text/plain';
+		default: return 'application/octet-stream';
+	}
+}
+
+async function collectInputArtifactReferences(
+	commandOptions: PipelineCommandOptions,
+	stepRecords: StepRecordTable,
+	resolvedCommand: string,
+	outputPath?: string,
+	commandResult?: unknown,
+): Promise<AnalysisArtifactReference[]> {
+	const pathKey = (candidate: string): string => {
+		const resolved = path.resolve(candidate);
+		return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+	};
+	const outputKey = outputPath ? pathKey(outputPath) : undefined;
+	const priorOutputs = new Map<string, string>();
+	for (const record of stepRecords) {
+		if (record?.outputPath) {
+			const resolved = path.resolve(record.outputPath);
+			const key = pathKey(resolved);
+			if (key !== outputKey) { priorOutputs.set(key, resolved); }
+		}
+	}
+	const referenced = new Set<string>();
+	const addExistingFile = (candidate: string): void => {
+		const resolved = path.resolve(candidate);
+		if (pathKey(resolved) === outputKey) { return; }
+		try {
+			if (fs.statSync(resolved).isFile()) { referenced.add(resolved); }
+		} catch { /* not every absolute command option is an artifact */ }
+	};
+	const visit = (value: unknown): void => {
+		if (typeof value === 'string' && path.isAbsolute(value)) {
+			const resolved = path.resolve(value);
+			const key = pathKey(resolved);
+			const prior = priorOutputs.get(key);
+			if (prior && key !== outputKey) { referenced.add(prior); }
+		} else if (Array.isArray(value)) {
+			for (const item of value) { visit(item); }
+		} else if (isRecord(value)) {
+			for (const item of Object.values(value)) { visit(item); }
+		}
+	};
+	visit(commandOptions);
+
+	// External inputs are not necessarily outputs of an earlier step in this job.
+	// Bind the scan to the bytes it actually read, not a later re-hash of mutable files.
+	const consumed: AnalysisArtifactReference[] = [];
+	if (resolvedCommand === 'hexcore.audit.refcountScan' && isRecord(commandResult)) {
+		const quality = isRecord(commandResult.inputQuality) ? commandResult.inputQuality : undefined;
+		const addConsumed = (inputPath: unknown, sha256: unknown): void => {
+			if (typeof inputPath !== 'string' || !path.isAbsolute(inputPath) ||
+				typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(sha256) || pathKey(inputPath) === outputKey) return;
+			const resolved = path.resolve(inputPath);
+			for (const existing of referenced) { if (pathKey(existing) === pathKey(resolved)) referenced.delete(existing); }
+			const digest = sha256.toLowerCase();
+			consumed.push({ id: `artifact:sha256:${digest}`, path: resolved, sha256: digest, mediaType: resolveArtifactMediaType(resolved) });
+		};
+		addConsumed(commandResult.inputFile, quality?.inputSha256);
+		if (isRecord(quality?.provenanceSnapshot)) {
+			addConsumed(quality.provenanceSnapshot.path, quality.provenanceSnapshot.sha256);
+		}
+	}
+
+	if (SHARED_ANALYSIS_CONSUMERS.has(resolvedCommand)) {
+		let latestAnalyzeAllIndex = -1;
+		for (let index = stepRecords.length - 1; index >= 0; index--) {
+			const record = stepRecords[index];
+			if (record?.resolvedCommand === 'hexcore.disasm.analyzeAll' && record.outputPath) {
+				addExistingFile(record.outputPath);
+				latestAnalyzeAllIndex = index;
+				break;
+			}
+		}
+		for (let index = latestAnalyzeAllIndex + 1; index < stepRecords.length; index++) {
+			const record = stepRecords[index];
+			if (record?.resolvedCommand !== 'hexcore.disasm.disassembleAtHeadless' || !record.outputPath) { continue; }
+			const closure = isRecord(record.result?.analysisClosure) ? record.result.analysisClosure : undefined;
+			if (closure?.auditUniverseChanged === true) {
+				addExistingFile(record.outputPath);
+			}
+		}
+	}
+
+	if (resolvedCommand === 'hexcore.pipeline.composeReport' && isRecord(commandResult) && Array.isArray(commandResult.sources)) {
+		for (const source of commandResult.sources) {
+			if (isRecord(source) && typeof source.filePath === 'string') {
+				addExistingFile(source.filePath);
+			}
+		}
+	}
+
+	const references = await Promise.all(Array.from(referenced).map(async inputPath => {
+		const sha256 = await sha256File(inputPath);
+		return {
+			id: `artifact:sha256:${sha256}`,
+			path: inputPath,
+			sha256,
+			mediaType: resolveArtifactMediaType(inputPath),
+		};
+	}));
+	return [...consumed, ...references];
+}
+
+function canonicalizeConfiguration(value: unknown): unknown {
+	if (Array.isArray(value)) { return value.map(canonicalizeConfiguration); }
+	if (!isRecord(value)) { return value; }
+	return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonicalizeConfiguration(value[key])]));
+}
+
+function hashCommandConfiguration(commandOptions: PipelineCommandOptions): string {
+	const { file: _file, quiet: _quiet, output: _output, pipelineQueryContext: _observer, ...semanticOptions } = commandOptions;
+	return crypto.createHash('sha256')
+		.update(JSON.stringify(canonicalizeConfiguration(semanticOptions)))
+		.digest('hex');
+}
+
 async function writeArtifactProvenance(
 	outputPath: string | undefined,
+	outDir: string,
 	run: PipelineRunProvenance,
 	stepIndex: number,
 	step: PipelineStep,
 	resolvedCommand: string,
 	semanticStatus: 'ok' | 'partial' | 'error',
+	commandOptions: PipelineCommandOptions,
+	stepRecords: StepRecordTable,
+	commandResult?: unknown,
 ): Promise<string | undefined> {
 	if (!outputPath || !fs.existsSync(outputPath) || !fs.statSync(outputPath).isFile()) {
 		return undefined;
@@ -1142,24 +1433,145 @@ async function writeArtifactProvenance(
 			version: typeof packageJson?.version === 'string' ? packageJson.version : 'unknown',
 		};
 	});
-	const provenancePath = `${outputPath}.provenance.json`;
-	writeJson(provenancePath, {
-		schemaVersion: 1,
-		generatedAt: new Date().toISOString(),
-		execution: run,
+	if (!run.analysisTarget || !run.analysisSession) {
+		throw new Error('Analysis contract target/session unavailable for artifact provenance');
+	}
+	const persistedContract = peekAnalysisContractState(run.binaryPath);
+	if (persistedContract?.target.id === run.analysisTarget.id &&
+		persistedContract.session.generation >= run.analysisSession.generation) {
+		run.analysisSession = createAnalysisSession({
+			id: persistedContract.session.id,
+			targetId: run.analysisTarget.id,
+			generation: persistedContract.session.generation,
+			createdAt: persistedContract.session.createdAt,
+			parentGeneration: persistedContract.session.parentGeneration,
+			engines: persistedContract.session.engines,
+		});
+	}
+	const generatedAt = new Date().toISOString();
+	const artifactSha256 = await sha256File(outputPath);
+	const inputs = await collectInputArtifactReferences(
+		commandOptions,
+		stepRecords,
+		resolvedCommand,
+		outputPath,
+		commandResult,
+	);
+	const artifact = {
+		id: `artifact:sha256:${artifactSha256}`,
+		path: outputPath,
+		sha256: artifactSha256,
+		mediaType: resolveArtifactMediaType(outputPath, step.output?.format),
+	};
+	if (inputs.some(input => path.resolve(input.path) === path.resolve(artifact.path) || input.id === artifact.id)) {
+		throw new Error(`Artifact provenance must be acyclic: ${artifact.path} cannot depend on itself`);
+	}
+	const analysisStatus: AnalysisStatus = semanticStatus === 'error' ? 'failed' : semanticStatus;
+	const analysisContract = createAnalysisArtifactProvenance({
+		target: run.analysisTarget,
+		session: run.analysisSession,
+		producer: ownerExtensions,
+		inputs,
+		artifact,
+		status: analysisStatus,
+		generatedAt,
+	});
+	const provenancePath = getProvenanceManifestPath(outDir);
+	const entry = {
+		generatedAt,
+		analysisContract,
+		...(persistedContract?.universe ? { analysisUniverse: {
+			generation: persistedContract.session.generation,
+			universeSha256: persistedContract.universe.universeSha256,
+			materializedFunctions: persistedContract.universe.materializedFunctions.map(item => ({ ...item })),
+		} } : {}),
 		step: {
 			index: stepIndex + 1,
 			cmd: step.cmd,
 			resolvedCmd: resolvedCommand,
 			semanticStatus,
+			configurationSha256: hashCommandConfiguration(commandOptions),
 		},
 		artifact: {
 			path: outputPath,
-			sha256: await sha256File(outputPath),
+			sha256: artifactSha256,
 		},
+		inputs,
 		ownerExtensions,
-	});
+	};
+	const manifest = readProvenanceManifest(provenancePath, run);
+	manifest.generatedAt = generatedAt;
+	manifest.execution = run;
+	manifest.artifacts = manifest.artifacts.filter(existing => existing.artifact.path !== outputPath);
+	manifest.artifacts.push(entry);
+	writeJson(provenancePath, manifest);
 	return provenancePath;
+}
+
+interface ProvenanceManifestEntry {
+	generatedAt: string;
+	analysisContract: ReturnType<typeof createAnalysisArtifactProvenance>;
+	step: {
+		index: number;
+		cmd: string;
+		resolvedCmd: string;
+		semanticStatus: 'ok' | 'partial' | 'error';
+		configurationSha256: string;
+	};
+	artifact: { path: string; sha256: string };
+	inputs: AnalysisArtifactReference[];
+	ownerExtensions: Array<{ id: string; version: string }>;
+}
+
+interface ProvenanceManifest {
+	schemaVersion: 1;
+	generatedAt: string;
+	status: 'running' | 'ok' | 'error' | 'partial';
+	execution: PipelineRunProvenance;
+	artifacts: ProvenanceManifestEntry[];
+}
+
+function getProvenanceManifestPath(outDir: string): string {
+	return path.join(outDir, '.hexcore-meta', 'provenance.json');
+}
+
+function createProvenanceManifest(run: PipelineRunProvenance): ProvenanceManifest {
+	return {
+		schemaVersion: 1,
+		generatedAt: new Date().toISOString(),
+		status: 'running',
+		execution: run,
+		artifacts: [],
+	};
+}
+
+function readProvenanceManifest(manifestPath: string, run: PipelineRunProvenance): ProvenanceManifest {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as ProvenanceManifest;
+		if (parsed?.schemaVersion === 1 && parsed.execution?.executionId === run.executionId && Array.isArray(parsed.artifacts)) {
+			return parsed;
+		}
+	} catch { /* a new execution replaces missing or invalid metadata */ }
+	return createProvenanceManifest(run);
+}
+
+function initializeProvenanceManifest(outDir: string, run: PipelineRunProvenance): string {
+	const manifestPath = getProvenanceManifestPath(outDir);
+	fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+	writeJson(manifestPath, createProvenanceManifest(run));
+	return manifestPath;
+}
+
+function finalizeProvenanceManifest(
+	manifestPath: string,
+	run: PipelineRunProvenance,
+	status: 'ok' | 'error' | 'partial',
+): void {
+	const manifest = readProvenanceManifest(manifestPath, run);
+	manifest.generatedAt = new Date().toISOString();
+	manifest.status = status;
+	manifest.execution = run;
+	writeJson(manifestPath, manifest);
 }
 
 export class AutomationPipelineRunner {
@@ -1170,6 +1582,7 @@ export class AutomationPipelineRunner {
 		}
 
 		const rawContent = fs.readFileSync(absoluteJobPath, 'utf8');
+		const jobFileSha256 = crypto.createHash('sha256').update(rawContent).digest('hex');
 		const parsed = parseJsonFile(rawContent, absoluteJobPath);
 		const normalized = normalizeJob(parsed, absoluteJobPath, quietOverride);
 		const validation = await createValidationReport(normalized, absoluteJobPath);
@@ -1177,12 +1590,50 @@ export class AutomationPipelineRunner {
 			? await sha256File(normalized.file)
 			: 'unavailable';
 		const binaryIdentity = inspectBinaryIdentity(normalized.file);
+		const executionId = crypto.randomUUID();
+		const startedAt = new Date().toISOString();
+		const analysisTarget = binarySha256 !== 'unavailable' ? createAnalysisTarget({
+			binarySha256,
+			filePath: normalized.file,
+			fileSize: fs.statSync(normalized.file).size,
+			format: binaryIdentity.format,
+			...(binaryIdentity.architecture ? { architecture: binaryIdentity.architecture } : {}),
+			...(binaryIdentity.imageBase ? { imageBase: binaryIdentity.imageBase } : {}),
+		}) : undefined;
+		// 3.8.4 wave 2 (C5): adopt the persisted session identity when the
+		// target's session DB exists and its target matches this run's binary
+		// content. A digest mismatch is a wrong-target signal: persisted state
+		// is ignored rather than contaminating this run's provenance.
+		const persistedContract = analysisTarget ? peekAnalysisContractState(normalized.file) : undefined;
+		const adoptedContract = persistedContract && analysisTarget && persistedContract.target.id === analysisTarget.id
+			? persistedContract
+			: undefined;
 		const provenance: PipelineRunProvenance = {
-			executionId: crypto.randomUUID(),
+			analysisContractVersion: ANALYSIS_CONTRACT_VERSION,
+			executionId,
+			jobFileSha256,
 			...(runContext.jobId ? { jobId: runContext.jobId } : {}),
 			...(runContext.workerId !== undefined ? { workerId: runContext.workerId } : {}),
 			...(runContext.sessionId ? { sessionId: runContext.sessionId } : {}),
 			contextGeneration: 0,
+			...(analysisTarget ? {
+				analysisTarget,
+				analysisSession: adoptedContract
+					? createAnalysisSession({
+						id: adoptedContract.session.id,
+						targetId: analysisTarget.id,
+						generation: adoptedContract.session.generation,
+						createdAt: adoptedContract.session.createdAt,
+						parentGeneration: adoptedContract.session.parentGeneration,
+						engines: adoptedContract.session.engines,
+					})
+					: createAnalysisSession({
+						id: runContext.sessionId ?? executionId,
+						targetId: analysisTarget.id,
+						generation: 0,
+						createdAt: startedAt,
+					}),
+			} : {}),
 			binaryPath: normalized.file,
 			binarySha256,
 			binaryFormat: binaryIdentity.format,
@@ -1196,6 +1647,15 @@ export class AutomationPipelineRunner {
 
 		const execute = async (): Promise<PipelineRunStatus> => {
 			provenance.contextGeneration = ++contextGenerationCounter;
+			// Synthetic sessions (no persisted contract state) keep the legacy
+			// behavior of tracking the runner counter as their generation.
+			// Adopted sessions keep the persisted analysis generation instead.
+			if (provenance.analysisTarget && provenance.analysisSession && !adoptedContract) {
+				provenance.analysisSession = createAnalysisSession({
+					...provenance.analysisSession,
+					generation: provenance.contextGeneration,
+				});
+			}
 			return this.run(normalized, absoluteJobPath, provenance, abortSignal);
 		};
 		return jobRequiresExclusiveEngine(normalized.steps)
@@ -1222,9 +1682,11 @@ export class AutomationPipelineRunner {
 		provenance: PipelineRunProvenance,
 	): PipelineRunStatus {
 		fs.mkdirSync(job.outDir, { recursive: true });
+		const provenanceManifestPath = initializeProvenanceManifest(job.outDir, provenance);
 		const now = new Date().toISOString();
 		const status: PipelineRunStatus = {
 			jobFile: jobFilePath,
+			jobFileSha256: provenance.jobFileSha256,
 			file: job.file,
 			outDir: job.outDir,
 			status: 'error',
@@ -1232,6 +1694,7 @@ export class AutomationPipelineRunner {
 			finishedAt: now,
 			steps: [],
 			provenance,
+			provenanceManifestPath,
 			summary: {
 				totalSteps: 0,
 				okCount: 0,
@@ -1241,6 +1704,7 @@ export class AutomationPipelineRunner {
 				totalDurationMs: 0,
 			},
 		};
+		finalizeProvenanceManifest(provenanceManifestPath, provenance, 'error');
 		writeJson(path.join(job.outDir, 'hexcore-pipeline.validation.json'), validation);
 		writeJson(path.join(job.outDir, JOB_STATUS_FILENAME), status);
 		const details = validation.issues
@@ -1264,15 +1728,18 @@ export class AutomationPipelineRunner {
 
 		const logPath = path.join(job.outDir, JOB_LOG_FILENAME);
 		const statusPath = path.join(job.outDir, JOB_STATUS_FILENAME);
+		const provenanceManifestPath = initializeProvenanceManifest(job.outDir, provenance);
 
 		const status: PipelineRunStatus = {
 			jobFile: jobFilePath,
+			jobFileSha256: provenance.jobFileSha256,
 			file: job.file,
 			outDir: job.outDir,
 			status: 'running',
 			startedAt: new Date().toISOString(),
 			steps: [],
 			provenance,
+			provenanceManifestPath,
 		};
 
 		writeJson(statusPath, status);
@@ -1297,6 +1764,7 @@ export class AutomationPipelineRunner {
 		// Latest record keyed by the declared job-step index. A forward skip
 		// leaves a hole; a backward goto overwrites that step's stale first run.
 		const stepRecords: StepRecordTable = [];
+		const terminalReportFinalizers = new Map<number, TerminalReportFinalizer>();
 
 		while (index < job.steps.length) {
 			// Check if job was aborted
@@ -1304,6 +1772,11 @@ export class AutomationPipelineRunner {
 				appendLog(logPath, '[CANCELLED] Job aborted by user.');
 				status.status = 'error';
 				status.finishedAt = new Date().toISOString();
+				try {
+					finalizeProvenanceManifest(provenanceManifestPath, provenance, 'error');
+				} catch (error: unknown) {
+					appendLog(logPath, `[Provenance] ERROR: ${toErrorMessage(error)}`);
+				}
 				writeJson(statusPath, status);
 				return status;
 			}
@@ -1335,6 +1808,9 @@ export class AutomationPipelineRunner {
 				}
 				index++;
 				continue;
+			}
+			if (output?.path && invalidatePriorStepArtifacts(output.path)) {
+				appendLog(logPath, `[Step ${index + 1}] Removed stale output from a prior execution.`);
 			}
 			const timeoutMs = resolveStepTimeout(step, capability);
 			const retryCount = resolveRetryCount(step);
@@ -1418,8 +1894,8 @@ export class AutomationPipelineRunner {
 				continue;
 			}
 
-			// Arch gate: Elixir is x86_64-only. Running an emulate/stalker/snapshot
-			// step against a PE32 (x86) binary is a predictable incompatibility,
+			// Target gate: Elixir currently supports PE32+ x86_64 only. Running an
+			// emulate/stalker/snapshot step against another target is predictable,
 			// not a runtime failure — mark it `skipped` so the pipeline stays green
 			// and reports the real reason instead of surfacing it as `error`.
 			const archGate = checkBinaryArchGate(resolvedCommand, job.file);
@@ -1489,6 +1965,10 @@ export class AutomationPipelineRunner {
 			let commandOptions: PipelineCommandOptions;
 			try {
 				commandOptions = buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index, resolvedCommand);
+				commandOptions.pipelineTimeoutMs = timeoutMs;
+				if (resolvedCommand === 'hexcore.pipeline.jobStatus') {
+					commandOptions.pipelineQueryContext = { executionId: provenance.executionId, jobId: provenance.jobId };
+				}
 			} catch (error: unknown) {
 				const errorMessage = `Step arg interpolation failed: ${toErrorMessage(error)}`;
 				const stepStatus = createStepStatus(
@@ -1523,6 +2003,9 @@ export class AutomationPipelineRunner {
 
 			while (attemptCount < maxAttempts) {
 				attemptCount++;
+				if (attemptCount > 1 && output?.path) {
+					invalidatePriorStepArtifacts(output.path);
+				}
 				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
 
 				try {
@@ -1533,6 +2016,13 @@ export class AutomationPipelineRunner {
 					);
 
 					const semantic = inspectSemanticResult(commandReturn);
+					if (isRecord(commandReturn) && isRecord(commandReturn.analysisContext)) {
+						const analysisContext = commandReturn.analysisContext;
+						appendLog(
+							logPath,
+							`[Step ${index + 1}] Analysis context: ${formatAnalysisContextLog(analysisContext)}`,
+						);
+					}
 					if (semantic.status === 'failed') {
 						throw new Error(`Semantic command failure: ${semantic.reason ?? 'command reported failure'}`);
 					}
@@ -1571,13 +2061,29 @@ export class AutomationPipelineRunner {
 					);
 					stepStatus.artifactProvenancePath = await writeArtifactProvenance(
 						output?.path,
+						job.outDir,
 						provenance,
 						index,
 						step,
 						resolvedCommand,
 						stepResultStatus,
+						commandOptions,
+						stepRecords,
+						commandReturn,
 					);
 					status.steps.push(stepStatus);
+					if (resolvedCommand === 'hexcore.pipeline.composeReport' && output?.path) {
+						terminalReportFinalizers.set(index, {
+							stepIndex: index,
+							step,
+							resolvedCommand,
+							outputPath: output.path,
+							commandOptions,
+							semanticStatus: stepResultStatus,
+							stepStatus,
+							timeoutMs,
+						});
+					}
 					if (semantic.status === 'partial') {
 						partial = true;
 					}
@@ -1618,11 +2124,15 @@ export class AutomationPipelineRunner {
 					try {
 						stepStatus.artifactProvenancePath = await writeArtifactProvenance(
 							output?.path,
+							job.outDir,
 							provenance,
 							index,
 							step,
 							resolvedCommand,
 							'error',
+							commandOptions,
+							stepRecords,
+							commandReturn,
 						);
 					} catch (provenanceError: unknown) {
 						errorMessage += `; artifact provenance unavailable: ${toErrorMessage(provenanceError)}`;
@@ -1664,7 +2174,7 @@ export class AutomationPipelineRunner {
 			}
 
 			// Record the completed step result so later steps can reference it via $step[N].
-			stepRecords[index] = { outputPath: output?.path, result: stepOutputData };
+			stepRecords[index] = { outputPath: output?.path, result: stepOutputData, resolvedCommand };
 
 			// Evaluate onResult conditional branching. evaluateOnResult can throw on a
 			// bad RegExp ('regex' operator) and applyOnResultAction throws on an invalid
@@ -1742,7 +2252,11 @@ export class AutomationPipelineRunner {
 		};
 		let slowest: PipelineStepStatus | undefined;
 		for (const s of status.steps) {
-			if ((s.status === 'ok' || s.status === 'partial') && (!slowest || s.durationMs > slowest.durationMs)) {
+			// Failed work still consumed wall-clock time and is often the most
+			// actionable bottleneck (for example, a command timing out). Only
+			// synthetic skipped records did not execute and must be excluded.
+			if ((s.status === 'ok' || s.status === 'partial' || s.status === 'error') &&
+				(!slowest || s.durationMs > slowest.durationMs)) {
 				slowest = s;
 			}
 		}
@@ -1764,6 +2278,69 @@ export class AutomationPipelineRunner {
 		} catch { /* singleton not initialised or getter threw — skip */ }
 		status.summary = summary;
 
+		// A report composed as an ordinary step necessarily saw status=running.
+		// Persist the complete terminal snapshot, then regenerate the same report
+		// path once. The composer excludes its own output, so this cannot recurse.
+		writeJson(statusPath, status);
+		for (const finalizer of terminalReportFinalizers.values()) {
+			try {
+				appendLog(logPath, `[Finalizer] Re-composing terminal report: ${finalizer.outputPath}`);
+				const commandReturn = await withTimeout(
+					vscode.commands.executeCommand(finalizer.resolvedCommand, finalizer.commandOptions),
+					finalizer.timeoutMs,
+					`Terminal report finalization timed out after ${finalizer.timeoutMs}ms`,
+				);
+				const semantic = inspectSemanticResult(commandReturn);
+				if (semantic.status === 'failed' || (semantic.status === 'partial' && finalizer.step.allowPartial !== true)) {
+					throw new Error(semantic.reason ?? `terminal report returned ${semantic.status}`);
+				}
+				validateStepOutput(finalizer.outputPath);
+				finalizer.stepStatus.outputBytes = fs.statSync(finalizer.outputPath).size;
+				finalizer.stepStatus.artifactProvenancePath = await writeArtifactProvenance(
+					finalizer.outputPath,
+					job.outDir,
+					provenance,
+					finalizer.stepIndex,
+					finalizer.step,
+					finalizer.resolvedCommand,
+					semantic.status === 'partial' ? 'partial' : finalizer.semanticStatus,
+					finalizer.commandOptions,
+					stepRecords,
+					commandReturn,
+				);
+				if (isRecord(commandReturn)) {
+					stepRecords[finalizer.stepIndex] = {
+						outputPath: finalizer.outputPath,
+						result: commandReturn,
+						resolvedCommand: finalizer.resolvedCommand,
+					};
+				}
+				appendLog(logPath, `[Finalizer] Terminal report updated (${finalizer.stepStatus.outputBytes} bytes)`);
+			} catch (error: unknown) {
+				const message = `terminal report finalization failed: ${toErrorMessage(error)}`;
+				appendLog(logPath, `[Finalizer] ERROR: ${message}`);
+				finalizer.stepStatus.status = 'error';
+				finalizer.stepStatus.error = message;
+				status.status = status.status === 'error' ? 'error' : 'partial';
+				try { fs.unlinkSync(finalizer.outputPath); } catch { /* stale report must not survive */ }
+				const manifest = readProvenanceManifest(provenanceManifestPath, provenance);
+				manifest.artifacts = manifest.artifacts.filter(entry => entry.artifact.path !== finalizer.outputPath);
+				writeJson(provenanceManifestPath, manifest);
+			}
+		}
+
+		// A failed finalizer changes the terminal counts/status. Successful
+		// finalization only refreshes output size and provenance hash.
+		summary.okCount = status.steps.filter(s => s.status === 'ok').length;
+		summary.partialCount = status.steps.filter(s => s.status === 'partial').length;
+		summary.errorCount = status.steps.filter(s => s.status === 'error').length;
+		summary.skippedCount = status.steps.filter(s => s.status === 'skipped').length;
+
+		try {
+			finalizeProvenanceManifest(provenanceManifestPath, provenance, status.status);
+		} catch (error: unknown) {
+			appendLog(logPath, `[Provenance] ERROR: ${toErrorMessage(error)}`);
+		}
 		writeJson(statusPath, status);
 		appendLog(logPath, `Job finished with status: ${status.status}`);
 		appendLog(logPath, `Summary: ok=${summary.okCount} partial=${summary.partialCount} error=${summary.errorCount} skipped=${summary.skippedCount} totalMs=${summary.totalDurationMs}${summary.slowestStepCmd ? ` slowest=${summary.slowestStepCmd}(${summary.slowestStepMs}ms)` : ''}`);
@@ -2216,14 +2793,21 @@ function resolveStepOutput(outDir: string, step: PipelineStep, index: number): S
 		outputPath = resolved;
 	} else {
 		const safeName = sanitizeFileName(step.cmd);
-		outputPath = path.join(outDir, `${String(index + 1).padStart(2, '0')}-${safeName}.json`);
+		const defaultExtension = BINARY_OUTPUT_COMMANDS.has(resolveCommand(step.cmd)) ? '.bin' : '.json';
+		outputPath = path.join(outDir, `${String(index + 1).padStart(2, '0')}-${safeName}${defaultExtension}`);
 	}
 
 	const format = resolveOutputFormat(outputPath, step.output?.format);
-	const captureKind = step.output?.format === 'json' ||
-		(step.output?.format === undefined && path.extname(outputPath).toLowerCase() === '.json')
+	const extension = path.extname(outputPath).toLowerCase();
+	const textExtensions = new Set([
+		'.md', '.txt', '.log', '.c', '.h', '.cc', '.cpp', '.cs', '.il', '.ll', '.s', '.asm', '.csv', '.tsv',
+	]);
+	const captureKind: StepOutputPath['captureKind'] = step.output?.format === 'json' ||
+		(step.output?.format === undefined && extension === '.json')
 		? 'json'
-		: 'text';
+		: step.output?.format === 'md' || textExtensions.has(extension)
+			? 'text'
+			: 'binary';
 	return { path: outputPath, format, captureKind };
 }
 
@@ -2264,8 +2848,15 @@ export function resolveStepReferences(
 /** Read a step artifact without forcing text formats through JSON.parse. */
 export function readStepOutputForCapture(
 	outputPath: string,
-	captureKind: 'json' | 'text',
+	captureKind: 'json' | 'text' | 'binary',
 ): Record<string, unknown> | undefined {
+	if (captureKind === 'binary') {
+		return {
+			path: outputPath,
+			bytes: fs.statSync(outputPath).size,
+			kind: 'binary',
+		};
+	}
 	const content = fs.readFileSync(outputPath, 'utf8');
 	if (captureKind === 'text') {
 		return {
@@ -2452,6 +3043,39 @@ const JOB_FILE_ARG_COMMANDS = new Set<string>([
 	'hexcore.pipeline.queueJob'
 ]);
 
+const DEBUGGER_PRNG_COMMANDS = new Set<string>([
+	'hexcore.debug.emulateHeadless',
+	'hexcore.debug.emulateFullHeadless',
+]);
+
+export interface PipelinePrngRecommendation {
+	prngMode: 'glibc' | 'msvcrt';
+	prngSeed?: number;
+	sourceStep: number;
+}
+
+export function findPipelinePrngRecommendation(
+	stepRecords: StepRecordTable,
+	filePath: string,
+): PipelinePrngRecommendation | undefined {
+	const format = inspectBinaryIdentity(filePath).format;
+	if (format !== 'elf' && format !== 'pe') { return undefined; }
+	for (let index = stepRecords.length - 1; index >= 0; index--) {
+		const result = stepRecords[index]?.result;
+		const detection = result && isRecord(result.prngDetection) ? result.prngDetection : undefined;
+		if (!detection || detection.prngDetected !== true) { continue; }
+		const seed = detection.seedValue;
+		return {
+			prngMode: format === 'elf' ? 'glibc' : 'msvcrt',
+			...(Number.isSafeInteger(seed) && (seed as number) >= 0 && (seed as number) <= 0xFFFFFFFF
+				? { prngSeed: seed as number }
+				: {}),
+			sourceStep: index,
+		};
+	}
+	return undefined;
+}
+
 function buildCommandOptions(
 	filePath: string,
 	step: PipelineStep,
@@ -2481,6 +3105,16 @@ function buildCommandOptions(
 				continue;
 			}
 			merged[key] = value;
+		}
+	}
+	if (resolvedCommand && DEBUGGER_PRNG_COMMANDS.has(resolvedCommand) && merged.prngMode === undefined) {
+		const recommendation = findPipelinePrngRecommendation(stepRecords, filePath);
+		if (recommendation) {
+			merged.prngMode = recommendation.prngMode;
+			if (merged.prngSeed === undefined && recommendation.prngSeed !== undefined) {
+				merged.prngSeed = recommendation.prngSeed;
+			}
+			merged.prngAutoConfiguredFromStep = recommendation.sourceStep;
 		}
 	}
 	merged.file = filePath;
@@ -2544,6 +3178,23 @@ function validateStepOutput(outputPath: string): void {
 	if (stat.size === 0) {
 		throw new Error(`Output file was created but is empty: ${outputPath}`);
 	}
+}
+
+function invalidatePriorStepArtifacts(outputPath: string): boolean {
+	let removed = false;
+	for (const candidate of [outputPath, `${outputPath}.provenance.json`]) {
+		try {
+			if (!fs.lstatSync(candidate).isDirectory()) {
+				fs.unlinkSync(candidate);
+				removed = true;
+			}
+		} catch (error: unknown) {
+			if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+				throw error;
+			}
+		}
+	}
+	return removed;
 }
 
 async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, timeoutMessage: string): Promise<T> {
@@ -2700,12 +3351,10 @@ function delay(ms: number): Promise<void> {
  * Best-effort cancellation when a step exceeds its timeout.
  *
  * HONEST BEHAVIOUR: the pipeline cannot interrupt a `vscode.commands.executeCommand`
- * promise. We only race it against a timer (see {@link withTimeout}); when the
- * timer wins we ABANDON the command and move on, but the underlying operation
- * keeps running in the Extension Host until it finishes on its own. The only
- * real cancellation we can perform is invoking an explicit `cancelCommand` if a
- * capability declares one (none do today). We do NOT fake a cancel — when none
- * is configured we say so plainly in the log.
+ * promise. We race it against a timer (see {@link withTimeout}); when the timer
+ * wins, an explicit capability `cancelCommand` is the only way to stop isolated
+ * work rather than merely abandon its Promise. Capabilities without one remain
+ * honest in the log about the underlying operation potentially continuing.
  *
  * @returns `true` only if a real cancel command was successfully executed.
  */
@@ -2764,6 +3413,24 @@ function appendLog(logPath: string, message: string): void {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export function formatAnalysisContextLog(analysisContext: Record<string, unknown>): string {
+	if ('ownership' in analysisContext || 'activeEngineEvidenceUsed' in analysisContext || 'sourceTargetFile' in analysisContext) {
+		return `ownership=${String(analysisContext.ownership ?? 'unknown')} ` +
+			`activeEngineEvidenceUsed=${String(analysisContext.activeEngineEvidenceUsed ?? false)} ` +
+			`source=${String(analysisContext.sourceTargetFile ?? 'unbound')} ` +
+			`active=${String(analysisContext.activeTargetFile ?? 'none')}`;
+	}
+	if ('sessionGeneration' in analysisContext || 'universeSha256' in analysisContext || 'materializedFunctions' in analysisContext) {
+		return `binding=persisted-session ` +
+			`session=${String(analysisContext.sessionId ?? 'unknown')} ` +
+			`generation=${String(analysisContext.sessionGeneration ?? 'unknown')} ` +
+			`universe=${String(analysisContext.universeSha256 ?? 'unbound')} ` +
+			`materialized=${String(analysisContext.materializedFunctions ?? 'unknown')} ` +
+			`lazy=${String(analysisContext.lazyFunctions ?? 'unknown')}`;
+	}
+	return 'schema=unrecognized';
 }
 
 function toErrorMessage(error: unknown): string {

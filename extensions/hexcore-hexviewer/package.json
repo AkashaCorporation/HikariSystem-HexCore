@@ -2,7 +2,7 @@
 	"name": "hexcore-hexviewer",
 	"displayName": "HexCore Hex Viewer",
 	"description": "Binary file viewer and editor for malware analysis and reverse engineering",
-	"version": "1.2.3",
+	"version": "1.2.4",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {

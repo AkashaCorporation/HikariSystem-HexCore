@@ -1,0 +1,210 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "anti-analysis.vm_detection",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.system-enumeration:positive",
+      "branchId": "system-enumeration",
+      "branchIndex": 0,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "call"
+      ],
+      "contentSha256": "90366ae40f6a21b0e811e02b4165f9034259bb81f8521cefdf1e36cb14adae3c",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "call",
+            "name": "GetSystemFirmwareTable",
+            "args": [
+              "provider",
+              "table"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.system-enumeration:negative-1",
+      "branchId": "system-enumeration",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "5420d8bc455017d2c811ef1441cee983ad905c6ab64a9dd1704226cba38765a9",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "GetSystemInfo"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.system-enumeration:negative-2",
+      "branchId": "system-enumeration",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7303f966748ebcc75f95f3d033b27e6d6b15bfc78bbd298cf32c7a51846416fe",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "MyGetComputerNameWWrapper"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.registry-artifact:positive",
+      "branchId": "registry-artifact",
+      "branchIndex": 1,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "call"
+      ],
+      "contentSha256": "4f4424b3042845e69cd30343cb19f9ab80ce85fad420568b130439e90348053d",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "call",
+            "name": "RegQueryValueExW",
+            "args": [
+              "key",
+              {
+                "k": "str",
+                "value": "VEN_VMWARE"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.registry-artifact:negative-1",
+      "branchId": "registry-artifact",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "1cf76f49721f15766b2beaafe206fc81ffb9454db9ffbaebea0465e1172399e9",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "RegQueryValueExW",
+            "args": [
+              "key",
+              {
+                "k": "str",
+                "value": "VEN_INTEL"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.registry-artifact:negative-2",
+      "branchId": "registry-artifact",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "1bd19767ce9d10ab730fc4ee815ba6db2c6d0dfe88db2623be61c45f7f81e658",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "RegCloseKey",
+            "args": [
+              {
+                "k": "str",
+                "value": "VirtualBox"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.wmi-artifact:positive",
+      "branchId": "wmi-artifact",
+      "branchIndex": 2,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "call"
+      ],
+      "contentSha256": "fcfb13c61afa9f5918aa9d9771d7d066633feaa662d8fb62ff3042010ed3564c",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "call",
+            "name": "wbemServices_ExecQuery",
+            "args": [
+              {
+                "k": "str",
+                "value": "SELECT * FROM Win32_BIOS"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.wmi-artifact:negative-1",
+      "branchId": "wmi-artifact",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "a639dc27b98a71ab42d29f7d4dd089cd592c81a1b6233b73f3a2b93170fd053a",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "wbemServices_ExecQuery",
+            "args": [
+              {
+                "k": "str",
+                "value": "SELECT * FROM Win32_Process"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.vm_detection.wmi-artifact:negative-2",
+      "branchId": "wmi-artifact",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "f16bdb510fddf7ee91bce0d837b0762360488603d4a92e02a083f8e7d73268dc",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "ExecQuery",
+            "args": [
+              {
+                "k": "str",
+                "value": "SELECT * FROM Win32_VideoController"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

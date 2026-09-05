@@ -7,6 +7,8 @@ node_modules/
 # Logs and transient files
 *.log
 typescript-errors.txt
+helix_dump_*_passes.mlir
+mlir_debug_dump.txt
 
 # Environment and private files
 .env

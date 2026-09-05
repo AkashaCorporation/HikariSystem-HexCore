@@ -41,7 +41,7 @@ suite('TraceManager — Unit Tests', () => {
 	});
 
 	test('record() stores multiple entries in insertion order', () => {
-		const manager = new TraceManager();
+		const manager = new TraceManager({ groupRepeated: false });
 		const e1 = makeEntry({ functionName: 'open', timestamp: 1000 });
 		const e2 = makeEntry({ functionName: 'read', timestamp: 2000 });
 		const e3 = makeEntry({ functionName: 'close', timestamp: 3000 });
@@ -99,6 +99,7 @@ suite('TraceManager — Unit Tests', () => {
 
 		assert.deepStrictEqual(exported.entries, []);
 		assert.strictEqual(exported.totalEntries, 0);
+		assert.strictEqual(exported.totalCalls, 0);
 		assert.strictEqual(typeof exported.generatedAt, 'string');
 		assert.ok(!isNaN(Date.parse(exported.generatedAt)), 'generatedAt should be a valid ISO date');
 	});
@@ -111,9 +112,50 @@ suite('TraceManager — Unit Tests', () => {
 		const exported = manager.exportJSON();
 
 		assert.strictEqual(exported.totalEntries, 2);
+		assert.strictEqual(exported.totalCalls, 2);
 		assert.strictEqual(exported.entries.length, 2);
 		assert.strictEqual(exported.entries[0].functionName, 'write');
 		assert.strictEqual(exported.entries[1].functionName, 'close');
+	});
+
+	test('groups consecutive identical calls and preserves the exact call count', () => {
+		const manager = new TraceManager({ groupRepeated: true, maxEntries: 10 });
+		manager.record(makeEntry({ timestamp: 1000 }));
+		manager.record(makeEntry({ timestamp: 1001 }));
+		manager.record(makeEntry({ timestamp: 1002 }));
+
+		const exported = manager.exportJSON();
+		assert.strictEqual(exported.totalCalls, 3);
+		assert.strictEqual(exported.totalEntries, 1);
+		assert.strictEqual(exported.aggregatedCalls, 2);
+		assert.strictEqual(exported.entries[0].repeatCount, 3);
+		assert.strictEqual(exported.entries[0].firstTimestamp, 1000);
+		assert.strictEqual(exported.entries[0].lastTimestamp, 1002);
+	});
+
+	test('supports deterministic sampling and reports sampled-out calls', () => {
+		const manager = new TraceManager({ groupRepeated: false, sampleEvery: 3, maxEntries: 10 });
+		for (let i = 0; i < 7; i++) {
+			manager.record(makeEntry({ functionName: `call_${i}`, timestamp: i }));
+		}
+
+		const exported = manager.exportJSON();
+		assert.strictEqual(exported.totalCalls, 7);
+		assert.strictEqual(exported.totalEntries, 3);
+		assert.strictEqual(exported.sampledOut, 4);
+		assert.deepStrictEqual(exported.entries.map(entry => entry.functionName), ['call_0', 'call_3', 'call_6']);
+	});
+
+	test('caps retained rows while continuing to count observed calls', () => {
+		const manager = new TraceManager({ groupRepeated: false, maxEntries: 2 });
+		manager.record(makeEntry({ functionName: 'a' }));
+		manager.record(makeEntry({ functionName: 'b' }));
+		manager.record(makeEntry({ functionName: 'c' }));
+
+		const exported = manager.exportJSON();
+		assert.strictEqual(exported.totalCalls, 3);
+		assert.strictEqual(exported.retainedEntries, 2);
+		assert.strictEqual(exported.dropped, 1);
 	});
 
 	test('exportJSON() generatedAt is a valid ISO 8601 timestamp', () => {

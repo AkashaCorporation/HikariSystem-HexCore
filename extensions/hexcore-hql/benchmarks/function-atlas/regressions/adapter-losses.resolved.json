@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "status": "resolved",
+  "producer": {
+    "helixNodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776",
+    "hqlAdapterContract": "hast-v1-unary-compound-v1"
+  },
+  "failures": [],
+  "acceptedFunctions": 224,
+  "expectedFunctions": 224,
+  "functionAtlasArtifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3"
+}

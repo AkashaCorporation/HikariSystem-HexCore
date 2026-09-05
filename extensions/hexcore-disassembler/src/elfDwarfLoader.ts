@@ -47,6 +47,7 @@ const DW_AT_bit_size = 0x0D;
 const DW_AT_bit_offset = 0x0C;
 const DW_AT_type = 0x49;
 const DW_AT_data_member_location = 0x38;
+const DW_AT_data_bit_offset = 0x6B;
 const DW_AT_upper_bound = 0x2F;
 const DW_AT_count = 0x37;
 const DW_AT_encoding = 0x3E;
@@ -723,6 +724,17 @@ function resolveTypeSize(offset: number | undefined, allDies: Map<number, DIE>, 
 		case DW_TAG_volatile_type:
 		case DW_TAG_restrict_type:
 			return resolveTypeSize(typeRef, allDies, pointerSize, depth + 1);
+		case DW_TAG_array_type: {
+			const elementSize = resolveTypeSize(typeRef, allDies, pointerSize, depth + 1);
+			for (const child of die.children) {
+				if (child.tag !== DW_TAG_subrange_type) continue;
+				const upper = child.attrs.get(DW_AT_upper_bound) as number | undefined;
+				const count = child.attrs.get(DW_AT_count) as number | undefined;
+				const elements = count ?? (upper !== undefined ? upper + 1 : undefined);
+				if (elements !== undefined && Number.isSafeInteger(elements) && elements >= 0) return elementSize * elements;
+			}
+			return 0;
+		}
 		default:
 			return 0;
 	}
@@ -806,7 +818,12 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 
 						const memberTypeRef = child.attrs.get(DW_AT_type) as number | undefined;
 						const memberLocVal = child.attrs.get(DW_AT_data_member_location);
-						const memberOffset = extractMemberOffset(memberLocVal);
+						const dataBitOffset = child.attrs.get(DW_AT_data_bit_offset) as number | undefined;
+						const legacyBitOffset = child.attrs.get(DW_AT_bit_offset) as number | undefined;
+						const bitSize = child.attrs.get(DW_AT_bit_size) as number | undefined;
+						const memberOffset = dataBitOffset !== undefined
+							? Math.floor(dataBitOffset / 8)
+							: extractMemberOffset(memberLocVal);
 						const memberType = resolveType(memberTypeRef, cu.allDies);
 						const memberSize = resolveTypeSize(memberTypeRef, cu.allDies, pointerSize);
 
@@ -815,6 +832,11 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 							offset: `0x${memberOffset.toString(16).toUpperCase()}`,
 							size: memberSize,
 							type: memberType,
+							...(bitSize !== undefined ? {
+								bitOffset: dataBitOffset ?? memberOffset * 8 + (legacyBitOffset ?? 0),
+								bitSize,
+								bitfield: true,
+							} : {}),
 						});
 					}
 

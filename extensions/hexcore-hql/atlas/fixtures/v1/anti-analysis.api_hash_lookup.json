@@ -1,0 +1,285 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "anti-analysis.api_hash_lookup",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-shift:positive",
+      "branchId": "for-xor-shift",
+      "branchIndex": 0,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "loop"
+      ],
+      "contentSha256": "82799b8e9cd1a5448d62e7701477ca8585cac6da0f9a06b2b2ffa0b815997bff",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "at": "loop",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "<<",
+                "a": "hash",
+                "b": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-shift:negative-1",
+      "branchId": "for-xor-shift",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "66d1e2fed5a6823dfc4dfa0a700248c748e79aeb968ab9ded4b5e25844208971",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "+",
+                "a": "hash",
+                "b": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-shift:negative-2",
+      "branchId": "for-xor-shift",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "26fee6375ca6c55f8e163014316ed8ffa2cd3881521278fd8787d23a2102f949",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "|",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "<<",
+                "a": "hash",
+                "b": 5
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.while-xor-shift:positive",
+      "branchId": "while-xor-shift",
+      "branchIndex": 1,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "loop"
+      ],
+      "contentSha256": "53e501c6454122496eed4f376bd4513a5dc5209cd1208a538f59e58f9b14c474",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "while",
+            "at": "loop",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "<<",
+                "a": "hash",
+                "b": 7
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.while-xor-shift:negative-1",
+      "branchId": "while-xor-shift",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "86a42dcb32bb2ccd45118e06d0de6155cba2cbd99996cc6912870204752f8128",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "while",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": ">>",
+                "a": "hash",
+                "b": 7
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.while-xor-shift:negative-2",
+      "branchId": "while-xor-shift",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7c2177ad636cafd30fb541f0d2d1f5fd6c9784a048e2f03f5c0124025b7c7817",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "while",
+            "body": [
+              {
+                "k": "bin",
+                "op": "&",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "<<",
+                "a": "hash",
+                "b": 7
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-multiply:positive",
+      "branchId": "for-xor-multiply",
+      "branchIndex": 2,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "loop"
+      ],
+      "contentSha256": "26d22226f1483e5eae0596eb7c6a500cb5070f5dfa512731264a7cf3dade711b",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "at": "loop",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "*",
+                "a": "hash",
+                "b": 33
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-multiply:negative-1",
+      "branchId": "for-xor-multiply",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "8563b975f37ac2ed19dd12910039ee207f5d6b9137279b66de14a9ec8b015c33",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "^",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "/",
+                "a": "hash",
+                "b": 33
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.api_hash_lookup.for-xor-multiply:negative-2",
+      "branchId": "for-xor-multiply",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "c3cef2819de92c3c9683c5056778b732b18d8f6edec020c2b03fae6bbce74c76",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "bin",
+                "op": "|",
+                "a": "hash",
+                "b": "byte"
+              },
+              {
+                "k": "bin",
+                "op": "*",
+                "a": "hash",
+                "b": 33
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -17,7 +17,7 @@ static Napi::Object Init(Napi::Env env, Napi::Object exports) {
     SouperOptimizer::Init(env, exports);
 
     // Export version string
-    exports.Set("version", Napi::String::New(env, "0.2.0"));
+    exports.Set("version", Napi::String::New(env, kSouperWrapperVersion));
 
     return exports;
 }

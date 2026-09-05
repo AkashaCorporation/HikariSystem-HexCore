@@ -4,14 +4,16 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { UnicornWrapper, ArchitectureType, EmulationState, ExecutionBackend } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
 import { PELoader, PEInfo } from './peLoader';
 import { ELFLoader, ELFInfo } from './elfLoader';
 import { WinApiHooks, ApiCallLog } from './winApiHooks';
 import { LinuxApiHooks, ApiCallLog as LinuxApiCallLog } from './linuxApiHooks';
-import { TraceManager } from './traceManager';
+import { TraceManager, TraceCaptureOptions } from './traceManager';
 import { PrngMode } from './prng';
+import { mergeMappedMemoryRegions } from './memoryRegionMerge';
 
 // Types from hexcore-disassembler (cross-extension, loaded via require at runtime)
 interface DisassemblerInstruction {
@@ -60,6 +62,8 @@ export interface MemoryRegion {
 export interface EmulationOptions {
 	permissiveMemoryMapping?: boolean;
 	prngMode?: PrngMode;
+	prngSeed?: number;
+	trace?: TraceCaptureOptions;
 	collectSideChannels?: boolean;
 	memoryDumps?: Array<{ address: string; size: number; trigger: 'breakpoint' | 'end' }>;
 	breakpointConfigs?: Array<{ address: string; autoSnapshot?: boolean; dumpRanges?: Array<{ address: string; size: number }> }>;
@@ -103,6 +107,7 @@ export interface SideChannelData {
 
 export class DebugEngine {
 	private targetPath?: string;
+	private stdinSha256?: string;
 	private isRunning: boolean = false;
 	private registers: Partial<RegisterState> = {};
 	private listeners: Array<(event: string, data?: any) => void> = [];
@@ -110,6 +115,7 @@ export class DebugEngine {
 	// Emulation options (v3.7)
 	private emulationOptions: EmulationOptions = {};
 	private breakpointSnapshots: BreakpointSnapshot[] = [];
+	private lastBreakpointArtifactKey?: string;
 	private collectedMemoryDumps: Array<{ address: string; size: number; data: string; trigger: string }> = [];
 	private sideChannelData: SideChannelData = {
 		basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0
@@ -190,6 +196,7 @@ export class DebugEngine {
 
 		this.targetPath = filePath;
 		this.emulationOptions = options ?? {};
+		this._traceManager.configure(this.emulationOptions.trace);
 		this.resetSessionState();
 
 		// Read the file
@@ -425,6 +432,7 @@ export class DebugEngine {
 
 				// handleCall reads args from in-process Unicorn (now synced)
 				const returnValue = this.apiHooks!.handleCall(importEntry.dll, importEntry.name);
+				const callContract = this.apiHooks!.getLastCall();
 
 				this.emit('api-call', {
 					dll: importEntry.dll,
@@ -432,14 +440,16 @@ export class DebugEngine {
 					returnValue
 				});
 
-				// Pop return address: adjust RSP/ESP in the worker (add pointer size)
+				// Simulate the ABI return. Win64 callers own argument cleanup; Win32
+				// stdcall callees remove their stack arguments in addition to RET.
 				try {
 					if (isX64) {
 						const rsp = emulator.getRegistersX64().rsp;
 						await emulator.setRegister('rsp', rsp + 8n);
 					} else {
 						const esp = BigInt(emulator.getRegistersX86().esp);
-						await emulator.setRegister('esp', esp + 4n);
+						const argumentBytes = BigInt(callContract?.stackBytesPopped ?? 0);
+						await emulator.setRegister('esp', esp + 4n + argumentBytes);
 					}
 				} catch {
 					// Best-effort RSP/ESP adjustment
@@ -486,7 +496,13 @@ export class DebugEngine {
 			console.warn(`[debugEngine] Invalid prngMode '${prngMode}', falling back to 'stub'`);
 			prngMode = 'stub';
 		}
-		this.linuxApiHooks = new LinuxApiHooks(this.emulator!, this.memoryManager!, this.architecture, prngMode);
+		this.linuxApiHooks = new LinuxApiHooks(
+			this.emulator!,
+			this.memoryManager!,
+			this.architecture,
+			prngMode,
+			this.emulationOptions.prngSeed,
+		);
 		this.linuxApiHooks.setImageBase(elfInfo.baseAddress);
 		this.linuxApiHooks.setTraceManager(this._traceManager);
 		const exitImport = elfInfo.imports.find(imp => imp.name === 'exit' || imp.name === '_exit');
@@ -1447,6 +1463,7 @@ export class DebugEngine {
 
 		await this.emulator.step();
 		await this.updateEmulationRegisters();
+		await this.captureBreakpointArtifacts();
 		this.emit('step');
 	}
 
@@ -1466,6 +1483,7 @@ export class DebugEngine {
 			await this.emulator.continue();
 		}
 		await this.updateEmulationRegisters();
+		await this.captureBreakpointArtifacts();
 		this.emit('continue');
 	}
 
@@ -1700,26 +1718,22 @@ export class DebugEngine {
 	/**
 	 * Get emulation state
 	 *
-	 * After startEmulation(), isRunning reflects the debugEngine state (loaded & ready).
-	 * isReady indicates the emulator is initialized and ready to step/continue.
-	 * The wrapper's isRunning only becomes true during active emuStart calls.
+	 * isRunning reports active CPU execution. Use isEmulationSessionActive() for
+	 * the separate loaded-and-ready session lifecycle.
 	 */
 	getEmulationState(): EmulationState | null {
 		if (!this.emulator) {
 			return null;
 		}
-		const state = this.emulator.getState();
-		// If the debug engine has loaded a binary, report isRunning=true
-		// even if we're not actively inside an emuStart call.
-		// This tells the UI/tests "the debugger session is active and ready".
-		if (this.isRunning && !state.isRunning) {
-			state.isRunning = true;
-			// If not actively executing, we're paused at the entry point
-			if (!state.isPaused) {
-				state.isPaused = true;
-			}
-		}
-		return state;
+		return this.emulator.getState();
+	}
+
+	isEmulationSessionActive(): boolean {
+		return this.isRunning && this.emulator !== undefined;
+	}
+
+	getEmulationBreakpoints(): bigint[] {
+		return this.emulator?.getBreakpoints() ?? [];
 	}
 
 	/**
@@ -1730,23 +1744,9 @@ export class DebugEngine {
 			return [];
 		}
 
-		// Use memory manager allocations for named regions
-		if (this.memoryManager) {
-			return this.memoryManager.getAllocations().map(alloc => ({
-				address: alloc.address,
-				size: alloc.size,
-				permissions: this.permsToString(alloc.permissions),
-				name: alloc.name
-			}));
-		}
-
-		const regions = await this.emulator.getMemoryRegions();
-		return regions.map(r => ({
-			address: r.address,
-			size: Number(r.size),
-			permissions: r.permissions,
-			name: undefined
-		}));
+		const mappedRegions = await this.emulator.getMemoryRegions();
+		const allocations = this.memoryManager?.getAllocations() ?? [];
+		return mergeMappedMemoryRegions(mappedRegions, allocations);
 	}
 
 	/**
@@ -1795,6 +1795,7 @@ export class DebugEngine {
 	 * Example: setStdinBuffer("42\nhello\n") for two scanf calls.
 	 */
 	setStdinBuffer(input: string): void {
+		this.stdinSha256 = crypto.createHash('sha256').update(input, 'utf8').digest('hex');
 		if (this.linuxApiHooks) {
 			this.linuxApiHooks.setStdinBuffer(input);
 		}
@@ -1848,17 +1849,6 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Convert numeric permissions to string
-	 */
-	private permsToString(perms: number): string {
-		let result = '';
-		if (perms & 1) { result += 'r'; }
-		if (perms & 2) { result += 'w'; }
-		if (perms & 4) { result += 'x'; }
-		return result || '---';
-	}
-
-	/**
 	 * Get loaded PE info
 	 */
 	getPEInfo(): PEInfo | undefined {
@@ -1887,7 +1877,30 @@ export class DebugEngine {
 		const currentAddr = this.emulator.getState().currentAddress;
 		await this.emulator.runSync(currentAddr, count, timeout);
 		await this.updateEmulationRegisters();
+		await this.captureBreakpointArtifacts();
 		this.emit('continue');
+	}
+
+	/** Capture configured artifacts exactly once when execution stops on a breakpoint. */
+	private async captureBreakpointArtifacts(): Promise<void> {
+		if (!this.emulator) { return; }
+		const state = this.emulator.getState();
+		const atBreakpoint = this.emulator.getBreakpoints().some(bp => bp === state.currentAddress);
+		if (!atBreakpoint) { return; }
+
+		const key = `${state.currentAddress.toString(16)}:${state.instructionsExecuted}`;
+		if (this.lastBreakpointArtifactKey === key) { return; }
+		this.lastBreakpointArtifactKey = key;
+
+		const config = this.emulationOptions.breakpointConfigs?.find(bp => {
+			try {
+				return BigInt(bp.address) === state.currentAddress;
+			} catch {
+				return false;
+			}
+		});
+		await this.takeBreakpointSnapshot(config);
+		await this.collectMemoryDumps('breakpoint');
 	}
 
 	/**
@@ -1919,11 +1932,29 @@ export class DebugEngine {
 		return this.fileType;
 	}
 
+	getTargetPath(): string | undefined {
+		return this.targetPath;
+	}
+
+	getRuntimeInputConfiguration(): Record<string, unknown> {
+		return {
+			permissiveMemoryMapping: this.emulationOptions.permissiveMemoryMapping ?? false,
+			prngMode: this.emulationOptions.prngMode ?? 'stub',
+			prngSeed: this.emulationOptions.prngSeed ?? null,
+			trace: this._traceManager.exportJSON().configuration,
+			stdinSha256: this.stdinSha256 ?? null,
+		};
+	}
+
 	getExecutionBackend(): ExecutionBackend {
 		if (!this.emulator) {
 			return 'in-process';
 		}
 		return this.emulator.getExecutionBackend();
+	}
+
+	clearLastError(): void {
+		this.emulator?.clearLastError();
 	}
 
 	getLastFaultInfo(): Record<string, unknown> | undefined {
@@ -2059,11 +2090,12 @@ export class DebugEngine {
 		// Read stack: RSP-64 to RSP+256
 		let stackData = '';
 		try {
-			const rsp = state.currentAddress; // Approximate — use actual RSP
-			const rspVal = this.architecture === 'x64'
-				? this.emulator.getRegistersX64().rsp
-				: BigInt(this.emulator.getRegistersX86().esp);
-			const stackStart = rspVal - 64n;
+			const spText = this.architecture === 'x64'
+				? regs.rsp
+				: this.architecture === 'x86' ? regs.esp : regs.sp;
+			if (!spText) { throw new Error('Stack pointer unavailable'); }
+			const rspVal = BigInt(spText);
+			const stackStart = rspVal >= 64n ? rspVal - 64n : 0n;
 			const buf = await this.emulator.readMemory(stackStart, 320);
 			stackData = buf.toString('base64');
 		} catch { /* stack read may fail */ }
@@ -2265,7 +2297,9 @@ export class DebugEngine {
 	 * session's data after a bare dispose.
 	 */
 	private resetSessionState(): void {
+		this.stdinSha256 = undefined;
 		this.breakpointSnapshots = [];
+		this.lastBreakpointArtifactKey = undefined;
 		this.collectedMemoryDumps = [];
 		this.sideChannelData = { basicBlockCounts: [], memoryAccesses: [], branchStats: [], totalInstructions: 0 };
 		this._scLastBBAddr = 0n;

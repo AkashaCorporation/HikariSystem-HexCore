@@ -2,7 +2,7 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.27",
+	"version": "1.4.66",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
@@ -10,6 +10,8 @@
 	},
 	"activationEvents": [
 		"onStartupFinished",
+		"onCommand:hexcore.analysis.openCenter",
+		"onCommand:hexcore.disasm.goToFileOffset",
 		"onCommand:hexcore.emulator.switch",
 		"onCommand:hexcore.pipeline.runJob",
 		"onCommand:hexcore.pipeline.listCapabilities",
@@ -21,10 +23,39 @@
 		"onCommand:hexcore.pipeline.queueJob",
 		"onCommand:hexcore.pipeline.cancelJob",
 		"onCommand:hexcore.pipeline.jobStatus",
+		"onCommand:hexcore.constraints.solveHeadless",
 		"onCommand:hexcore.disasm.buildFormula",
+		"onCommand:hexcore.disasm.liftMemoryHeadless",
+		"onCommand:hexcore.disasm.disassembleBufferHeadless",
 		"onCommand:hexcore.disasm.checkConstants",
 		"onCommand:hexcore.hql.scanFunction",
 		"onCommand:hexcore.hql.scanHeadless",
+		"onCommand:hexcore.types.applyPrototype",
+		"onCommand:hexcore.types.setCallingConvention",
+		"onCommand:hexcore.types.setParameter",
+		"onCommand:hexcore.types.clearOverride",
+		"onCommand:hexcore.types.explainPrototype",
+		"onCommand:hexcore.types.export",
+		"onCommand:hexcore.types.import",
+		"onCommand:hexcore.references.query",
+		"onCommand:hexcore.references.export",
+		"onCommand:hexcore.propagation.solve",
+		"onCommand:hexcore.propagation.status",
+		"onCommand:hexcore.propagation.export",
+		"onCommand:hexcore.typeManager.list",
+		"onCommand:hexcore.typeManager.create",
+		"onCommand:hexcore.typeManager.update",
+		"onCommand:hexcore.typeManager.rename",
+		"onCommand:hexcore.typeManager.delete",
+		"onCommand:hexcore.typeManager.undo",
+		"onCommand:hexcore.typeManager.export",
+		"onCommand:hexcore.typeManager.import",
+		"onCommand:hexcore.types.ingestDebug",
+		"onCommand:hexcore.records.recover",
+		"onCommand:hexcore.pdb.importSemantics",
+		"onCommand:hexcore.pdb.resolveSymbols",
+		"onCommand:hexcore.signatures.apply",
+		"onCommand:hexcore.semanticExplorer.open",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -67,6 +98,12 @@
 			}
 		],
 		"commands": [
+			{
+				"command": "hexcore.analysis.openCenter",
+				"title": "Open Analysis Center",
+				"category": "HexCore",
+				"icon": "$(layout)"
+			},
 			{
 				"command": "hexcore.emulator.switch",
 				"title": "Switch Emulator…",
@@ -118,7 +155,7 @@
 				"command": "hexcore.disasm.showCFG",
 				"title": "Show Control Flow Graph",
 				"category": "HexCore Disassembler",
-				"icon": "$(debug-step-over)"
+				"icon": "$(type-hierarchy)"
 			},
 			{
 				"command": "hexcore.disasm.searchString",
@@ -215,6 +252,12 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.disasm.windowsFilesystemAuditHeadless",
+				"title": "Audit Windows Filesystem Boundary",
+				"category": "HexCore Automation",
+				"icon": "$(shield)"
+			},
+			{
 				"command": "hexcore.disasm.buildFormula",
 				"title": "Build Formula from Instructions",
 				"category": "HexCore Disassembler",
@@ -307,6 +350,11 @@
 				"category": "HexCore Automation"
 			},
 			{
+				"command": "hexcore.constraints.solveHeadless",
+				"title": "Solve Constraints (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.disasm.rttiScanHeadless",
 				"title": "RTTI Scan (Headless)",
 				"category": "HexCore Automation"
@@ -327,6 +375,16 @@
 				"title": "[Experimental] Lift to LLVM IR",
 				"category": "HexCore Disassembler",
 				"icon": "$(beaker)"
+			},
+			{
+				"command": "hexcore.disasm.liftMemoryHeadless",
+				"title": "Lift Live Memory to LLVM IR (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.disasm.disassembleBufferHeadless",
+				"title": "Disassemble Live Memory Buffer (Headless)",
+				"category": "HexCore Automation"
 			},
 			{
 				"command": "hexcore.rellic.decompile",
@@ -362,6 +420,162 @@
 				"command": "hexcore.hql.scanHeadless",
 				"title": "HQL: Scan Function for Patterns (Headless)",
 				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.types.applyPrototype",
+				"title": "Apply Full Function Prototype",
+				"category": "HexCore Types",
+				"icon": "$(symbol-interface)"
+			},
+			{
+				"command": "hexcore.types.setCallingConvention",
+				"title": "Set Calling Convention",
+				"category": "HexCore Types",
+				"icon": "$(symbol-method)"
+			},
+			{
+				"command": "hexcore.types.setParameter",
+				"title": "Edit Function Parameter",
+				"category": "HexCore Types",
+				"icon": "$(symbol-parameter)"
+			},
+			{
+				"command": "hexcore.types.clearOverride",
+				"title": "Clear Function Prototype Override",
+				"category": "HexCore Types",
+				"icon": "$(discard)"
+			},
+			{
+				"command": "hexcore.types.explainPrototype",
+				"title": "Explain Function Prototype",
+				"category": "HexCore Types",
+				"icon": "$(inspect)"
+			},
+			{
+				"command": "hexcore.types.export",
+				"title": "Export Semantic Model",
+				"category": "HexCore Types",
+				"icon": "$(export)"
+			},
+			{
+				"command": "hexcore.types.import",
+				"title": "Import Semantic Model",
+				"category": "HexCore Types",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "hexcore.references.query",
+				"title": "Query Typed References",
+				"category": "HexCore References",
+				"icon": "$(references)"
+			},
+			{
+				"command": "hexcore.references.export",
+				"title": "Export Typed Reference Graph",
+				"category": "HexCore References",
+				"icon": "$(export)"
+			},
+			{
+				"command": "hexcore.propagation.solve",
+				"title": "Run Whole-Program Propagation",
+				"category": "HexCore Types",
+				"icon": "$(run-all)"
+			},
+			{
+				"command": "hexcore.propagation.status",
+				"title": "Show Propagation Status",
+				"category": "HexCore Types",
+				"icon": "$(pulse)"
+			},
+			{
+				"command": "hexcore.propagation.export",
+				"title": "Export Propagation Model",
+				"category": "HexCore Types",
+				"icon": "$(export)"
+			},
+			{
+				"command": "hexcore.typeManager.list",
+				"title": "Open Type Manager",
+				"category": "HexCore Types",
+				"icon": "$(symbol-structure)"
+			},
+			{
+				"command": "hexcore.typeManager.create",
+				"title": "Create Semantic Type",
+				"category": "HexCore Types",
+				"icon": "$(add)"
+			},
+			{
+				"command": "hexcore.typeManager.update",
+				"title": "Update Semantic Type",
+				"category": "HexCore Types",
+				"icon": "$(edit)"
+			},
+			{
+				"command": "hexcore.typeManager.rename",
+				"title": "Rename Semantic Type",
+				"category": "HexCore Types",
+				"icon": "$(symbol-key)"
+			},
+			{
+				"command": "hexcore.typeManager.delete",
+				"title": "Delete Semantic Type",
+				"category": "HexCore Types",
+				"icon": "$(trash)"
+			},
+			{
+				"command": "hexcore.typeManager.undo",
+				"title": "Undo Semantic Type Edit",
+				"category": "HexCore Types",
+				"icon": "$(discard)"
+			},
+			{
+				"command": "hexcore.typeManager.export",
+				"title": "Export Type Catalog",
+				"category": "HexCore Types",
+				"icon": "$(export)"
+			},
+			{
+				"command": "hexcore.typeManager.import",
+				"title": "Import Type Catalog",
+				"category": "HexCore Types",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "hexcore.types.ingestDebug",
+				"title": "Ingest Debug Types into HXDB",
+				"category": "HexCore Types",
+				"icon": "$(database)"
+			},
+			{
+				"command": "hexcore.records.recover",
+				"title": "Recover Records from Propagation",
+				"category": "HexCore Types",
+				"icon": "$(wand)"
+			},
+			{
+				"command": "hexcore.pdb.importSemantics",
+				"title": "Import PDB Semantics into HXDB",
+				"category": "HexCore Types",
+				"icon": "$(database)"
+			},
+			{
+				"command": "hexcore.pdb.resolveSymbols",
+				"title": "Resolve PDB from Symbol Server",
+				"category": "HexCore Types",
+				"icon": "$(cloud-download)"
+			},
+			{
+				"command": "hexcore.signatures.apply",
+				"title": "Apply Library Signature Provider",
+				"category": "HexCore Types",
+				"icon": "$(library)"
+			},
+			{
+				"command": "hexcore.semanticExplorer.open",
+				"title": "Open Semantic Explorer",
+				"category": "HexCore Types",
+				"icon": "$(symbol-structure)"
 			},
 			{
 				"command": "hexcore.extractStructInfo",
@@ -431,9 +645,19 @@
 			],
 			"view/title": [
 				{
+					"command": "hexcore.analysis.openCenter",
+					"when": "view == hexcore.analysis.overview",
+					"group": "navigation@1"
+				},
+				{
 					"command": "hexcore.disasm.analyzeAll",
 					"when": "view == hexcore.disassembler.functions",
 					"group": "navigation"
+				},
+				{
+					"command": "hexcore.analysis.openCenter",
+					"when": "view == hexcore.disassembler.functions",
+					"group": "navigation@1"
 				},
 				{
 					"command": "hexcore.disasm.showCFG",
@@ -446,9 +670,8 @@
 			"activitybar": [
 				{
 					"id": "hexcore-disassembler",
-					"title": "Disassembler",
-					"icon": "$(debug-disconnect)",
-					"when": "hexcore:disassemblerActive"
+					"title": "HexCore Analysis",
+					"icon": "$(circuit-board)"
 				}
 			]
 		},
@@ -456,39 +679,52 @@
 			"hexcore-disassembler": [
 				{
 					"type": "webview",
-					"id": "hexcore.disassembler.graphView",
-					"name": "Graph View",
-					"icon": "$(type-hierarchy)"
+					"id": "hexcore.analysis.overview",
+					"name": "Session Overview",
+					"icon": "$(dashboard)",
+					"visibility": "visible"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.functions",
 					"name": "Functions",
-					"icon": "$(symbol-method)"
+					"icon": "$(symbol-method)",
+					"visibility": "visible"
+				},
+				{
+					"type": "webview",
+					"id": "hexcore.disassembler.graphView",
+					"name": "Graph View",
+					"icon": "$(type-hierarchy)",
+					"visibility": "collapsed"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.sections",
 					"name": "Sections",
-					"icon": "$(split-horizontal)"
+					"icon": "$(split-horizontal)",
+					"visibility": "collapsed"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.imports",
 					"name": "Imports",
-					"icon": "$(arrow-down)"
+					"icon": "$(arrow-down)",
+					"visibility": "collapsed"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.exports",
 					"name": "Exports",
-					"icon": "$(arrow-up)"
+					"icon": "$(arrow-up)",
+					"visibility": "collapsed"
 				},
 				{
 					"type": "tree",
 					"id": "hexcore.disassembler.strings",
 					"name": "Strings",
-					"icon": "$(quote)"
+					"icon": "$(quote)",
+					"visibility": "collapsed"
 				}
 			]
 		},
@@ -511,6 +747,13 @@
 					"minimum": 1,
 					"maximum": 16,
 					"description": "Number of concurrent logical worker slots in the HexCore pipeline job queue (Issue #25). Jobs that touch shared engine state are serialized for whole-job isolation; proven stateless byte tools may use the remaining parallelism. keepAlive session jobs retain sticky routing. Changing this takes effect on the NEXT window reload."
+				},
+				"hexcore.pipeline.staleRunningMs": {
+					"type": "integer",
+					"default": 900000,
+					"minimum": 60000,
+					"maximum": 86400000,
+					"description": "Age after which an unchanged pipeline status left in running state by a dead/blocked prior host is archived and marked recovered on startup."
 				},
 				"hexcore.pipeline.allowExternalOutDir": {
 					"type": "boolean",

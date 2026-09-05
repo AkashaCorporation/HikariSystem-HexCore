@@ -2,18 +2,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { BUILTIN_SIGNATURES } from './builtin.js';
 import type { HQLSignature } from '../types/hql.js';
-
-const SEVERITIES = new Set(['info', 'low', 'medium', 'high', 'critical']);
-
-function isSignature(value: unknown): value is HQLSignature {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) { return false; }
-  const v = value as Record<string, unknown>;
-  return typeof v.id === 'string' && v.id.length > 0 &&
-    typeof v.name === 'string' && typeof v.description === 'string' &&
-    typeof v.severity === 'string' && SEVERITIES.has(v.severity) &&
-    Array.isArray(v.queries) && v.queries.length > 0 &&
-    v.queries.every(query => query !== null && typeof query === 'object' && !Array.isArray(query));
-}
+import { assertValidSignature } from './schema.js';
+import { loadReleasedAtlasSignatures } from '../atlas/runtime.js';
 
 function collectSignatureFiles(root: string): string[] {
   if (!fs.existsSync(root)) { return []; }
@@ -33,29 +23,31 @@ function collectSignatureFiles(root: string): string[] {
 /** Load valid on-disk signatures in deterministic path order. */
 export function loadSignatureDirectory(root: string): HQLSignature[] {
   const signatures: HQLSignature[] = [];
+  const failures: string[] = [];
   for (const file of collectSignatureFiles(root)) {
     try {
       const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
-      if (!isSignature(parsed)) {
-        console.warn(`[HQL] Ignoring invalid signature schema: ${file}`);
-        continue;
-      }
+      assertValidSignature(parsed, file);
       signatures.push(parsed);
     } catch (error) {
-      console.warn(`[HQL] Ignoring unreadable signature ${file}: ${(error as Error).message}`);
+      failures.push((error as Error).message);
     }
+  }
+  if (failures.length > 0) {
+    throw new Error(`HQL signature library rejected ${failures.length} file(s):\n${failures.join('\n')}`);
   }
   return signatures;
 }
 
-/** Merge libraries by ID. Earlier entries win, so builtins remain authoritative. */
+/** Merge libraries by ID. Duplicate IDs fail closed. */
 export function mergeSignatureLibraries(
   ...libraries: ReadonlyArray<ReadonlyArray<HQLSignature>>
 ): HQLSignature[] {
   const byId = new Map<string, HQLSignature>();
   for (const library of libraries) {
     for (const signature of library) {
-      if (!byId.has(signature.id)) { byId.set(signature.id, signature); }
+      if (byId.has(signature.id)) throw new Error(`HQL duplicate signature ID: ${signature.id}`);
+      byId.set(signature.id, signature);
     }
   }
   return [...byId.values()];
@@ -67,14 +59,15 @@ let cachedDefault: HQLSignature[] | undefined;
 export function getDefaultSignatures(): HQLSignature[] {
   if (cachedDefault) { return cachedDefault; }
   const configured = process.env.HEXCORE_HQL_SIGNATURE_DIR;
-  const candidates = configured
-    ? [configured]
-    : [
-        path.resolve(__dirname, '../../signatures'),
-        path.resolve(process.cwd(), 'signatures'),
-      ];
-  const root = candidates.find(candidate => fs.existsSync(candidate));
-  const onDisk = root ? loadSignatureDirectory(root) : [];
-  cachedDefault = mergeSignatureLibraries(BUILTIN_SIGNATURES, onDisk);
+  const configuredAtlas = process.env.HEXCORE_HQL_ATLAS_PATH;
+  const atlasCandidates = configuredAtlas ? [configuredAtlas] : [
+    path.resolve(__dirname, '../hql-atlas.sqlite'),
+    path.resolve(__dirname, '../../dist/hql-atlas.sqlite'),
+  ];
+  const atlasPath = atlasCandidates.find(candidate => fs.existsSync(candidate));
+  cachedDefault = (configured
+    ? loadSignatureDirectory(configured)
+    : atlasPath ? loadReleasedAtlasSignatures(atlasPath) : [...BUILTIN_SIGNATURES])
+    .filter(signature => signature.status === undefined || signature.status === 'released');
   return cachedDefault;
 }

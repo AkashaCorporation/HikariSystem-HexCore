@@ -9,6 +9,11 @@ import type {
   HQLOperandCheck,
   HQLSignature,
   HQLMatchResult,
+  HQLCondition,
+  HQLEvidenceLevel,
+  HQLSemanticCondition,
+  HQLSemanticFact,
+  HQLSemanticQuery,
 } from '../types/hql.js';
 
 /**
@@ -40,6 +45,10 @@ function getChildren(node: CNode): CNode[] {
     // ── Statements ──
     case 'CBlockStmt':
       return [...node.body];
+    case 'CAssignStmt':
+      return node.value ? [node.target, node.value] : [node.target];
+    case 'CExprStmt':
+      return [node.expression];
     case 'CIfStmt':
       return node.else
         ? [node.condition, node.then, node.else]
@@ -86,6 +95,10 @@ function getChildren(node: CNode): CNode[] {
     case 'CGotoStmt':
     case 'CTypedefDecl':
     case 'CEnumDecl':
+    case 'CUnknownExpr':
+    case 'CUnknownStmt':
+    case 'CAsmStmt':
+    case 'CCommentStmt':
       return [];
   }
 }
@@ -99,6 +112,7 @@ function getOperands(node: CNode): CNode[] {
     case 'CBinaryExpr':
       return [node.left, node.right];
     case 'CUnaryExpr':
+    case 'CCastExpr':
       return [node.operand];
     case 'CCallExpr':
       return node.arguments;
@@ -116,8 +130,17 @@ function getOperands(node: CNode): CNode[] {
  * Supports: exact match, glob (*), and regex (re: prefix).
  */
 function matchValue(actual: unknown, expected: string | number | boolean): boolean {
-  if (typeof expected === 'boolean' || typeof expected === 'number') {
+  if (typeof expected === 'boolean') {
     return actual === expected;
+  }
+
+  if (typeof expected === 'number') {
+    if (actual === expected) return true;
+    if (Number.isSafeInteger(expected) && typeof actual === 'string') {
+      const exact = parseIntegerString(actual);
+      return exact !== undefined && exact === BigInt(expected);
+    }
+    return false;
   }
 
   // Regex match: "re:pattern"
@@ -126,8 +149,8 @@ function matchValue(actual: unknown, expected: string | number | boolean): boole
     return typeof actual === 'string' && new RegExp(pattern).test(actual);
   }
 
-  // Glob match: contains *
-  if (expected.includes('*')) {
+  // Glob match: contains * and is not the literal multiplication operator.
+  if (expected.length > 1 && expected.includes('*')) {
     const regex = new RegExp(
       '^' + expected.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*') + '$'
     );
@@ -135,7 +158,36 @@ function matchValue(actual: unknown, expected: string | number | boolean): boole
   }
 
   // Exact string match
+  const expectedInteger = parseIntegerString(expected);
+  if (expectedInteger !== undefined) {
+    if (typeof actual === 'number' && Number.isSafeInteger(actual)) return expectedInteger === BigInt(actual);
+    if (typeof actual === 'string') {
+      const actualInteger = parseIntegerString(actual);
+      if (actualInteger !== undefined) return expectedInteger === actualInteger;
+    }
+  }
   return actual === expected;
+}
+
+function parseIntegerString(value: string): bigint | undefined {
+  if (/^\d+$/.test(value) || /^0x[0-9a-f]+$/i.test(value)) return BigInt(value);
+  if (/^-\d+$/.test(value)) return BigInt(value);
+  if (/^-0x[0-9a-f]+$/i.test(value)) return -BigInt(value.slice(1));
+  return undefined;
+}
+
+interface ConditionEvaluation {
+  matched: boolean;
+  matches: CNode[];
+  satisfiedLeaves: number;
+  totalLeaves: number;
+}
+
+interface SemanticConditionEvaluation {
+  matched: boolean;
+  matches: HQLSemanticFact[];
+  satisfiedLeaves: number;
+  totalLeaves: number;
 }
 
 /**
@@ -187,22 +239,105 @@ export class HQLMatcher {
    * Evaluate a full HQL signature against an AST.
    * ALL queries in the signature must produce at least one match.
    */
-  evaluate(root: CNode, signature: HQLSignature): HQLMatchResult | null {
-    const allMatches: CNode[] = [];
-
-    for (const query of signature.queries) {
-      const matches = this.scan(root, query);
-      if (matches.length === 0) {
-        return null; // AND semantics: one miss = no fire
-      }
-      allMatches.push(...matches);
+  evaluate(root: CNode, signature: HQLSignature, semanticFacts: readonly HQLSemanticFact[] = []): HQLMatchResult | null {
+    const condition: HQLCondition | undefined = signature.condition ?? (signature.queries
+      ? { all: signature.queries.map(query => ({ query })) }
+      : undefined);
+    const evaluated = condition
+      ? this.evaluateCondition(root, condition)
+      : { matched: true, matches: [], satisfiedLeaves: 0, totalLeaves: 0 };
+    if (!evaluated.matched) return null;
+    const semantic = signature.semanticCondition
+      ? this.evaluateSemanticCondition(semanticFacts, signature.semanticCondition)
+      : { matched: true, matches: [], satisfiedLeaves: 0, totalLeaves: 0 };
+    if (!semantic.matched) return null;
+    const allMatches = [...new Set(evaluated.matches)];
+    const adapterCoverage = root.kind === 'CFunctionDecl' ? root.adapterCoverage?.coverage : undefined;
+    const absenceDependsOnCompleteAst = condition ? this.conditionReliesOnAbsence(condition) : false;
+    const adapterLossAffected = allMatches.some(node => this.containsLossyNode(node)) ||
+      (absenceDependsOnCompleteAst && adapterCoverage !== undefined && adapterCoverage < 1);
+    const requestedLevel = signature.evidenceLevel ?? 'signal';
+    let evidenceLevel = adapterLossAffected
+      ? this.downgradeEvidenceLevel(requestedLevel)
+      : requestedLevel;
+    if (semantic.matches.length > 0) {
+      const semanticCeiling = semantic.matches.reduce<HQLEvidenceLevel>((ceiling, fact) =>
+        this.lowerEvidenceLevel(ceiling, fact.proofStatus), 'proven');
+      evidenceLevel = this.lowerEvidenceLevel(evidenceLevel, semanticCeiling);
     }
 
     return {
       signatureId: signature.id,
       matches: allMatches,
-      confidence: this.computeConfidence(allMatches, signature),
+      ...(semantic.matches.length > 0 ? { semanticMatches: [...new Set(semantic.matches)] } : {}),
+      structuralCompleteness: evaluated.totalLeaves + semantic.totalLeaves > 0
+        ? (evaluated.satisfiedLeaves + semantic.satisfiedLeaves) / (evaluated.totalLeaves + semantic.totalLeaves)
+        : 0,
+      evidenceLevel,
+      ...(signature.calibration && !adapterLossAffected ? { confidence: signature.calibration.confidence } : {}),
+      ...(adapterCoverage !== undefined ? { adapterCoverage } : {}),
+      ...(adapterLossAffected ? { adapterLossAffected: true } : {}),
     };
+  }
+
+  evaluateSemanticCondition(facts: readonly HQLSemanticFact[], condition: HQLSemanticCondition): SemanticConditionEvaluation {
+    if ('fact' in condition) {
+      const matches = facts.filter(fact => this.matchSemanticFact(fact, condition.fact));
+      return { matched: matches.length > 0, matches, satisfiedLeaves: matches.length > 0 ? 1 : 0, totalLeaves: 1 };
+    }
+    if ('all' in condition) {
+      const parts = condition.all.map(child => this.evaluateSemanticCondition(facts, child));
+      return { matched: parts.length > 0 && parts.every(part => part.matched), matches: parts.flatMap(part => part.matches), satisfiedLeaves: parts.reduce((sum, part) => sum + part.satisfiedLeaves, 0), totalLeaves: parts.reduce((sum, part) => sum + part.totalLeaves, 0) };
+    }
+    if ('any' in condition) {
+      const parts = condition.any.map(child => this.evaluateSemanticCondition(facts, child));
+      const matched = parts.filter(part => part.matched);
+      return { matched: matched.length > 0, matches: matched.flatMap(part => part.matches), satisfiedLeaves: matched.length > 0 ? 1 : 0, totalLeaves: 1 };
+    }
+    if ('not' in condition) {
+      const inner = this.evaluateSemanticCondition(facts, condition.not);
+      return { matched: !inner.matched, matches: [], satisfiedLeaves: inner.matched ? 0 : 1, totalLeaves: 1 };
+    }
+    const matches = facts.filter(fact => this.matchSemanticFact(fact, condition.count.fact));
+    const { exactly, min, max } = condition.count;
+    const matched = exactly !== undefined ? matches.length === exactly : matches.length >= (min ?? 1) && matches.length <= (max ?? Infinity);
+    return { matched, matches: matched ? matches : [], satisfiedLeaves: matched ? 1 : 0, totalLeaves: 1 };
+  }
+
+  evaluateCondition(root: CNode, condition: HQLCondition): ConditionEvaluation {
+    if ('query' in condition) {
+      const matches = this.scan(root, condition.query);
+      return { matched: matches.length > 0, matches, satisfiedLeaves: matches.length > 0 ? 1 : 0, totalLeaves: 1 };
+    }
+    if ('all' in condition) {
+      const parts = condition.all.map(child => this.evaluateCondition(root, child));
+      return {
+        matched: parts.length > 0 && parts.every(part => part.matched),
+        matches: parts.flatMap(part => part.matches),
+        satisfiedLeaves: parts.reduce((sum, part) => sum + part.satisfiedLeaves, 0),
+        totalLeaves: parts.reduce((sum, part) => sum + part.totalLeaves, 0),
+      };
+    }
+    if ('any' in condition) {
+      const parts = condition.any.map(child => this.evaluateCondition(root, child));
+      const matchedParts = parts.filter(part => part.matched);
+      return {
+        matched: matchedParts.length > 0,
+        matches: matchedParts.flatMap(part => part.matches),
+        satisfiedLeaves: matchedParts.length > 0 ? 1 : 0,
+        totalLeaves: 1,
+      };
+    }
+    if ('not' in condition) {
+      const inner = this.evaluateCondition(root, condition.not);
+      return { matched: !inner.matched, matches: [], satisfiedLeaves: inner.matched ? 0 : 1, totalLeaves: 1 };
+    }
+    const matches = this.scan(root, condition.count.query);
+    const { exactly, min, max } = condition.count;
+    const matched = exactly !== undefined
+      ? matches.length === exactly
+      : matches.length >= (min ?? 1) && matches.length <= (max ?? Infinity);
+    return { matched, matches: matched ? matches : [], satisfiedLeaves: matched ? 1 : 0, totalLeaves: 1 };
   }
 
   // ─── Private ───
@@ -228,6 +363,16 @@ export class HQLMatcher {
       }
     }
     return true;
+  }
+
+  private matchSemanticFact(fact: HQLSemanticFact, query: HQLSemanticQuery): boolean {
+    if (fact.kind !== query.fact) return false;
+    return (query.attributes ?? []).every(attribute => matchValue(fact.attributes[attribute.field], attribute.value));
+  }
+
+  private lowerEvidenceLevel(left: HQLEvidenceLevel, right: HQLEvidenceLevel): HQLEvidenceLevel {
+    const rank: Record<HQLEvidenceLevel, number> = { signal: 0, candidate: 1, proven: 2 };
+    return rank[left] <= rank[right] ? left : right;
   }
 
   /** Verify positional operands satisfy their sub-queries */
@@ -289,14 +434,23 @@ export class HQLMatcher {
     return false;
   }
 
-  /**
-   * Confidence heuristic — more unique matches = higher confidence.
-   * Trivial for now, can be upgraded with weighted scoring per node type.
-   */
-  private computeConfidence(matches: CNode[], signature: HQLSignature): number {
-    const uniqueKinds = new Set(matches.map(m => m.kind)).size;
-    const queryCount = signature.queries.length;
-    // Base: ratio of unique matched kinds to total queries, capped at 1.0
-    return Math.min(1.0, (uniqueKinds / queryCount) * 0.8 + 0.2);
+  /** Lossy adapter coverage can never retain a proven evidence claim. */
+  private downgradeEvidenceLevel(level: HQLEvidenceLevel): HQLEvidenceLevel {
+    return level === 'proven' ? 'candidate' : 'signal';
+  }
+
+  private containsLossyNode(node: CNode): boolean {
+    if (node.kind === 'CUnknownExpr' || node.kind === 'CUnknownStmt' || node.kind === 'CAsmStmt') {
+      return true;
+    }
+    return getChildren(node).some(child => this.containsLossyNode(child));
+  }
+
+  private conditionReliesOnAbsence(condition: HQLCondition): boolean {
+    if ('not' in condition) return true;
+    if ('count' in condition) return condition.count.exactly !== undefined || condition.count.max !== undefined;
+    if ('all' in condition) return condition.all.some(child => this.conditionReliesOnAbsence(child));
+    if ('any' in condition) return condition.any.some(child => this.conditionReliesOnAbsence(child));
+    return false;
   }
 }

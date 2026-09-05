@@ -30,6 +30,7 @@ const result = lifter.liftBytes(code, 0x401000);
 if (result.success) {
   console.log(result.ir);           // LLVM IR text
   console.log(result.bytesConsumed); // 6
+  console.log(result.semanticCoverage); // 1 for this scalar sample
 }
 
 lifter.close();
@@ -69,6 +70,13 @@ semantic helper bodies inlined into the lifted function.
 
 Async lift in a worker thread. Use for large buffers (>64KB).
 
+### Non-contiguous control flow
+
+`entryAddress` may identify a logical function entry inside a larger buffer.
+With `reachableOnly: true`, the lifter decodes the address-preserving window
+but emits only instructions reachable from that entry. This is used for
+callfuscation, where one function is scattered across an executable section.
+
 ### `LiftResult`
 
 ```typescript
@@ -78,8 +86,19 @@ Async lift in a worker thread. Use for large buffers (>64KB).
   error: string;        // Error message if !success
   address: number;      // Start address
   bytesConsumed: number; // Bytes consumed from input
+  decodedInstructions: number; // Before LLVM optimization
+  liftedInstructions: number;  // Concrete Remill semantics
+  unsupportedInstructions: number; // HandleUnsupported fallbacks
+  decodeFailureInstructions: number; // Decode, ISEL, or semantic-lifter failures
+  semanticCoverage: number; // lifted / semantic attempts, range 0..1
+  unsupportedOpcodes: Record<string, number>;
 }
 ```
+
+Semantic counts are collected before LLVM optimization. This prevents dead-code
+elimination from making an incomplete lift appear complete; consequently, the
+unsupported count can be higher than the surviving `HandleUnsupported` calls in
+the final textual IR.
 
 ### `RemillLifter.getSupportedArchs() → string[]`
 

@@ -267,4 +267,40 @@ suite('ELF symbol function-boundary reconciliation', () => {
 			[0x5A710]
 		);
 	});
+
+	test('ET_REL canonicalizes the numeric table to .text and drops interior discoveries', () => {
+		const { engine, mutable } = buildEngine([
+			symbol('wrong_section_alias', 0x100, 0x90, '.init.text'),
+			symbol('text_owner', 0x100, 0x40, '.text'),
+			symbol('text_next', 0x140, 0x20, '.text'),
+			symbol('text_missing', 0x180, 0x10, '.text'),
+		]);
+		mutable.functions.clear();
+		mutable.functions.set(0x80, {
+			address: 0x80, name: 'sub_80', size: 0x90, endAddress: 0x110,
+			instructions: [instruction(0x80)], callers: [], callees: []
+		});
+		mutable.functions.set(0x100, {
+			address: 0x100, name: 'wrong_section_alias', size: 0x90, endAddress: 0x190,
+			instructions: [instruction(0x100), instruction(0x150)], callers: [], callees: []
+		});
+		mutable.functions.set(0x110, {
+			address: 0x110, name: 'sub_110', size: 0x30, endAddress: 0x140,
+			instructions: [instruction(0x110)], callers: [], callees: []
+		});
+		mutable.functions.set(0x140, {
+			address: 0x140, name: 'text_next', size: 0x20, endAddress: 0x160,
+			instructions: [instruction(0x140)], callers: [], callees: []
+		});
+
+		mutable.reconcileFunctionsWithElfSymbols();
+
+		assert.strictEqual(engine.getFunctionAt(0x80), undefined, 'container spanning a real begin is removed');
+		assert.strictEqual(engine.getFunctionAt(0x110), undefined, 'interior prologue discovery is removed');
+		assert.strictEqual(engine.getFunctionAt(0x100)?.name, 'text_owner');
+		assert.strictEqual(engine.getFunctionAt(0x100)?.endAddress, 0x140);
+		assert.deepStrictEqual(engine.getFunctionAt(0x100)?.instructions.map(inst => inst.address), [0x100]);
+		assert.strictEqual(engine.getFunctionAt(0x180)?.name, 'text_missing', 'missing .text symbol becomes a lazy stub');
+		assert.strictEqual(engine.getFunctionAt(0x180)?.endAddress, 0x190);
+	});
 });

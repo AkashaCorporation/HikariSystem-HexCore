@@ -24,12 +24,15 @@ export interface ApiCallLog {
 
 type ApiHandler = (args: bigint[]) => bigint;
 
+const API_CALL_LOG_MAX_ENTRIES = 20000;
+
 export class LinuxApiHooks {
 	private emulator: UnicornWrapper;
 	private memoryManager: MemoryManager;
 	private architecture: ArchitectureType;
 	private handlers: Map<string, ApiHandler> = new Map();
 	private callLog: ApiCallLog[] = [];
+	private lastCall: ApiCallLog | undefined;
 	private lastErrno: number = 0;
 
 	// Emulated state
@@ -55,12 +58,21 @@ export class LinuxApiHooks {
 	private prng: PRNG | undefined;
 	private prngMode: PrngMode;
 
-	constructor(emulator: UnicornWrapper, memoryManager: MemoryManager, arch: ArchitectureType, prngMode: PrngMode = 'stub') {
+	constructor(
+		emulator: UnicornWrapper,
+		memoryManager: MemoryManager,
+		arch: ArchitectureType,
+		prngMode: PrngMode = 'stub',
+		initialPrngSeed?: number,
+	) {
 		this.emulator = emulator;
 		this.memoryManager = memoryManager;
 		this.architecture = arch;
 		this.prngMode = prngMode;
 		this.prng = createPRNG(prngMode);
+		if (this.prng && initialPrngSeed !== undefined) {
+			this.prng.seed(initialPrngSeed);
+		}
 		this.registerAllHandlers();
 	}
 
@@ -181,7 +193,7 @@ export class LinuxApiHooks {
 		const formattedArgs = args.map(a => '0x' + a.toString(16));
 		const timestamp = Date.now();
 
-		this.callLog.push({
+		this.recordCallLog({
 			dll: library,
 			name,
 			args,
@@ -1321,7 +1333,7 @@ export class LinuxApiHooks {
 				break;
 		}
 
-		this.callLog.push({
+		this.recordCallLog({
 			dll: 'syscall',
 			name: `sys_${syscallNum}`,
 			args: args.slice(0, 3),
@@ -1355,10 +1367,18 @@ export class LinuxApiHooks {
 
 	clearCallLog(): void {
 		this.callLog = [];
+		this.lastCall = undefined;
 	}
 
 	getLastCall(): ApiCallLog | undefined {
-		return this.callLog[this.callLog.length - 1];
+		return this.lastCall;
+	}
+
+	private recordCallLog(entry: ApiCallLog): void {
+		this.lastCall = entry;
+		if (this.callLog.length < API_CALL_LOG_MAX_ENTRIES) {
+			this.callLog.push(entry);
+		}
 	}
 
 	hasHandler(name: string): boolean {

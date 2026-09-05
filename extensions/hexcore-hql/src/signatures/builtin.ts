@@ -1,85 +1,43 @@
-// ─── Built-in HQL signature library ───
-// A starter set of semantic signatures over the Helix C-AST. These are
-// architecture/compiler independent: they match algorithmic STRUCTURE, not bytes.
-// Extend freely; each is a named behavioral pattern.
+// Backwards-compatible export name for the packaged canonical rule library.
+// The source of truth is signatures/**/*.hql.json; no rules live in TypeScript.
 
+import * as fs from 'fs';
+import * as path from 'path';
 import type { HQLSignature } from '../types/hql.js';
+import { assertValidSignature } from './schema.js';
 
-const FNV32_PRIME = 16777619;        // 0x01000193
-const FNV64_PRIME = 1099511628211;   // 0x100000001b3
-const CRC32_POLY_REV = 0xEDB88320;   // reversed CRC-32 polynomial
+function collect(root: string): string[] {
+  const files: string[] = [];
+  const visit = (dir: string): void => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) visit(full);
+      else if (entry.isFile() && entry.name.endsWith('.hql.json')) files.push(full);
+    }
+  };
+  visit(root);
+  return files;
+}
 
-export const BUILTIN_SIGNATURES: HQLSignature[] = [
-  {
-    id: 'crypto.fnv1',
-    name: 'FNV hash (32-bit)',
-    description: 'A multiply by the 32-bit FNV prime (0x01000193) -- the core mixing step of FNV-1/FNV-1a string hashing.',
-    severity: 'info',
-    queries: [
-      {
-        target: 'CBinaryExpr',
-        attributes: [{ field: 'operator', value: 're:^\\*=?$' }],
-        contains: [{ target: 'CIntLitExpr', attributes: [{ field: 'value', value: FNV32_PRIME }] }],
-      },
-    ],
-  },
-  {
-    id: 'crypto.fnv1_64',
-    name: 'FNV hash (64-bit)',
-    description: 'A multiply by the 64-bit FNV prime (0x100000001b3).',
-    severity: 'info',
-    queries: [
-      {
-        target: 'CBinaryExpr',
-        attributes: [{ field: 'operator', value: 're:^\\*=?$' }],
-        contains: [{ target: 'CIntLitExpr', attributes: [{ field: 'value', value: FNV64_PRIME }] }],
-      },
-    ],
-  },
-  {
-    id: 'crypto.crc32',
-    name: 'CRC-32',
-    description: 'The reversed CRC-32 polynomial 0xEDB88320 as a constant -- table init or bit-by-bit CRC.',
-    severity: 'info',
-    queries: [
-      { target: 'CIntLitExpr', attributes: [{ field: 'value', value: CRC32_POLY_REV }] },
-    ],
-  },
-  {
-    id: 'crypto.xor_present',
-    name: 'XOR mixing',
-    description: 'A bitwise-XOR expression in the function -- byte mixing, simple obfuscation, or a stream cipher step.',
-    severity: 'low',
-    mitre: ['T1027'],
-    queries: [
-      {
-        target: 'CFunctionDecl',
-        contains: [{ target: 'CBinaryExpr', attributes: [{ field: 'operator', value: 're:^\\^=?$' }] }],
-      },
-    ],
-  },
-  {
-    id: 'struct.guarded_loop',
-    name: 'Guarded loop',
-    description: 'A loop nested inside a guard (if -> do/while) -- init-once, stack-probe (__chkstk), or lazy-init patterns.',
-    severity: 'info',
-    queries: [
-      { target: 'CIfStmt', contains: [{ target: 'CDoWhileStmt' }] },
-    ],
-  },
-  {
-    id: 'algo.multiply_xor_loop',
-    name: 'Multiply-XOR hash loop',
-    description: 'A loop body combining a multiply and a XOR -- the shape of most rolling/avalanche hash functions (FNV, DJB-variants, custom).',
-    severity: 'low',
-    queries: [
-      {
-        target: 'CFunctionDecl',
-        contains: [
-          { target: 'CBinaryExpr', attributes: [{ field: 'operator', value: 're:^\\*=?$' }] },
-          { target: 'CBinaryExpr', attributes: [{ field: 'operator', value: 're:^\\^=?$' }] },
-        ],
-      },
-    ],
-  },
-];
+function canonicalRoot(): string {
+  const candidates = [
+    path.resolve(__dirname, '../../signatures'),
+    path.resolve(process.cwd(), 'signatures'),
+  ];
+  const root = candidates.find(candidate => fs.existsSync(candidate));
+  if (!root) throw new Error(`HQL canonical signature directory not found: ${candidates.join(', ')}`);
+  return root;
+}
+
+function loadCanonicalLibrary(): HQLSignature[] {
+  const byId = new Map<string, HQLSignature>();
+  for (const file of collect(canonicalRoot())) {
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assertValidSignature(parsed, file);
+    if (byId.has(parsed.id)) throw new Error(`HQL duplicate canonical rule ID ${parsed.id}: ${file}`);
+    byId.set(parsed.id, parsed);
+  }
+  return [...byId.values()].filter(signature => signature.status === 'released');
+}
+
+export const BUILTIN_SIGNATURES: HQLSignature[] = loadCanonicalLibrary();

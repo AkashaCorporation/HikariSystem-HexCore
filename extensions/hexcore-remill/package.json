@@ -1,6 +1,6 @@
 {
   "name": "hexcore-remill",
-  "version": "0.5.1",
+  "version": "0.5.4",
   "description": "HikariSystem fork of Remill N-API bindings — customized for the HexCore-Helix decompiler pipeline",
   "main": "./index.js",
   "module": "./index.mjs",
@@ -44,7 +44,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-      "url": "https://github.com/AkashaCorporation/hexcore-remill.git"
+    "url": "https://github.com/AkashaCorporation/hexcore-remill.git"
   },
   "bugs": {
     "url": "https://github.com/AkashaCorporation/hexcore-remill/issues"
@@ -73,7 +73,9 @@
     "README.md"
   ],
   "binary": {
-    "napi_versions": [8]
+    "napi_versions": [
+      8
+    ]
   },
   "devDependencies": {}
 }

@@ -414,4 +414,25 @@ suite('Property 2: Preservation — Existing Behavior Unchanged for Non-Buggy In
 			}
 		}
 	});
+
+	test('bounded search stops before materializing every matching string', async () => {
+		const engine = new DisassemblerEngine();
+		const strings = new Map<number, StringReference>();
+		for (let index = 0; index < 20; index++) {
+			const address = 0x500000 + index * 0x10;
+			strings.set(address, {
+				address,
+				string: `health_${index}`,
+				encoding: 'ascii',
+				references: [0x401000 + index]
+			});
+		}
+		(engine as any).strings = strings;
+
+		const results = await engine.searchStringReferences('health', 5);
+		assert.strictEqual(results.length, 5);
+		assert.deepStrictEqual(results.map((result: StringReference) => result.string), [
+			'health_0', 'health_1', 'health_2', 'health_3', 'health_4'
+		]);
+	});
 });

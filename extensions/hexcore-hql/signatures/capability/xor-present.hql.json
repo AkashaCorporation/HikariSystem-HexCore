@@ -1,0 +1,18 @@
+{
+  "id": "crypto.xor_present",
+  "version": "1.0.0",
+  "namespace": "crypto",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/crypto.xor_present.json" },
+  "limitations": ["XOR is ubiquitous and must never be promoted above signal without independent semantics."],
+  "name": "XOR mixing",
+  "description": "A bitwise-XOR expression in the function.",
+  "severity": "low",
+  "mitre": ["T1027"],
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CFunctionDecl", "contains": [{ "target": "CBinaryExpr", "attributes": [{ "field": "operator", "value": "re:^\\^=?$" }] }] } }
+}

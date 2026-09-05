@@ -21,6 +21,8 @@ interface ComposeReportArgs {
 	output?: { path: string };
 	/** Suppress UI messages. */
 	quiet?: boolean;
+	/** Inline every source body. Defaults to false; sources stay as attachments. */
+	includeFullSources?: boolean;
 }
 
 /**
@@ -114,7 +116,10 @@ async function composeReport(
 	}
 
 	// Scan for report files
-	const sources = aggregator.scanReportsDirectory(reportsDir);
+	const sources = aggregator.scanReportsDirectory(
+		reportsDir,
+		options.output?.path ? [options.output.path] : [],
+	);
 	if (sources.length === 0) {
 		throw new Error('No reports found in hexcore-reports/. Directory is empty or contains no .md/.json files.');
 	}
@@ -143,7 +148,9 @@ async function composeReport(
 		);
 
 	// Generate Markdown
-	const markdown = aggregator.toMarkdown(report);
+	const markdown = options.includeFullSources === true
+		? aggregator.toMarkdown(report)
+		: aggregator.toSummaryMarkdown(report);
 
 	// Save to output path if provided
 	if (options.output) {

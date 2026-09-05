@@ -4,6 +4,7 @@ import {
 	PE32_MAX_STAGNANT_BATCHES,
 	UnicornWrapper,
 } from './unicornWrapper';
+import { DebugEngine } from './debugEngine';
 
 suite('PE32 worker stagnant-progress guard (#48)', () => {
 	test('counts a zero-instruction batch when PC does not move', () => {
@@ -111,5 +112,109 @@ suite('PE32 worker stagnant-progress guard (#48)', () => {
 
 		assert.deepStrictEqual(workerWrites, [{ address: outputPtr, data: output }]);
 		assert.deepStrictEqual(wrapper.deferredMemoryWrites, []);
+	});
+
+	test('stops on a breakpoint reached inside a PE32 worker batch', async () => {
+		const entry = 0x401000n;
+		const breakpoint = 0x40178en;
+		let workerPc = entry;
+		let observedTerminals: bigint[] = [];
+		const wrapper = Object.create(UnicornWrapper.prototype) as any;
+		wrapper._pe32Worker = {
+			regRead: async () => workerPc,
+			executeBatch: async (_start: bigint, _count: number, terminals: bigint[]) => {
+				observedTerminals = terminals;
+				workerPc = breakpoint;
+				return {
+					instructionsExecuted: 37,
+					pc: breakpoint,
+					error: null,
+					faultInfo: null,
+					stubHit: false,
+					stubAddress: null,
+					stopped: true,
+				};
+			},
+		};
+		wrapper.unicornModule = { X86_REG: { EIP: 1, EAX: 2 } };
+		wrapper.architecture = 'x86';
+		wrapper.state = {
+			isRunning: false, isPaused: false, isReady: false,
+			currentAddress: entry, instructionsExecuted: 0,
+		};
+		wrapper.breakpoints = new Set([breakpoint]);
+		wrapper.codeHooks = new Map();
+		wrapper.deferredMemoryWrites = [];
+		wrapper.deferredRegisterWrites = new Map();
+		wrapper._pe32StubRangeStart = 0x72000000n;
+		wrapper._pe32StubRangeEnd = 0x72040000n;
+		wrapper._pe32StubRangesExtra = [];
+
+		await wrapper.startPe32Worker(entry, 0n, 10_000);
+
+		assert.ok(observedTerminals.includes(breakpoint));
+		assert.strictEqual(wrapper.state.currentAddress, breakpoint);
+		assert.strictEqual(wrapper.state.isPaused, true);
+		assert.strictEqual(wrapper.state.instructionsExecuted, 37);
+	});
+
+	test('new PE32 run clears a stale fault before reporting a breakpoint', async () => {
+		const breakpoint = 0x40178en;
+		const wrapper = Object.create(UnicornWrapper.prototype) as any;
+		wrapper._pe32Worker = {
+			// PE32/x86 native register reads are numbers at runtime even though the
+			// cross-architecture client also supports bigint for x64.
+			regRead: async () => Number(breakpoint),
+			executeBatch: async () => ({
+				instructionsExecuted: 1, pc: Number(breakpoint), error: null, faultInfo: null,
+				stubHit: false, stubAddress: null, stopped: true,
+			}),
+		};
+		wrapper.unicornModule = { X86_REG: { EIP: 1, EAX: 2 } };
+		wrapper.architecture = 'x86';
+		wrapper.state = {
+			isRunning: false, isPaused: false, isReady: false,
+			currentAddress: 0x401000n, instructionsExecuted: 0,
+			lastError: 'UC_ERR_READ_UNMAPPED from a repaired prior run',
+		};
+		wrapper.lastError = wrapper.state.lastError;
+		wrapper._lastFaultInfo = { address: '0xdeadbeef' };
+		wrapper.breakpoints = new Set([breakpoint]);
+		wrapper.codeHooks = new Map();
+		wrapper.deferredMemoryWrites = [];
+		wrapper.deferredRegisterWrites = new Map();
+		wrapper._pe32StubRangeStart = 0x72000000n;
+		wrapper._pe32StubRangeEnd = 0x72040000n;
+		wrapper._pe32StubRangesExtra = [];
+
+		await wrapper.start(0x401000n, 0n, 0, 10);
+
+		assert.strictEqual(wrapper.state.currentAddress, breakpoint);
+		assert.strictEqual(wrapper.state.lastError, undefined);
+		assert.strictEqual(wrapper.getLastFaultInfo(), undefined);
+		assert.strictEqual(wrapper.state.isPaused, true);
+	});
+
+	test('captures configured artifacts once when execution stops at a breakpoint', async () => {
+		const address = 0x40178en;
+		const engine = Object.create(DebugEngine.prototype) as any;
+		engine.emulator = {
+			getState: () => ({ currentAddress: address, instructionsExecuted: 209 }),
+			getBreakpoints: () => [address],
+		};
+		engine.emulationOptions = {
+			breakpointConfigs: [{ address: '0x40178e', autoSnapshot: true }],
+		};
+		const captured: unknown[] = [];
+		const dumpTriggers: string[] = [];
+		engine.takeBreakpointSnapshot = async (config: unknown) => { captured.push(config); };
+		engine.collectMemoryDumps = async (trigger: string) => { dumpTriggers.push(trigger); };
+
+		await engine.captureBreakpointArtifacts();
+		await engine.captureBreakpointArtifacts();
+
+		assert.strictEqual(captured.length, 1);
+		assert.deepStrictEqual(captured[0], { address: '0x40178e', autoSnapshot: true });
+		assert.deepStrictEqual(dumpTriggers, ['breakpoint']);
 	});
 });

@@ -1,23 +1,7 @@
 /*---------------------------------------------------------------------------------------------
- *  HexCore Refcount Audit Scanner v0.1 — Milestone 2.1 (P0)
- *
- *  Automates four recurring kernel vulnerability patterns (refcount
- *  mismanagement, force-variant refcount bypass, dereference-after-failed-get,
- *  reachable crash primitive) surfaced during HexCore battle-testing on Linux
- *  GPU kernel drivers and Windows kernel drivers.
- *
- *  Scans decompiled C output (from Helix or any C-like source) for:
- *    - Pattern A — "get()" before error check without matching "put()" on error path
- *    - Pattern B — `_force` variants that bypass refcounting
- *    - Pattern C — unconditional operation after a failed refcount get()
- *    - Pattern E — reachable BUG_ON / panic / WARN_ON in error paths
- *
- *  Pattern D (lock-drop-reacquire with stale pointer) requires proper CFG
- *  dataflow analysis and is deferred to v0.2.
- *
- *  The scanner is regex + label-tracking based, not a full AST parser. That
- *  matches the doc's "AST-level or regex-based" contract and keeps the module
- *  zero-dep. False positives are filtered via heuristic confidence scoring.
+ *  Textual refcount review, schema v2. Pattern matches are unproven signals,
+ *  not security findings. Diagnostic calls are separate observations and do
+ *  not establish reachability. This module is not an AST/CFG analyzer.
  *
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
@@ -25,6 +9,11 @@
 export type RefcountPattern = 'A' | 'B' | 'C' | 'E' | 'F';
 
 export interface RefcountAuditFinding {
+	evidenceLevel?: 'signal';
+	proofStatus?: 'unproven';
+	confidenceKind?: 'heuristic-pattern-score';
+	/** Legacy severity is a review priority, not vulnerability severity. */
+	severityKind?: 'review-priority';
 	/** Which detection pattern fired */
 	pattern: RefcountPattern;
 	/** 'high' | 'medium' | 'low' — qualitative triage weight */
@@ -50,6 +39,12 @@ export interface RefcountAuditFinding {
 }
 
 export interface RefcountAuditReport {
+	schemaVersion: 2;
+	evidenceLevel: 'signal';
+	proofStatus: 'unproven';
+	limitations: string[];
+	scanCoverage: { status: 'ok' | 'partial'; reasons: string[]; skippedLines: number[] };
+	observations: RefcountDiagnosticObservation[];
 	inputFile: string;
 	fileSize: number;
 	scannedLines: number;
@@ -64,6 +59,22 @@ export interface RefcountAuditReport {
 	/** Scan duration in milliseconds */
 	scanTimeMs: number;
 }
+
+export interface RefcountDiagnosticObservation {
+	kind: 'assertion' | 'warning' | 'termination';
+	symbol: string;
+	functionName: string;
+	line: number;
+	snippet: string;
+	reachability: 'not-assessed';
+	vulnerabilityStatus: 'not-assessed';
+}
+
+const SCAN_LIMITATIONS = [
+	'Textual pattern review only; no CFG, dominance, alias, ownership, reachability or concurrency proof.',
+	'Legacy confidence and severity describe heuristic review priority, not vulnerability probability or impact.',
+	'No matches does not prove the absence of a vulnerability.',
+];
 
 // ---------------------------------------------------------------------------
 // Constants — curated from Linux kernel + Windows driver refcount APIs
@@ -108,11 +119,6 @@ const FORCE_VARIANT_NAMES: RegExp = /\b[a-zA-Z_][a-zA-Z0-9_]*_force(?:_release|_
 const CRASH_PRIMITIVES: RegExp = /\b(BUG_ON|BUG|panic|KeBugCheck(?:Ex)?|WARN_ON_ONCE|WARN_ON|assert|__builtin_trap)\s*\(/;
 
 /**
- * Heuristic: words that signal an error-path label in decompiled C.
- */
-const ERROR_LABEL_PATTERN: RegExp = /^\s*(err|error|fail|cleanup|unwind|rollback|out_err|bad|oom|abort)[a-z_0-9]*\s*:/i;
-
-/**
  * Pattern A (raw): a refcount FIELD being incremented directly (`x->count++`,
  * `x.refcount += 1`) rather than through a get()-family call. Pattern A's
  * REFCOUNT_PAIRS are call-based and CANNOT match a raw increment (e.g.
@@ -153,6 +159,8 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 		// Public-API surface: a non-string input previously threw an unguarded
 		// TypeError ("Cannot read properties of undefined (reading 'split')").
 		return {
+			schemaVersion: 2, evidenceLevel: 'signal', proofStatus: 'unproven', limitations: [...SCAN_LIMITATIONS],
+			scanCoverage: { status: 'partial', reasons: ['invalid-source'], skippedLines: [] }, observations: [],
 			inputFile: filePath, fileSize: 0, scannedLines: 0, functionsScanned: 0,
 			findings: [],
 			summary: { total: 0, byPattern: { A: 0, B: 0, C: 0, E: 0, F: 0 }, bySeverity: { high: 0, medium: 0, low: 0 }, highestConfidence: 0 },
@@ -161,15 +169,37 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 	}
 	const startedAt = Date.now();
 	const lines = source.split(/\r?\n/);
-	const fns = extractFunctions(source);
+	const masked = maskNonCode(source);
+	const codeLines = masked.code.split(/\r?\n/);
+	const skippedLines: number[] = [];
+	for (let i = 0; i < codeLines.length; i++) {
+		if (codeLines[i].length > MAX_SCAN_LINE_LEN) {
+			skippedLines.push(i + 1);
+			codeLines[i] = '';
+		}
+	}
+	const code = codeLines.join('\n');
+	const fns = extractFunctions(code);
+	const reasons = [...masked.reasons];
+	if (skippedLines.length) { reasons.push('line-limit-exceeded'); }
+	if (!fns.length) { reasons.push('no-functions-scanned'); }
+	if (fns.some(fn => fn.complete === false)) { reasons.push('incomplete-function'); }
+	const covered = new Set<number>();
+	for (const fn of fns) {
+		for (let line = fn.signatureLine ?? fn.startLine; line <= fn.endLine; line++) { covered.add(line); }
+	}
+	if (codeLines.some((line, i) => line.trim() && !covered.has(i + 1))) {
+		reasons.push('source-outside-recognized-functions');
+	}
 	const findings: RefcountAuditFinding[] = [];
+	const observations: RefcountDiagnosticObservation[] = [];
 
 	for (const fn of fns) {
 		findings.push(...detectPatternA(fn, source, lines));
 		findings.push(...detectPatternARaw(fn, source, lines));
 		findings.push(...detectPatternB(fn, source, lines));
 		findings.push(...detectPatternC(fn, source, lines));
-		findings.push(...detectPatternE(fn, source, lines));
+		observations.push(...collectDiagnostics(fn, lines));
 	}
 
 	// Pattern F is pairwise (cross-function), so it runs once over all functions.
@@ -178,17 +208,17 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 	// Also scan lines outside any detected function — covers hand-written
 	// helpers whose boundaries the brace-matcher misses.
 	if (fns.length === 0) {
-		const synthetic: Fn = { name: '<top-level>', startLine: 1, endLine: lines.length, bodyLines: lines };
+		const synthetic: Fn = { name: '<top-level>', startLine: 1, endLine: lines.length, bodyLines: codeLines };
 		findings.push(...detectPatternA(synthetic, source, lines));
 		findings.push(...detectPatternARaw(synthetic, source, lines));
 		findings.push(...detectPatternB(synthetic, source, lines));
 		findings.push(...detectPatternC(synthetic, source, lines));
-		findings.push(...detectPatternE(synthetic, source, lines));
+		observations.push(...collectDiagnostics(synthetic, lines));
 	}
 
 	// Deduplicate — two patterns can catch the same line, keep the highest-
 	// severity/confidence one.
-	const deduped = dedupeFindings(findings);
+	const deduped = dedupeFindings(findings).map(asUnprovenSignal);
 
 	const byPattern: Record<RefcountPattern, number> = { A: 0, B: 0, C: 0, E: 0, F: 0 };
 	const bySeverity = { high: 0, medium: 0, low: 0 };
@@ -200,8 +230,10 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 	}
 
 	return {
+		schemaVersion: 2, evidenceLevel: 'signal', proofStatus: 'unproven', limitations: [...SCAN_LIMITATIONS],
+		scanCoverage: { status: reasons.length ? 'partial' : 'ok', reasons, skippedLines }, observations,
 		inputFile: filePath,
-		fileSize: source.length,
+		fileSize: Buffer.byteLength(source, 'utf8'),
 		scannedLines: lines.length,
 		functionsScanned: fns.length,
 		findings: deduped.sort((a, b) => b.confidence - a.confidence),
@@ -222,6 +254,8 @@ export function auditRefcount(source: string, filePath: string): RefcountAuditRe
 
 interface Fn {
 	name: string;
+	signatureLine?: number;
+	complete?: boolean;
 	startLine: number; // 1-based line of the opening brace (or signature)
 	endLine: number;
 	bodyLines: string[]; // slice of the original source lines, inclusive
@@ -256,22 +290,25 @@ function extractFunctions(source: string): Fn[] {
 		// Walk to matching close brace
 		let depth = 0;
 		let endLine = -1;
+		let complete = false;
 		for (let j = braceOpenLine; j < lines.length; j++) {
 			for (const ch of lines[j]) {
 				if (ch === '{') { depth++; }
 				else if (ch === '}') {
 					depth--;
-					if (depth === 0) { endLine = j; break; }
+					if (depth === 0) { endLine = j; complete = true; break; }
 				}
 			}
 			if (endLine !== -1) { break; }
 			// Safety cap
 			if (j - braceOpenLine > 5000) { endLine = j; break; }
 		}
-		if (endLine === -1) { continue; }
+		if (endLine === -1) { endLine = lines.length - 1; }
 
 		fns.push({
 			name,
+			signatureLine: i + 1,
+			complete,
 			startLine: braceOpenLine + 1,
 			endLine: endLine + 1,
 			bodyLines: lines.slice(braceOpenLine, endLine + 1),
@@ -568,61 +605,77 @@ function detectPatternC(fn: Fn, _source: string, lines: string[]): RefcountAudit
 // Pattern E — Reachable BUG_ON / panic in error paths
 // ---------------------------------------------------------------------------
 
-function detectPatternE(fn: Fn, _source: string, lines: string[]): RefcountAuditFinding[] {
-	const findings: RefcountAuditFinding[] = [];
-
+function collectDiagnostics(fn: Fn, lines: string[]): RefcountDiagnosticObservation[] {
+	const observations: RefcountDiagnosticObservation[] = [];
+	const calls = new RegExp(CRASH_PRIMITIVES.source, 'g');
 	for (let i = 0; i < fn.bodyLines.length; i++) {
-		const ln = fn.bodyLines[i];
-		const m = CRASH_PRIMITIVES.exec(ln);
-		if (!m) { continue; }
-		// Skip obvious sanity checks on build-time constants (`BUILD_BUG_ON`)
-		if (/\bBUILD_BUG_ON\b/.test(ln)) { continue; }
-
-		// Heuristic: is this BUG_ON gated by a condition that checks something
-		// attacker-controlled? Look upward for the nearest if() and see what it
-		// tests. If it's a NULL/allocation check, this is reachable via OOM or
-		// corrupted input.
-		let reachability: 'high' | 'medium' | 'low' = 'medium';
-		let context = '';
-		for (let k = i - 1; k >= Math.max(0, i - 8); k--) {
-			const prev = fn.bodyLines[k].trim();
-			if (!prev || prev.startsWith('//')) { continue; }
-			if (/\bif\s*\(/.test(prev)) {
-				context = prev;
-				// Patterns that make the BUG_ON user-reachable
-				if (/==\s*NULL|!\s*[A-Za-z_]|kmalloc|kzalloc|kmem_cache_alloc|vmalloc|copy_from_user/.test(prev)) {
-					reachability = 'high';
-				} else if (/BUG_ON|WARN_ON/.test(prev)) {
-					reachability = 'low';
-				}
-				break;
-			}
-			// Error label above means this BUG_ON is in cleanup — generally reachable
-			if (ERROR_LABEL_PATTERN.test(prev)) { reachability = 'high'; break; }
+		calls.lastIndex = 0;
+		let match: RegExpExecArray | null;
+		while ((match = calls.exec(fn.bodyLines[i])) !== null) {
+			const symbol = match[1];
+			observations.push({
+				kind: symbol.startsWith('WARN_ON') ? 'warning' : symbol === 'assert' || symbol === 'BUG_ON' ? 'assertion' : 'termination',
+				symbol, functionName: fn.name, line: fn.startLine + i,
+				snippet: snippetAround(lines, fn.startLine + i),
+				reachability: 'not-assessed', vulnerabilityStatus: 'not-assessed',
+			});
 		}
-
-		const crashName = m[1];
-		const confidence = reachability === 'high' ? 85 : reachability === 'medium' ? 55 : 30;
-		findings.push({
-			pattern: 'E',
-			severity: reachability === 'high' ? 'high' : 'medium',
-			confidence,
-			title: `Reachable ${crashName} in error-handling path`,
-			description:
-				`Function \`${fn.name}\` contains \`${crashName}\` at line ${fn.startLine + i} ` +
-				`${context ? `gated by \`${context}\` — ` : ''}` +
-				`this may be reachable from userspace input or OOM conditions. Kernel ${crashName} ` +
-				`results in system crash (DoS or privilege escalation via panic-handler races).`,
-			functionName: fn.name,
-			line: fn.startLine + i,
-			snippet: snippetAround(lines, fn.startLine + i, 3),
-			affectedSymbol: crashName,
-			suggestion: `Replace \`${crashName}\` with a soft error return (\`-ENOMEM\` / \`-EINVAL\`) and let the caller handle the failure.`,
-			referenceBug: reachability === 'high' ? 'CWE-617 (reachable crash primitive)' : undefined,
-		});
 	}
+	return observations;
+}
 
-	return findings;
+function asUnprovenSignal(finding: RefcountAuditFinding): RefcountAuditFinding {
+	const labels: Record<RefcountPattern, string> = {
+		A: 'Textual increment/exit imbalance', B: 'Force-named helper',
+		C: 'Conditional get with nearby member access', E: 'Diagnostic call', F: 'Textual lock-name asymmetry',
+	};
+	const { referenceBug: _referenceBug, ...signal } = finding;
+	return {
+		...signal, evidenceLevel: 'signal', proofStatus: 'unproven',
+		confidenceKind: 'heuristic-pattern-score', severityKind: 'review-priority',
+		title: `${labels[finding.pattern]}: ${finding.affectedSymbol ?? finding.functionName}`,
+		description: `Textual pattern ${finding.pattern} matched in ${finding.functionName} at line ${finding.line}. ` +
+			'Control flow, object identity, ownership, caller-held locks and concurrent execution have not been established. This is not a vulnerability finding.',
+		suggestion: 'Review the original source and calling contracts before changing reference counts, locking or error handling.',
+	};
+}
+
+// Preserve offsets/newlines while excluding comments and literal contents from matching.
+function maskNonCode(source: string): { code: string; reasons: string[] } {
+	const output: string[] = [];
+	const reasons: string[] = [];
+	let state: 'code' | 'line' | 'block' | 'string' | 'char' = 'code';
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		const next = source[i + 1];
+		if (state === 'code') {
+			if (ch === '/' && (next === '/' || next === '*')) {
+				state = next === '/' ? 'line' : 'block';
+				output.push('  '); i++; continue;
+			}
+			if (ch === '"' || ch === "'") {
+				state = ch === '"' ? 'string' : 'char'; output.push(' '); continue;
+			}
+			output.push(ch); continue;
+		}
+		if (state === 'block' && ch === '*' && next === '/') {
+			state = 'code'; output.push('  '); i++; continue;
+		}
+		if ((state === 'string' || state === 'char') && ch === '\\') {
+			output.push(' ');
+			if (next !== undefined) { output.push(next === '\n' || next === '\r' ? next : ' '); i++; }
+			continue;
+		}
+		if ((state === 'string' && ch === '"') || (state === 'char' && ch === "'")) { state = 'code'; }
+		if (state === 'line' && ch === '\n') { state = 'code'; }
+		output.push(ch === '\n' || ch === '\r' ? ch : ' ');
+	}
+	if (state !== 'code' && state !== 'line') { reasons.push('unterminated-comment-or-literal'); }
+	if (/\\\r?\n/.test(source)) { reasons.push('line-splicing-not-supported'); }
+	if (/\bR"/.test(source)) { reasons.push('raw-string-not-supported'); }
+	const code = output.join('');
+	if (/^\s*#/m.test(code)) { reasons.push('preprocessor-not-evaluated'); }
+	return { code, reasons };
 }
 
 // ---------------------------------------------------------------------------

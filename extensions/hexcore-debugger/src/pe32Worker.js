@@ -275,6 +275,19 @@ const handlers = {
 		engine.regWrite(regId, typeof value === 'string' ? BigInt(value) : value);
 	},
 
+	regWriteMmr(regId, selector, base, limit, flags) {
+		if (typeof engine.regWriteMmr !== 'function') {
+			throw new Error('hexcore-unicorn does not provide regWriteMmr');
+		}
+		engine.regWriteMmr(
+			regId,
+			selector,
+			typeof base === 'string' ? BigInt(base) : base,
+			limit,
+			flags
+		);
+	},
+
 	emuStart(begin, until, timeout, count) {
 		engine.emuStart(BigInt(begin), BigInt(until), timeout || 0, count || 0);
 	},

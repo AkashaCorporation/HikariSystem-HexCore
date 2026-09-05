@@ -2,7 +2,7 @@
 	"name": "hexcore-debugger",
 	"displayName": "HexCore Debugger",
 	"description": "Emulation-based debugger using Unicorn Engine for PE/ELF binary analysis",
-	"version": "2.1.10",
+	"version": "2.1.22",
 	"publisher": "hikarisystem",
 	"license": "GPL-2.0-only",
 	"engines": {
@@ -37,6 +37,8 @@
 		"onCommand:hexcore.debug.continueHeadless",
 		"onCommand:hexcore.debug.stepHeadless",
 		"onCommand:hexcore.debug.readMemoryHeadless",
+		"onCommand:hexcore.debug.disassembleMemoryHeadless",
+		"onCommand:hexcore.debug.decompileMemoryHeadless",
 		"onCommand:hexcore.debug.getRegistersHeadless",
 		"onCommand:hexcore.debug.setBreakpointHeadless",
 		"onCommand:hexcore.debug.getStateHeadless",
@@ -131,6 +133,16 @@
 			{
 				"command": "hexcore.debug.readMemoryHeadless",
 				"title": "Emulate: Read Memory (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.disassembleMemoryHeadless",
+				"title": "Emulate: Disassemble Live Memory (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.debug.decompileMemoryHeadless",
+				"title": "Emulate: Decompile Live Memory (Headless)",
 				"category": "HexCore Automation"
 			},
 			{

@@ -57,6 +57,7 @@ export interface UnicornInstance {
 	memRegions(): Array<{ begin: bigint; end: bigint; perms: number }>;
 	regRead(regId: number): bigint | number;
 	regWrite(regId: number, value: bigint | number): void;
+	regWriteMmr?(regId: number, selector: number, base: bigint | number, limit: number, flags: number): void;
 	hookAdd(type: number, callback: Function, begin?: bigint | number, end?: bigint | number): number;
 	hookDel(hookHandle: number): void;
 	// v4.0.0 — SAB zero-copy CODE hook (Issue #31). Optional because older
@@ -127,6 +128,7 @@ interface X86RegConstants {
 	EAX: number; EBX: number; ECX: number; EDX: number;
 	ESI: number; EDI: number; EBP: number; ESP: number;
 	EIP: number; EFLAGS: number;
+	CS: number; DS: number; ES: number; FS: number; GS: number; SS: number; GDTR: number;
 	FS_BASE: number; GS_BASE: number;
 }
 
@@ -209,7 +211,35 @@ export type InterruptCallback = (intno: number) => void;
 export type AsyncInterruptCallback = (intno: number) => Promise<void>;
 
 export type ArchitectureType = 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'riscv';
-export type ExecutionBackend = 'in-process' | 'worker-arm64' | 'worker-x64-elf' | 'worker-pe32';
+export type ExecutionBackend = 'in-process' | 'worker-arm64' | 'worker-x64-elf' | 'worker-pe32' | 'worker-pe64';
+
+type PeWorkerArgumentRegisters = Partial<Record<
+	'rcx' | 'rdx' | 'r8' | 'r9' | 'rsi' | 'rdi' | 'ecx' | 'edx' | 'esi' | 'edi',
+	bigint
+>>;
+
+export function collectPeWorkerArgumentPointers(
+	isX64: boolean,
+	registers: PeWorkerArgumentRegisters,
+	stackData?: Buffer,
+	stackPointerOffset = 64,
+): bigint[] {
+	const registerNames: Array<keyof PeWorkerArgumentRegisters> = isX64
+		? ['rcx', 'rdx', 'r8', 'r9', 'rsi', 'rdi']
+		: ['ecx', 'edx', 'esi', 'edi'];
+	const candidates = registerNames.map(name => registers[name]).filter((value): value is bigint => value !== undefined);
+
+	if (stackData) {
+		const wordSize = isX64 ? 8 : 4;
+		const firstArgumentOffset = stackPointerOffset + wordSize; // Skip the return address.
+		const endOffset = Math.min(stackData.length, firstArgumentOffset + 128);
+		for (let offset = firstArgumentOffset; offset + wordSize <= endOffset; offset += wordSize) {
+			candidates.push(isX64 ? stackData.readBigUInt64LE(offset) : BigInt(stackData.readUInt32LE(offset)));
+		}
+	}
+
+	return [...new Set(candidates.filter(pointer => pointer > 0x1000n))];
+}
 
 export class UnicornWrapper {
 	private unicornModule?: UnicornModule;
@@ -277,6 +307,13 @@ export class UnicornWrapper {
 	// STATUS_HEAP_CORRUPTION when Unicorn's JIT backend allocates executable
 	// memory for PE32 (x86/x64) code translation.
 	private _pe32Worker?: Pe32WorkerClient;
+	private _x86Segments?: {
+		gdtBase: bigint;
+		gdtLimit: number;
+		codeSelector: number;
+		dataSelector: number;
+		fsSelector: number;
+	};
 	// Stub address range for PE32 WinAPI interception
 	private _pe32StubRangeStart: bigint = 0n;
 	private _pe32StubRangeEnd: bigint = 0n;
@@ -767,6 +804,20 @@ export class UnicornWrapper {
 					console.warn(`[pe32] regWrite failed for ${name}: ${regErr}`);
 				}
 			}
+			if (this._x86Segments) {
+				await this._pe32Worker.regWriteMmr(
+					X86_REG.GDTR,
+					0,
+					this._x86Segments.gdtBase,
+					this._x86Segments.gdtLimit,
+					0
+				);
+				await this._pe32Worker.regWrite(X86_REG.CS, this._x86Segments.codeSelector);
+				for (const regId of [X86_REG.DS, X86_REG.ES, X86_REG.SS, X86_REG.GS]) {
+					await this._pe32Worker.regWrite(regId, this._x86Segments.dataSelector);
+				}
+				await this._pe32Worker.regWrite(X86_REG.FS, this._x86Segments.fsSelector);
+			}
 		}
 
 		// Ensure stack is mapped in worker (automatic — replaces manual post-migration check)
@@ -872,11 +923,14 @@ export class UnicornWrapper {
 				// Pull worker registers → in-process Unicorn for sync API compatibility.
 				this._apiHookRedirected = false;
 				let workerStackPointer: bigint | undefined;
+				let workerStackData: Buffer | undefined;
+				let workerArgumentRegisters: PeWorkerArgumentRegisters = {};
 
 				if (this.codeHooks.size > 0 && this.uc) {
 					try {
 						if (isX64) {
 							const workerRegs = await this._pe32Worker.readAllX64Registers();
+							workerArgumentRegisters = workerRegs;
 							currentPc = BigInt(workerRegs.rip);
 							workerStackPointer = BigInt(workerRegs.rsp);
 							const REG = this.unicornModule.X86_REG;
@@ -900,6 +954,7 @@ export class UnicornWrapper {
 							this.uc.regWrite(REG.RFLAGS, workerRegs.rflags);
 						} else {
 							const workerRegs = await this._pe32Worker.readAllX86Registers();
+							workerArgumentRegisters = workerRegs;
 							currentPc = BigInt(workerRegs.eip);
 							workerStackPointer = BigInt(workerRegs.esp);
 							const REG = this.unicornModule.X86_REG;
@@ -922,17 +977,32 @@ export class UnicornWrapper {
 								: BigInt(await this._pe32Worker.regRead(X86_REG.ESP)));
 							const syncBase = spRegVal - 64n;
 							const syncSize = 256;
-							const stackData = await this._pe32Worker.memRead(syncBase, syncSize);
-							this.uc.memWrite(syncBase, stackData);
+							workerStackData = await this._pe32Worker.memRead(syncBase, syncSize);
+							this.uc.memWrite(syncBase, workerStackData);
 						} catch {
 							// Best-effort stack sync
+						}
+
+						// WinAPI handlers are synchronous and read through the in-process Unicorn
+						// mirror. Keep likely register and stack argument buffers coherent with the
+						// PE worker before dispatching the hook.
+						for (const pointer of collectPeWorkerArgumentPointers(isX64, workerArgumentRegisters, workerStackData)) {
+							for (const size of [1024, 256, 64, 16]) {
+								try {
+									const argumentData = await this._pe32Worker.memRead(pointer, size);
+									this.uc.memWrite(pointer, argumentData);
+									break;
+								} catch {
+									// Retry with a smaller window near mapping boundaries.
+								}
+							}
 						}
 					} catch {
 						// Best-effort sync — if it fails, hooks will see stale data
 					}
 				} else {
 					// Read PC from worker when register block sync is not needed.
-					currentPc = await this._pe32Worker.regRead(pcRegId) as bigint;
+					currentPc = BigInt(await this._pe32Worker.regRead(pcRegId));
 				}
 
 				this.state.currentAddress = currentPc;
@@ -1067,17 +1137,32 @@ export class UnicornWrapper {
 				// Execute a batch in the worker
 				const remaining = maxInstructions - totalExecuted;
 				const thisBatch = Math.min(batchSize, remaining);
+				let batchTerminals = terminalAddresses;
+				if (this.breakpoints.size > 0) {
+					batchTerminals = terminalAddresses.slice();
+					for (const breakpoint of this.breakpoints) {
+						// The host-side check above handles an already-reached breakpoint.
+						// Excluding the current PC also lets the first continue execute it once.
+						if (breakpoint !== currentPc) {
+							batchTerminals.push(breakpoint);
+						}
+					}
+				}
 
 				const result = await this._pe32Worker.executeBatch(
-					currentPc, thisBatch, terminalAddresses,
+					currentPc, thisBatch, batchTerminals,
 					this._pe32StubRangeStart, this._pe32StubRangeEnd,
 					undefined,
 					this._pe32StubRangesExtra
 				);
+				// The x86 Unicorn binding returns register values as JS numbers while
+				// x64 returns bigint. Normalize the worker boundary immediately; mixing
+				// number PCs with bigint breakpoints makes equality silently fail.
+				const resultPc = BigInt(result.pc);
 
 				totalExecuted += result.instructionsExecuted;
 				this.state.instructionsExecuted += result.instructionsExecuted;
-				this.state.currentAddress = result.pc;
+				this.state.currentAddress = resultPc;
 
 				if (result.error) {
 					this.state.lastError = result.error;
@@ -1088,9 +1173,9 @@ export class UnicornWrapper {
 
 				if (result.stubHit && result.stubAddress !== null) {
 					// Worker hit a WinAPI stub address — dispatch on the host side.
-					let nextPc = result.pc;
+					let nextPc = resultPc;
 					if (this._pe32StubCallback) {
-						const dispatchResult = await this._pe32StubCallback(result.stubAddress);
+						const dispatchResult = await this._pe32StubCallback(BigInt(result.stubAddress));
 						// WinAPI output buffers are written through the in-process mirror.
 						// Propagate them before the worker resumes from the API return site.
 						await this.flushPe32DeferredMemoryWrites();
@@ -1116,17 +1201,22 @@ export class UnicornWrapper {
 				}
 
 				if (result.stopped) {
+					if (this.breakpoints.has(resultPc)) {
+						this.state.currentAddress = resultPc;
+						this.state.isPaused = true;
+						return;
+					}
 					// Terminal address reached (e.g. program exit)
 					break;
 				}
 				recordWorkerProgress(
-					currentPc, result.pc, result.instructionsExecuted);
+					currentPc, resultPc, result.instructionsExecuted);
 			}
 		} finally {
 			// Sync the final PC
 			if (this._pe32Worker) {
 				try {
-					const finalPc = await this._pe32Worker.regRead(pcRegId) as bigint;
+					const finalPc = BigInt(await this._pe32Worker.regRead(pcRegId));
 					this.state.currentAddress = finalPc;
 				} catch {
 					// Worker may have exited
@@ -1551,9 +1641,14 @@ export class UnicornWrapper {
 	 * transparent to callers — continue() will seamlessly handle multiple API calls.
 	 */
 	async start(startAddress: bigint, endAddress: bigint = 0n, timeout: number = 0, count: number = 0): Promise<void> {
-		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker) {
+		if (!this.uc && !this._arm64Worker && !this._x64ElfWorker && !this._pe32Worker) {
 			throw new Error('Unicorn not initialized');
 		}
+
+		// A fault describes the previous execution attempt. A new start/continue/step
+		// must not inherit it, otherwise a successfully reached breakpoint is exported
+		// as a fault merely because the caller repaired registers after an earlier stop.
+		this.clearLastError();
 
 		// ARM64 worker mode: use worker's executeBatch for emulation
 		if (this._arm64Worker) {
@@ -2666,6 +2761,8 @@ export class UnicornWrapper {
 			throw new Error('Unicorn not initialized');
 		}
 
+		this.clearLastError();
+
 		// ARM64 worker: delegate to startArm64Worker (same batch-based approach)
 		if (this._arm64Worker) {
 			await this.startArm64Worker(startAddress, 0n, count);
@@ -3178,6 +3275,31 @@ export class UnicornWrapper {
 		this.setRegisterImmediate(regName, value);
 	}
 
+	/** Configure protected-mode flat segments plus the PE32 TEB-backed FS segment. */
+	configureX86Segments(
+		gdtBase: bigint,
+		gdtLimit: number,
+		codeSelector: number,
+		dataSelector: number,
+		fsSelector: number
+	): void {
+		if (this.architecture !== 'x86' || !this.uc || !this.unicornModule) {
+			throw new Error('x86 Unicorn is not initialized');
+		}
+		if (typeof this.uc.regWriteMmr !== 'function') {
+			throw new Error('hexcore-unicorn does not provide regWriteMmr; install v1.3.2 or newer');
+		}
+
+		const registers = this.unicornModule.X86_REG;
+		this.uc.regWriteMmr(registers.GDTR, 0, gdtBase, gdtLimit, 0);
+		this.uc.regWrite(registers.CS, codeSelector);
+		for (const regId of [registers.DS, registers.ES, registers.SS, registers.GS]) {
+			this.uc.regWrite(regId, dataSelector);
+		}
+		this.uc.regWrite(registers.FS, fsSelector);
+		this._x86Segments = { gdtBase, gdtLimit, codeSelector, dataSelector, fsSelector };
+	}
+
 	/**
 	 * Get x86-64 registers
 	 */
@@ -3348,6 +3470,7 @@ export class UnicornWrapper {
 				throw new Error(`Unknown ARM64 register: ${regName}`);
 			}
 			await this._arm64Worker.regWrite(regId, BigInt(value));
+			this.syncProgramCounterWrite(regName, value);
 			return;
 		}
 
@@ -3367,6 +3490,7 @@ export class UnicornWrapper {
 				throw new Error(`Unknown x64 register: ${regName}`);
 			}
 			await this._x64ElfWorker.regWrite(regId, BigInt(value));
+			this.syncProgramCounterWrite(regName, value);
 			return;
 		}
 
@@ -3391,6 +3515,7 @@ export class UnicornWrapper {
 				throw new Error(`Unknown x86/x64 register: ${regName}`);
 			}
 			await this._pe32Worker.regWrite(regId, BigInt(value));
+			this.syncProgramCounterWrite(regName, value);
 			return;
 		}
 
@@ -3456,6 +3581,22 @@ export class UnicornWrapper {
 			this.uc.regWrite(arm64Regs[name], BigInt(value));
 		} else {
 			throw new Error(`Unknown register: ${name.toLowerCase()}`);
+		}
+
+		this.syncProgramCounterWrite(name, value);
+	}
+
+	private syncProgramCounterWrite(name: string, value: bigint | number): void {
+		const pcRegister = this.architecture === 'x64'
+			? 'rip'
+			: this.architecture === 'x86'
+				? 'eip'
+				: this.architecture === 'arm64'
+					? 'pc'
+					: undefined;
+
+		if (name.toLowerCase() === pcRegister) {
+			this.state.currentAddress = BigInt(value);
 		}
 	}
 
@@ -3775,7 +3916,7 @@ export class UnicornWrapper {
 			return 'worker-x64-elf';
 		}
 		if (this._pe32Worker) {
-			return 'worker-pe32';
+			return this.architecture === 'x64' ? 'worker-pe64' : 'worker-pe32';
 		}
 		return 'in-process';
 	}

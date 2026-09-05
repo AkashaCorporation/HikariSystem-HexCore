@@ -1,0 +1,209 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "anti-analysis.timing_check",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.for-timer:positive",
+      "branchId": "for-timer",
+      "branchIndex": 0,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "loop"
+      ],
+      "contentSha256": "9b1c2fb9f978032eb3e6a4880175b400e105270e34378cc94ab3c9ddcf9bd677",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "at": "loop",
+            "body": [
+              {
+                "k": "call",
+                "name": "QueryPerformanceCounter",
+                "args": [
+                  "counter"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.for-timer:negative-1",
+      "branchId": "for-timer",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "b4ac64fdf37c8bcd7c1b15acf2c0cbb1adb6cea9ca41fd352fa43e8a4448a330",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "for",
+            "body": [
+              {
+                "k": "call",
+                "name": "QueryPerformanceFrequency",
+                "args": [
+                  "frequency"
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.for-timer:negative-2",
+      "branchId": "for-timer",
+      "branchIndex": 0,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "f6e5cb670c29eb02c42e9555dc78eaeeb187dfc0b4e20cb35f2d6d1f38b5a516",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "GetTickCount64"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.while-timer:positive",
+      "branchId": "while-timer",
+      "branchIndex": 1,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "loop"
+      ],
+      "contentSha256": "794c06743fdc5a45aa8feb4ad0f9ab719070a16eccdeeb1fba09bd95df72c89b",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "while",
+            "at": "loop",
+            "body": [
+              {
+                "k": "call",
+                "name": "GetTickCount64"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.while-timer:negative-1",
+      "branchId": "while-timer",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "e696bef2d2c09d2be49c61fdf3fca2f4c6d9a83c8ce69007a9d70f78811682e7",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "while",
+            "body": [
+              {
+                "k": "call",
+                "name": "GetSystemTime"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.while-timer:negative-2",
+      "branchId": "while-timer",
+      "branchIndex": 1,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "78d588c525427a351c00f56542fbb69bacbfbff109bb3f8561800e69a549bdba",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "rdtscp"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.timer-subtraction:positive",
+      "branchId": "timer-subtraction",
+      "branchIndex": 2,
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "delta"
+      ],
+      "contentSha256": "4a1d491ab5ab97ac181ba59dae13beb3139465d5cf60759339388e450e3ec7c6",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "at": "delta",
+            "op": "-",
+            "a": {
+              "k": "call",
+              "name": "rdtsc"
+            },
+            "b": "start"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.timer-subtraction:negative-1",
+      "branchId": "timer-subtraction",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "6d9451dd30e8c95aefe023ddcac2c04b37073a8726eb55c60c35c878032cdd4a",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "op": "+",
+            "a": {
+              "k": "call",
+              "name": "rdtsc"
+            },
+            "b": "start"
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:anti-analysis.timing_check.timer-subtraction:negative-2",
+      "branchId": "timer-subtraction",
+      "branchIndex": 2,
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "a2b05d71a1d6b2ea896e0e725443921ee225f38e11c28cd628013338395d402a",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "bin",
+            "op": "-",
+            "a": {
+              "k": "call",
+              "name": "GetSystemTime"
+            },
+            "b": "start"
+          }
+        ]
+      }
+    }
+  ]
+}

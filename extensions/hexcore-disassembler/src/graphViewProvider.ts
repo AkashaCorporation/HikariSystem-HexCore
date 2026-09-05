@@ -5,19 +5,24 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import * as crypto from 'crypto';
 import { DisassemblerEngine, Function as DisasmFunction } from './disassemblerEngine';
 import { BasicBlockAnalyzer, CFG } from './basicBlockAnalyzer';
+import type { AnalysisAddressSpace, AnalysisTarget } from 'hexcore-common';
 import { GraphLayoutEngine, GraphLayout, NodeLayout, EdgeLayout, LAYOUT_CONSTANTS } from './graphLayoutEngine';
 
 export class GraphViewProvider implements vscode.WebviewViewProvider {
 	public static readonly viewType = 'hexcore.graphView';
 
 	private _view?: vscode.WebviewView;
+	private _panel?: vscode.WebviewPanel;
+	private readonly webviews = new Set<vscode.Webview>();
 	private engine: DisassemblerEngine;
 	private blockAnalyzer: BasicBlockAnalyzer;
 	private layoutEngine: GraphLayoutEngine;
 	private currentCFG?: CFG;
 	private currentLayout?: GraphLayout;
+	private currentFunctionAddress?: number;
 
 	constructor(
 		private readonly _extensionUri: vscode.Uri,
@@ -34,22 +39,58 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 		_token: vscode.CancellationToken
 	): void {
 		this._view = webviewView;
+		this.configureWebview(webviewView.webview);
+		webviewView.onDidDispose(() => {
+			this.webviews.delete(webviewView.webview);
+			if (this._view === webviewView) {
+				this._view = undefined;
+			}
+		});
+	}
 
-		webviewView.webview.options = {
+	public async showFunctionInEditor(func: DisasmFunction): Promise<void> {
+		this.ensureEditorPanel();
+		await this.showFunction(func);
+	}
+
+	private ensureEditorPanel(): void {
+		if (this._panel) {
+			this._panel.reveal(vscode.ViewColumn.Active);
+			return;
+		}
+
+		this._panel = vscode.window.createWebviewPanel(
+			'hexcore.disassembler.graphEditor',
+			'HexCore Graph',
+			vscode.ViewColumn.Active,
+			{ enableScripts: true, retainContextWhenHidden: true }
+		);
+		this.configureWebview(this._panel.webview);
+		this._panel.onDidDispose(() => {
+			if (this._panel) {
+				this.webviews.delete(this._panel.webview);
+			}
+			this._panel = undefined;
+		});
+	}
+
+	private configureWebview(webview: vscode.Webview): void {
+		webview.options = {
 			enableScripts: true,
 			localResourceRoots: [this._extensionUri]
 		};
-
-		webviewView.webview.html = this._getHtmlForWebview(webviewView.webview);
-
-		// Handle messages from webview
-		webviewView.webview.onDidReceiveMessage(async message => {
+		webview.html = this._getHtmlForWebview(webview);
+		this.webviews.add(webview);
+		webview.onDidReceiveMessage(async message => {
 			switch (message.type) {
+				case 'ready':
+					await this.postCurrentGraph(webview);
+					break;
 				case 'blockClick':
 					this.handleBlockClick(message.blockId, message.address);
 					break;
 				case 'goToAddress':
-					vscode.commands.executeCommand('hexcore.disassembler.goToAddress', message.address);
+					await vscode.commands.executeCommand('hexcore.disasm.goToAddress', message.address);
 					break;
 			}
 		});
@@ -59,43 +100,66 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 	 * Update the graph view with a new function
 	 */
 	public async showFunction(func: DisasmFunction): Promise<void> {
-		if (!this._view) return;
-
 		// A-lazy: the passed function may be an unmaterialized .pdata stub (empty instructions).
 		// Materialize its body here so the CFG is built from real instructions; the returned object
 		// is the same Function instance (now populated). No-op for an already-materialized function.
 		const materialized = await this.engine.materializeFunction(func.address);
 		const fn = materialized ?? func;
+		this.currentFunctionAddress = fn.address;
 
 		// Build CFG from function instructions
+		const sessionStore = this.engine.getSessionStore();
+		const analysisTarget = sessionStore?.getAnalysisTarget();
+		const cfgOptions: { target?: AnalysisTarget; addressSpace?: AnalysisAddressSpace } = analysisTarget
+			? { target: analysisTarget, addressSpace: analysisTarget.imageBase ? 'va' : 'file-offset' }
+			: {};
 		this.currentCFG = this.blockAnalyzer.buildCFG(
 			fn.instructions,
 			fn.name,
-			fn.address
+			fn.address,
+			cfgOptions
 		);
 
 		// Calculate layout
 		this.currentLayout = this.layoutEngine.calculateLayout(this.currentCFG);
 
-		// Send to webview
-		this._view.webview.postMessage({
-			type: 'updateGraph',
-			cfg: this.serializeCFG(this.currentCFG),
-			layout: this.serializeLayout(this.currentLayout)
-		});
+		if (this._panel) {
+			this._panel.title = `${fn.name} - HexCore Graph`;
+		}
+		await Promise.all(Array.from(this.webviews, webview => this.postCurrentGraph(webview)));
 	}
 
 	/**
 	 * Clear the graph view
 	 */
 	public clear(): void {
-		if (!this._view) return;
-		this._view.webview.postMessage({ type: 'clear' });
+		this.currentCFG = undefined;
+		this.currentLayout = undefined;
+		this.currentFunctionAddress = undefined;
+		for (const webview of this.webviews) {
+			void webview.postMessage({ type: 'clear' });
+		}
+	}
+
+	public getCurrentFunctionAddress(): number | undefined {
+		return this.currentFunctionAddress;
+	}
+
+	private async postCurrentGraph(webview: vscode.Webview): Promise<void> {
+		if (!this.currentCFG || !this.currentLayout) {
+			await webview.postMessage({ type: 'clear' });
+			return;
+		}
+		await webview.postMessage({
+			type: 'updateGraph',
+			cfg: this.serializeCFG(this.currentCFG),
+			layout: this.serializeLayout(this.currentLayout)
+		});
 	}
 
 	private handleBlockClick(blockId: number, address: number): void {
 		// Navigate in sidebar disassembly
-		vscode.commands.executeCommand('hexcore.disassembler.goToAddress', address);
+		void vscode.commands.executeCommand('hexcore.disasm.goToAddress', address);
 	}
 
 	private serializeCFG(cfg: CFG): any {
@@ -141,13 +205,15 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 	}
 
 	private _getHtmlForWebview(webview: vscode.Webview): string {
+		const nonce = crypto.randomBytes(16).toString('hex');
 		return `<!DOCTYPE html>
 <html lang="en">
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
 	<title>CFG View</title>
-	<style>
+	<style nonce="${nonce}">
 		* {
 			margin: 0;
 			padding: 0;
@@ -167,38 +233,51 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 			top: 0;
 			left: 0;
 			right: 0;
-			height: 32px;
-			background: var(--vscode-titleBar-activeBackground);
+			height: 34px;
+			background: var(--vscode-editorGroupHeader-tabsBackground);
 			border-bottom: 1px solid var(--vscode-widget-border);
 			display: flex;
 			align-items: center;
-			padding: 0 8px;
-			gap: 8px;
+			padding: 0 10px;
+			gap: 6px;
 			z-index: 100;
 		}
 
 		.toolbar-title {
-			font-weight: bold;
-			color: var(--vscode-titleBar-activeForeground);
+			font-weight: 600;
+			color: var(--vscode-foreground);
 			flex: 1;
+			white-space: nowrap;
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+
+		.toolbar-stats {
+			color: var(--vscode-descriptionForeground);
+			font-size: 11px;
+			padding-right: 6px;
 		}
 
 		.toolbar-btn {
 			background: var(--vscode-button-secondaryBackground);
 			color: var(--vscode-button-secondaryForeground);
-			border: none;
-			padding: 4px 8px;
+			border: 1px solid transparent;
+			min-width: 26px;
+			height: 24px;
+			padding: 2px 7px;
 			cursor: pointer;
 			border-radius: 2px;
+			font: inherit;
 		}
 
 		.toolbar-btn:hover {
 			background: var(--vscode-button-secondaryHoverBackground);
+			border-color: var(--vscode-contrastBorder, transparent);
 		}
 
 		.container {
 			position: fixed;
-			top: 32px;
+			top: 34px;
 			left: 0;
 			right: 0;
 			bottom: 0;
@@ -222,7 +301,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 		.block-rect {
 			fill: var(--vscode-editor-background);
-			stroke: var(--vscode-widget-border);
+			stroke: var(--vscode-editorWidget-border, var(--vscode-widget-border));
 			stroke-width: 1;
 			rx: 4;
 		}
@@ -237,20 +316,32 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 		}
 
 		.block-header {
-			fill: var(--vscode-badge-background);
+			fill: var(--vscode-editorGroupHeader-tabsBackground);
 		}
 
 		.block-header-text {
-			fill: var(--vscode-badge-foreground);
+			fill: var(--vscode-editor-foreground);
 			font-size: 11px;
 			font-weight: bold;
 		}
 
-		.block-entry .block-header {
+		.block-entry .block-rect {
+			stroke: var(--vscode-testing-iconPassed);
+		}
+
+		.block-exit .block-rect {
+			stroke: var(--vscode-testing-iconFailed);
+		}
+
+		.block-kind {
+			fill: var(--vscode-descriptionForeground);
+		}
+
+		.block-entry .block-kind {
 			fill: var(--vscode-testing-iconPassed);
 		}
 
-		.block-exit .block-header {
+		.block-exit .block-kind {
 			fill: var(--vscode-testing-iconFailed);
 		}
 
@@ -281,6 +372,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 		.inst-operand {
 			fill: var(--vscode-editor-foreground);
+		}
+
+		.inst-overflow {
+			fill: var(--vscode-descriptionForeground);
+			font-style: italic;
 		}
 
 		/* Edge styling */
@@ -325,7 +421,19 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 		.edge-label {
 			font-size: 10px;
-			fill: var(--vscode-descriptionForeground);
+			font-weight: 600;
+			paint-order: stroke;
+			stroke: var(--vscode-editor-background);
+			stroke-width: 3px;
+			stroke-linejoin: round;
+		}
+
+		.edge.true .edge-label {
+			fill: var(--vscode-testing-iconPassed);
+		}
+
+		.edge.false .edge-label {
+			fill: var(--vscode-testing-iconFailed);
 		}
 
 		.empty-state {
@@ -356,9 +464,11 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 <body>
 	<div class="toolbar">
 		<span class="toolbar-title" id="title">Control Flow Graph</span>
-		<button class="toolbar-btn" id="zoomIn">[+]</button>
-		<button class="toolbar-btn" id="zoomOut">[-]</button>
-		<button class="toolbar-btn" id="fitView">[Fit]</button>
+		<span class="toolbar-stats" id="stats"></span>
+		<button class="toolbar-btn" id="zoomIn" title="Zoom in">+</button>
+		<button class="toolbar-btn" id="zoomOut" title="Zoom out">-</button>
+		<button class="toolbar-btn" id="actualSize" title="Actual size">1:1</button>
+		<button class="toolbar-btn" id="fitView" title="Fit graph to view">Fit</button>
 	</div>
 
 	<div class="container" id="container">
@@ -387,7 +497,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 	<div class="zoom-info" id="zoomInfo">100%</div>
 
-	<script>
+	<script nonce="${nonce}">
 		const vscode = acquireVsCodeApi();
 		const container = document.getElementById('container');
 		const canvas = document.getElementById('canvas');
@@ -396,6 +506,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 		const blocksGroup = document.getElementById('blocksGroup');
 		const emptyState = document.getElementById('emptyState');
 		const titleEl = document.getElementById('title');
+		const statsEl = document.getElementById('stats');
 		const zoomInfo = document.getElementById('zoomInfo');
 
 		let zoom = 1;
@@ -408,13 +519,22 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 		let currentCFG = null;
 		let currentLayout = null;
+		vscode.postMessage({ type: 'ready' });
 
 		const INST_HEIGHT = ${LAYOUT_CONSTANTS.INSTRUCTION_HEIGHT};
 		const HEADER_HEIGHT = ${LAYOUT_CONSTANTS.HEADER_HEIGHT};
+		const MAX_VISIBLE_INSTRUCTIONS = ${LAYOUT_CONSTANTS.MAX_VISIBLE_INSTRUCTIONS};
 
 		// Zoom controls
 		document.getElementById('zoomIn').addEventListener('click', () => setZoom(zoom * 1.2));
 		document.getElementById('zoomOut').addEventListener('click', () => setZoom(zoom / 1.2));
+		document.getElementById('actualSize').addEventListener('click', () => {
+			zoom = 1;
+			panX = 20;
+			panY = 20;
+			zoomInfo.textContent = '100%';
+			updateTransform();
+		});
 		document.getElementById('fitView').addEventListener('click', fitToView);
 
 		// Mouse wheel zoom
@@ -501,6 +621,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 			blocksGroup.innerHTML = '';
 			emptyState.style.display = 'block';
 			titleEl.textContent = 'Control Flow Graph';
+			statsEl.textContent = '';
 			currentCFG = null;
 			currentLayout = null;
 		}
@@ -513,6 +634,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 			emptyState.style.display = 'none';
 			titleEl.textContent = currentCFG.functionName + ' @ 0x' + currentCFG.functionAddress.toString(16);
+			statsEl.textContent = currentCFG.blocks.length + ' blocks / ' + currentLayout.edges.length + ' edges';
 
 			// Update canvas size
 			canvas.setAttribute('width', currentLayout.width + 100);
@@ -576,12 +698,12 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 			// Add label if present
 			if (edge.label) {
-				const midPoint = edge.points[Math.floor(edge.points.length / 2)];
 				const text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
 				text.classList.add('edge-label');
-				text.setAttribute('x', midPoint.x + 5);
-				text.setAttribute('y', midPoint.y - 5);
-				text.textContent = edge.label;
+				text.setAttribute('x', edge.points[0].x);
+				text.setAttribute('y', edge.points[0].y + 14);
+				text.setAttribute('text-anchor', 'middle');
+				text.textContent = edge.type === 'true' ? 'T' : edge.type === 'false' ? 'F' : edge.label;
 				g.appendChild(text);
 			}
 
@@ -610,6 +732,13 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 			header.setAttribute('rx', 4);
 			g.appendChild(header);
 
+			const kind = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+			kind.classList.add('block-kind');
+			kind.setAttribute('width', 3);
+			kind.setAttribute('height', HEADER_HEIGHT);
+			kind.setAttribute('rx', 1);
+			g.appendChild(kind);
+
 			// Header text (address)
 			const headerText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
 			headerText.classList.add('block-header-text');
@@ -620,7 +749,7 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 			// Instructions
 			let y = HEADER_HEIGHT + 14;
-			for (const inst of block.instructions) {
+			for (const inst of block.instructions.slice(0, MAX_VISIBLE_INSTRUCTIONS)) {
 				const instG = document.createElementNS('http://www.w3.org/2000/svg', 'g');
 				instG.classList.add('instruction');
 				instG.setAttribute('transform', 'translate(8,' + y + ')');
@@ -644,6 +773,15 @@ export class GraphViewProvider implements vscode.WebviewViewProvider {
 
 				g.appendChild(instG);
 				y += INST_HEIGHT;
+			}
+
+			if (block.instructions.length > MAX_VISIBLE_INSTRUCTIONS) {
+				const overflow = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+				overflow.classList.add('instruction', 'inst-overflow');
+				overflow.setAttribute('x', 8);
+				overflow.setAttribute('y', y);
+				overflow.textContent = '... ' + (block.instructions.length - MAX_VISIBLE_INSTRUCTIONS) + ' more instructions';
+				g.appendChild(overflow);
 			}
 
 			// Click handler

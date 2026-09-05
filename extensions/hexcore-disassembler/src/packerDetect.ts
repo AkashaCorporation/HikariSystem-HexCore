@@ -24,7 +24,7 @@ export type PackerFamily =
 	| 'none';
 
 export interface PackerMarker {
-	kind: 'magic' | 'section' | 'string' | 'overlay';
+	kind: 'magic' | 'section' | 'string' | 'overlay' | 'entropy';
 	detail: string;
 	/** File offset when known (byte index into raw buffer) */
 	offset?: number;
@@ -48,8 +48,11 @@ export interface PackerDetectResult {
 export interface PackerSectionLike {
 	name: string;
 	isCode?: boolean;
+	permissions?: string;
+	rawAddress?: number;
 	rawSize?: number;
 	virtualSize?: number;
+	entropy?: number;
 }
 
 export interface PackerStringLike {
@@ -102,7 +105,8 @@ export function detectPacker(
 	}
 
 	// ── PE/ELF section names ────────────────────────────────────────────
-	for (const s of opts?.sections ?? []) {
+	const sections = opts?.sections && opts.sections.length > 0 ? opts.sections : inferPeSections(buf);
+	for (const s of sections) {
 		const n = s.name || '';
 		if (/upx/i.test(n)) {
 			markers.push({ kind: 'section', detail: `section name "${n}"` });
@@ -133,6 +137,31 @@ export function detectPacker(
 			markers.push({
 				kind: 'section',
 				detail: `code section "${n}" rawSize=0 virtualSize=${s.virtualSize} (stub/packer heuristic)`,
+			});
+			familyHits.add('unknown');
+		}
+
+		// An unknown packer/encrypted payload has no family banner. Preserve that
+		// distinction instead of turning "no known marker" into "not packed".
+		// Gate on writable/executable storage and a meaningful size to avoid
+		// classifying ordinary compressed resources as a packer by entropy alone.
+		const rawSize = s.rawSize ?? 0;
+		let entropy = s.entropy;
+		if (
+			entropy === undefined &&
+			Number.isSafeInteger(s.rawAddress) &&
+			(s.rawAddress ?? -1) >= 0 &&
+			rawSize > 0 &&
+			(s.rawAddress ?? 0) + rawSize <= buf.length
+		) {
+			entropy = shannonEntropy(buf.subarray(s.rawAddress!, s.rawAddress! + rawSize));
+		}
+		const suspiciousPermissions = s.isCode === true || /[wx]/i.test(s.permissions ?? '');
+		if (rawSize >= 0x1000 && suspiciousPermissions && (entropy ?? 0) >= 7.0) {
+			markers.push({
+				kind: 'entropy',
+				detail: `high-entropy section "${n}" entropy=${entropy!.toFixed(2)} size=${rawSize} permissions=${s.permissions ?? 'unknown'}`,
+				offset: s.rawAddress,
 			});
 			familyHits.add('unknown');
 		}
@@ -178,7 +207,6 @@ export function detectPacker(
 	});
 
 	const families = [...familyHits].filter(f => f !== 'none') as PackerFamily[];
-	const packed = families.length > 0 && !(families.length === 1 && families[0] === 'unknown' && uniqMarkers.length === 0);
 	// unknown-only from rawSize=0 heuristic still counts as packed if we have that marker
 	const reallyPacked = uniqMarkers.length > 0;
 
@@ -198,7 +226,8 @@ export function detectPacker(
 		const magicHits = uniqMarkers.filter(m => m.kind === 'magic').length;
 		const stringHits = uniqMarkers.filter(m => m.kind === 'string').length;
 		const sectionHits = uniqMarkers.filter(m => m.kind === 'section').length;
-		confidence = Math.min(100, 40 + magicHits * 20 + stringHits * 15 + sectionHits * 15);
+		const entropyHits = uniqMarkers.filter(m => m.kind === 'entropy').length;
+		confidence = Math.min(100, 40 + magicHits * 20 + stringHits * 15 + (sectionHits + entropyHits) * 15);
 		if (family === 'upx' && magicHits > 0) { confidence = Math.max(confidence, 85); }
 		if (family === 'upx' && magicHits > 0 && stringHits > 0) { confidence = Math.max(confidence, 95); }
 	}
@@ -214,9 +243,12 @@ export function detectPacker(
 			'Unpack offline, then re-run analyzeAll / helix on the unpacked file. ' +
 			'HexCore does not ship or invoke external UPX (MIT core).';
 	} else if (reallyPacked) {
-		recommendation =
-			`Packer signals (${family}): unpack with family-specific tooling before deep decompile. ` +
-			'analyzeAll may report 0 real functions. HexCore detect-only — no external unpacker PATH.';
+		const entropyOnly = uniqMarkers.every(marker => marker.kind === 'entropy');
+		recommendation = entropyOnly
+			? 'Unknown high-entropy writable/executable section: likely encrypted payload or unknown packer. ' +
+				'Inspect and materialize the section before trusting deep decompilation; no family signature was identified.'
+			: `Packer signals (${family}): unpack with family-specific tooling before deep decompile. ` +
+				'analyzeAll may report 0 real functions. HexCore detect-only — no external unpacker PATH.';
 	}
 
 	return {
@@ -228,6 +260,57 @@ export function detectPacker(
 		recommendation,
 		upxVersionHint: upxVer,
 	};
+}
+
+function shannonEntropy(buffer: Buffer): number {
+	if (buffer.length === 0) { return 0; }
+	const counts = new Uint32Array(256);
+	for (const byte of buffer) { counts[byte]++; }
+	let entropy = 0;
+	for (const count of counts) {
+		if (count === 0) { continue; }
+		const probability = count / buffer.length;
+		entropy -= probability * Math.log2(probability);
+	}
+	return entropy;
+}
+
+function inferPeSections(buffer: Buffer): PackerSectionLike[] {
+	try {
+		if (buffer.length < 0x40 || buffer[0] !== 0x4d || buffer[1] !== 0x5a) { return []; }
+		const peOffset = buffer.readUInt32LE(0x3c);
+		if (peOffset + 24 > buffer.length || buffer.toString('ascii', peOffset, peOffset + 4) !== 'PE\0\0') {
+			return [];
+		}
+		const count = buffer.readUInt16LE(peOffset + 6);
+		const optionalSize = buffer.readUInt16LE(peOffset + 20);
+		const table = peOffset + 24 + optionalSize;
+		if (count > 512 || table + count * 40 > buffer.length) { return []; }
+		const sections: PackerSectionLike[] = [];
+		for (let index = 0; index < count; index++) {
+			const offset = table + index * 40;
+			const name = buffer.subarray(offset, offset + 8).toString('ascii').replace(/\0.*$/, '');
+			const virtualSize = buffer.readUInt32LE(offset + 8);
+			const rawSize = buffer.readUInt32LE(offset + 16);
+			const rawAddress = buffer.readUInt32LE(offset + 20);
+			const characteristics = buffer.readUInt32LE(offset + 36);
+			let permissions = '';
+			if (characteristics & 0x40000000) { permissions += 'r'; }
+			if (characteristics & 0x80000000) { permissions += 'w'; }
+			if (characteristics & 0x20000000) { permissions += 'x'; }
+			sections.push({
+				name,
+				isCode: (characteristics & 0x20) !== 0,
+				permissions,
+				rawAddress,
+				rawSize,
+				virtualSize,
+			});
+		}
+		return sections;
+	} catch {
+		return [];
+	}
 }
 
 /**

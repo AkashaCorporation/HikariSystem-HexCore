@@ -13,6 +13,7 @@ Creates souper-deps-win32-x64.zip containing:
   - deps/z3/lib/*.lib           (Z3 lib)
   - deps/z3/include/            (Z3 headers)
   - deps/z3/libz3.dll           (Z3 runtime DLL)
+  - deps/z3/z3.exe              (Z3 solver process)
 
 Usage:
   python _pack_deps.py
@@ -39,9 +40,9 @@ def pack_deps(output_path):
             for f in files:
                 fpath = os.path.join(root, f)
                 ext = os.path.splitext(f)[1].lower()
-                # Include: libs, headers, DLLs
+                # Include: libs, headers, DLLs, and the bounded external solver.
                 if ext in ('.lib', '.h', '.hpp', '.hh', '.inc', '.def',
-                           '.td', '.gen', '.modulemap', '.dll'):
+                           '.td', '.gen', '.modulemap', '.dll', '.exe'):
                     arcname = os.path.relpath(fpath, SCRIPT_DIR)
                     zf.write(fpath, arcname)
                     size = os.path.getsize(fpath)

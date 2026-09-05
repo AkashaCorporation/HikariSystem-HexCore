@@ -1,11 +1,22 @@
 {
   "id": "anti-analysis.timing_check",
+  "version": "1.0.0",
+  "namespace": "anti-analysis",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL rule library", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/anti-analysis.timing_check.json" },
+  "limitations": ["Timer access is common; this rule is a triage signal rather than anti-debug proof."],
   "name": "Timing-based Anti-Analysis",
   "description": "Detects loops or branches comparing two timer reads (rdtsc, GetTickCount, QueryPerformanceCounter). Sandboxes and debuggers introduce timing perturbations that this pattern is designed to detect.",
   "severity": "high",
   "mitre": ["T1497.003"],
-  "queries": [
-    {
+  "evidenceLevel": "signal",
+  "condition": {
+    "any": [
+      { "query": {
       "target": "CForStmt",
       "contains": [
         {
@@ -15,8 +26,8 @@
           ]
         }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CWhileStmt",
       "contains": [
         {
@@ -26,8 +37,8 @@
           ]
         }
       ]
-    },
-    {
+      } },
+      { "query": {
       "target": "CBinaryExpr",
       "attributes": [
         { "field": "operator", "value": "-" }
@@ -40,6 +51,7 @@
           ]
         }
       ]
-    }
-  ]
+      } }
+    ]
+  }
 }

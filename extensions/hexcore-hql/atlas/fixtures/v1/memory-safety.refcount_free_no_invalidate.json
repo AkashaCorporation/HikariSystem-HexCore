@@ -1,0 +1,114 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "memory-safety.refcount_free_no_invalidate",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "free-call",
+        "decrement-call"
+      ],
+      "contentSha256": "c446957266cc989e99e214db55a444763cb38fc4943e3116b8877d0f194948a2",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "at": "free-call",
+            "name": "kfree",
+            "args": [
+              {
+                "k": "field",
+                "name": "buffer",
+                "object": "object",
+                "arrow": true
+              }
+            ]
+          },
+          {
+            "k": "call",
+            "at": "decrement-call",
+            "name": "refcount_dec_and_test",
+            "args": [
+              {
+                "k": "field",
+                "name": "refcount",
+                "object": "object",
+                "arrow": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "6f9aa66ea3d324e10e7deef2fa5c77db1c13c01a5623c798f5c7c186ed65b864",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "kfree",
+            "args": [
+              {
+                "k": "field",
+                "name": "buffer",
+                "object": "object",
+                "arrow": true
+              }
+            ]
+          },
+          {
+            "k": "call",
+            "name": "atomic_inc",
+            "args": [
+              {
+                "k": "field",
+                "name": "refcount",
+                "object": "object",
+                "arrow": true
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:memory-safety.refcount_free_no_invalidate.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "c8143ffa82b1e2d7ef33ecd02cea19c288b6a127e78bf366613b930bf4686733",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "call",
+            "name": "free",
+            "args": [
+              "buffer"
+            ]
+          },
+          {
+            "k": "call",
+            "name": "_InterlockedDecrement",
+            "args": [
+              {
+                "k": "field",
+                "name": "usage",
+                "object": "object",
+                "arrow": true
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

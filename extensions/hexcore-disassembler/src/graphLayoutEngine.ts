@@ -37,6 +37,12 @@ const LAYER_SPACING = 100;
 const NODE_SPACING = 40;
 const INSTRUCTION_HEIGHT = 18;
 const HEADER_HEIGHT = 28;
+const MAX_VISIBLE_INSTRUCTIONS = 32;
+
+function displayedInstructionRows(instructionCount: number): number {
+	return Math.min(instructionCount, MAX_VISIBLE_INSTRUCTIONS)
+		+ (instructionCount > MAX_VISIBLE_INSTRUCTIONS ? 1 : 0);
+}
 
 /**
  * Calculates layout for a CFG using a simplified Sugiyama algorithm
@@ -57,8 +63,11 @@ export class GraphLayoutEngine {
 		// Step 2: Order nodes within each layer to minimize crossings
 		const orderedLayers = this.orderNodesInLayers(cfg, layers);
 
-		// Step 3: Calculate node positions
-		const nodes = this.calculateNodePositions(cfg, orderedLayers);
+		// A region made only of independent thunks has no graph topology. Keep it
+		// inspectable without stretching every block across one enormous row.
+		const nodes = cfg.edges.length === 0 && cfg.blocks.size > 1
+			? this.calculateDisconnectedNodePositions(cfg)
+			: this.calculateNodePositions(cfg, orderedLayers);
 
 		// Step 4: Route edges
 		const edges = this.routeEdges(cfg, nodes);
@@ -210,8 +219,8 @@ export class GraphLayoutEngine {
 				const block = cfg.blocks.get(nodeId);
 				if (!block) continue;
 
-				// Calculate height based on number of instructions
-				const height = HEADER_HEIGHT + block.instructions.length * INSTRUCTION_HEIGHT + NODE_PADDING;
+				// Calculate height based on the instructions shown in the graph preview.
+				const height = HEADER_HEIGHT + displayedInstructionRows(block.instructions.length) * INSTRUCTION_HEIGHT + NODE_PADDING;
 
 				nodes.set(nodeId, {
 					id: nodeId,
@@ -232,6 +241,36 @@ export class GraphLayoutEngine {
 		return nodes;
 	}
 
+	private calculateDisconnectedNodePositions(cfg: CFG): Map<number, NodeLayout> {
+		const nodes = new Map<number, NodeLayout>();
+		const blocks = Array.from(cfg.blocks.values());
+		const columns = Math.max(1, Math.ceil(Math.sqrt(blocks.length)));
+		let currentY = NODE_PADDING;
+
+		for (let rowStart = 0; rowStart < blocks.length; rowStart += columns) {
+			const row = blocks.slice(rowStart, rowStart + columns);
+			let maxHeight = 0;
+
+			for (let column = 0; column < row.length; column++) {
+				const block = row[column];
+				const height = HEADER_HEIGHT + displayedInstructionRows(block.instructions.length) * INSTRUCTION_HEIGHT + NODE_PADDING;
+				nodes.set(block.id, {
+					id: block.id,
+					x: NODE_PADDING + column * (NODE_WIDTH + NODE_SPACING),
+					y: currentY,
+					width: NODE_WIDTH,
+					height,
+					layer: Math.floor(rowStart / columns)
+				});
+				maxHeight = Math.max(maxHeight, height);
+			}
+
+			currentY += maxHeight + NODE_SPACING;
+		}
+
+		return nodes;
+	}
+
 	/**
 	 * Route edges between nodes
 	 */
@@ -247,7 +286,6 @@ export class GraphLayoutEngine {
 			// Calculate connection points
 			const fromX = fromNode.x + fromNode.width / 2;
 			const fromY = fromNode.y + fromNode.height;
-			const toX = toNode.x + toNode.width / 2;
 			const toY = toNode.y;
 
 			// For conditional jumps, offset the exit points
@@ -257,11 +295,25 @@ export class GraphLayoutEngine {
 			} else if (edge.type === 'false') {
 				exitOffset = 30;
 			}
+			const toX = toNode.x + toNode.width / 2 + exitOffset;
 
 			// Create edge path (bezier curve for smooth edges)
 			const points: { x: number; y: number }[] = [];
 
-			if (toNode.layer > fromNode.layer) {
+			if (toNode.layer > fromNode.layer + 1) {
+				// A long forward edge would otherwise pass through blocks in the
+				// intermediate layers. Route it through a side channel.
+				const useLeftChannel = edge.type === 'true';
+				const corridorX = useLeftChannel
+					? Math.max(NODE_PADDING / 2, Math.min(fromNode.x, toNode.x) - 50)
+					: Math.max(fromNode.x + fromNode.width, toNode.x + toNode.width) + 50;
+				points.push({ x: fromX + exitOffset, y: fromY });
+				points.push({ x: fromX + exitOffset, y: fromY + 24 });
+				points.push({ x: corridorX, y: fromY + 24 });
+				points.push({ x: corridorX, y: toY - 24 });
+				points.push({ x: toX, y: toY - 24 });
+				points.push({ x: toX, y: toY });
+			} else if (toNode.layer > fromNode.layer) {
 				// Forward edge (normal flow)
 				points.push({ x: fromX + exitOffset, y: fromY });
 
@@ -301,5 +353,6 @@ export const LAYOUT_CONSTANTS = {
 	LAYER_SPACING,
 	NODE_SPACING,
 	INSTRUCTION_HEIGHT,
-	HEADER_HEIGHT
+	HEADER_HEIGHT,
+	MAX_VISIBLE_INSTRUCTIONS
 };

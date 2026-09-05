@@ -27,7 +27,7 @@
  */
 export interface OptimizeOptions {
     /**
-     * Maximum number of optimization candidates to extract per function.
+     * Maximum number of optimization candidates to submit to the solver per function.
      * Set to 0 for unlimited. Higher values may increase optimization quality
      * at the cost of solve time.
      * @default 1000
@@ -69,17 +69,29 @@ export interface OptimizeResult {
      */
     readonly error: string;
 
+    /** Non-fatal solver and optimization diagnostics. */
+    readonly diagnostics: string;
+
     /**
      * Number of optimization candidates found in the IR.
      * A candidate is an instruction sequence that Souper can analyze.
      */
     readonly candidatesFound: number;
 
+    /** Number of candidates submitted to the solver. */
+    readonly candidatesAttempted: number;
+
+    /** Number of candidates for which Souper inferred a replacement. */
+    readonly candidatesInferred: number;
+
     /**
      * Number of candidates successfully replaced with simpler equivalents.
      * `candidatesReplaced <= candidatesFound`.
      */
     readonly candidatesReplaced: number;
+
+    /** Number of solver calls stopped by the per-candidate timeout. */
+    readonly solverTimeouts: number;
 
     /**
      * Wall-clock time for the optimization pass in milliseconds.

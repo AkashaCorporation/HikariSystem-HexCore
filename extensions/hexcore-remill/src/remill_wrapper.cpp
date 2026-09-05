@@ -147,6 +147,25 @@ static size_t XedInstructionLength(const uint8_t* bytes, size_t maxLen, bool is6
 	return static_cast<size_t>(len);
 }
 
+/** Resolve an x86 mnemonic for diagnostics when Remill rejects the sub-arch. */
+static std::string XedInstructionName(const std::string& bytes, bool is64Bit) {
+	if (bytes.empty()) return {};
+	EnsureXedInitialized();
+	xed_decoded_inst_t xedd;
+	xed_decoded_inst_zero(&xedd);
+	xed_decoded_inst_set_mode(
+		&xedd,
+		is64Bit ? XED_MACHINE_MODE_LONG_64 : XED_MACHINE_MODE_LEGACY_32,
+		is64Bit ? XED_ADDRESS_WIDTH_64b : XED_ADDRESS_WIDTH_32b);
+	const unsigned int capLen = static_cast<unsigned int>(
+		std::min<size_t>(bytes.size(), XED_MAX_INSTRUCTION_BYTES));
+	const auto err = xed_decode(
+		&xedd, reinterpret_cast<const xed_uint8_t*>(bytes.data()), capLen);
+	if (err != XED_ERROR_NONE) return {};
+	const char* name = xed_iclass_enum_t2str(xed_decoded_inst_get_iclass(&xedd));
+	return name ? std::string(name) : std::string{};
+}
+
 static llvm::AllocaInst* FindNamedAlloca(llvm::Function* func, llvm::StringRef name) {
 	if (!func) {
 		return nullptr;
@@ -261,6 +280,17 @@ static LiftOptions ParseLiftOptions(const Napi::Value& value) {
 		options.optimizeIR = opts.Get("optimizeIR").As<Napi::Boolean>().Value();
 	if (opts.Has("inlineSemantics") && opts.Get("inlineSemantics").IsBoolean())
 		options.inlineSemantics = opts.Get("inlineSemantics").As<Napi::Boolean>().Value();
+	if (opts.Has("entryAddress")) {
+		Napi::Value entry = opts.Get("entryAddress");
+		if (entry.IsNumber()) {
+			options.entryAddress = static_cast<uint64_t>(entry.As<Napi::Number>().Int64Value());
+		} else if (entry.IsBigInt()) {
+			bool lossless = false;
+			options.entryAddress = entry.As<Napi::BigInt>().Uint64Value(&lossless);
+		}
+	}
+	if (opts.Has("reachableOnly") && opts.Get("reachableOnly").IsBoolean())
+		options.reachableOnly = opts.Get("reachableOnly").As<Napi::Boolean>().Value();
 	// FIX-052b: opt-in CFG-preserving optimization pipeline (deflatten path only).
 	if (opts.Has("preserveCfgTopology") && opts.Get("preserveCfgTopology").IsBoolean())
 		options.preserveCfgTopology = opts.Get("preserveCfgTopology").As<Napi::Boolean>().Value();
@@ -648,8 +678,11 @@ LiftResult RemillLifter::DoLift(
 	const uint8_t* bytes, size_t length, uint64_t address,
 	const LiftOptions& options) {
 
+	const uint64_t entryAddress = options.entryAddress ? options.entryAddress : address;
+	const uint64_t bufferEndAddress = address + length;
+
 	LiftResult result;
-	result.address = address;
+	result.address = entryAddress;
 	result.bytesConsumed = 0;
 	result.success = false;
 
@@ -660,6 +693,10 @@ LiftResult RemillLifter::DoLift(
 
 	if (length == 0) {
 		result.error = "Empty buffer";
+		return result;
+	}
+	if (entryAddress < address || entryAddress >= bufferEndAddress) {
+		result.error = "entryAddress is outside the lift buffer";
 		return result;
 	}
 
@@ -700,12 +737,13 @@ LiftResult RemillLifter::DoLift(
 		remill::Instruction inst;
 		uint64_t pc;
 		size_t size;
+		std::string semanticName;
 		bool terminatesControlFlow = false;
 	};
 	std::vector<DecodedInst> decoded;
 	std::set<uint64_t> leaders;
 
-	leaders.insert(address);  // Entry is always a leader
+	leaders.insert(entryAddress);  // Logical entry is always a leader
 
 	// Pre-compute knownFunctionEnds as a set for O(log n) lookup
 	std::set<uint64_t> functionEndSet(options.knownFunctionEnds.begin(),
@@ -940,6 +978,7 @@ LiftResult RemillLifter::DoLift(
 			di.inst = scanInst;
 			di.pc = scanPC;
 			di.size = scanInst.bytes.size();
+			di.semanticName = scanInst.function;
 			// Some Remill x86 configurations decode UD2 successfully but expose
 			// it as a non-terminating category. Recognize the architectural
 			// encoding independently of the decoder category as well.
@@ -1059,17 +1098,17 @@ LiftResult RemillLifter::DoLift(
 			scanPC = nextPC;
 
 			// ─── Boundary detection: stop if limits are exceeded ─────────
-			if (decoded.size() >= options.maxInstructions) {
+			if (decoded.size() >= options.maxInstructions && scanOffset < length) {
 				result.truncated = true;
 				result.truncationReason = "max_instructions";
 				break;
 			}
-			if (leaders.size() >= options.maxBasicBlocks) {
+			if (leaders.size() >= options.maxBasicBlocks && scanOffset < length) {
 				result.truncated = true;
 				result.truncationReason = "max_blocks";
 				break;
 			}
-			if (scanOffset >= options.maxBytes) {
+			if (scanOffset >= options.maxBytes && scanOffset < length) {
 				result.truncated = true;
 				result.truncationReason = "max_bytes";
 				break;
@@ -1100,13 +1139,83 @@ LiftResult RemillLifter::DoLift(
 		}
 	}
 
+	// Callfuscation scatters one logical function across a large executable
+	// window. The linear decode above preserves every original virtual address;
+	// this reachability slice removes neighboring functions before IR emission.
+	// Calls retain only their fall-through edge. Rewritten call-as-jmp links are
+	// direct jumps, so their targets become part of the same logical function.
+	if (options.reachableOnly) {
+		std::map<uint64_t, size_t> decodedByPc;
+		for (size_t i = 0; i < decoded.size(); ++i) {
+			decodedByPc.emplace(decoded[i].pc, i);
+		}
+
+		std::vector<uint64_t> worklist = {entryAddress};
+		std::set<uint64_t> reachablePcs;
+		while (!worklist.empty()) {
+			const uint64_t pc = worklist.back();
+			worklist.pop_back();
+			if (reachablePcs.count(pc)) continue;
+			auto found = decodedByPc.find(pc);
+			if (found == decodedByPc.end()) continue;
+
+			const auto& di = decoded[found->second];
+			reachablePcs.insert(pc);
+			if (di.terminatesControlFlow) continue;
+
+			const uint64_t nextPc = di.pc + di.size;
+			auto enqueueInBuffer = [&](uint64_t target) {
+				if (target >= address && target < bufferEndAddress &&
+					decodedByPc.count(target) && !reachablePcs.count(target)) {
+					worklist.push_back(target);
+				}
+			};
+
+			switch (di.inst.category) {
+			case remill::Instruction::kCategoryDirectJump:
+				enqueueInBuffer(ResolveDirectJumpTargetFromDecode(di.inst));
+				break;
+			case remill::Instruction::kCategoryConditionalBranch:
+				enqueueInBuffer(di.inst.branch_taken_pc);
+				enqueueInBuffer(di.inst.branch_not_taken_pc ?
+					di.inst.branch_not_taken_pc : nextPc);
+				break;
+			case remill::Instruction::kCategoryFunctionReturn:
+			case remill::Instruction::kCategoryIndirectJump:
+				break;
+			default:
+				enqueueInBuffer(nextPc);
+				break;
+			}
+		}
+
+		if (reachablePcs.empty()) {
+			result.error = "entryAddress was not decoded from the lift buffer";
+			return result;
+		}
+
+		decoded.erase(std::remove_if(decoded.begin(), decoded.end(),
+			[&](const DecodedInst& di) { return !reachablePcs.count(di.pc); }), decoded.end());
+		for (auto it = leaders.begin(); it != leaders.end();) {
+			if (!reachablePcs.count(*it)) {
+				it = leaders.erase(it);
+			} else {
+				++it;
+			}
+		}
+		leaders.insert(entryAddress);
+	}
+
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 1.5: Inject additional BB leaders from external analysis
 	// ═══════════════════════════════════════════════════════════════════════
 	// TypeScript can extract leaders from jump table targets (.rodata),
 	// PE .pdata exception directory, or ELF symtab function addresses.
 	// Insert them into the leaders set before Phase 2 creates basic blocks.
-	if (!options.additionalLeaders.empty()) {
+	// reachableOnly already retained every reachable branch target discovered
+	// during Phase 1. Re-injecting the full external target set here would
+	// recreate thousands of unreachable, empty callfuscation gadget blocks.
+	if (!options.additionalLeaders.empty() && !options.reachableOnly) {
 		uint64_t endAddr = address + length;
 		for (uint64_t extraLeader : options.additionalLeaders) {
 			// Only accept leaders that fall within the decoded range
@@ -1121,18 +1230,18 @@ LiftResult RemillLifter::DoLift(
 	// ═══════════════════════════════════════════════════════════════════════
 
 	auto func = arch_->DeclareLiftedFunction(
-		"lifted_" + std::to_string(address), liftModule.get());
+		"lifted_" + std::to_string(entryAddress), liftModule.get());
 	arch_->InitializeEmptyLiftedFunction(func);
 
 	// Map: leader address → BasicBlock
 	std::map<uint64_t, llvm::BasicBlock*> bbMap;
 
 	// The entry block is always the first leader
-	bbMap[address] = &func->getEntryBlock();
+	bbMap[entryAddress] = &func->getEntryBlock();
 
 	// Create additional blocks for other leaders
 	for (uint64_t leaderAddr : leaders) {
-		if (leaderAddr == address) continue;  // Already have the entry block
+		if (leaderAddr == entryAddress) continue;  // Already have the entry block
 
 		// Only create blocks for leaders that are within our function range
 		uint64_t endAddr = address + length;
@@ -1174,6 +1283,29 @@ LiftResult RemillLifter::DoLift(
 	// JMPI immediate). Lets the Phase 3.4 rewire connect edges without re-deriving
 	// the target, since `branch_taken_pc` is 0 for `jmp rel` in this build.
 	std::map<uint64_t, uint64_t> directJumpTargets;
+	std::set<uint64_t> liftedPcs;
+	std::set<uint64_t> unsupportedPcs;
+	std::set<uint64_t> decodeFailurePcs;
+	auto recordLiftStatus = [&](const DecodedInst& di, remill::LiftStatus status) {
+		if (status == remill::kLiftedInstruction) {
+			liftedPcs.insert(di.pc);
+			return;
+		}
+		if (status == remill::kLiftedUnsupportedInstruction) {
+			if (unsupportedPcs.insert(di.pc).second) {
+				std::string opcode = di.semanticName;
+				if (opcode.empty() &&
+					(archName_ == "amd64" || archName_ == "amd64_avx" || archName_ == "amd64_avx512" ||
+					 archName_ == "x86" || archName_ == "x86_avx" || archName_ == "x86_avx512")) {
+					opcode = XedInstructionName(di.inst.bytes, archName_.rfind("amd64", 0) == 0);
+				}
+				if (opcode.empty()) opcode = "<unknown-semantics>";
+				result.unsupportedOpcodes[opcode]++;
+			}
+			return;
+		}
+		decodeFailurePcs.insert(di.pc);
+	};
 
 	for (size_t i = 0; i < decoded.size(); i++) {
 		auto& di = decoded[i];
@@ -1201,6 +1333,7 @@ LiftResult RemillLifter::DoLift(
 			const uint8_t firstByte = static_cast<uint8_t>(di.inst.bytes[0]);
 			if (firstByte == 0xF3 || firstByte == 0xE8) {
 				// Synthetic NOP — skip lifting, just count the bytes
+				liftedPcs.insert(di.pc);
 				totalOffset += di.size;
 				continue;
 			}
@@ -1227,12 +1360,14 @@ LiftResult RemillLifter::DoLift(
 		if (di.terminatesControlFlow) {
 			llvm::IRBuilder<> builder(currentBlock);
 			builder.CreateRet(func->getArg(2));
+			liftedPcs.insert(di.pc);
 			totalOffset += di.size;
 			continue;
 		}
 
 		// Lift the instruction into its block
 		auto status = instLifter->LiftIntoBlock(di.inst, currentBlock, false);
+		recordLiftStatus(di, status);
 		if (status != remill::kLiftedInstruction) {
 			// FIX-105: keep lifting PAST an instruction Remill cannot fully model,
 			// instead of `break`-ing and discarding every instruction after it -- the
@@ -1456,7 +1591,40 @@ LiftResult RemillLifter::DoLift(
 		}
 	}
 
-	result.bytesConsumed = totalOffset;
+	// `decoded` may contain the same byte range more than once when multiple
+	// leaders or overlapping blocks converge on it. Summing instruction sizes
+	// reports impossible coverage such as 905/342. bytesConsumed is an input
+	// coverage metric, so count the union of decoded intervals, clipped to the
+	// caller-provided buffer.
+	std::vector<std::pair<uint64_t, uint64_t>> decodedIntervals;
+	decodedIntervals.reserve(decoded.size());
+	for (const auto& di : decoded) {
+		if (di.size == 0) continue;
+		const uint64_t begin = std::max<uint64_t>(di.pc, address);
+		const uint64_t end = std::min<uint64_t>(
+			di.pc + static_cast<uint64_t>(di.size), bufferEndAddress);
+		if (begin < end) decodedIntervals.emplace_back(begin, end);
+	}
+	std::sort(decodedIntervals.begin(), decodedIntervals.end());
+	uint64_t uniqueDecodedBytes = 0;
+	uint64_t intervalBegin = 0;
+	uint64_t intervalEnd = 0;
+	for (const auto& [begin, end] : decodedIntervals) {
+		if (intervalBegin == intervalEnd) {
+			intervalBegin = begin;
+			intervalEnd = end;
+			continue;
+		}
+		if (begin <= intervalEnd) {
+			intervalEnd = std::max(intervalEnd, end);
+			continue;
+		}
+		uniqueDecodedBytes += intervalEnd - intervalBegin;
+		intervalBegin = begin;
+		intervalEnd = end;
+	}
+	uniqueDecodedBytes += intervalEnd - intervalBegin;
+	result.bytesConsumed = uniqueDecodedBytes;
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 3.4: Re-wire in-buffer direct jumps whose edge was dropped
@@ -1575,6 +1743,7 @@ LiftResult RemillLifter::DoLift(
 						}
 
 						auto status = instLifter->LiftIntoBlock(di.inst, bb, false);
+						recordLiftStatus(di, status);
 						if (status != remill::kLiftedInstruction) break;
 
 						// Wire fallthrough to next block if needed.
@@ -1734,7 +1903,7 @@ LiftResult RemillLifter::DoLift(
 		}
 		if (pcArg) {
 			auto* concretePC = llvm::ConstantInt::get(
-				llvm::Type::getInt64Ty(liftModule->getContext()), address);
+				llvm::Type::getInt64Ty(liftModule->getContext()), entryAddress);
 			pcArg->replaceAllUsesWith(concretePC);
 		}
 
@@ -2376,6 +2545,10 @@ LiftResult RemillLifter::DoLift(
 	os.flush();
 
 	result.ir = irStr;
+	result.decodedInstructions = static_cast<uint64_t>(decoded.size());
+	result.liftedInstructions = static_cast<uint64_t>(liftedPcs.size());
+	result.unsupportedInstructions = static_cast<uint64_t>(unsupportedPcs.size());
+	result.decodeFailureInstructions = static_cast<uint64_t>(decodeFailurePcs.size());
 	result.success = true;
 	return result;
 }
@@ -2423,6 +2596,27 @@ Napi::Object RemillLifter::LiftResultToJS(
 		static_cast<double>(result.address)));
 	obj.Set("bytesConsumed", Napi::Number::New(env,
 		static_cast<double>(result.bytesConsumed)));
+	obj.Set("decodedInstructions", Napi::Number::New(env,
+		static_cast<double>(result.decodedInstructions)));
+	obj.Set("liftedInstructions", Napi::Number::New(env,
+		static_cast<double>(result.liftedInstructions)));
+	obj.Set("unsupportedInstructions", Napi::Number::New(env,
+		static_cast<double>(result.unsupportedInstructions)));
+	obj.Set("decodeFailureInstructions", Napi::Number::New(env,
+		static_cast<double>(result.decodeFailureInstructions)));
+	const uint64_t semanticTotal = result.liftedInstructions +
+		result.unsupportedInstructions + result.decodeFailureInstructions;
+	const double semanticCoverage = semanticTotal == 0
+		? 1.0
+		: static_cast<double>(result.liftedInstructions) /
+			static_cast<double>(semanticTotal);
+	obj.Set("semanticCoverage", Napi::Number::New(env, semanticCoverage));
+	Napi::Object unsupportedOpcodes = Napi::Object::New(env);
+	for (const auto& [opcode, count] : result.unsupportedOpcodes) {
+		unsupportedOpcodes.Set(opcode, Napi::Number::New(env,
+			static_cast<double>(count)));
+	}
+	obj.Set("unsupportedOpcodes", unsupportedOpcodes);
 
 	// Boundary detection metadata
 	obj.Set("truncated", Napi::Boolean::New(env, result.truncated));

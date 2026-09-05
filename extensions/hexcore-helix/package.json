@@ -1,6 +1,6 @@
 {
   "name": "hexcore-helix",
-  "version": "0.9.3",
+  "version": "0.9.4-rc.1",
   "description": "HexCore Helix - MLIR decompilation with structured control flow and debug-info-guided type recovery",
   "main": "./index.js",
   "types": "./index.d.ts",

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "signatureId": "struct.guarded_loop",
+  "cases": [
+    {
+      "caseId": "hql-atlas-v1:struct.guarded_loop.rule:positive",
+      "branchId": "rule",
+      "expectMatch": true,
+      "expectedMatchLocations": [
+        "guard"
+      ],
+      "contentSha256": "d3a4b0bd84684d6002bf1b2140eb7d48ee0ada415c7398ae62c70c02cc4f0012",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "if",
+            "at": "guard",
+            "condition": "ready",
+            "then": [
+              {
+                "k": "doWhile",
+                "condition": "pending",
+                "body": [
+                  {
+                    "k": "call",
+                    "name": "initialize"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:struct.guarded_loop.rule:negative-1",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "7a1b15e8bbc042b929905a967644483aa9a9ee85f6ba127f839d88681969ac2c",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "if",
+            "condition": "ready",
+            "then": [
+              {
+                "k": "while",
+                "condition": "pending",
+                "body": [
+                  {
+                    "k": "call",
+                    "name": "initialize"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "caseId": "hql-atlas-v1:struct.guarded_loop.rule:negative-2",
+      "branchId": "rule",
+      "expectMatch": false,
+      "expectedMatchLocations": [],
+      "contentSha256": "bebdc7703024e9a1860ed7c4aee8ed95309dab89634519db725b1a4066b0ec22",
+      "ast": {
+        "k": "fn",
+        "body": [
+          {
+            "k": "doWhile",
+            "condition": "pending",
+            "body": [
+              {
+                "k": "call",
+                "name": "initialize"
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

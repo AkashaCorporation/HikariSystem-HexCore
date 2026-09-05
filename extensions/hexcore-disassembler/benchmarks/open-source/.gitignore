@@ -1,0 +1,5 @@
+/build/
+/sources/
+/runs/competitors/ghidra-projects/
+/runs/competitors/*.i64
+/runs/competitors/*.log

@@ -121,6 +121,35 @@ suite('Unit tests: listCapabilities', () => {
 		assert.strictEqual(entry!.headless, false, 'analyzeActive should not be headless');
 	});
 
+	test('R32 semantic commands are headless, artifact-producing and owned by the disassembler', () => {
+		const commands = [
+			'hexcore.types.applyPrototype',
+			'hexcore.types.setCallingConvention',
+			'hexcore.types.setParameter',
+			'hexcore.types.clearOverride',
+			'hexcore.types.explainPrototype',
+			'hexcore.types.export',
+			'hexcore.types.import',
+		];
+		for (const command of commands) {
+			const entry = allEntries.find(candidate => candidate.command === command);
+			assert.ok(entry, `missing R32 capability ${command}`);
+			assert.strictEqual(entry!.headless, true, `${command} must support jobs`);
+			assert.strictEqual(entry!.validateOutput, true, `${command} must emit an acceptance artifact`);
+			assert.deepStrictEqual(entry!.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		}
+	});
+
+	test('R33 typed-reference commands are headless, artifact-producing and owned by the disassembler', () => {
+		for (const command of ['hexcore.references.query', 'hexcore.references.export']) {
+			const entry = allEntries.find(candidate => candidate.command === command);
+			assert.ok(entry, `missing R33 capability ${command}`);
+			assert.strictEqual(entry!.headless, true, `${command} must support jobs`);
+			assert.strictEqual(entry!.validateOutput, true, `${command} must emit an acceptance artifact`);
+			assert.deepStrictEqual(entry!.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		}
+	});
+
 	/**
 	 * Total capabilities count is reasonable (> 30 entries).
 	 */

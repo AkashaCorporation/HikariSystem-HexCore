@@ -485,11 +485,13 @@ export interface Version {
 export interface FunctionBoundary {
 	/** Start address of the function (BigInt for 64-bit safety) */
 	start: bigint;
-	/** End address (last instruction address) */
+	/** First byte after the function. Function ranges are [start, endExclusive). */
+	endExclusive: bigint;
+	/** @deprecated Inclusive compatibility endpoint. Use endExclusive. */
 	end: bigint;
 	/** Total size in bytes */
 	size: number;
-	/** Number of instructions (0 if not counted in fast scan) */
+	/** Number of instructions decoded by the detector within this half-open range */
 	instructionCount: number;
 	/** How this function was detected */
 	detectionMethod: 'prologue' | 'call_target' | 'symbol' | 'heuristic';
@@ -499,9 +501,9 @@ export interface FunctionBoundary {
 	hasReturn: boolean;
 	/** Whether this is a thunk (tiny function with just a jump) */
 	isThunk: boolean;
-	/** Addresses of functions called by this function */
+	/** In-buffer direct-call targets observed inside this function */
 	callTargets: bigint[];
-	/** Addresses of functions that call this function */
+	/** Detected function entries with a direct call to this exact entry */
 	calledBy: bigint[];
 }
 

@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "targets": [
+    {
+      "id": "zlib-1.3.1",
+      "repository": "https://github.com/madler/zlib.git",
+      "tag": "v1.3.1",
+      "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+      "binary": "build/zlib/RelWithDebInfo/zlib1.dll",
+      "pdb": "build/zlib/RelWithDebInfo/zlib.pdb",
+      "focus": ["deflate", "inflate", "inflateBack", "crc32"]
+    },
+    {
+      "id": "libarchive-3.8.1",
+      "repository": "https://github.com/libarchive/libarchive.git",
+      "tag": "v3.8.1",
+      "commit": "9525f90ca4bd14c7b335e2f8c84a4607b0af6bdf",
+      "binary": "build/libarchive/bin/RelWithDebInfo/archive.dll",
+      "pdb": "build/libarchive/bin/RelWithDebInfo/archive.pdb",
+      "focus": ["archive_read_open", "archive_read_data", "archive_write_open", "archive_read_support_format_zip"]
+    }
+  ],
+  "build": {
+    "generator": "Visual Studio 17 2022",
+    "architecture": "x64",
+    "configuration": "RelWithDebInfo",
+    "runtime": "MD",
+    "libarchiveFeatures": {
+      "zlib": "zlib-1.3.1",
+      "openssl": false,
+      "programs": false,
+      "tests": false,
+      "posixRegex": "NONE"
+    }
+  }
+}

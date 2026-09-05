@@ -150,4 +150,39 @@ suite('honestyConfidenceCap (#31)', () => {
 		assert.strictEqual(r.capped, true);
 		assert.ok(r.reasons.some(x => x.includes('stub-shaped body')));
 	});
+
+	test('caps apparently clean output when the source binary is callfuscated', () => {
+		const src = '// Confidence: 100% (High)\nint helper(int x) {\n  return x + 1;\n}\n';
+		const r = applyHonestyConfidenceCap(src, {
+			bytesConsumed: 64,
+			knownFunctionSize: 64,
+			callfuscation: { detected: true, gadgetCount: 3214, callCount: 3614, ratio: 0.8894 },
+		});
+		assert.strictEqual(r.capped, true);
+		assert.strictEqual(r.newScore, 50);
+		assert.ok(r.reasons.some(x => x.includes('callfuscation detected')));
+	});
+
+	test('caps apparently clean output when source IR contains unsupported instructions', () => {
+		const src = '// Confidence: 97% (High)\nint digest(void) {\n  return 1;\n}\n';
+		const r = applyHonestyConfidenceCap(src, {
+			semanticCoverage: 0.42,
+			unsupportedInstructions: 58,
+			decodeFailureInstructions: 0,
+		});
+		assert.strictEqual(r.capped, true);
+		assert.strictEqual(r.newScore, 50);
+		assert.ok(r.reasons.some(x => x.includes('incomplete source IR')));
+	});
+
+	test('caps whole-function confidence for an explicitly scoped fragment', () => {
+		const src = '// Confidence: 100% (High)\nint op01(void) {\n  return 1;\n}\n';
+		const r = applyHonestyConfidenceCap(src, {
+			bytesConsumed: 480,
+			knownFunctionSize: 13_504,
+			scopeLimited: { instructionLimit: 180 },
+		});
+		assert.strictEqual(r.capped, true);
+		assert.ok(r.reasons.some(reason => reason.includes('explicit scoped fragment')));
+	});
 });

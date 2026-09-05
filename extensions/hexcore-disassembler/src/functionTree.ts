@@ -5,22 +5,24 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
-import { DisassemblerEngine, Function } from './disassemblerEngine';
+import type { DisassemblerEngine, Function, FunctionBodyStatus } from './disassemblerEngine';
 
 type FunctionTreeElement = FunctionTreeItem | FunctionRefGroupItem | FunctionRefItem;
 
 export class FunctionTreeItem extends vscode.TreeItem {
 	constructor(
 		public readonly func: Function,
-		public readonly collapsibleState: vscode.TreeItemCollapsibleState
+		public readonly collapsibleState: vscode.TreeItemCollapsibleState,
+		public readonly bodyStatus: FunctionBodyStatus | 'unknown' = 'unknown'
 	) {
 		super(func.name, collapsibleState);
 		const callerCount = func.callers.length;
 		const calleeCount = func.callees.length;
-		this.tooltip = `Address: 0x${func.address.toString(16).toUpperCase()}\nSize: ${func.size} bytes\nCallers: ${callerCount}\nCallees: ${calleeCount}`;
-		this.description = `0x${func.address.toString(16).toUpperCase()} (${func.size}b)`;
+		const bodyLabel = bodyStatus === 'lazy' ? 'Lazy (deferred)' : bodyStatus;
+		this.tooltip = `Address: 0x${func.address.toString(16).toUpperCase()}\nSize: ${func.size} bytes\nBody: ${bodyLabel}\nKnown callers: ${callerCount}\nKnown callees: ${calleeCount}\nReference completeness: not established`;
+		this.description = `0x${func.address.toString(16).toUpperCase()} (${func.size}b) [${bodyStatus}]`;
 		this.contextValue = 'function';
-		this.iconPath = new vscode.ThemeIcon('symbol-method');
+		this.iconPath = new vscode.ThemeIcon(bodyStatus === 'lazy' ? 'clock' : bodyStatus === 'partial' || bodyStatus === 'decode-empty' ? 'warning' : 'symbol-method');
 		this.command = {
 			command: 'hexcore.disasm.goToAddress',
 			title: 'Go to Function',
@@ -43,6 +45,7 @@ export class FunctionRefGroupItem extends vscode.TreeItem {
 			groupType === 'callers' ? 'call-incoming' : 'call-outgoing'
 		);
 		this.contextValue = groupType;
+		this.tooltip = 'Known references in the current analysis; missing references are not proof of absence.';
 	}
 }
 
@@ -88,7 +91,8 @@ export class FunctionTreeProvider implements vscode.TreeDataProvider<FunctionTre
 					const hasChildren = func.callers.length > 0 || func.callees.length > 0;
 					return new FunctionTreeItem(
 						func,
-						hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None
+						hasChildren ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.None,
+						this.engine.getFunctionBodyStatus(func.address)
 					);
 				})
 			);

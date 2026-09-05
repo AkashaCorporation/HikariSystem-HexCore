@@ -1,0 +1,17 @@
+{
+  "id": "crypto.crc32",
+  "version": "1.0.0",
+  "namespace": "crypto",
+  "status": "released",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": { "kind": "internal", "source": "HexCore HQL 0.1 built-in", "modified": true },
+  "compatibility": { "hql": ">=0.2.0 <1.0.0", "helix": ">=0.9.3", "hastSchema": 1 },
+  "fixtures": { "manifest": "v1/crypto.crc32.json" },
+  "limitations": ["The polynomial constant alone is a signal and may occur in tables or unrelated dataflow."],
+  "name": "CRC-32",
+  "description": "The reversed CRC-32 polynomial 0xEDB88320 as an exact integer constant.",
+  "severity": "info",
+  "evidenceLevel": "signal",
+  "condition": { "query": { "target": "CIntLitExpr", "attributes": [{ "field": "value", "value": 3988292384 }] } }
+}

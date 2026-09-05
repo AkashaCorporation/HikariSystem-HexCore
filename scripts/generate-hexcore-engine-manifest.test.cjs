@@ -10,7 +10,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { ENGINE_SPECS, generateManifest } = require('./generate-hexcore-engine-manifest.cjs');
+const { ENGINE_SPECS, runtimeCandidates, generateManifest } = require('./generate-hexcore-engine-manifest.cjs');
 
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-engine-manifest-'));
 
@@ -30,7 +30,11 @@ try {
 			repository: { url: `https://github.com/AkashaCorporation/${spec.id}.git` }
 		}), 'utf8');
 		if (spec.required !== false) {
-			fs.writeFileSync(path.join(extensionRoot, `${spec.id}.node`), spec.id, 'utf8');
+			const runtime = path.join(extensionRoot, runtimeCandidates(spec.id, 'win32', 'x64')[0]);
+			fs.mkdirSync(path.dirname(runtime), { recursive: true });
+			fs.writeFileSync(runtime, spec.id, 'utf8');
+			if (spec.id === 'hexcore-unicorn' || spec.id === 'hexcore-elixir') fs.writeFileSync(path.join(extensionRoot, 'unicorn.dll'), 'fixture');
+			if (spec.id === 'hexcore-remill') fs.writeFileSync(path.join(extensionRoot, 'X86.bc'), 'fixture');
 		}
 	}
 
@@ -49,11 +53,26 @@ try {
 	);
 	assert.ok(!helix.artifacts[0].path.includes('\\'));
 
-	fs.rmSync(path.join(fixtureRoot, 'extensions', 'hexcore-helix', 'hexcore-helix.node'));
+	const helixRoot = path.join(fixtureRoot, 'extensions', 'hexcore-helix');
+	const primary = path.join(helixRoot, runtimeCandidates('hexcore-helix', 'win32', 'x64')[0]);
+	assert.equal(helix.runtimeValidation, 'presence-only');
+	fs.rmSync(primary);
+	fs.writeFileSync(path.join(helixRoot, 'irrelevant.dll'), 'not a Helix addon');
 	assert.throws(
-		() => generateManifest({ appRoot: fixtureRoot, outputPath }),
-		/Engine hexcore-helix has no packaged native artifacts/
+		() => generateManifest({ appRoot: fixtureRoot, outputPath, platform: 'win32', arch: 'x64' }),
+		/Engine hexcore-helix primary runtime missing/
 	);
+	fs.writeFileSync(primary, '');
+	assert.throws(() => generateManifest({ appRoot: fixtureRoot, outputPath, platform: 'win32', arch: 'x64' }), /primary runtime missing or empty/);
+	fs.writeFileSync(primary, 'hexcore-helix');
+	const elixirDll = path.join(fixtureRoot, 'extensions', 'hexcore-elixir', 'unicorn.dll');
+	fs.rmSync(elixirDll);
+	assert.throws(() => generateManifest({ appRoot: fixtureRoot, outputPath, platform: 'win32', arch: 'x64' }), /Elixir adjacent Unicorn runtime DLL/);
+	fs.writeFileSync(elixirDll, 'fixture');
+	fs.rmSync(path.join(fixtureRoot, 'extensions', 'hexcore-rellic'), { recursive: true });
+	assert.equal(generateManifest({ appRoot: fixtureRoot, outputPath, platform: 'win32', arch: 'x64' }).engines.filter(engine => engine.active).length, 9);
+	fs.rmSync(path.join(fixtureRoot, 'extensions', 'hexcore-remill', 'X86.bc'));
+	assert.throws(() => generateManifest({ appRoot: fixtureRoot, outputPath, platform: 'win32', arch: 'x64' }), /Remill semantics bitcode missing/);
 
 	console.log('HexCore engine manifest tests passed.');
 } finally {

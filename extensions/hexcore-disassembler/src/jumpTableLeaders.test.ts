@@ -54,6 +54,26 @@ suite('jumpTableLeaders (#51)', () => {
 		assert.deepStrictEqual(hits[0].targets.sort((a, b) => a - b), expected.sort((a, b) => a - b));
 	});
 
+	test('recovers MSVC image-base-relative tables with a displaced table address', () => {
+		const imageBase = 0x180000000;
+		const tableAddress = imageBase + 0x19b8;
+		const targets = [0x18000198e, 0x180001993, 0x180001998, 0x18000199d, 0x1800019a2, 0x1800019a7, 0x1800019ac];
+		const table = Buffer.alloc(targets.length * 4);
+		targets.forEach((target, index) => table.writeInt32LE(target - imageBase, index * 4));
+		const insns: DecodedInsnLike[] = [
+			{ address: 0x180001975, size: 3, mnemonic: 'cmp', opStr: 'eax, 6' },
+			{ address: 0x180001978, size: 2, mnemonic: 'ja', opStr: '0x1800019b1', isJump: true, isConditional: true, targetAddress: 0x1800019b1 },
+			{ address: 0x18000197a, size: 7, mnemonic: 'lea', opStr: 'r8, [rip - 0x1981]' },
+			{ address: 0x180001981, size: 8, mnemonic: 'mov', opStr: 'edx, dword ptr [r8 + rax*4 + 0x19b8]' },
+			{ address: 0x180001989, size: 3, mnemonic: 'add', opStr: 'rdx, r8' },
+			{ address: 0x18000198c, size: 2, mnemonic: 'jmp', opStr: 'rdx', isJump: true, isConditional: false },
+		];
+		const hits = recoverJumpTableTargets(insns, (address, size) => address === tableAddress ? table.subarray(0, size) : undefined);
+		assert.strictEqual(hits.length, 1);
+		assert.strictEqual(hits[0].tableAddress, tableAddress);
+		assert.deepStrictEqual(hits[0].targets, targets);
+	});
+
 	test('collectJumpTableLeaders filters to lift range', () => {
 		const hits = [{
 			jmpAddress: 0x401013,

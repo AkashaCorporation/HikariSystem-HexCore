@@ -74,6 +74,8 @@ export function recoverJumpTableTargets(
 		const slice = insns.slice(sliceStart, i + 1);
 
 		let tableBase: number | undefined;
+		let tableAddress: number | undefined;
+		let tableDisplacement = 0;
 		let maxEntries: number | undefined;
 		let baseReg: string | undefined;
 
@@ -96,14 +98,18 @@ export function recoverJumpTableTargets(
 
 			// movsxd rax, dword ptr [r12 + rax*4]
 			const ms = so.match(new RegExp(
-				`dword ptr\\s*\\[\\s*(${GPR})\\s*\\+\\s*(?:${GPR})\\s*\\*\\s*4\\s*\\]`,
+				`dword ptr\\s*\\[\\s*(${GPR})\\s*\\+\\s*(?:${GPR})\\s*\\*\\s*4(?:\\s*([+-])\\s*(0x[0-9a-fA-F]+|[0-9]+))?\\s*\\]`,
 				'i',
 			)) || so.match(new RegExp(
-				`\\[\\s*(${GPR})\\s*\\+\\s*(?:${GPR})\\s*\\*\\s*4\\s*\\]`,
+				`\\[\\s*(${GPR})\\s*\\+\\s*(?:${GPR})\\s*\\*\\s*4(?:\\s*([+-])\\s*(0x[0-9a-fA-F]+|[0-9]+))?\\s*\\]`,
 				'i',
 			));
-			if ((sm === 'movsxd' || sm === 'movsx') && ms) {
+			if ((sm === 'movsxd' || sm === 'movsx' || sm === 'mov') && ms) {
 				baseReg = ms[1].toLowerCase();
+				if (ms[3]) {
+					const displacement = Number.parseInt(ms[3], ms[3].toLowerCase().startsWith('0x') ? 16 : 10);
+					tableDisplacement = ms[2] === '-' ? -displacement : displacement;
+				}
 			}
 		}
 
@@ -154,9 +160,10 @@ export function recoverJumpTableTargets(
 		}
 
 		if (tableBase === undefined || maxEntries === undefined) { continue; }
+		tableAddress = tableBase + tableDisplacement;
 
 		const n = Math.min(maxEntries, maxEntriesCap);
-		const tableBytes = readAbs(tableBase, n * 4);
+		const tableBytes = readAbs(tableAddress, n * 4);
 		if (!tableBytes || tableBytes.length < 8) { continue; }
 
 		const targets: number[] = [];
@@ -175,7 +182,7 @@ export function recoverJumpTableTargets(
 
 		hits.push({
 			jmpAddress: insn.address,
-			tableAddress: tableBase,
+			tableAddress,
 			targets: unique,
 			entryCount: n,
 		});

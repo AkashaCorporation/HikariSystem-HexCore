@@ -165,6 +165,9 @@ private:
 	 */
 	Napi::Value RegWrite(const Napi::CallbackInfo& info);
 
+	/** Write an x86 memory-management register using uc_x86_mmr. */
+	Napi::Value RegWriteMmr(const Napi::CallbackInfo& info);
+
 	/**
 	 * Read multiple registers at once
 	 * @param regIds - Array of register IDs

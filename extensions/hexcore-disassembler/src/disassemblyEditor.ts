@@ -32,16 +32,15 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 
 	/** Navigate to an address and refresh the view */
 	navigateToAddress(address: number): void {
-		if (!this.activeWebview) {
-			return;
-		}
 		const funcs = this.engine.getFunctions();
 		const containing = funcs.find(f => address >= f.address && address < f.endAddress);
 		if (containing) {
 			this.currentFunctionAddress = containing.address;
 		}
 		this.currentAddress = address;
-		void this.updateWebview(this.activeWebview, containing ? containing.address : address);
+		if (this.activeWebview) {
+			void this.updateWebview(this.activeWebview, containing ? containing.address : address);
+		}
 	}
 
 	/** Refresh the current view */
@@ -157,8 +156,8 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 					this.currentFunctionAddress = func.address;
 					this.currentAddress = func.address;
 					await this.updateWebview(webview, func.address);
-					// Auto-update graph view when switching functions
-					vscode.commands.executeCommand('hexcore.disasm.showCFG');
+					// Keep an existing graph view synchronized without forcing it open.
+					vscode.commands.executeCommand('hexcore.disasm.updateCFG');
 				}
 				break;
 			}
@@ -292,6 +291,10 @@ export class DisassemblyEditorProvider implements vscode.CustomReadonlyEditorPro
 		// A-lazy: this is the disasm-view render choke point -- materialize the function the user
 		// opened so a .pdata stub's body is disassembled exactly here, the first time it is shown.
 		const currentFunction = address ? await this.engine.materializeFunction(address) : undefined;
+		if (currentFunction) {
+			this.currentFunctionAddress = currentFunction.address;
+			this.currentAddress = address;
+		}
 
 		webview.postMessage({
 			command: 'updateDisassembly',

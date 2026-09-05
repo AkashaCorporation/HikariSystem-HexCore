@@ -752,6 +752,10 @@ export interface StructFieldInfo {
 	offset: string;   // hex string e.g. "0xC6F0"
 	size: number;
 	type: string;
+	bitOffset?: number;
+	bitSize?: number;
+	bitfield?: boolean;
+	arrayStrideBits?: number;
 }
 
 /** Single struct in the exported JSON */
@@ -892,6 +896,11 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 				offset: `0x${byteOffset.toString(16).toUpperCase()}`,
 				size: memberSize,
 				type: memberType,
+				...(type.kflag && (member.offset >>> 24) > 0 ? {
+					bitOffset,
+					bitSize: member.offset >>> 24,
+					bitfield: true,
+				} : {}),
 			});
 		}
 

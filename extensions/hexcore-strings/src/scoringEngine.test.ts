@@ -127,6 +127,16 @@ function printableNoBonusArb(minLen: number, maxLen: number): fc.Arbitrary<Buffe
 	}).map(s => Buffer.from(s, 'ascii'));
 }
 
+function printableNoBonusOrPenaltyArb(minLen: number, maxLen: number): fc.Arbitrary<Buffer> {
+	return printableNoBonusArb(minLen, maxLen).filter(buf => {
+		const distinct = new Set(buf).size;
+		const digitCount = Array.from(buf).filter(byte => byte >= 0x30 && byte <= 0x39).length;
+		if (buf.length >= 4 && distinct <= 2) { return false; }
+		if (buf.length >= 8 && distinct <= 4) { return false; }
+		return digitCount <= buf.length * 0.8;
+	});
+}
+
 // ---------------------------------------------------------------------------
 // Property Tests
 // ---------------------------------------------------------------------------
@@ -267,7 +277,7 @@ suite('Scoring Engine Properties', () => {
 	test('P14: Backward compatibility — no bonus/penalty strings match original formula', () => {
 		fc.assert(
 			fc.property(
-				printableNoBonusArb(4, 120),
+				printableNoBonusOrPenaltyArb(4, 120),
 				(buf) => {
 					// This buffer has no URL/path/registry patterns and is not all-same-char.
 					// The new scoring engine should produce the same score as the original formula.

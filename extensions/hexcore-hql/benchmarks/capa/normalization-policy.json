@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "id": "hexcore.capa-result-document.v1",
+  "tool": "mandiant.capa",
+  "operations": [
+    {
+      "operation": "remove",
+      "pointer": "/meta/timestamp",
+      "reason": "Wall-clock time is execution metadata and not semantic output."
+    },
+    {
+      "operation": "replace",
+      "pointer": "/meta/argv",
+      "value": ["-j", "-r", "capa-rules@<RULES_COMMIT>", "sha256:<TARGET_SHA256>"],
+      "reason": "Absolute checkout and input paths are replaced by pinned logical identities."
+    },
+    {
+      "operation": "replace",
+      "pointer": "/meta/sample/path",
+      "value": "<TARGET_BASENAME>",
+      "reason": "The absolute workspace path is volatile; basename and sample hashes remain."
+    },
+    {
+      "operation": "replace",
+      "pointer": "/meta/analysis/rules",
+      "value": ["capa-rules@<RULES_COMMIT>"],
+      "reason": "The absolute rules checkout path is replaced by its pinned commit."
+    }
+  ]
+}

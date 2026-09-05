@@ -57,7 +57,7 @@ test('module exports OS constants', () => {
 });
 
 test('module exports version string', () => {
-	assert.strictEqual(version, '0.5.1');
+	assert.strictEqual(version, '0.5.4');
 	assert.strictEqual(upstreamVersion, '6.0.1');
 	assert.strictEqual(upstreamCommit, '0e324aee8c67a63ec759ef379dcfafa0b3cb1448');
 });
@@ -130,6 +130,12 @@ test('liftBytes lifts x86-64 push rbp; mov rbp,rsp; ret', () => {
 	assert.strictEqual(result.address, 0x401000);
 	assert.ok(result.bytesConsumed > 0, 'Should consume some bytes');
 	assert.ok(result.bytesConsumed <= code.length);
+	assert.strictEqual(result.decodedInstructions, 4);
+	assert.strictEqual(result.liftedInstructions, 4);
+	assert.strictEqual(result.unsupportedInstructions, 0);
+	assert.strictEqual(result.decodeFailureInstructions, 0);
+	assert.strictEqual(result.semanticCoverage, 1);
+	assert.deepStrictEqual(result.unsupportedOpcodes, {});
 
 	lifter.close();
 });
@@ -204,6 +210,27 @@ test('liftBytes models Remill 6.0.1 BMI and CRC32 semantics', () => {
 		assert.doesNotMatch(
 			result.ir, /HandleUnsupported/, `${name}: fell back to unsupported`);
 	}
+
+	lifter.close();
+});
+
+test('liftBytes reachableOnly honors a logical entry inside a larger buffer', () => {
+	const lifter = new RemillLifter(ARCH.AMD64);
+	const code = Buffer.from([
+		0xb8, 0x11, 0x11, 0x11, 0x11, 0xc3, // unrelated: mov eax,0x11111111; ret
+		0xb8, 0x22, 0x22, 0x22, 0x22, 0xc3, // entry:     mov eax,0x22222222; ret
+	]);
+	const result = lifter.liftBytes(code, 0x401000, {
+		entryAddress: 0x401006,
+		reachableOnly: true,
+		maxBytes: code.length,
+	});
+
+	assert.strictEqual(result.success, true, result.error);
+	assert.strictEqual(result.address, 0x401006);
+	assert.match(result.ir, /572662306/); // 0x22222222
+	assert.doesNotMatch(result.ir, /286331153/); // 0x11111111
+	assert.strictEqual(result.truncated, false);
 
 	lifter.close();
 });

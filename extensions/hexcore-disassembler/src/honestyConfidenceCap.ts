@@ -28,6 +28,19 @@ export interface HonestyEvidence {
 	bytesConsumed?: number;
 	knownFunctionSize?: number;
 	cLines?: number;
+	semanticCoverage?: number;
+	unsupportedInstructions?: number;
+	decodeFailureInstructions?: number;
+	scopeLimited?: {
+		instructionLimit?: number;
+		byteLimit?: number;
+	};
+	callfuscation?: {
+		detected: boolean;
+		gadgetCount: number;
+		callCount: number;
+		ratio: number;
+	};
 }
 
 const CONF_RE = /\/\/\s*Confidence:\s*([\d.]+)%\s*\((High|Medium|Low)\)/i;
@@ -103,12 +116,39 @@ export function detectTextDamningDefects(
 		reasons.push(`under-lift (${consumed}/${known} bytes consumed)`);
 	}
 
+	if (evidence.scopeLimited) {
+		const detail = evidence.scopeLimited.instructionLimit !== undefined
+			? `${evidence.scopeLimited.instructionLimit} instruction(s)`
+			: evidence.scopeLimited.byteLimit !== undefined
+				? `${evidence.scopeLimited.byteLimit} byte(s)`
+				: 'caller-provided boundary';
+		reasons.push(`explicit scoped fragment (${detail}); confidence is not whole-function confidence`);
+	}
+
+	const unsupported = evidence.unsupportedInstructions ?? 0;
+	const decodeFailures = evidence.decodeFailureInstructions ?? 0;
+	if (unsupported > 0 || decodeFailures > 0) {
+		const coverage = typeof evidence.semanticCoverage === 'number'
+			? `, ${(evidence.semanticCoverage * 100).toFixed(1)}% semantic coverage`
+			: '';
+		reasons.push(
+			`incomplete source IR (${unsupported} unsupported, ${decodeFailures} decode failures${coverage})`,
+		);
+	}
+
 	const returnCallOnly = executable.length <= 2 &&
 		/return\s+[A-Za-z_$][\w$]*(?:\s*\([^;]*\))?\s*;/.test(body);
 	const suspiciouslyLargeWrapper = known >= 96 && returnCallOnly;
 	if (!underLift && suspiciouslyLargeWrapper) {
 		reasons.push(
 			`stub-shaped body for ${known}-byte function (only call/return recovered)`,
+		);
+	}
+
+	const cf = evidence.callfuscation;
+	if (cf?.detected && cf.gadgetCount >= 16 && cf.ratio >= 0.5) {
+		reasons.push(
+			`callfuscation detected (${cf.gadgetCount}/${cf.callCount} call-as-jump gadgets); recovered semantics may be flattened`,
 		);
 	}
 

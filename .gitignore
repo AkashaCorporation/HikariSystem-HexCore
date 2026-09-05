@@ -83,3 +83,12 @@ wiki/
 
 # HexCore agent RAG / decision knowledge base (local only, do not publish)
 rag/
+
+# Private local agent state and compiler diagnostics (not release source).
+.agents/
+.kilo/
+docs/AgentsNoGit/
+**/mlir_debug_dump.txt
+**/helix_dump_*.mlir
+**/*.node.*
+/vc140.pdb

@@ -32,8 +32,8 @@ const errors = [];
 const candidates = [
 	{ label: 'build/Release', path: './build/Release/hexcore_remill.node' },
 	{ label: 'build/Debug', path: './build/Debug/hexcore_remill.node' },
-	{ label: 'prebuild (underscore)', path: platformDir + 'hexcore_remill.node' },
 	{ label: 'prebuild (hyphen)', path: platformDir + 'hexcore-remill.node' },
+	{ label: 'prebuild (legacy underscore)', path: platformDir + 'hexcore_remill.node' },
 ];
 
 for (const candidate of candidates) {

@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "status": "resolved",
+  "producer": {
+    "remill": {
+      "version": "0.5.4",
+      "upstreamVersion": "6.0.1",
+      "upstreamCommit": "0e324aee8c67a63ec759ef379dcfafa0b3cb1448",
+      "nodeSha256": "1002fd9b85a6f1e68c52d8b1f451dc5bd536ed27df404b769149ae17f22ac257"
+    },
+    "helix": {
+      "version": "helix-js=0.1.9 native=0.1.9",
+      "nodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776",
+      "hastSchema": 1
+    }
+  },
+  "program": "msvc-x86-O2-debug",
+  "function": "bench_plain_copy",
+  "binarySha256": "c7463a31c5b23c410c699df88dae6e2cb4c310b91658a9048c28314bf46e4c03",
+  "configurationSha256": "384c3ff097ca4055432ca068a19393c6d3062dc97cecdee82bd3ebd9ec73500f",
+  "irSha256": "da17dd579e2360a4e63b339c40e1c2062e28cfa3ac1d385f727558126a418a6e",
+  "irBytes": 19868,
+  "originalFailures": [
+    "x86 register and binary-operation widths diverged across RemillToHelixLow and RecoverVariables",
+    "unary compound assignments were misreported as missing-source adapter loss"
+  ],
+  "expected": {
+    "pipeline": "mlir",
+    "hastSchema": 1,
+    "semanticEligible": true,
+    "adapterCoverage": 1
+  },
+  "acceptedBy": {
+    "functionAtlasArtifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3",
+    "functionCount": 224,
+    "binaryCount": 16
+  }
+}

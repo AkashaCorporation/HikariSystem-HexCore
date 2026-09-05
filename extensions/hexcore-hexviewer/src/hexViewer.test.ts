@@ -9,6 +9,20 @@ import * as os from 'os';
 import * as path from 'path';
 import { hexDumpRange } from './hexDump';
 import { hexSearchPattern } from './hexSearch';
+import { getVirtualScrollHeight, MAX_VIRTUAL_SCROLL_HEIGHT } from './virtualScroll';
+
+suite('Hex Viewer scalable virtual scroll', () => {
+	test('small files preserve one physical row per logical row', () => {
+		assert.strictEqual(getVirtualScrollHeight(1000, 22), 22_000);
+	});
+
+	test('Lies of P sized binaries stay below Chromium element-height limits', () => {
+		const fileSize = 139_744_768;
+		const rows = Math.ceil(fileSize / 16);
+		assert.strictEqual(getVirtualScrollHeight(rows, 22), MAX_VIRTUAL_SCROLL_HEIGHT);
+		assert.ok(getVirtualScrollHeight(rows, 22) < rows * 22);
+	});
+});
 
 suite('Unit Tests: hexDump', () => {
 

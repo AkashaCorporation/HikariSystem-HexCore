@@ -26,13 +26,12 @@ import type { FunctionBoundaryInfo } from './elfBtfLoader';
 
 /** Candidate locations for llvm-pdbutil.exe, tried in order. */
 const DEFAULT_PDBUTIL_CANDIDATES = [
-	'llvm-pdbutil.exe',  // PATH
-	'C:/Users/Mazum/Desktop/caps/llvm-build/build-mlir/bin/llvm-pdbutil.exe',
+	process.platform === 'win32' ? 'llvm-pdbutil.exe' : 'llvm-pdbutil',  // PATH
 	'C:/Program Files/LLVM/bin/llvm-pdbutil.exe',
 ];
 
 /** Discover a working llvm-pdbutil binary. Returns null if none found. */
-function findPdbutil(): string | null {
+export function findPdbutil(): string | null {
 	const override = process.env.HEXCORE_PDBUTIL;
 	const candidates = override
 		? [override, ...DEFAULT_PDBUTIL_CANDIDATES]
@@ -43,6 +42,7 @@ function findPdbutil(): string | null {
 			const result = spawnSync(candidate, ['--version'], {
 				encoding: 'utf-8',
 				timeout: 5000,
+				windowsHide: true,
 			});
 			if (result.status === 0 || result.status === 1) {
 				// --version exits 0 on modern llvm-pdbutil; some versions
@@ -58,7 +58,7 @@ function findPdbutil(): string | null {
 }
 
 /** Parse the section-headers dump to build a sectionIndex -> VA map. */
-function parseSectionHeaders(output: string): Map<number, number> {
+export function parseSectionHeaders(output: string): Map<number, number> {
 	const result = new Map<number, number>();
 	const sectionRe = /SECTION HEADER #(\d+)/g;
 	const virtAddrRe = /^\s*([0-9A-Fa-f]+)\s+virtual address\s*$/m;
@@ -80,7 +80,7 @@ function parseSectionHeaders(output: string): Map<number, number> {
 }
 
 /** Parse S_GPROC32 / S_LPROC32 function records from --symbols output. */
-function parseSymbols(
+export function parseSymbols(
 	output: string,
 	sectionVAs: Map<number, number>,
 	imageBase: number,
