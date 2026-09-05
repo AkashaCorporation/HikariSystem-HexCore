@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Release candidate preparation (3.8.4-rc.1)
 
+- Repair native-prebuild dependency delivery: bind the Helix C++ bundle to its
+  package version, engine source tree and SHA-256; validate this binding even on
+  cache hits. The new bundle contains the current validated C++ engine.
+- Pin the Elixir Unicorn vendor bundle independently of the wrapper version and
+  rebuild Elixir C++ from checked-out main on Windows 2022 before linking Rust.
+- Make standalone main selection explicit and preserve prerelease status when
+  the Helix native workflow creates a candidate release.
 - Integrate Helix 0.9.4-rc.1 from its canonical source line after native, Rust,
   current-IR A/B and Extension Host acceptance. The LLVM/MLIR upgrade remains a
   separate later release.

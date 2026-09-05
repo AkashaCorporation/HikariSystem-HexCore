@@ -46,6 +46,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: ${{ matrix.engine.repo }}
+          ref: main
           path: engine
 
       - name: Setup Node.js
@@ -297,6 +298,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: AkashaCorporation/HexCore-Helix
+          ref: main
           path: engine
 
       - name: Setup Node.js
@@ -317,7 +319,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/engine/deps/llvm-mlir
-          key: helix-llvm-mlir-win32-x64-v3-${{ hashFiles('engine/crates/hexcore-helix/Cargo.toml', 'engine/package.json') }}
+          key: helix-llvm-mlir-win32-x64-bc05a44b7b9860ca2a257516e0d1d744f87720badda5a5bef587b4f87f9908b7
 
       - name: Download Helix LLVM/MLIR Deps
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
@@ -349,6 +351,10 @@ jobs:
             }
           }
 
+          $expectedHash = 'BC05A44B7B9860CA2A257516E0D1D744F87720BADDA5A5BEF587B4F87F9908B7'
+          if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw 'Helix dependency bundle hash mismatch'
+          }
           New-Item -ItemType Directory -Force deps | Out-Null
           Expand-Archive -Path $asset -DestinationPath deps -Force
           Remove-Item $asset
@@ -356,7 +362,17 @@ jobs:
       - name: Verify Engine Lib
         working-directory: engine/engine
         run: |
+          $provenance = Get-Content -Raw deps/llvm-mlir/engine/build-provenance.json | ConvertFrom-Json
+          $sourceTree = git rev-parse HEAD:engine
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot resolve Helix engine source tree' }
+          $packageVersion = node -p "require('../package.json').version"
+          if ($provenance.engineSourceTree -ne $sourceTree.Trim() -or $provenance.packageVersion -ne $packageVersion) {
+            throw 'Prebuilt Helix C++ engine does not match the checked-out source/version'
+          }
           $libPath = "deps/llvm-mlir/engine/helix_engine.lib"
+          if ((Get-FileHash -LiteralPath $libPath -Algorithm SHA256).Hash -ne $provenance.engineLibrarySha256) {
+            throw 'Prebuilt Helix C++ engine hash mismatch'
+          }
           if (Test-Path $libPath) {
             $size = (Get-Item $libPath).Length / 1MB
             Write-Host "✓ helix_engine.lib found: $([math]::Round($size, 2)) MB"
@@ -434,7 +450,9 @@ jobs:
           $tag = "v$env:ENGINE_VERSION"
           gh release view $tag --repo $env:GH_REPO *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --repo $env:GH_REPO --title $tag --notes "Automated NAPI-RS prebuilds for Helix $env:ENGINE_VERSION"
+            $releaseArgs = @('release', 'create', $tag, '--repo', $env:GH_REPO, '--target', 'main', '--title', $tag, '--notes', "Automated NAPI-RS prebuilds for Helix $env:ENGINE_VERSION")
+            if ($env:ENGINE_VERSION.Contains('-')) { $releaseArgs += '--prerelease' }
+            gh @releaseArgs
           }
           $asset = "engine/${{ steps.pack-napi.outputs.asset }}"
           if (-not (Test-Path $asset)) {
@@ -450,7 +468,7 @@ jobs:
   # ---------------------------------------------------------------------------
   prebuild-elixir-windows:
     name: Build Elixir NAPI-RS (Windows)
-    runs-on: windows-latest
+    runs-on: windows-2022
     env:
       HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
     steps:
@@ -458,6 +476,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: AkashaCorporation/HexCore-Elixir
+          ref: main
           path: engine
 
       - name: Setup Node.js
@@ -473,21 +492,19 @@ jobs:
       - name: Install NAPI-RS CLI
         run: npm install -g @napi-rs/cli
 
-      - name: Cache Elixir Deps (hexcore-unicorn vendored + prebuilt engine lib)
+      - name: Cache Elixir vendored Unicorn dependencies
         id: cache-elixir-deps
         uses: actions/cache@v4
         with:
-          path: |
-            engine/deps
-            engine/engine/build/Release
-          key: elixir-deps-win32-x64-v2-${{ hashFiles('engine/package.json', 'engine/Cargo.lock') }}
+          path: engine/deps
+          key: elixir-deps-win32-x64-610a5416870d4cfd69e1bf881ef4d6fca588793d8feb85ac49126ec42e44bdba
 
       - name: Download Elixir Deps
         if: steps.cache-elixir-deps.outputs.cache-hit != 'true'
         working-directory: engine
         run: |
-          $version = node -p "require('./package.json').version"
-          $tag = "v$version"
+          # The vendor bundle has its own version. Rebuild Elixir's C++ below.
+          $tag = 'v1.0.3'
           $asset = "elixir-deps-win32-x64.zip"
           $url = "https://github.com/AkashaCorporation/HexCore-Elixir/releases/download/$tag/$asset"
           Write-Host "Downloading Elixir deps from $url (tag: $tag) ..."
@@ -512,6 +529,10 @@ jobs:
             }
           }
 
+          $expectedHash = '610A5416870D4CFD69E1BF881EF4D6FCA588793D8FEB85AC49126EC42E44BDBA'
+          if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $expectedHash) {
+            throw 'Elixir dependency bundle hash mismatch'
+          }
           Expand-Archive -Path $asset -DestinationPath . -Force
           Remove-Item $asset
 
@@ -532,6 +553,17 @@ jobs:
             }
           }
           if ($missing) { exit 1 }
+
+      - name: Build current Elixir C++ engine
+        working-directory: engine
+        run: |
+          cmake -S engine -B engine/ci-build -G "Visual Studio 17 2022" -A x64 -DELIXIR_BUILD_CLI=OFF -DELIXIR_BUILD_TESTS=OFF
+          if ($LASTEXITCODE -ne 0) { throw 'Elixir CMake configure failed' }
+          cmake --build engine/ci-build --config Release --target elixir_engine --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'Elixir C++ build failed' }
+          New-Item -ItemType Directory -Force engine/build/Release | Out-Null
+          Copy-Item -LiteralPath engine/ci-build/Release/elixir_engine.lib -Destination engine/build/Release/elixir_engine.lib -Force
+          Get-FileHash -LiteralPath engine/build/Release/elixir_engine.lib -Algorithm SHA256
 
       - name: Install Dependencies
         working-directory: engine
