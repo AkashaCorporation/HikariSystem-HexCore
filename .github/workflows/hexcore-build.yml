@@ -131,7 +131,10 @@ jobs:
         working-directory: extensions/hexcore-hql
         run: |
           npm ci --ignore-scripts
-          npm run build
+          # Source compilation is platform-neutral. Atlas materialization is
+          # exercised by the installer after the matching native SQLite addon
+          # has been staged for its target platform.
+          npm run compile
 
       - name: Build Summary
         run: |

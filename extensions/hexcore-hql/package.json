@@ -5,6 +5,7 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
+    "compile": "tsc",
     "build": "tsc && tsx src/atlas/cli.ts build",
     "atlas:build": "tsx src/atlas/cli.ts build",
     "atlas:verify": "tsx src/atlas/cli.ts verify",
