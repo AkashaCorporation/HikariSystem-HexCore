@@ -6,9 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag matching product.json (e.g., v3.8.4-rc.1)"
+        description: "Version tag matching product.json (e.g., v3.8.4-rc.2)"
         required: true
-        default: "v3.8.4-rc.1"
+        default: "v3.8.4-rc.2"
       build_linux:
         description: "Build the experimental Linux package"
         required: true

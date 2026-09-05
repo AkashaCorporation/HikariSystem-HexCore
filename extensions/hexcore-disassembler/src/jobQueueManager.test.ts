@@ -35,6 +35,48 @@ function makeControllable() {
 	};
 }
 
+suite('JobQueueManager manual/autorun convergence', () => {
+	test('manual observes an active autorun and a later explicit run remains possible', async () => {
+		const manager = new JobQueueManager(1);
+		let finish!: (result: unknown) => void;
+		let executions = 0;
+		manager.setJobExecutor(() => {
+			executions++;
+			return new Promise(resolve => { finish = resolve; });
+		});
+		const auto = manager.queueJobIfAbsent('shared.hexcore_job.json', 'low');
+		const manual = manager.queueJobIfAbsent('shared.hexcore_job.json', 'normal');
+		assert.strictEqual(manual.jobId, auto.jobId);
+		assert.strictEqual(manual.deduped, true);
+		const observer = manager.waitForJob(manual.jobId);
+		manager.start();
+		try {
+			await sleep(30);
+			assert.strictEqual(executions, 1);
+			const status = { status: 'partial', steps: [1, 2, 3] };
+			finish(status);
+			assert.strictEqual(await observer, status);
+			assert.strictEqual(await manager.waitForJob(auto.jobId), status);
+			const repeat = manager.queueJobIfAbsent('shared.hexcore_job.json');
+			assert.notStrictEqual(repeat.jobId, auto.jobId);
+			manager.cancelJob(repeat.jobId);
+		} finally { manager.dispose(); }
+	});
+
+	test('autorun observes a queued manual request and cancellation settles observers', async () => {
+		const manager = new JobQueueManager(1);
+		const manual = manager.queueJobIfAbsent('shared.hexcore_job.json');
+		const auto = manager.queueJobIfAbsent('shared.hexcore_job.json', 'low');
+		assert.strictEqual(auto.jobId, manual.jobId);
+		assert.strictEqual(auto.deduped, true);
+		const observer = manager.waitForJob(auto.jobId);
+		manager.cancelJob(manual.jobId);
+		assert.strictEqual(await observer, undefined);
+		await assert.rejects(manager.waitForJob('missing'), /Unknown job/);
+		manager.dispose();
+	});
+});
+
 suite('JobQueueManager #24 — queue position', () => {
 	test('position reflects priority then FIFO submit order', () => {
 		const m = new JobQueueManager(1);

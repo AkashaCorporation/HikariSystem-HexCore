@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.4] - Unreleased
 
+### RC.2 contract fixes (Disassembler 1.4.68)
+
+- Manual Run Job now joins the autorun queue and observes an existing pending or
+  running submission instead of creating a hidden second execution.
+- Preserve logical function ownership when removing CET/ftrace preambles. Missing
+  semantic endpoint evidence remains unknown/partial instead of claiming zero bytes.
+- Bind fresh HXDB sessions to a replay universe and carry the binding through
+  semantic edits and reanalysis. Validate supplied universe hashes before advancing.
+- Report partial/error counts accurately in completion notifications.
+- Qualification: 65 focused tests; separate-process HXDB reopen/materialization
+  checks; operational smoke coverage for native loading, managed output, static
+  extractors, snapshots, breakpoints, HQL controls, and prototype persistence.
+- Reuse the qualified RC.1 native engine releases. RC.2 changes TypeScript and
+  product metadata; packaged ZIP acceptance is still required before stable release.
+
 ### Release candidate preparation (3.8.4-rc.1)
 
 - Repair native-prebuild dependency delivery: bind the Helix C++ bundle to its

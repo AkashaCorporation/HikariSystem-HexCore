@@ -35,6 +35,59 @@ suite('SessionStore generations and engine manifest (3.8.4 C2/C3)', () => {
 		}
 	});
 
+	test('fresh sessions bind an empty replay universe before semantic edits and retain it on reopen', () => {
+		const store = new SessionStore(binaryPath);
+		bind(store);
+		const initial = store.getAnalysisUniverseManifest();
+		if (!initial) {
+			store.dispose();
+			assert.fail('a newly bound session must have a replay universe');
+		}
+		assert.strictEqual(initial.materializedFunctions.length, 0);
+		const next = store.advanceAnalysisGeneration('semantic-applyPrototype', '0x1000');
+		const expected = { generation: next.generation, universeSha256: initial.universeSha256 };
+		assert.deepStrictEqual(JSON.parse(store.getMeta('analysis_generation_universe_json')!), expected);
+		store.dispose();
+		const reopened = new SessionStore(binaryPath);
+		try {
+			bind(reopened);
+			assert.strictEqual(reopened.getAnalysisSession()?.generation, next.generation);
+			assert.deepStrictEqual(JSON.parse(reopened.getMeta('analysis_generation_universe_json')!), expected);
+			assert.strictEqual(reopened.getAnalysisUniverseManifest()?.universeSha256, initial.universeSha256);
+			const reanalysis = reopened.startReanalysis();
+			assert.deepStrictEqual(JSON.parse(reopened.getMeta('analysis_generation_universe_json')!), {
+				...expected, generation: reanalysis.generation,
+			});
+		} finally { reopened.dispose(); }
+	});
+
+	test('rebinding a legacy session does not invent a missing replay universe', () => {
+		const store = new SessionStore(binaryPath);
+		bind(store);
+		store.advanceAnalysisGeneration('legacy-fixture');
+		const legacyDb = (store as unknown as { db: { exec(sql: string): void } }).db;
+		legacyDb.exec(`DELETE FROM session_meta WHERE key IN ('analysis_universe_manifest_json', 'analysis_generation_universe_json')`);
+		store.dispose();
+		const reopened = new SessionStore(binaryPath);
+		try {
+			bind(reopened);
+			assert.strictEqual(reopened.getAnalysisUniverseManifest(), undefined);
+			assert.strictEqual(reopened.getMeta('analysis_generation_universe_json'), undefined);
+		} finally { reopened.dispose(); }
+	});
+
+	test('a supplied universe hash must match persisted bodies before advancing generation', () => {
+		const store = new SessionStore(binaryPath);
+		try {
+			bind(store);
+			const before = store.getAnalysisSession()!.generation;
+			const binding = store.getMeta('analysis_generation_universe_json');
+			assert.throws(() => store.advanceAnalysisGeneration('mismatch', undefined, 'f'.repeat(64)), /universe manifest/);
+			assert.strictEqual(store.getAnalysisSession()!.generation, before);
+			assert.strictEqual(store.getMeta('analysis_generation_universe_json'), binding);
+		} finally { store.dispose(); }
+	});
+
 	test('startReanalysis advances generation, persists it, wipes derived facts, keeps annotations', () => {
 		const store = new SessionStore(binaryPath);
 		bind(store);

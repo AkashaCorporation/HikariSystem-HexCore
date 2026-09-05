@@ -4,7 +4,23 @@ HexCore supports running analysis pipelines from workspace job files.
 
 This document describes the `3.8.4` analysis-contract surface. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.66`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.1`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+Relevant integrated versions: disassembler `1.4.68`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.1`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+
+### RC.2 scheduling and session continuity
+
+Manual Run Job and startup/watcher requests share the same queue. A manual
+request for an already queued/running path observes its result; it does not
+schedule a hidden second execution. An explicit request after completion can
+start a new run. Completion notifications report actual partial/error counts.
+
+Fresh HXDB sessions bind generation zero to an empty replay universe. Semantic
+edits and reanalysis preserve the generation/universe association. An empty
+replay set is valid and does not prove that all function bodies are materialized.
+Real legacy sessions without a replay manifest retain conservative reset handling.
+
+After CET/ftrace preamble removal, function ownership retains the logical entry
+and original endpoint. If semantic endpoint evidence is unavailable, the body
+range and coverage remain unknown/partial. A decoded-byte union is not an endpoint.
 
 For nonstandard LLVM installations, set `HEXCORE_PDBUTIL` to the intended
 llvm-pdbutil executable before starting HexCore. PDB discovery no longer searches

@@ -31,6 +31,18 @@ function makeEngineStub(opts: {
 }
 
 suite('FIX-QUALITY-001 Helix packaging', () => {
+	test('missing semantic endpoint stays unknown instead of claiming zero decoded bytes', () => {
+		const result = assessLiftRangeCompletion({
+			startAddress: 0x3a29, endExclusive: 0x4269,
+			pathfinderOwnershipEnd: 0x4269, nativeTruncated: false,
+		});
+		assert.strictEqual(result.status, 'partial');
+		assert.strictEqual(result.coverage, undefined);
+		assert.strictEqual(result.semanticEndExclusive, undefined);
+		assert.match(result.reason ?? '', /endpoint unavailable/);
+		assert.doesNotMatch(result.reason ?? '', /0\/|ownership end/);
+	});
+
 	test('exact half-open range completion rejects both under-run and crossing', () => {
 		assert.deepStrictEqual(assessByteRangeCompletion(2090, 2090), {
 			status: 'ok', reached: true, crossed: false, coverage: 1,

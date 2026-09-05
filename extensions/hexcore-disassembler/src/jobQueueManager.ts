@@ -534,6 +534,30 @@ export class JobQueueManager {
 		return { jobId: this.queueJob(filePath, priority, sessionId), deduped: false };
 	}
 
+	/** Observe an existing submission without scheduling another execution. */
+	waitForJob(jobId: string): Promise<unknown> {
+		return new Promise((resolve, reject) => {
+			const check = (): void => {
+				const job = this.jobs.get(jobId);
+				if (!job) {
+					subscription.dispose();
+					reject(new Error(`Unknown job: ${jobId}`));
+				} else if (job.status === 'done' || job.status === 'failed' || job.status === 'cancelled') {
+					subscription.dispose();
+					if (job.status === 'failed' && job.result === undefined) {
+						reject(new Error(job.error ?? `Job failed: ${jobId}`));
+					} else {
+						resolve(job.result);
+					}
+				}
+			};
+			const subscription = this.onJobStatusChanged(event => {
+				if (event.jobId === jobId) { check(); }
+			});
+			check();
+		});
+	}
+
 	/**
 	 * Cancels a job by its ID.
 	 * If the job is queued, it's removed from the queue.

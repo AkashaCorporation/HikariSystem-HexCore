@@ -381,7 +381,8 @@ export interface LiftRangeCompletionInput {
 	nativeTruncated?: boolean;
 }
 
-export interface LiftRangeCompletion extends ByteRangeCompletion {
+export interface LiftRangeCompletion extends Omit<ByteRangeCompletion, 'coverage'> {
+	coverage?: number;
 	semanticEndExclusive?: number;
 	pathfinderOwnershipEnd?: number;
 	nativeTruncated: boolean;
@@ -413,12 +414,12 @@ export function assessByteRangeCompletion(decodedBytes: number, expectedBytes: n
  * comes from the semantic endpoint, ownership boundary and native limit flag,
  * never from the union-size `bytesConsumed` metric.
  */
-export function assessLiftRangeCompletion(input: LiftRangeCompletionInput): LiftRangeCompletion {
+	export function assessLiftRangeCompletion(input: LiftRangeCompletionInput): LiftRangeCompletion {
 	const expectedBytes = Math.max(1, input.endExclusive - input.startAddress);
-	const semanticBytes = input.semanticEndExclusive === undefined
-		? 0
-		: Math.max(0, input.semanticEndExclusive - input.startAddress);
-	const endpoint = assessByteRangeCompletion(semanticBytes, expectedBytes);
+	const endpoint: Omit<ByteRangeCompletion, 'coverage'> & { coverage?: number } = input.semanticEndExclusive === undefined
+		? { status: 'partial', reached: false, crossed: false,
+			reason: 'semantic endpoint unavailable; decoded-byte count does not prove boundary completion' }
+		: assessByteRangeCompletion(Math.max(0, input.semanticEndExclusive - input.startAddress), expectedBytes);
 	const ownershipMismatch = input.pathfinderOwnershipEnd !== undefined &&
 		input.pathfinderOwnershipEnd !== input.endExclusive;
 	const nativeTruncated = input.nativeTruncated === true;

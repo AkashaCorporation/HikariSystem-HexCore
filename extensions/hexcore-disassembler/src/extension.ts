@@ -1583,8 +1583,6 @@ export function activate(context: vscode.ExtensionContext): void {
 		return { ...parsed, functionIdentity: parsed.functionIdentity ?? identity } as ApplyPrototypeRequest;
 	};
 	const pendingJobRuns = new Map<string, NodeJS.Timeout>();
-	const activeJobRuns = new Set<string>();
-	const queuedAutoRuns = new Set<string>();
 
 	// Bug #36/4: loop-breaker state for the *.hexcore_job.json FileSystemWatcher.
 	// Auto Save flushes the open dirty job buffer on every keystroke window, and
@@ -1600,28 +1598,28 @@ export function activate(context: vscode.ExtensionContext): void {
 	const executePipelineJob = async (
 		jobFilePath: string,
 		quiet: boolean,
-		autoTriggered: boolean
 	): Promise<PipelineRunStatus | undefined> => {
 		const normalizedPath = jobPathIdentity(jobFilePath);
-		if (activeJobRuns.has(normalizedPath)) {
-			if (autoTriggered) {
-				queuedAutoRuns.add(normalizedPath);
-				return undefined;
-			}
-			if (!quiet) {
-				vscode.window.showWarningMessage(`A HexCore job is already running: ${normalizedPath}`);
-			}
-			return undefined;
+		const pending = pendingJobRuns.get(normalizedPath);
+		if (pending) {
+			clearTimeout(pending);
+			pendingJobRuns.delete(normalizedPath);
 		}
-
-		activeJobRuns.add(normalizedPath);
+		const manager = getJobQueueManagerInstance();
+		const { jobId, deduped } = manager.queueJobIfAbsent(normalizedPath, 'normal');
+		const message = `${deduped ? 'Observing existing' : 'Queued'} HexCore job ${jobId}: ${normalizedPath}`;
+		console.log(`[HexCore][manualRun] ${message}`);
+		if (!quiet) { void vscode.window.showInformationMessage(message); }
 		try {
-			const status = await pipelineRunner.runJobFile(normalizedPath, true);
+			const status = await manager.waitForJob(jobId) as PipelineRunStatus | undefined;
+			if (!status) { return undefined; }
 			if (!quiet) {
 				if (status.status === 'ok') {
 					vscode.window.showInformationMessage(`Pipeline completed successfully. Status file: ${path.join(status.outDir, 'hexcore-pipeline.status.json')}`);
 				} else if (status.status === 'partial') {
-					vscode.window.showWarningMessage(`Pipeline finished partially (some steps failed, continueOnError kept the job running). Check: ${path.join(status.outDir, 'hexcore-pipeline.log')}`);
+					const partialCount = status.steps.filter(step => step.status === 'partial').length;
+					const errorCount = status.steps.filter(step => step.status === 'error').length;
+					vscode.window.showWarningMessage(`Pipeline finished: ${partialCount} partial step(s), ${errorCount} error(s). Check: ${path.join(status.outDir, 'hexcore-pipeline.log')}`);
 				} else {
 					vscode.window.showWarningMessage(`Pipeline halted on error. Check: ${path.join(status.outDir, 'hexcore-pipeline.log')}`);
 				}
@@ -1632,11 +1630,6 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showErrorMessage(`Pipeline execution failed: ${toErrorMessage(error)}`);
 			}
 			throw error;
-		} finally {
-			activeJobRuns.delete(normalizedPath);
-			if (queuedAutoRuns.delete(normalizedPath)) {
-				scheduleJobRun(normalizedPath);
-			}
 		}
 	};
 
@@ -1651,7 +1644,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			return undefined;
 		}
 
-		const result = await executePipelineJob(jobFilePath, quiet, false);
+		const result = await executePipelineJob(jobFilePath, quiet);
 		return result ? decoratePipelineRunStatus(result) : undefined;
 	};
 
@@ -3760,6 +3753,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
+			// Preserve ownership while the lifter skips instrumentation at the entry.
+			const logicalEntryAddress = startAddress;
+			const logicalEntryExtent = getAuthoritativeFunctionExtent(engine, logicalEntryAddress);
+
 			// v3.7.5 FIX-017: Skip CET endbr64 + ftrace __fentry__ preamble.
 			// Remill's amd64 semantics may not support endbr64 (F3 0F 1E FA),
 			// causing it to decode every byte as a 1-byte instruction (ADD/OR/XOR).
@@ -4005,8 +4002,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Primary end MUST come from .pdata when larger than the function
 			// table (prologue-scan undersize = 4800 vs pdata 6761).
 			// Do NOT flood additionalLeaders — Remill discovers BBs itself.
-			const extent = getAuthoritativeFunctionExtent(engine, startAddress);
-			const primaryFn = engine.getFunctionAt(startAddress);
+			const extent = logicalEntryExtent;
+			const primaryFn = engine.getFunctionAt(logicalEntryAddress);
 			if (primaryFn && extent.size > primaryFn.size) {
 				primaryFn.size = extent.size;
 				primaryFn.endAddress = extent.end;
@@ -4469,7 +4466,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					? `${liftSemantics.reason}; ${scopeReason}`
 					: scopeReason;
 			}
-			const coverageExtent = getAuthoritativeFunctionExtent(engine, startAddress);
+			const coverageExtent = { ...extent, size: Math.max(0, extent.end - startAddress) };
 			const decodedBytes = Math.max(0, Number(liftResult.bytesConsumed ?? 0));
 			const requestedWindowCoverage = Math.max(0, Math.min(1, decodedBytes / Math.max(1, size)));
 			const decodedByteCoverage = coverageExtent.size > 0
@@ -4484,13 +4481,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			const functionRangeSource = liftWindow?.endExclusive !== undefined
 				? liftWindow.reason
 				: coverageExtent.source;
-			const semanticInstructionEnd = primaryFn?.instructions?.reduce(
+			const semanticInstructionEnd = primaryFn?.instructions?.length ? primaryFn.instructions.reduce(
 				(maximum, instruction) => Math.max(
 					maximum,
 					Number(instruction.address) + Number(instruction.size),
 				),
 				startAddress,
-			);
+			) : undefined;
 			const boundaryCompletion = functionEndExclusive !== undefined
 				? assessLiftRangeCompletion({
 					startAddress,
@@ -4510,7 +4507,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				? (functionEndExclusive !== undefined
 					? Math.min(functionEndExclusive, semanticInstructionEnd)
 					: semanticInstructionEnd)
-				: startAddress;
+				: undefined;
 			const rangeContract = {
 				requestedByteRange: {
 					start: toHexAddress(startAddress),
@@ -4529,8 +4526,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				} : {}),
 				semanticBodyRange: {
 					start: toHexAddress(startAddress),
-					endExclusive: toHexAddress(semanticEndExclusive),
-					size: Math.max(0, semanticEndExclusive - startAddress),
+					...(semanticEndExclusive !== undefined ? {
+						endExclusive: toHexAddress(semanticEndExclusive),
+						size: Math.max(0, semanticEndExclusive - startAddress),
+					} : {}),
 					boundaryReached: boundaryCompletion?.reached ?? false,
 					boundaryCrossed: boundaryCompletion?.crossed ?? false,
 					byteCoverage: boundaryCompletion?.coverage,
@@ -4555,7 +4554,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				(functionEndExclusive !== undefined
 					? `; FunctionByteRange: [${toHexAddress(startAddress)}, ${toHexAddress(functionEndExclusive)}) source=${functionRangeSource}\n`
 					: '; FunctionByteRange: unknown\n') +
-				`; SemanticBodyRange: [${toHexAddress(startAddress)}, ${toHexAddress(semanticEndExclusive)}) ` +
+				`; SemanticBodyRange: ${semanticEndExclusive === undefined ? 'unknown' : `[${toHexAddress(startAddress)}, ${toHexAddress(semanticEndExclusive)})`} ` +
 				`boundaryReached=${rangeContract.semanticBodyRange.boundaryReached} ` +
 				`boundaryCrossed=${rangeContract.semanticBodyRange.boundaryCrossed} ` +
 				`source=${rangeContract.semanticBodyRange.source}\n` +

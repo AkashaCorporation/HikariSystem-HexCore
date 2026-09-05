@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3"><img alt="Stable release v3.8.3" src="https://img.shields.io/badge/stable-v3.8.3-2ea44f"></a>
-  <a href="docs/RELEASE_3_8_4_RC_CHECKLIST.md"><img alt="Release candidate v3.8.4-rc.1" src="https://img.shields.io/badge/candidate-v3.8.4--rc.1-f59e0b"></a>
+  <a href="docs/RELEASE_3_8_4_RC_CHECKLIST.md"><img alt="Release candidate v3.8.4-rc.2" src="https://img.shields.io/badge/candidate-v3.8.4--rc.2-f59e0b"></a>
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml"><img alt="HexCore build" src="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml/badge.svg?branch=main"></a>
   <img alt="Platform Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-0078d4">
   <a href="LICENSE.txt"><img alt="License MIT" src="https://img.shields.io/badge/workbench%20license-MIT-blue"></a>
@@ -40,7 +40,7 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 **Stable release:** [`v3.8.3`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3).
 
-**Release candidate:** source for `v3.8.4-rc.1` is prepared on `main`. The
+**Release candidate:** source for `v3.8.4-rc.2` is prepared on `main`. The
 candidate adds HXDB v2, typed references, bounded whole-program propagation,
 Semantic Explorer, HQL `0.3.1`, Function Atlas, killable native analysis, and
 explicit separation between static signals, candidates, and proven evidence.
@@ -115,7 +115,7 @@ result as complete.
 | Extension | Version | Description |
 |-----------|---------|-------------|
 | **Debugger** | 2.1.22 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, and binary/input/trace-bound runtime corroboration |
-| **Disassembler** | 1.4.66 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
+| **Disassembler** | 1.4.68 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
 | **Revenant** | 0.4.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 10 backend |
 | **Hex Viewer** | 1.2.4 | Chunk-backed binary viewer with scaled large-file scrolling, data inspection, editing, templates, and offset sync |
 | **PE Analyzer** | 1.1.3 | Comprehensive PE analysis with binary transforms, Windows security summaries, and headless mode |

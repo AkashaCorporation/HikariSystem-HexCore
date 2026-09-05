@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.4.68] - 2026-09-05
+
+- Bind new HXDB sessions to an explicit empty replay universe before semantic
+  edits advance their generation. Preserve that binding on generation changes
+  and whole-binary reanalysis; keep true legacy sessions distinguishable.
+- Reject supplied universe hashes that disagree with the persisted manifest.
+- Correct partial-completion notifications to show actual partial/error counts.
+- Validation: 65 focused tests passed. A real-engine harness preserved a typed
+  prototype and then a materialized body across four separate processes without
+  a false legacy reset. No native addon changes.
+
+## [1.4.67] - 2026-09-05
+
+- Route manual Run Job requests through the autorun queue and observe existing
+  queued/running submissions. Cancel pending startup debounce for a manual run;
+  preserve explicit reruns after the earlier job reaches a terminal state.
+- Preserve the logical function identity and endpoint across CET/ftrace preamble
+  removal. Do not re-anchor ownership using a heuristic at the adjusted address.
+- Report missing semantic endpoints as unknown/partial, without fabricating a
+  zero-byte body or zero coverage. The decoded-byte union remains a separate metric.
+- No native addon changes. Validate the installed UI workflow before promoting
+  this development fix into another packaged release candidate.
+
 ## [1.4.66] - 2026-09-04
 
 - Remove the developer-specific LLVM path from PDB tool discovery. Use

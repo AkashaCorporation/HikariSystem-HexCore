@@ -1022,6 +1022,15 @@ export class SessionStore {
 		if (this.getMeta('analysis_generation_counter') === undefined) {
 			this.setMeta('analysis_generation_counter', String(session.generation));
 		}
+		// A new contract has a valid empty replay set. Semantic edits may advance
+		// its generation before any lazy body is committed to that set.
+		if (!persistedSession && this.getMeta('analysis_universe_manifest_json') === undefined) {
+			const universe = this.resetAnalysisUniverseManifest();
+			this.setMeta('analysis_generation_universe_json', JSON.stringify({
+				generation: session.generation,
+				universeSha256: universe.universeSha256,
+			}));
+		}
 		return target;
 	}
 
@@ -1112,6 +1121,11 @@ export class SessionStore {
 	 */
 	advanceAnalysisGeneration(reason: string, functionAddress?: string, universeSha256?: string): AnalysisSession {
 		const target = this.requireBoundTarget();
+		const universe = this.getAnalysisUniverseManifest();
+		if (universeSha256 !== undefined && universe?.universeSha256 !== universeSha256) {
+			throw new Error('Analysis generation cannot bind a different or unavailable universe manifest.');
+		}
+		const boundUniverseSha256 = universeSha256 ?? universe?.universeSha256;
 		const current = this.analysisSession ?? createAnalysisSession({
 			id: `session:${crypto.randomUUID()}`,
 			targetId: target.id,
@@ -1132,13 +1146,13 @@ export class SessionStore {
 			reason,
 			...(functionAddress ? { functionAddress } : {}),
 			generation: next.generation,
-			...(universeSha256 ? { universeSha256 } : {}),
+			...(boundUniverseSha256 ? { universeSha256: boundUniverseSha256 } : {}),
 			updatedAt: new Date().toISOString(),
 		}));
-		if (universeSha256) {
+		if (boundUniverseSha256) {
 			this.setMeta('analysis_generation_universe_json', JSON.stringify({
 				generation: next.generation,
-				universeSha256,
+				universeSha256: boundUniverseSha256,
 			}));
 		}
 		if (functionAddress) {
@@ -1180,6 +1194,13 @@ export class SessionStore {
 			);
 			this.setMeta('analysis_session_json', JSON.stringify(next));
 			this.setMeta('analysis_generation_counter', String(next.generation));
+			const universe = this.getAnalysisUniverseManifest();
+			if (universe) {
+				this.setMeta('analysis_generation_universe_json', JSON.stringify({
+					generation: next.generation,
+					universeSha256: universe.universeSha256,
+				}));
+			}
 			this.db.exec(`
 				DELETE FROM analyze_cache;
 				DELETE FROM investigation_findings;

@@ -3,7 +3,7 @@
 	"nameLong": "HikariSystem HexCore",
 	"companyName": "Akasha Corporation",
 	"copyright": "Copyright (C) 2026 Akasha Corporation",
-	"hexcoreVersion": "3.8.4-rc.1",
+	"hexcoreVersion": "3.8.4-rc.2",
 	"applicationName": "hexcore",
 	"dataFolderName": ".hexcore",
 	"win32MutexName": "hexcore",
