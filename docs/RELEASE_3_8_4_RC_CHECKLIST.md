@@ -1,7 +1,11 @@
 # HexCore 3.8.4 RC release checklist
 
-Updated: 2026-09-05. Candidate: **3.8.4-rc.2**, tag **v3.8.4-rc.2**.
+Updated: 2026-09-06. Qualified candidate: **3.8.4-rc.2**, tag **v3.8.4-rc.2**.
 Target: Windows x64 portable. Native engine versions are unchanged from RC.1.
+
+Packaged RC.2 acceptance passed on 2026-09-06: 26 evidence checks, 60 pipeline
+steps, zero unexpected step errors, 128 ready commands, and matching hashes for
+all 22 native artifacts. Stable 3.8.4 uses the accepted engine/source behavior.
 
 ## Promotion policy
 
@@ -43,14 +47,18 @@ native loading and records hashes in its own packaged engine manifest.
 
 ## RC.2 delivery gates
 
-- [ ] Commit only reviewed source, tests and public documentation; exclude private
+- [x] Commit only reviewed source, tests and public documentation; exclude private
   reports, corpora, sessions, generated dumps and local build caches.
-- [ ] Confirm source CI on the exact RC.2 commit.
-- [ ] Dispatch Build Installer with version=v3.8.4-rc.2 and build_linux=false.
-- [ ] Download the resulting ZIP and verify product/native identities, fresh HXDB
+- [x] Confirm source CI on the exact RC.2 commit.
+- [x] Dispatch Build Installer with version=v3.8.4-rc.2 and build_linux=false.
+- [x] Download the resulting ZIP and verify product/native identities, fresh HXDB
   edit/reopen and manual/autorun behavior on that extraction.
-- [ ] Publish the candidate artifact and record its SHA-256.
+- [x] Retain the qualified candidate artifact through Actions run 33993702761.
 - [ ] Promote stable only after packaged acceptance and explicit stable identity.
+
+The stable installer can publish a prepared draft with publish_release=true.
+Publication requires a stable tag on main, a draft bound to the exact build SHA,
+successful packaged runtime checks, and ZIP/checksum upload before marking latest.
 
 ## Explicit limitations
 

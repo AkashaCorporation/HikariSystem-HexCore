@@ -9,8 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3"><img alt="Stable release v3.8.3" src="https://img.shields.io/badge/stable-v3.8.3-2ea44f"></a>
-  <a href="docs/RELEASE_3_8_4_RC_CHECKLIST.md"><img alt="Release candidate v3.8.4-rc.2" src="https://img.shields.io/badge/candidate-v3.8.4--rc.2-f59e0b"></a>
+  <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4"><img alt="Stable release v3.8.4" src="https://img.shields.io/badge/stable-v3.8.4-2ea44f"></a>
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml"><img alt="HexCore build" src="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml/badge.svg?branch=main"></a>
   <img alt="Platform Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-0078d4">
   <a href="LICENSE.txt"><img alt="License MIT" src="https://img.shields.io/badge/workbench%20license-MIT-blue"></a>
@@ -20,7 +19,7 @@
   <a href="#features">Features</a> |
   <a href="#extensions">Extensions</a> |
   <a href="#disassembler">Disassembler</a> |
-  <a href="#semantic-analysis-384-rc">Semantic Analysis</a> |
+  <a href="#semantic-analysis">Semantic Analysis</a> |
   <a href="#debugger--emulator">Debugger</a> |
   <a href="#automation-pipeline">Automation</a> |
   <a href="#installation">Installation</a> |
@@ -38,14 +37,13 @@
 
 HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It brings static analysis, IR lifting, MLIR-based decompilation, controlled CPU emulation, semantic queries, and reproducible automation into one workspace.
 
-**Stable release:** [`v3.8.3`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.3).
+**Stable release:** [`v3.8.4`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4).
 
-**Release candidate:** source for `v3.8.4-rc.2` is prepared on `main`. The
-candidate adds HXDB v2, typed references, bounded whole-program propagation,
-Semantic Explorer, HQL `0.3.1`, Function Atlas, killable native analysis, and
-explicit separation between static signals, candidates, and proven evidence.
-It is not a published binary until the native-prebuild and packaged-ZIP gates
-in the [RC checklist](docs/RELEASE_3_8_4_RC_CHECKLIST.md) pass.
+This release brings HXDB v2, typed references, bounded whole-program propagation,
+Semantic Explorer, HQL `0.3.1`, Function Atlas, and killable native analysis.
+Manual and automatic job requests share one queue, while session generations
+retain their analysis-universe binding across semantic edits and reloads.
+Static signals, candidates and proven evidence remain explicitly distinguished.
 
 See the [changelog](CHANGELOG.md) for the release history and
 [known limitations](docs/KNOWN_LIMITATIONS.md) before treating an analysis
@@ -74,10 +72,10 @@ result as complete.
 - **IR Lifting** — Machine code → LLVM IR translation via patched Remill fork (FIX-023/024/025: CET preamble handling, XED-ILD exotic-ISA recovery, CALL fall-through wiring)
 - **Decompilation** — LLVM IR → pseudo-C via the Helix MLIR engine, with Low/Mid/High dialect lowering, a documented 19-pass pipeline, structured control flow, type recovery, and evidence-gated confidence
 - **Helix MLIR Decompiler** — C++23/MLIR pipeline, C AST layer with 16+ optimizer passes, SysV/Win64/Cdecl32 ABI auto-detection, SSA variable splitting via reverse post-order traversal, Ghidra-inspired type recovery with pointer propagation
-- **HXDB Semantic Model** (3.8.4 RC) — Target-bound canonical types, full function prototypes, ABI locations, type bindings, evidence/conflicts, generations, typed references, and propagation summaries persisted in `.hexcore_session.db`
-- **Semantic Explorer** (3.8.4 RC) — Evidence-first prototype/type editor with xrefs, conflicts, providers, stale facts, generation diffs, transactional edits, and undo
-- **HQL 0.3.1 + Atlas** (3.8.4 RC) — Recursive `all`/`any`/`not`/`count` rules over HAST plus typed HXDB facts, explicit signal/candidate/proven levels, deterministic fixtures, and target-bound semantic hashes
-- **Function Atlas** (3.8.4 RC) — Deterministic function-family similarity across compiler, architecture, optimization, and debug variants, evaluated separately from Ghidra BSim
+- **HXDB Semantic Model** (3.8.4) — Target-bound canonical types, full function prototypes, ABI locations, type bindings, evidence/conflicts, generations, typed references, and propagation summaries persisted in `.hexcore_session.db`
+- **Semantic Explorer** (3.8.4) — Evidence-first prototype/type editor with xrefs, conflicts, providers, stale facts, generation diffs, transactional edits, and undo
+- **HQL 0.3.1 + Atlas** (3.8.4) — Recursive `all`/`any`/`not`/`count` rules over HAST plus typed HXDB facts, explicit signal/candidate/proven levels, deterministic fixtures, and target-bound semantic hashes
+- **Function Atlas** (3.8.4) — Deterministic function-family similarity across compiler, architecture, optimization, and debug variants, evaluated separately from Ghidra BSim
 - **DWARF + BTF + PDB Debug Info Ingestion** (v3.8.0) — Pure-TypeScript DWARF 5 parser with split-form resolution (`DW_FORM_strx*`/`DW_FORM_addrx*`) and in-process ET_REL relocation application for kernel modules. PDB function boundary feeder via `llvm-pdbutil`. End-to-end: `mali_kbase.ko` recovers 792 structs + 3,864 function signatures with real parameter names and types
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis, KUSER_SHARED_DATA + synthetic DLL PE images for hash-resolved imports
 - **Project Azoth** — Clean-room Apache-2.0 Rust+C++23 dynamic-analysis path with Interceptor/Stalker APIs, shipped through `AkashaCorporation/HexCore-Elixir`
@@ -159,7 +157,7 @@ distribution are qualified separately from the HexCore ZIP.
 
 ---
 
-## Semantic Analysis (3.8.4 RC)
+## Semantic Analysis
 
 HexCore's semantic layer is evidence-driven. A successful command means the
 operation completed; it does not by itself prove that a behavior, type, or
@@ -340,7 +338,7 @@ Interceptor-style API hooking and basic-block tracing built on HexCore-Unicorn.
 ### Usage
 
 HexCore exposes `azoth`, `debugger`, and `both` modes through
-`hexcore.emulator`; the RC keeps both paths available for explicit comparison.
+`hexcore.emulator`; both paths remain available for explicit comparison.
 
 ---
 

@@ -5,7 +5,11 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.4] - Unreleased
+## [3.8.4] - 2026-09-06
+
+Stable Windows x64 portable release following packaged RC.2 acceptance. Native
+engine versions remain unchanged from the qualified candidate. The final build
+aligns product metadata with v3.8.4; known semantic limitations remain explicit.
 
 ### RC.2 contract fixes (Disassembler 1.4.68)
 
@@ -19,8 +23,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Qualification: 65 focused tests; separate-process HXDB reopen/materialization
   checks; operational smoke coverage for native loading, managed output, static
   extractors, snapshots, breakpoints, HQL controls, and prototype persistence.
-- Reuse the qualified RC.1 native engine releases. RC.2 changes TypeScript and
-  product metadata; packaged ZIP acceptance is still required before stable release.
+- Reuse the qualified native engine releases. Packaged RC.2 passed 26 evidence
+  checks: 60 steps, 51 ok, eight explicit partial results, one expected malformed
+  input rejection, and no unexpected step errors. Doctor reached 128/128 ready.
 
 ### Release candidate preparation (3.8.4-rc.1)
 
@@ -47,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   self-observation and report signal/IOC interpretation are independently accepted
   through Disassembler 1.4.64 and Composer 1.0.14.
 
-The candidate is not published by these changes. Native repository synchronization,
-versioned assets, integration acceptance and portable ZIP testing remain release gates.
+Native repository synchronization, versioned assets and packaged candidate
+acceptance were completed before stable release preparation.
 
 ### Semantic closure and installed acceptance (Disassembler 1.4.60; HQL 0.3.1)
 

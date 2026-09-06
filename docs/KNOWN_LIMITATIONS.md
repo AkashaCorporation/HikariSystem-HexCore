@@ -1,13 +1,13 @@
-# Known Limitations - HexCore 3.8.4 RC
+# Known Limitations - HexCore 3.8.4
 
-This document describes the candidate scope, not a published-release acceptance.
-It supersedes the historical 3.5.1 checklist. Release gates are tracked in
+These limitations apply to the stable release as well as its qualified candidates.
+This supersedes the historical 3.5.1 checklist. Qualification history is tracked in
 [RELEASE_3_8_4_RC_CHECKLIST.md](RELEASE_3_8_4_RC_CHECKLIST.md).
 
 ## Platform and distribution
 
 - Windows x64 portable is the release target. Linux packaging remains experimental
-  and is not enabled by default; macOS is not qualified by this RC.
+  and is not enabled by default; macOS is not qualified by this release.
 - Updates remain manual. npm distribution of standalone libraries is a separate
   packaging effort and is not required to use the portable application.
 - Addon presence is not loadability. The installer checks expected runtime paths,

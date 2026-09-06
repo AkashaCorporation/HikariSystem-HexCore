@@ -6,11 +6,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag matching product.json (e.g., v3.8.4-rc.2)"
+        description: "Version tag matching product.json (e.g., v3.8.4)"
         required: true
-        default: "v3.8.4-rc.2"
+        default: "v3.8.4"
       build_linux:
         description: "Build the experimental Linux package"
+        required: true
+        type: boolean
+        default: false
+      publish_release:
+        description: "Publish a prepared stable draft after packaged checks pass"
         required: true
         type: boolean
         default: false
@@ -290,6 +295,27 @@ jobs:
           files: HexCore-win32-x64.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish prepared stable release
+        if: github.event_name == 'workflow_dispatch' && inputs.publish_release && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:HEXCORE_RELEASE_TAG
+          if ($tag -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$') { throw 'Only a stable version can be published by this step' }
+          $releaseJson = gh release view $tag --json isDraft,targetCommitish
+          if ($LASTEXITCODE -ne 0) { throw 'Prepare the release draft before dispatching publication' }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not $release.isDraft -or $release.targetCommitish -ne $env:GITHUB_SHA) {
+            throw 'Release must be a draft bound to the exact build commit'
+          }
+          $hash = (Get-FileHash -LiteralPath HexCore-win32-x64.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  HexCore-win32-x64.zip" | Set-Content -LiteralPath SHA256SUMS.txt -Encoding ascii
+          gh release upload $tag HexCore-win32-x64.zip SHA256SUMS.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Release artifact upload failed' }
+          gh release edit $tag --draft=false --prerelease=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Stable release publication failed' }
 
   build-linux:
     name: Build Linux Package
