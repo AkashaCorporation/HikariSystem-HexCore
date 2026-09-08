@@ -316,7 +316,7 @@ jobs:
 
       - name: Cache Helix LLVM/MLIR Deps
         id: cache-helix-deps
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: engine/engine/deps/llvm-mlir
           key: helix-llvm-mlir-win32-x64-bc05a44b7b9860ca2a257516e0d1d744f87720badda5a5bef587b4f87f9908b7
