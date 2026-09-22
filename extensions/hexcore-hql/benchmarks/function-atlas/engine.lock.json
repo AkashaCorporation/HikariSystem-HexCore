@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "helix": {
     "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
-    "nodeSha256": "c16f6fb7197f1ca2aa1a9ebc483199c4eef2100027a9b9ceb9cfad8faa180842",
+    "nodeSha256": "6400fcc56d2a7f889ee60cdc6e24829ee05e92ee57b7caca8da5c1f194e3aba8",
     "hastSchema": 1
   },
   "remill": {
