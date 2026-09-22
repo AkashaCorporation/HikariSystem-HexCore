@@ -6,18 +6,18 @@
 import * as crypto from 'crypto';
 import type { DisassemblerEngine } from './disassemblerEngine';
 import { canonicalSerialize } from './semanticModel';
-import type { ReferenceQuery } from './typedReferenceGraph';
+import { filterReferenceEdges, type CanonicalReferenceEdge, type ReferenceQuery } from './typedReferenceGraph';
 import {
 	syncTypedReferenceGraph,
 	type ReferenceGraphProducerBudgets,
 	type ReferenceGraphSyncResult,
 } from './typedReferenceGraphProducer';
-
-export interface ReferenceGraphQueryCommandOptions {
-	query?: ReferenceQuery;
-	maxResults?: number;
-	producerBudgets?: Partial<ReferenceGraphProducerBudgets>;
-}
+import {
+	normalizeReferenceGraphQueryOptions,
+	type ReferenceGraphQueryCommandOptions,
+} from './referenceQueryOptions';
+export { normalizeReferenceGraphQueryOptions } from './referenceQueryOptions';
+export type { ReferenceGraphQueryCommandOptions } from './referenceQueryOptions';
 
 export interface ReferenceGraphExportCommandOptions {
 	includeInvalidated?: boolean;
@@ -87,6 +87,69 @@ function graphFor(engine: DisassemblerEngine) {
 	return session.getSemanticStore().getReferenceGraph();
 }
 
+function parseAddressIdentity(value: string | undefined): number | undefined {
+	if (!value) { return undefined; }
+	const match = /(?:^|:)0x([0-9a-f]+)$/i.exec(value);
+	if (!match) { return undefined; }
+	const parsed = Number.parseInt(match[1], 16);
+	return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function resolveThunkView(engine: DisassemblerEngine, edge: CanonicalReferenceEdge) {
+	const address = parseAddressIdentity(edge.target.address ?? edge.target.identity);
+	if (address === undefined) { return { edge, targetAddress: undefined, targetIdentity: undefined }; }
+	const resolution = engine.resolveKnownLinkerThunk(address);
+	if (resolution.chain.length === 0) {
+		return { edge, targetAddress: address, targetIdentity: edge.target.identity };
+	}
+	const finalFunction = engine.getFunctionAt(resolution.target);
+	const targetIdentity = finalFunction
+		? `function:0x${resolution.target.toString(16)}`
+		: `address:0x${resolution.target.toString(16)}`;
+	return {
+		edge: Object.freeze({
+			...edge,
+			thunkResolution: Object.freeze({
+				status: resolution.complete ? 'resolved' : 'partial',
+				physicalTarget: edge.target,
+				chain: Object.freeze(resolution.chain.map(item => Object.freeze({
+					from: `0x${item.from.toString(16)}`,
+					to: `0x${item.to.toString(16)}`,
+				}))),
+				resolvedTarget: Object.freeze({
+					kind: finalFunction ? 'function' : 'address',
+					identity: targetIdentity,
+					address: `0x${resolution.target.toString(16)}`,
+				}),
+			}),
+		}),
+		targetAddress: resolution.target,
+		targetIdentity,
+	};
+}
+
+function queryWithThunkResolution(engine: DisassemblerEngine, graph: ReturnType<typeof graphFor>, query: ReferenceQuery) {
+	const baseQuery: ReferenceQuery = { ...query };
+	delete baseQuery.address;
+	delete baseQuery.functionIdentity;
+	delete baseQuery.targetIdentity;
+	const candidates = graph.query(baseQuery);
+	const desiredAddress = query.address ? parseAddressIdentity(query.address) : undefined;
+	const desiredFunction = parseAddressIdentity(query.functionIdentity);
+	const desiredTarget = parseAddressIdentity(query.targetIdentity);
+	const hasResolvedEndpoint = desiredAddress !== undefined || desiredFunction !== undefined || desiredTarget !== undefined;
+	return candidates.flatMap(candidate => {
+		const view = resolveThunkView(engine, candidate);
+		const originalMatches = filterReferenceEdges([candidate], query).length > 0;
+		const directionAllowsIncoming = (query.direction ?? 'both') !== 'outgoing';
+		const resolvedMatches = directionAllowsIncoming && hasResolvedEndpoint && view.targetAddress !== undefined &&
+			(desiredAddress === undefined || desiredAddress === view.targetAddress) &&
+			(desiredFunction === undefined || desiredFunction === view.targetAddress) &&
+			(desiredTarget === undefined || desiredTarget === view.targetAddress);
+		return originalMatches || resolvedMatches ? [view.edge] : [];
+	});
+}
+
 export function runReferenceGraphQuery(
 	engine: DisassemblerEngine,
 	options: ReferenceGraphQueryCommandOptions = {},
@@ -94,8 +157,10 @@ export function runReferenceGraphQuery(
 	const maxResults = boundedInteger(options.maxResults, 1_000, 100_000, 'maxResults');
 	const sync = syncTypedReferenceGraph(engine, options.producerBudgets);
 	const graph = graphFor(engine);
-	const query = Object.freeze({ ...(options.query ?? {}) });
-	const matched = graph.query(query);
+	const query = normalizeReferenceGraphQueryOptions(options);
+	const matched = options.resolveThunks === true
+		? queryWithThunkResolution(engine, graph, query)
+		: graph.query(query);
 	const edges = Object.freeze(matched.slice(0, maxResults));
 	const truncated = edges.length < matched.length;
 	return withOutputHash({

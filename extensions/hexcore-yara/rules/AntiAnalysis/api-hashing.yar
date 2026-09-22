@@ -9,6 +9,9 @@
 rule ApiHashing_PEB_Walk_X64
 {
     meta:
+        architecture = "x86_64"
+        requires_executable = "true"
+        formats = "pe"
         description = "PEB walk pattern for API hash resolution (x64) — mov rax, gs:[0x60] followed by MZ/PE check"
         severity = "critical"
         author = "HexCore"
@@ -30,6 +33,9 @@ rule ApiHashing_PEB_Walk_X64
 rule ApiHashing_PEB_Walk_X86
 {
     meta:
+        architecture = "x86"
+        requires_executable = "true"
+        formats = "pe"
         description = "PEB walk pattern for API hash resolution (x86) — mov eax, fs:[0x30] followed by MZ/PE check"
         severity = "critical"
         author = "HexCore"
@@ -49,6 +55,8 @@ rule ApiHashing_PEB_Walk_X86
 rule ApiHashing_DJB2_Constant
 {
     meta:
+        advisory_only = "true"
+        advisory_reason = "A hash seed or arithmetic fragment does not establish API hashing or malicious behavior."
         description = "Contains djb2 hash seed constant 0x1505 (5381) — djb2 API hashing"
         severity = "high"
         author = "HexCore"
@@ -72,6 +80,8 @@ rule ApiHashing_DJB2_Constant
 rule ApiHashing_FNV1a_Constant
 {
     meta:
+        advisory_only = "true"
+        advisory_reason = "FNV constants are generic data evidence, not proof of API hashing or evasion."
         description = "Contains FNV-1a hash constants (offset basis 0x811C9DC5 or prime 0x01000193)"
         severity = "high"
         author = "HexCore"

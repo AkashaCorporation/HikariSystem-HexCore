@@ -72,12 +72,13 @@ export function assessLiftSemanticCoverage(
 }
 
 export function formatLiftSemanticHeader(assessment: LiftSemanticAssessment): string {
+	const singleLine = (value: string) => value.replace(/[\r\n\u2028\u2029]/g, ' ');
 	const opcodes = Object.entries(assessment.unsupportedOpcodes)
 		.filter((entry): entry is [string, number] => finiteCount(entry[1]) !== undefined && entry[1] > 0)
 		.sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
 	const retainedOpcodes = opcodes.slice(0, 32);
 	const opcodeSummary = retainedOpcodes.length > 0
-		? retainedOpcodes.map(([name, count]) => `${name}=${count}`).join(', ') +
+		? retainedOpcodes.map(([name, count]) => `${singleLine(name)}=${count}`).join(', ') +
 			(opcodes.length > retainedOpcodes.length ? `, ... +${opcodes.length - retainedOpcodes.length} more` : '')
 		: 'none';
 	return [
@@ -86,7 +87,7 @@ export function formatLiftSemanticHeader(assessment: LiftSemanticAssessment): st
 			`(decoded=${assessment.decodedInstructions}, lifted=${assessment.liftedInstructions}, ` +
 			`unsupported=${assessment.unsupportedInstructions}, failures=${assessment.decodeFailureInstructions})`,
 		`; UnsupportedOpcodes: ${opcodeSummary}`,
-		...(assessment.reason ? [`; SemanticWarning: ${assessment.reason}`] : []),
+		...(assessment.reason ? [`; SemanticWarning: ${singleLine(assessment.reason)}`] : []),
 		'',
 	].join('\n');
 }

@@ -491,6 +491,27 @@ suite('MSVC chained-unwind .pdata fragment merge (v3.8.2 FIX-027 / FIX-027b)', (
 		assert.strictEqual(engine.getFunctionAt(second)?.endAddress, BASE + 0x1040);
 	});
 
+	test('uses independently proven non-pdata leaves as protected boundaries', async () => {
+		const first = BASE + 0x1000;
+		const leaf = BASE + 0x1020;
+		const { engine, reconcile } = buildEngine(
+			[{ begin: 0x1100, end: 0x1140 }],
+			[
+				{ address: first, endAddress: BASE + 0x1040 },
+				{ address: leaf, endAddress: BASE + 0x1028 },
+			]
+		);
+		const internals = engine as unknown as {
+			functionSeeds: { record(address: number, seed: { kind: string }): void };
+		};
+		internals.functionSeeds.record(first, { kind: 'direct-call' });
+		internals.functionSeeds.record(leaf, { kind: 'padding-delimited-leaf' });
+
+		await reconcile();
+		assert.strictEqual(engine.getFunctionAt(first)?.endAddress, leaf);
+		assert.strictEqual(engine.getFunctionAt(leaf)?.endAddress, BASE + 0x1028);
+	});
+
 	test('#2 no-drop: an ORPHAN continuation (primary absent from the table) stays a function', async () => {
 		// CHAININFO points to 0x1000 but there is no .pdata entry there; the fragment must not
 		// vanish (pre-FIX-027 kept it; FIX-027b must not regress that coverage).

@@ -62,7 +62,8 @@ const M_NAME = 4, M_FUNCTIONS = 6,
 // DecompiledFunction
 const F_NAME = 4, F_ADDRESS = 6, F_RETURN_TYPE = 8,
       F_PARAMS = 10, F_LOCALS = 12, F_BODY = 14,
-      F_CALLING_CONVENTION = 16, F_IS_VARIADIC = 18;
+      F_CALLING_CONVENTION = 16, F_IS_VARIADIC = 18,
+      F_NATIVE_QUALITY_REPORTED = 20, F_NATIVE_QUALITY_ISSUES = 22;
 
 // DataType
 const DT_KIND = 4, DT_IS_SIGNED = 6, DT_BITS = 8,
@@ -228,6 +229,7 @@ function readByteVec(bb: BB, tablePos: number, voff: number): number[] | undefin
 // ─── DataType → type string ───
 
 function readTypeStr(bb: BB, pos: number): string {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'DataType');
   const kind = readU8(bb, pos, DT_KIND, 0);
   const signed = readU8(bb, pos, DT_IS_SIGNED, 0) !== 0;
@@ -288,6 +290,7 @@ function variableMetadata(bb: BB, pos: number): Pick<CVarDecl, 'type' | 'identit
 // ─── Expression → CNode ───
 
 function readExpr(bb: BB, pos: number): CNode {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Expression');
   const kind = readU8(bb, pos, E_KIND, 0);
   const nodeId = readU64Optional(bb, pos, E_NODE_ID);
@@ -444,6 +447,7 @@ function readExpr(bb: BB, pos: number): CNode {
 // ─── Statement → CNode ───
 
 function readStmt(bb: BB, pos: number): CNode {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Statement');
   const kind = readU8(bb, pos, S_KIND, 0);
   const text = readStr(bb, pos, S_TEXT);
@@ -661,6 +665,7 @@ function readStmt(bb: BB, pos: number): CNode {
 }
 
 function readSwitchCase(bb: BB, pos: number): CCaseStmt {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'SwitchCase');
   const body: CNode[] = [];
   const bv = readVec(bb, pos, SC_BODY);
@@ -692,6 +697,7 @@ function readSwitchCase(bb: BB, pos: number): CCaseStmt {
 // ─── Variable → CVarDecl ───
 
 function readVariable(bb: BB, pos: number): CVarDecl {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Variable');
   const name = readStr(bb, pos, V_NAME) ?? 'var';
 
@@ -705,6 +711,7 @@ function readVariable(bb: BB, pos: number): CVarDecl {
 // ─── DecompiledFunction → CFunctionDecl ───
 
 function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined, hast: HASTModuleMetadata): CFunctionDecl {
+	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'DecompiledFunction');
   let name = readStr(bb, pos, F_NAME) ?? 'unknown';
   const address = readU64(bb, pos, F_ADDRESS);
@@ -765,6 +772,21 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
 
   const body: CBlockStmt = { kind: 'CBlockStmt', body: bodyStmts };
 
+  const qualityNegotiated = hast.schemaMajor === 1 && hast.schemaMinor >= 1 &&
+    hast.capabilities.includes('native-function-quality');
+  const qualityFlag = qualityNegotiated ? readU8(bb, pos, F_NATIVE_QUALITY_REPORTED, 0) : 0;
+  if (qualityFlag > 1) throw new Error('Invalid HAST native quality marker');
+  const qualityIds = qualityNegotiated ? readByteVec(bb, pos, F_NATIVE_QUALITY_ISSUES) : null;
+  if (qualityIds && qualityIds.length > 64) throw new Error('HAST native quality issue budget exceeded');
+  if (qualityNegotiated && qualityFlag === 1 && !qualityIds) throw new Error('Reported HAST native quality lacks its issue vector');
+  const qualityNames = ['opaque-post-call-register', 'incomplete-abi-arguments',
+    'synthesized-variable', 'damning-defect', 'registry-miss', 'suspicious-self-reference'];
+  const qualityReported = qualityNegotiated && qualityFlag === 1;
+  const qualityIssues = qualityReported ? (qualityIds ?? []).map(id => qualityNames[id] ?? `unknown-native-quality-${id}`) : [];
+  const nativeQuality: NonNullable<HASTModuleMetadata['nativeQuality']> = {
+    status: !qualityReported ? 'unreported' : qualityIssues.length ? 'known-loss' : 'no-known-loss',
+    issues: qualityIssues,
+  };
   const fn: CFunctionDecl = {
     kind: 'CFunctionDecl',
     name,
@@ -775,7 +797,7 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
     body,
     callingConvention: readStr(bb, pos, F_CALLING_CONVENTION) ?? 'unknown',
     isVariadic: readU8(bb, pos, F_IS_VARIADIC, 0) !== 0,
-    hast,
+    hast: { ...hast, nativeQuality, semanticEligible: hast.semanticEligible && qualityReported && qualityIssues.length === 0 },
   };
   applyFunctionVariableMetadata(fn);
   fn.adapterCoverage = measureAdapterCoverage(fn);
@@ -894,7 +916,16 @@ function readModuleMetadata(bb: BB, rootPos: number): HASTModuleMetadata {
  * @returns        Array of CFunctionDecl nodes representing the decompiled module.
  * @throws         If the buffer is invalid or too small.
  */
-export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader): CFunctionDecl[] {
+export interface HASTHydrationLimits { maxFunctions: number; maxTables: number }
+export class HASTHydrationBudgetError extends Error {}
+const hydrationBudgets = new WeakMap<BB, { remaining: number }>();
+function consumeHydrationBudget(bb: BB): void {
+	const budget = hydrationBudgets.get(bb);
+	if (budget && --budget.remaining < 0) throw new HASTHydrationBudgetError('HAST hydration table budget exceeded');
+}
+
+export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader, limits?: HASTHydrationLimits): CFunctionDecl[] {
+	if (limits && (!Number.isSafeInteger(limits.maxFunctions) || limits.maxFunctions < 1 || !Number.isSafeInteger(limits.maxTables) || limits.maxTables < 1)) throw new Error('Invalid HAST hydration limits');
   if (buffer.length < 8) {
     throw new Error('HAST buffer too small (< 8 bytes)');
   }
@@ -906,6 +937,7 @@ export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader): CFun
   }
 
   const bb = new flatbuffers.ByteBuffer(buffer);
+	if (limits) hydrationBudgets.set(bb, { remaining: limits.maxTables });
 
   // Read root table (AstModule)
   const rootOff = bb.readInt32(bb.position()) + bb.position();
@@ -917,11 +949,13 @@ export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader): CFun
   const fv = readVec(bb, rootOff, M_FUNCTIONS);
   if (fv) {
     const [start, len] = fv;
+		if (limits && len > limits.maxFunctions) throw new HASTHydrationBudgetError('HAST hydration function budget exceeded');
     for (let i = 0; i < len; i++) {
       const fPos = bb.__indirect(start + i * 4);
       try {
         functions.push(readFunction(bb, fPos, session, moduleMetadata));
       } catch (error) {
+				if (error instanceof HASTHydrationBudgetError) throw error;
         const reason = `HAST function[${i}] hydration failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512);
         const unknown = unknownStmt(255, reason);
         functions.push({
@@ -934,7 +968,7 @@ export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader): CFun
           body: { kind: 'CBlockStmt', body: [unknown] },
           callingConvention: 'unknown',
           isVariadic: false,
-          hast: moduleMetadata,
+          hast: { ...moduleMetadata, semanticEligible: false, nativeQuality: { status: 'unreported', issues: [] } },
           adapterCoverage: {
             totalNodes: 3,
             lossyNodes: 1,

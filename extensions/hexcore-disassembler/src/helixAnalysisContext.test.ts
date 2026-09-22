@@ -30,10 +30,67 @@ require.cache['__vscode_mock_helix_context__'] = {
 
 const { DisassemblerEngine } = require('./disassemblerEngine');
 const { createHelixAnalysisContext, createHelixDebugTypeEnvelope } = require('./helixAnalysisContext');
+const { openSemanticQueryView } = require('./semanticQueryView');
+const { captureReadOnlyHelixInput, ReadOnlyHelixCapture } = require('./readOnlyHelixCapture');
 const { TypeManager } = require('./typeManager') as typeof import('./typeManager');
 const { SemanticCommandService } = require('./semanticCommandService') as typeof import('./semanticCommandService');
 
 suite('Immutable Disassembler to Helix analysis context', () => {
+	test('read-only capture never materializes or caches body assessments', async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-read-only-context-'));
+		const file = path.join(dir, 'sample.bin'); fs.writeFileSync(file, Buffer.from([0x31, 0xc0, 0xc3]));
+		const engine = new DisassemblerEngine();
+		try {
+			await engine.loadFile(file, { architecture: 'x86', baseAddress: 0x1000 }); await engine.analyzeAll();
+			const selected = engine.getFunctionAt(0x1000); assert.ok(selected);
+			delete selected.bodyCompleteness;
+			const session = engine.getSessionStore();
+			const view = openSemanticQueryView(session, { engineGeneration: engine.getAnalysisGeneration() });
+			const revision = session.getSemanticReadRevision();
+			engine.getFunctionInstructions = async () => { throw new Error('unexpected materialization'); };
+			engine.getFunctionBodyCompleteness = () => { throw new Error('unexpected caching'); };
+			const before = JSON.stringify(selected);
+			const capture = captureReadOnlyHelixInput(engine, view, 0x1000);
+			assert.strictEqual(JSON.stringify(selected), before);
+			assert.strictEqual(selected.bodyCompleteness, undefined);
+			assert.strictEqual(session.getSemanticReadRevision(), revision);
+			assert.strictEqual(capture.context.queryIdentity.snapshotSha256, view.identity.snapshotSha256);
+			capture.assertCurrent(engine);
+			const copied = capture.copyBytes(); copied[0] ^= 0xff;
+			assert.deepStrictEqual(engine.getBytes(0x1000, 3), Buffer.from([0x31, 0xc0, 0xc3]));
+			assert.throws(() => new ReadOnlyHelixCapture(engine, view, 0x1000, Symbol('forged')), /captureReadOnly/);
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1001), /exact function/);
+			session.renameFunction('0x1000', 'changed');
+			assert.throws(() => capture.assertCurrent(engine), /no longer current/);
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1000), /identity-mismatch/);
+		} finally { engine.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
+	});
+	test('read-only capture rejects lazy/partial bodies, coverage gaps and stale bytes', async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-read-only-reject-'));
+		const file = path.join(dir, 'sample.bin'); fs.writeFileSync(file, Buffer.from([0x31, 0xc0, 0xc3]));
+		const engine = new DisassemblerEngine();
+		try {
+			await engine.loadFile(file, { architecture: 'x86', baseAddress: 0x1000 }); await engine.analyzeAll();
+			const view = openSemanticQueryView(engine.getSessionStore(), { engineGeneration: engine.getAnalysisGeneration() });
+			const fn = engine.getFunctionAt(0x1000); const instructions = [...fn.instructions];
+			const capture = captureReadOnlyHelixInput(engine, view, 0x1000);
+			fn.instructions = [];
+			assert.throws(() => capture.assertCurrent(engine), /instruction model changed/);
+			fn.bodyCompleteness = undefined;
+			(engine as any).unmaterializedStubs.add(0x1000);
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1000), /lazy/);
+			(engine as any).unmaterializedStubs.delete(0x1000);
+			fn.instructions = [instructions[0]];
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1000), /partial/);
+			fn.instructions = [instructions[1]];
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1000), /coverage/);
+			fn.instructions = instructions;
+			capture.assertCurrent(engine);
+			const bytes = engine.getBytes(0x1000, 3); bytes[0] ^= 0xff;
+			assert.throws(() => capture.assertCurrent(engine), /image changed/);
+			assert.throws(() => captureReadOnlyHelixInput(engine, view, 0x1000), /image differs/);
+		} finally { engine.dispose(); fs.rmSync(dir, { recursive: true, force: true }); }
+	});
 	test('captures owned blocks and becomes authoritative only after analyzeAll', async () => {
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-helix-context-'));
 		const file = path.join(dir, 'sample.bin');

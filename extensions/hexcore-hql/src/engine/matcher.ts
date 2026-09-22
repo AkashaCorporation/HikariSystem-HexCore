@@ -21,7 +21,7 @@ import type {
  * No reflection, no Object.values noise — explicit structural extraction
  * for maximum V8 inline cache performance.
  */
-function getChildren(node: CNode): CNode[] {
+export function getChildren(node: CNode): CNode[] {
   switch (node.kind) {
     // ── Expressions with children ──
     case 'CBinaryExpr':
@@ -197,11 +197,13 @@ interface SemanticConditionEvaluation {
  * against node properties. No bytes, no opcodes — pure semantic analysis.
  */
 export class HQLMatcher {
+  constructor(private readonly checkpoint?: () => void) {}
   /**
    * Check if a single node matches a query (non-recursive into children
    * unless `contains` or `operands` require it).
    */
   match(node: CNode, query: HQLQuery): boolean {
+    this.checkpoint?.();
     // 1. Kind filter — fast reject
     if (query.target && node.kind !== query.target) {
       return false;
@@ -366,6 +368,7 @@ export class HQLMatcher {
   }
 
   private matchSemanticFact(fact: HQLSemanticFact, query: HQLSemanticQuery): boolean {
+    this.checkpoint?.();
     if (fact.kind !== query.fact) return false;
     return (query.attributes ?? []).every(attribute => matchValue(fact.attributes[attribute.field], attribute.value));
   }
@@ -419,6 +422,7 @@ export class HQLMatcher {
     minDepth: number,
     maxDepth: number
   ): boolean {
+    this.checkpoint?.();
     if (depth > maxDepth) return false;
 
     if (depth >= minDepth && this.match(node, query)) {

@@ -8,7 +8,7 @@ import * as zlib from 'zlib';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 import type { ChildProcess } from 'child_process';
-import { AnalyzeAllProcessController, type IsolatedAnalyzeAllRequest } from './analyzeAllProcess';
+import { AnalyzeAllProcessController, writeJsonAtomic, type IsolatedAnalyzeAllRequest } from './analyzeAllProcess';
 
 class FakeChild extends EventEmitter {
 	pid = 4242;
@@ -43,6 +43,18 @@ suite('isolated analyzeAll process controller', () => {
 	});
 
 	teardown(() => fs.rmSync(tempDir, { recursive: true, force: true }));
+
+	test('repeated atomic heartbeat writes use unique temporaries and leave valid JSON', () => {
+		const heartbeat = path.join(tempDir, 'atomic-heartbeat.json');
+		for (let index = 0; index < 100; index++) {
+			assert.strictEqual(writeJsonAtomic(heartbeat, { index }), true);
+		}
+		assert.deepStrictEqual(JSON.parse(fs.readFileSync(heartbeat, 'utf8')), { index: 99 });
+		assert.deepStrictEqual(
+			fs.readdirSync(tempDir).filter(name => name.startsWith('atomic-heartbeat.json.tmp-')),
+			[],
+		);
+	});
 
 	test('accepts a digest-verified snapshot and records terminal heartbeat', async () => {
 		const child = new FakeChild();
@@ -101,5 +113,23 @@ suite('isolated analyzeAll process controller', () => {
 		assert.deepStrictEqual(snapshot.limits, request.limits);
 		assert.strictEqual(result.nativeExecution.outcome, 'completed');
 		assert.strictEqual(JSON.parse(fs.readFileSync(request.heartbeatPath, 'utf8')).state, 'completed');
+	});
+
+	test('flushes every real result while repeatedly restoring the same persisted session', async function () {
+		this.timeout(30_000);
+		request.raw = { architecture: 'x64', baseAddress: 0x401000 };
+		request.timeoutMs = 20_000;
+		const controller = new AnalyzeAllProcessController();
+		const hashes: string[] = [];
+		for (let index = 0; index < 32; index++) {
+			request.snapshotPath = path.join(tempDir, `snapshot-${index}.bin`);
+			request.heartbeatPath = path.join(tempDir, `heartbeat-${index}.json`);
+			const result = await controller.run(request);
+			hashes.push(result.snapshotSha256);
+			assert.strictEqual(result.nativeExecution.outcome, 'completed');
+			assert.strictEqual(result.nativeExecution.lastPhase, 'completed');
+			assert.strictEqual(JSON.parse(fs.readFileSync(request.heartbeatPath, 'utf8')).state, 'completed');
+		}
+		assert.strictEqual(new Set(hashes).size, 1, 'restoring unchanged state must serialize deterministically');
 	});
 });

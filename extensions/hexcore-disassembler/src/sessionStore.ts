@@ -193,6 +193,7 @@ export class SessionStore {
 	private analysisTarget?: AnalysisTarget;
 	private analysisSession?: AnalysisSession;
 	private semanticStore!: SemanticStore;
+	private semanticReadCounter = 0;
 
 	// Prepared statements — functions
 	private readonly insertFunc;
@@ -975,6 +976,46 @@ export class SessionStore {
 
 	getSemanticStore(): SemanticStore {
 		return this.semanticStore;
+	}
+
+	/** A synchronous, read-only SQLite snapshot over the already-bound session. */
+	withSemanticReadSnapshot<T>(read: () => T): T {
+		const previous = this.db.prepare('PRAGMA query_only').get() as { query_only?: number };
+		const savepoint = `hxdb_query_${++this.semanticReadCounter}`;
+		this.db.exec(`SAVEPOINT ${savepoint}`);
+		try {
+			this.db.exec('PRAGMA query_only = ON');
+			const result = read();
+			if (result && typeof (result as { then?: unknown }).then === 'function') { throw new Error('Semantic read snapshot callback must be synchronous'); }
+			this.db.exec(`RELEASE SAVEPOINT ${savepoint}`);
+			return result;
+		} catch (error) {
+			try { this.db.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`); this.db.exec(`RELEASE SAVEPOINT ${savepoint}`); } catch { /* Preserve the read failure. */ }
+			throw error;
+		} finally { this.db.exec(`PRAGMA query_only = ${previous.query_only ? 'ON' : 'OFF'}`); }
+	}
+
+	getSemanticReadRevision(): string {
+		const changes = this.db.prepare('SELECT total_changes() AS value').get() as { value: number | bigint };
+		const version = this.db.prepare('PRAGMA data_version').get() as { data_version: number | bigint };
+		return `${changes.value}:${version.data_version}`;
+	}
+
+	readSemanticQueryAnnotations(maxRows: number, maxBytes: number): {
+		functions: Array<Omit<FunctionEntry, 'updated_at'>>;
+		variables: Array<Omit<VariableEntry, 'updated_at'>>;
+		cachedFunctions: number;
+	} {
+		const functions = this.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(address || COALESCE(name,'') || COALESCE(return_type,'') || COALESCE(calling_convention,'') AS BLOB))),0) AS bytes FROM functions`).get() as { count: number; bytes: number };
+		const variables = this.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(func_address || original_name || COALESCE(new_name,'') || COALESCE(new_type,'') AS BLOB))),0) AS bytes FROM variables`).get() as { count: number; bytes: number };
+		const count = functions.count + variables.count;
+		if (count > maxRows || functions.bytes + variables.bytes + count * 256 > maxBytes) { throw new Error('Semantic annotation snapshot budget exceeded'); }
+		const cached = this.db.prepare('SELECT COUNT(*) AS count FROM analyze_cache').get() as { count: number };
+		return {
+			functions: this.getAllFunctions().map(({ updated_at: _time, ...record }) => record),
+			variables: this.db.prepare('SELECT func_address, original_name, new_name, new_type FROM variables ORDER BY func_address, original_name').all() as Array<Omit<VariableEntry, 'updated_at'>>,
+			cachedFunctions: cached.count,
+		};
 	}
 
 	getWholeProgramPropagationStore(): WholeProgramPropagationStore {

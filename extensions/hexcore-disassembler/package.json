@@ -28,8 +28,13 @@
 		"onCommand:hexcore.disasm.liftMemoryHeadless",
 		"onCommand:hexcore.disasm.disassembleBufferHeadless",
 		"onCommand:hexcore.disasm.checkConstants",
+		"onCommand:hexcore.disasm.materializeFunctions",
+		"onCommand:hexcore.session.export",
+		"onCommand:hexcore.xref.reachableFrom",
+		"onCommand:hexcore.xref.unreachableFrom",
 		"onCommand:hexcore.hql.scanFunction",
 		"onCommand:hexcore.hql.scanHeadless",
+		"onCommand:hexcore.hql.queryHeadless",
 		"onCommand:hexcore.types.applyPrototype",
 		"onCommand:hexcore.types.setCallingConvention",
 		"onCommand:hexcore.types.setParameter",
@@ -56,6 +61,7 @@
 		"onCommand:hexcore.pdb.resolveSymbols",
 		"onCommand:hexcore.signatures.apply",
 		"onCommand:hexcore.semanticExplorer.open",
+		"onCommand:hexcore.semantic.explain",
 		"onCustomEditor:hexcore.disassembler.editor",
 		"onView:hexcore.disassembler.graphView",
 		"workspaceContains:.hexcore_job.json"
@@ -252,6 +258,26 @@
 				"icon": "$(search)"
 			},
 			{
+				"command": "hexcore.disasm.materializeFunctions",
+				"title": "Materialize Selected Functions",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.session.export",
+				"title": "Export Analysis Session",
+				"category": "HexCore Automation"
+			},
+			{
+				"command": "hexcore.xref.reachableFrom",
+				"title": "List Reachable Functions",
+				"category": "HexCore References"
+			},
+			{
+				"command": "hexcore.xref.unreachableFrom",
+				"title": "List Unreachable Functions",
+				"category": "HexCore References"
+			},
+			{
 				"command": "hexcore.disasm.windowsFilesystemAuditHeadless",
 				"title": "Audit Windows Filesystem Boundary",
 				"category": "HexCore Automation",
@@ -422,6 +448,11 @@
 				"category": "HexCore Automation"
 			},
 			{
+				"command": "hexcore.hql.queryHeadless",
+				"title": "HQL: Run Ad-Hoc Semantic Query (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.types.applyPrototype",
 				"title": "Apply Full Function Prototype",
 				"category": "HexCore Types",
@@ -578,6 +609,11 @@
 				"icon": "$(symbol-structure)"
 			},
 			{
+				"command": "hexcore.semantic.explain",
+				"title": "Explain Semantic Evidence (Headless)",
+				"category": "HexCore Automation"
+			},
+			{
 				"command": "hexcore.extractStructInfo",
 				"title": "Extract Struct Info (BTF/DWARF)",
 				"category": "HexCore Disassembler",
@@ -606,6 +642,14 @@
 			"commandPalette": [
 				{
 					"command": "hexcore.hql.scanHeadless",
+					"when": "false"
+				},
+				{
+					"command": "hexcore.hql.queryHeadless",
+					"when": "false"
+				},
+				{
+					"command": "hexcore.semantic.explain",
 					"when": "false"
 				}
 			],

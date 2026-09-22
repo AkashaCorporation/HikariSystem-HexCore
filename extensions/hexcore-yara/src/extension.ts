@@ -7,7 +7,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { YaraEngine, RuleMatch, ScanResult } from './yaraEngine';
+import { YaraEngine, RuleMatch, ScanResult, scorePriorityLabel } from './yaraEngine';
 import { ResultsTreeProvider } from './resultsTree';
 import { RulesTreeProvider } from './rulesTree';
 
@@ -469,9 +469,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 				showThreatReport(uri!.fsPath, result);
 
-				const severity = result.threatScore >= 75 ? '🔴 CRITICAL' :
-					result.threatScore >= 50 ? '🟠 HIGH' :
-						result.threatScore >= 25 ? '🟡 MEDIUM' : '🟢 CLEAN';
+				const severity = scorePriorityLabel(result.threatScore);
 
 				vscode.window.showWarningMessage(
 					`${severity} | Score: ${result.threatScore}/100 | ${result.matches.length} matches | ${result.scanTime}ms`
@@ -577,7 +575,7 @@ async function resolveScanTargetUri(
 	return uris[0];
 }
 
-function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void {
+export function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void {
 	const format = normalizeOutputFormat(output.path, output.format);
 	fs.mkdirSync(path.dirname(output.path), { recursive: true });
 
@@ -597,6 +595,11 @@ function writeScanOutput(result: ScanResult, output: CommandOutputOptions): void
 				categories: result.categories,
 				matchCount: result.matches.length,
 				matches: result.matches,
+				binaryContext: result.binaryContext,
+				scoring: result.scoring,
+				heuristicAdvisory: result.heuristicAdvisory,
+				isDotNet: result.isDotNet,
+				dotNetAdvisory: result.dotNetAdvisory,
 				// v3.8.0-nightly diagnostic: number of YARA rules active at
 				// scan time. Zero = rules failed to load (packaging issue).
 				// Non-zero + matchCount 0 = legitimate no-match.
@@ -629,7 +632,7 @@ function normalizeOutputFormat(outputPath: string, format?: OutputFormat): Outpu
 	return path.extname(outputPath).toLowerCase() === '.md' ? 'md' : 'json';
 }
 
-function buildScanMarkdown(result: ScanResult): string {
+export function buildScanMarkdown(result: ScanResult): string {
 	const lines: string[] = [];
 	lines.push('# YARA Scan Report');
 	lines.push('');
@@ -639,6 +642,12 @@ function buildScanMarkdown(result: ScanResult): string {
 	lines.push(`- Scan Time: ${result.scanTime} ms`);
 	lines.push(`- Threat Score: ${result.threatScore}/100`);
 	lines.push(`- Match Count: ${result.matches.length}`);
+	if (result.scoring) {
+		lines.push(`- Scored / Advisory Matches: ${result.scoring.scoredMatches} / ${result.scoring.advisoryMatches}`);
+		lines.push(`- Advisory Score (excluded): ${result.scoring.advisoryScore}/100`);
+	}
+	if (result.binaryContext) { lines.push(`- Scan Context: ${result.binaryContext.format} / ${result.binaryContext.architecture ?? 'unknown architecture'}`); }
+	lines.push('- Score is rule priority, not a malware verdict. Zero does not establish that the file is clean.');
 	lines.push('');
 
 	if (Object.keys(result.categories).length > 0) {
@@ -663,6 +672,8 @@ function buildScanMarkdown(result: ScanResult): string {
 		lines.push(`- Namespace: ${match.namespace}`);
 		lines.push(`- Severity: ${match.severity}`);
 		lines.push(`- Score: ${match.score}`);
+		lines.push(`- Score Contribution: ${match.scoreContribution ?? (match.advisoryOnly ? 0 : match.score)}`);
+		if (match.advisoryOnly) { lines.push(`- Advisory: ${match.advisoryReason ?? 'excluded from the primary score'}`); }
 		lines.push(`- Family: ${match.meta.family ?? 'unknown'}`);
 		lines.push(`- Platform: ${match.meta.platform ?? 'unknown'}`);
 		if (match.strings.length > 0) {
@@ -699,17 +710,16 @@ function formatBytes(bytes: number): string {
 
 // ── Threat Report ────────────────────────────────────────────────────────
 
-function showThreatReport(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number> }): void {
+function showThreatReport(filePath: string, result: ScanResult): void {
 	const md = buildThreatReportMarkdown(filePath, result);
 	vscode.workspace.openTextDocument({ content: md, language: 'markdown' }).then(doc => {
 		vscode.window.showTextDocument(doc, { preview: true });
 	});
 }
 
-function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatch[]; threatScore: number; scanTime: number; fileSize: number; categories: Record<string, number>; isDotNet?: boolean; dotNetAdvisory?: { suppressedRuleMatches: number; retainedRuleMatches: number; note: string } }): string {
+export function buildThreatReportMarkdown(filePath: string, result: ScanResult): string {
 	const lines: string[] = [];
-	const scoreLabel = result.threatScore > 70 ? '🔴 CRITICAL' :
-		result.threatScore >= 30 ? '🟡 MEDIUM' : '🟢 CLEAN';
+	const scoreLabel = scorePriorityLabel(result.threatScore);
 
 	lines.push('# HexCore Threat Report');
 	lines.push('');
@@ -722,6 +732,11 @@ function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatc
 	lines.push(`| Size | ${formatBytes(result.fileSize)} |`);
 	lines.push(`| Scan Time | ${result.scanTime} ms |`);
 	lines.push(`| Threat Score | **${result.threatScore}/100** (${scoreLabel}) |`);
+	if (result.scoring) {
+		lines.push(`| Scored / Advisory Matches | ${result.scoring.scoredMatches} / ${result.scoring.advisoryMatches} |`);
+		lines.push(`| Advisory Score (excluded) | ${result.scoring.advisoryScore}/100 |`);
+	}
+	if (result.binaryContext) { lines.push(`| Scan Context | ${result.binaryContext.format} / ${result.binaryContext.architecture ?? 'unknown architecture'} |`); }
 	lines.push(`| Total Matches | ${result.matches.length} |`);
 	if (result.isDotNet) {
 		lines.push(`| File Type | .NET / managed assembly |`);
@@ -778,7 +793,7 @@ function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatc
 				const icon = m.severity === 'critical' ? '🔴' :
 					m.severity === 'high' ? '🟠' :
 						m.severity === 'medium' ? '🟡' : '🟢';
-				const advisoryTag = m.advisoryOnly ? ' — ⚪ _advisory (managed metadata, excluded from score)_' : '';
+				const advisoryTag = m.advisoryOnly ? ' — _advisory (excluded from score)_' : '';
 				lines.push(`#### ${icon} ${m.ruleName}${advisoryTag}`);
 				lines.push('');
 				lines.push(`- **Family:** ${m.meta.family || 'unknown'}`);
@@ -809,21 +824,21 @@ function buildThreatReportMarkdown(filePath: string, result: { matches: RuleMatc
 	lines.push('## Recommendations');
 	lines.push('');
 	if (result.threatScore > 70) {
-		lines.push('⚠️ **High threat level detected.** Recommended actions:');
+		lines.push('**High-priority rule matches.** Applicability and behavior still require review. Recommended actions:');
 		lines.push('');
 		lines.push('1. Isolate the file in a sandbox environment');
 		lines.push('2. Run dynamic analysis with the HexCore Debugger');
 		lines.push('3. Extract IOCs using the IOC Extractor');
 		lines.push('4. Check strings for C2 indicators');
-		lines.push('5. Submit to VirusTotal for cross-reference');
+		lines.push('5. Check hashes against approved reputation sources; do not upload private samples without authorization');
 	} else if (result.threatScore >= 30) {
-		lines.push('⚡ **Moderate threat indicators found.** Recommended actions:');
+		lines.push('**Medium-priority rule matches.** Recommended actions:');
 		lines.push('');
 		lines.push('1. Review matched rules for false positives');
 		lines.push('2. Analyze suspicious strings and API calls');
 		lines.push('3. Check entropy for packed sections');
 	} else {
-		lines.push('✅ **Low or no threat detected.** The file appears clean based on loaded rules.');
+		lines.push('**Low or no scored indicators.** This is not a clean verdict; advisory matches and unassessed formats may remain.');
 		lines.push('');
 		lines.push('Consider loading additional YARA rule categories for deeper analysis.');
 	}

@@ -18,6 +18,7 @@ export interface RuleMatch {
 	strings: Array<{
 		identifier: string;
 		offset: number;
+		length?: number;
 		data: string;
 		section?: string;
 		executable?: boolean;
@@ -34,7 +35,15 @@ export interface RuleMatch {
 	 */
 	advisoryOnly?: boolean;
 	advisoryReason?: string;
+	scoreContribution?: number;
 }
+
+export function scorePriorityLabel(score: number): string {
+	return score >= 75 ? 'HIGH PRIORITY' : score >= 30 ? 'MEDIUM PRIORITY' : score > 0 ? 'LOW PRIORITY' : 'NO SCORED MATCHES';
+}
+
+// Qualification uses collected occurrences, not the ten-row display preview.
+const qualificationEvidence = new WeakMap<RuleMatch, { strings: RuleMatch['strings']; countLimited: boolean }>();
 
 export interface BinaryScanSection {
 	name: string;
@@ -45,7 +54,7 @@ export interface BinaryScanSection {
 }
 
 export interface BinaryScanContext {
-	format: 'pe' | 'elf' | 'unknown';
+	format: 'pe' | 'elf' | 'dex' | 'cdex' | 'vdex' | 'zip' | 'unknown';
 	architecture?: string;
 	sections: BinaryScanSection[];
 }
@@ -79,10 +88,13 @@ export interface ScanResult {
 	fileSize: number;
 	categories: Record<string, number>; // category -> match count
 	binaryContext?: {
-		format: 'pe' | 'elf' | 'unknown';
+		format: BinaryScanContext['format'];
 		architecture?: string;
 		executableSectionCount: number;
+		scanScope?: 'file-bytes' | 'container-bytes' | 'bytecode-bytes';
+		containerMembersAssessed?: false;
 	};
+	scoring?: { policy: 'qualified-rule-maximum-v1'; scoredMatches: number; advisoryMatches: number; advisoryScore: number };
 	heuristicAdvisory?: {
 		suppressedRuleMatches: number;
 		retainedRuleMatches: number;
@@ -687,6 +699,14 @@ function readCString(buffer: Buffer, offset: number): string {
 /** Parse enough PE/ELF metadata to qualify raw YARA byte matches. */
 export function inspectBinaryScanContext(content: Buffer): BinaryScanContext {
 	try {
+		const magic = content.subarray(0, 8).toString('latin1');
+		if (/^dex\n\d{3}\0$/.test(magic)) { return { format: 'dex', architecture: 'dalvik', sections: [] }; }
+		if (/^cdex\d{3}\0$/.test(magic)) { return { format: 'cdex', architecture: 'dalvik', sections: [] }; }
+		if (/^vdex\d{3}\0$/.test(magic)) { return { format: 'vdex', sections: [] }; }
+		if (content.length >= 4 && content[0] === 0x50 && content[1] === 0x4b &&
+			((content[2] === 3 && content[3] === 4) || (content[2] === 5 && content[3] === 6) || (content[2] === 7 && content[3] === 8))) {
+			return { format: 'zip', sections: [] };
+		}
 		if (content.length >= 0x40 && content.readUInt16LE(0) === 0x5a4d) {
 			const peOffset = content.readUInt32LE(0x3c);
 			if (peOffset + 24 <= content.length && content.readUInt32LE(peOffset) === 0x00004550) {
@@ -784,22 +804,50 @@ export function inspectBinaryScanContext(content: Buffer): BinaryScanContext {
 }
 
 function architectureMatches(required: string, actual: string | undefined): boolean {
-	if (!actual) { return true; }
+	if (!actual) { return false; }
 	const normalized = required.toLowerCase();
 	if (normalized === 'x86') { return actual === 'x86' || actual === 'x86_64'; }
 	if (normalized === 'arm') { return actual === 'arm' || actual === 'armv7' || actual === 'aarch64'; }
 	return normalized === actual.toLowerCase();
 }
 
-function qualifyMatch(match: RuleMatch, context: BinaryScanContext): void {
-	for (const evidence of match.strings) {
+function matchedExtent(str: YaraString, content: Buffer, offset: number): number | undefined {
+	if (str.type === 'hex') {
+		return str.bytes?.length ?? (/^[\da-f?\s]+$/i.test(str.value) ? str.value.trim().split(/\s+/).length : undefined);
+	}
+	if (str.type === 'text') {
+		const wide = str.modifiers.includes('wide');
+		if (!wide || str.modifiers.includes('ascii')) {
+			const actual = content.toString('binary', offset, offset + str.value.length);
+			if (str.modifiers.includes('nocase') ? actual.toLowerCase() === str.value.toLowerCase() : actual === str.value) { return str.value.length; }
+		}
+		if (wide) { return str.value.length * 2; }
+	}
+	return undefined;
+}
+
+function qualifyMatch(match: RuleMatch, context: BinaryScanContext, rule?: YaraRule): void {
+	const collected = qualificationEvidence.get(match);
+	const evidenceRows = collected?.strings ?? match.strings;
+	for (const evidence of evidenceRows) {
 		const section = context.sections.find(candidate =>
 			evidence.offset >= candidate.fileOffset && evidence.offset < candidate.fileOffset + candidate.size);
 		if (section) {
 			evidence.section = section.name;
-			evidence.executable = section.executable;
+			evidence.executable = evidence.length === undefined ? undefined : section.executable &&
+				evidence.offset + evidence.length <= section.fileOffset + section.size;
 			evidence.virtualAddress = `0x${(section.virtualAddress + BigInt(evidence.offset - section.fileOffset)).toString(16)}`;
 		}
+	}
+	if (match.meta.advisory_only === 'true') {
+		match.advisoryOnly = true;
+		match.advisoryReason = match.meta.advisory_reason || 'Rule declares advisory evidence only; excluded from the primary score.';
+		return;
+	}
+	if (match.meta.formats && !match.meta.formats.toLowerCase().split(/[\s,]+/).includes(context.format)) {
+		match.advisoryOnly = true;
+		match.advisoryReason = `Rule requires format ${match.meta.formats}; detected ${context.format}.`;
+		return;
 	}
 
 	const requiredArchitecture = match.meta.architecture;
@@ -808,9 +856,23 @@ function qualifyMatch(match: RuleMatch, context: BinaryScanContext): void {
 		match.advisoryReason = `Rule requires ${requiredArchitecture}; binary architecture is ${context.architecture ?? 'unknown'}.`;
 		return;
 	}
-	if (match.meta.requires_executable === 'true' && !match.strings.some(evidence => evidence.executable === true)) {
-		match.advisoryOnly = true;
-		match.advisoryReason = 'Opcode rule matched only outside executable sections.';
+	if (match.meta.requires_executable === 'true') {
+		if (collected?.countLimited && rule && /#[A-Za-z_]/.test(rule.condition)) {
+			match.advisoryOnly = true;
+			match.advisoryReason = 'Occurrence limit reached; executable cardinality condition is not fully assessed.';
+			return;
+		}
+		const counts: Record<string, number> = {};
+		for (const evidence of evidenceRows) {
+			if (evidence.executable === true) { counts[evidence.identifier] = (counts[evidence.identifier] ?? 0) + 1; }
+		}
+		const qualified = rule && evaluateYaraCondition(rule.condition, counts, rule.strings.map(string => string.identifier));
+		if (!qualified?.supported || !qualified.result) {
+			match.advisoryOnly = true;
+			match.advisoryReason = Object.keys(counts).length === 0
+				? 'Opcode rule matched only outside executable sections or has unknown match extent.'
+				: 'Executable-section evidence does not satisfy the rule condition.';
+		}
 	}
 }
 
@@ -1306,8 +1368,9 @@ export class YaraEngine {
 		try {
 			binaryContext = inspectBinaryScanContext(fs.readFileSync(filePath));
 		} catch { /* unreadable target already produces an empty scan */ }
+		const rules = new Map(this.getAllRules().map(rule => [`${rule.category}:${rule.name}`, rule]));
 		for (const match of matches) {
-			qualifyMatch(match, binaryContext);
+			qualifyMatch(match, binaryContext, rules.get(`${match.namespace}:${match.ruleName}`));
 		}
 
 		// GAP #3: detect a .NET / managed assembly so native byte-pattern rules
@@ -1329,6 +1392,7 @@ export class YaraEngine {
 		let managedSuppressed = 0;
 
 		for (const m of matches) {
+			m.scoreContribution = 0;
 			categories[m.namespace] = (categories[m.namespace] || 0) + 1;
 			if (m.advisoryOnly) {
 				continue;
@@ -1343,6 +1407,7 @@ export class YaraEngine {
 				continue;
 			}
 			scoredMatches++;
+			m.scoreContribution = m.score;
 			if (m.score > maxScore) { maxScore = m.score; }
 		}
 
@@ -1360,10 +1425,18 @@ export class YaraEngine {
 			scanTime: Date.now() - startTime,
 			fileSize: stat?.size || 0,
 			categories,
+			scoring: {
+				policy: 'qualified-rule-maximum-v1', scoredMatches,
+				advisoryMatches: matches.filter(match => match.advisoryOnly).length,
+				advisoryScore: Math.min(100, matches.reduce((score, match) => match.advisoryOnly ? Math.max(score, match.score) : score, 0)),
+			},
 			binaryContext: {
 				format: binaryContext.format,
 				...(binaryContext.architecture ? { architecture: binaryContext.architecture } : {}),
 				executableSectionCount: binaryContext.sections.filter(section => section.executable).length,
+				scanScope: binaryContext.format === 'zip' || binaryContext.format === 'vdex' ? 'container-bytes'
+					: binaryContext.format === 'dex' || binaryContext.format === 'cdex' ? 'bytecode-bytes' : 'file-bytes',
+				...(binaryContext.format === 'zip' || binaryContext.format === 'vdex' ? { containerMembersAssessed: false as const } : {}),
 			},
 			// v3.8.0-nightly diagnostic: surface how many rules the engine had
 			// active during this scan. `threatScore: 0` + `activeRules: 0` is
@@ -1377,7 +1450,7 @@ export class YaraEngine {
 			result.heuristicAdvisory = {
 				suppressedRuleMatches: heuristicSuppressed,
 				retainedRuleMatches: scoredMatches,
-				note: `${heuristicSuppressed} rule match(es) were retained as advisory evidence but excluded from threatScore because architecture or executable-section requirements were not met.`,
+				note: `${heuristicSuppressed} rule match(es) were retained as advisory evidence but excluded from threatScore by applicability checks or advisory-only rule policy.`,
 			};
 		}
 
@@ -1426,7 +1499,9 @@ export class YaraEngine {
 	// ── Rule Evaluation ─────────────────────────────────────────────────
 
 	private evaluateRule(rule: YaraRule, content: Buffer): RuleMatch | null {
-		const matchedStrings: Array<{ identifier: string; offset: number; data: string }> = [];
+		const matchedStrings: RuleMatch['strings'] = [];
+		const allMatchedStrings: RuleMatch['strings'] = [];
+		let countLimited = false;
 		const stringMatchCounts: Record<string, number> = {};
 
 		for (const str of rule.strings) {
@@ -1458,15 +1533,19 @@ export class YaraEngine {
 			}
 
 			if (offsets.length > 0) {
+				countLimited ||= offsets.length >= 100;
 				stringMatchCounts[str.identifier] = offsets.length;
 				// Keep first 10 match positions per string
-				for (const offset of offsets.slice(0, 10)) {
-					const dataSnippet = content.slice(offset, offset + Math.min(50, content.length - offset));
-					matchedStrings.push({
+				for (const [index, offset] of offsets.entries()) {
+					const length = matchedExtent(str, content, offset);
+					const evidence = {
 						identifier: str.identifier,
 						offset,
+						...(length !== undefined ? { length } : {}),
 						data: str.comment || str.value.substring(0, 50)
-					});
+					};
+					allMatchedStrings.push(evidence);
+					if (index < 10) { matchedStrings.push(evidence); }
 				}
 			}
 		}
@@ -1480,7 +1559,7 @@ export class YaraEngine {
 		const severity = (rule.meta.severity as any) || CATEGORY_SEVERITY[rule.category] || 'medium';
 		const score = SEVERITY_SCORE[severity] || 50;
 
-		return {
+		const result: RuleMatch = {
 			ruleName: rule.name,
 			namespace: rule.category,
 			meta: {
@@ -1493,6 +1572,8 @@ export class YaraEngine {
 			severity,
 			score
 		};
+		qualificationEvidence.set(result, { strings: allMatchedStrings, countLimited });
+		return result;
 	}
 
 	private evaluateCondition(rule: YaraRule, matchCounts: Record<string, number>): boolean {

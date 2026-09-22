@@ -128,8 +128,9 @@ assert.strictEqual(scan[0].nodeCount, 9);
 assert.strictEqual(scan[0].findings.length, 0);
 assert.strictEqual(scan[0].status, 'partial');
 assert.strictEqual(scan[0].truncated, false);
-assert.match(scan[0].partialReasons[0], /Adapter coverage incomplete/);
-assert.strictEqual(scan[0].evaluatedSignatureCount, 1);
+assert.ok(scan[0].partialReasons.some(reason => /Adapter coverage incomplete/.test(reason)));
+assert.ok(scan[0].partialReasons.some(reason => /Native function quality was not reported/.test(reason)));
+assert.strictEqual(scan[0].evaluatedSignatureCount, 0);
 assert.match(scan[0].cacheKey, /^[a-f0-9]{64}$/);
 assert.strictEqual(scan[0].signatureSetSha256, signatureSetSha256([cleanSignature]));
 
@@ -158,6 +159,6 @@ assert.strictEqual(malformedFunctions[0].name, '<unhydrated_0>');
 assert.strictEqual(malformedFunctions[0].adapterCoverage?.errors?.length, 1);
 const malformedScan = scanHAST(corrupted, [cleanSignature]);
 assert.strictEqual(malformedScan[0].status, 'partial');
-assert.match(malformedScan[0].partialReasons[0], /hydration failed/);
+assert.ok(malformedScan[0].partialReasons.some(reason => /hydration failed/.test(reason)));
 
 console.log('adapterLoss: exact int64, explicit loss, coverage, clean identity - OK');

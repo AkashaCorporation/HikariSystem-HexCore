@@ -100,6 +100,16 @@ export interface HQLSemanticFact {
   attributes: Readonly<Record<string, string | number | boolean>>;
   proofStatus: 'signal' | 'candidate' | 'proven';
   provenance: readonly { producer: string; source: string; strength: string; generation: number }[];
+  /** Persisted record location, not an assertion about its original producer. */
+  origin?: {
+    targetIdentity: string;
+    snapshotSha256: string;
+    collection: string;
+    recordIdentity: string;
+    recordSha256: string;
+  };
+  /** Stable semantic explanation identity supplied by the bound HXDB reader. */
+  explainIdentity?: string;
 }
 
 export interface HQLSemanticQuery {

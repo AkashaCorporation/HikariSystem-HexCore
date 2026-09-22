@@ -19,6 +19,10 @@ import {
 } from 'hexcore-common';
 import { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
 import { peekAnalysisContractState } from './sessionStore';
+import { inspectStepIdentities, isNamedStepToken, resolveStepToken, resolveGotoTarget, stepReferencePattern } from './pipelineStepIdentity';
+import { assertProducerUsable, collectPipelineArtifactBindings, producerArtifactKind, validatePipelineArtifactInputs, type PipelineArtifactKind } from './pipelineArtifactInputs';
+import { inspectUnsupportedNativeFormat, UnsupportedNativeInputError, type UnsupportedNativeFormat } from './nativeInputFormat';
+import { normalizePipelineExecutionError } from './pipelineExecutionError';
 
 export type PipelineOutputFormat = 'json' | 'md';
 export { JobQueueManager, getJobQueueManager, JobPriority } from './jobQueueManager';
@@ -40,6 +44,7 @@ export interface PipelineOutputOptions {
 }
 
 export interface PipelineStep {
+	id?: string;
 	cmd: string;
 	args?: Record<string, unknown>;
 	output?: PipelineOutputOptions;
@@ -79,6 +84,11 @@ export interface PipelineCommandOptions {
 }
 
 export interface PipelineStepStatus {
+	stepId?: string;
+	/** Zero-based declaration index; provenance's legacy index remains one-based. */
+	stepIndex?: number;
+	occurrence?: number;
+	attempts?: Array<{ attempt: number; startedAt: string; finishedAt: string; status: 'ok' | 'partial' | 'error'; error?: string }>;
 	cmd: string;
 	resolvedCmd: string;
 	status: 'ok' | 'partial' | 'error' | 'skipped';
@@ -97,6 +107,9 @@ export interface PipelineStepStatus {
 	/** Manifest that binds this artifact to its binary and execution context. */
 	artifactProvenancePath?: string;
 	error?: string;
+	errorCode?: 'unsupported-format';
+	detectedFormat?: UnsupportedNativeFormat;
+	artifactKind?: PipelineArtifactKind;
 }
 
 export interface PipelineRunProvenance {
@@ -178,6 +191,7 @@ export interface PipelineValidationIssue {
 }
 
 export interface PipelineValidationStep {
+	stepId?: string;
 	index: number;
 	cmd: string;
 	resolvedCmd: string;
@@ -243,6 +257,8 @@ export interface PipelineDoctorReport {
 }
 
 interface NormalizedPipelineJob {
+	stepIds: ReadonlyMap<string, number>;
+	identityIssues: PipelineValidationIssue[];
 	file: string;
 	outDir: string;
 	steps: PipelineStep[];
@@ -269,9 +285,14 @@ interface StepOutputPath {
  * - `result`     — the parsed JSON content of that file (maps to `$step[N].result.X`)
  */
 interface StepRecord {
+	stepId?: string;
+	outputSha256?: string;
 	outputPath: string | undefined;
 	result: Record<string, unknown> | undefined;
 	resolvedCommand?: string;
+	status?: PipelineStepStatus['status'];
+	artifactKind?: PipelineArtifactKind;
+	executionOrdinal?: number;
 }
 
 export interface PipelineRunContext {
@@ -284,6 +305,7 @@ export interface PipelineRunContext {
 export function findStepThatMaySkip(
 	steps: PipelineStep[],
 	targetIndex: number,
+	stepIds = inspectStepIdentities(steps).ids,
 ): number | undefined {
 	for (let i = 0; i < targetIndex; i++) {
 		const rule = steps[i]?.onResult;
@@ -294,7 +316,8 @@ export function findStepThatMaySkip(
 				return i;
 			}
 		} else if (rule.action === 'goto') {
-			const destination = Number(rule.actionValue);
+			let destination: number;
+			try { destination = resolveGotoTarget(rule.actionValue, steps.length, stepIds); } catch { continue; }
 			if (Number.isInteger(destination) && destination > targetIndex) {
 				return i;
 			}
@@ -303,7 +326,7 @@ export function findStepThatMaySkip(
 	return undefined;
 }
 
-type StepRecordTable = Array<StepRecord | undefined>;
+type StepRecordTable = Array<StepRecord | undefined> & { stepIds?: ReadonlyMap<string, number> };
 
 const SHARED_ANALYSIS_CONSUMERS = new Set<string>([
 	'hexcore.disasm.windowsFilesystemAuditHeadless',
@@ -316,6 +339,8 @@ const SHARED_ANALYSIS_CONSUMERS = new Set<string>([
 	'hexcore.disasm.checkConstants',
 	'hexcore.hql.scanHeadless',
 	'hexcore.hql.scanFunction',
+	'hexcore.hql.queryHeadless',
+	'hexcore.semantic.explain',
 ]);
 
 interface TerminalReportFinalizer {
@@ -501,8 +526,30 @@ export function inspectBinaryIdentity(filePath: string): BinaryIdentity {
 	return { format: 'unknown' };
 }
 
-export function checkBinaryFormatGate(command: string, filePath: string): { skip: boolean; reason?: string } {
+const NATIVE_FILE_COMMANDS = new Set([
+	'hexcore.disasm.openFile',
+	'hexcore.disasm.analyzeAll',
+	'hexcore.disasm.disassembleAtHeadless',
+	'hexcore.disasm.liftToIR',
+	'hexcore.helix.decompile',
+	'hexcore.rellic.decompile',
+]);
+
+export function checkBinaryFormatGate(command: string, filePath: string): {
+	skip: boolean; reason?: string; code?: 'unsupported-format'; detectedFormat?: UnsupportedNativeFormat;
+} {
 	const resolved = resolveCommand(command);
+	if (NATIVE_FILE_COMMANDS.has(resolved)) {
+		try {
+			const detectedFormat = inspectUnsupportedNativeFormat(filePath);
+			if (detectedFormat) {
+				const error = new UnsupportedNativeInputError(detectedFormat);
+				return { skip: true, code: error.code, detectedFormat, reason: error.message };
+			}
+		} catch {
+			// Preserve the command's existing I/O error handling for unreadable inputs.
+		}
+	}
 	const identity = inspectBinaryIdentity(filePath);
 	let expected: BinaryFormat | undefined;
 	if (PE_ONLY_COMMANDS.has(resolved)) { expected = 'pe'; }
@@ -555,6 +602,7 @@ const COMMAND_ALIASES = new Map<string, string>([
 	// HQL semantic scanner aliases (doc-friendly short forms).
 	['hexcore.hql.scan', 'hexcore.hql.scanHeadless'],
 	['hexcore.hql.scanFunctions', 'hexcore.hql.scanHeadless'],
+	['hexcore.hql.query', 'hexcore.hql.queryHeadless'],
 	['hexcore.debug.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemory', 'hexcore.debug.searchMemoryHeadless'],
 	['hexcore.unicorn.searchMemoryHeadless', 'hexcore.debug.searchMemoryHeadless'],
@@ -651,6 +699,10 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 		headless: true, defaultTimeoutMs: 180000, validateOutput: true,
 		cancelCommand: 'hexcore.disasm.cancelAnalyzeAll',
 	}],
+	['hexcore.disasm.materializeFunctions', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
+	['hexcore.session.export', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.xref.reachableFrom', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.xref.unreachableFrom', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.disasm.windowsFilesystemAuditHeadless', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
 	['hexcore.yara.scan', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.ioc.extract', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
@@ -699,6 +751,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	// function(s) via the helix pipeline then evaluates the built-in signature
 	// library over the HAST. Writes a JSON report ({ results: [...] }) to output.
 	['hexcore.hql.scanHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.hql.queryHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
 	['hexcore.hql.scanFunction', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command scans the function in the active disassembler editor and shows notifications.' }],
 	['hexcore.souper.optimize', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.extractStructInfo', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
@@ -717,6 +770,7 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.types.setParameter', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.types.clearOverride', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.types.explainPrototype', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
+	['hexcore.semantic.explain', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
 	['hexcore.types.export', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.types.import', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
 	['hexcore.references.query', { headless: true, defaultTimeoutMs: 120000, validateOutput: true }],
@@ -887,17 +941,23 @@ const COMMAND_OWNERS = new Map<string, readonly string[]>([
 	['hexcore.revenant.decompileIL', ['hikarisystem.hexcore-revenant']],
 	['hexcore.hql.scanHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.hql.scanFunction', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.hql.queryHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.souper.optimize', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.extractStructInfo', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.extractStrings', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.analyzePEHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.analyzeELFHeadless', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.disasm.getSessionDbPath', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.disasm.materializeFunctions', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.session.export', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.xref.reachableFrom', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.xref.unreachableFrom', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.applyPrototype', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.setCallingConvention', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.setParameter', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.clearOverride', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.explainPrototype', ['hikarisystem.hexcore-disassembler']],
+	['hexcore.semantic.explain', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.export', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.types.import', ['hikarisystem.hexcore-disassembler']],
 	['hexcore.references.query', ['hikarisystem.hexcore-disassembler']],
@@ -1177,7 +1237,7 @@ export function evaluateOnResult(rule: OnResultRule, stepOutput: Record<string, 
 	}
 }
 
-export function applyOnResultAction(rule: OnResultRule, currentIndex: number, totalSteps: number, logPath: string): number {
+export function applyOnResultAction(rule: OnResultRule, currentIndex: number, totalSteps: number, logPath: string, stepIds?: ReadonlyMap<string, number>): number {
 	switch (rule.action) {
 		case 'skip': {
 			// Validate actionValue is a non-negative integer. A non-numeric value
@@ -1195,11 +1255,7 @@ export function applyOnResultAction(rule: OnResultRule, currentIndex: number, to
 			// check let NaN through (both comparisons false -> returned NaN -> the loop
 			// silently exited as 'ok') and let a fractional in-range value through (e.g.
 			// 1.5 -> job.steps[1.5] === undefined -> undefined.cmd TypeError). Reject both.
-			const target = Number(rule.actionValue);
-			if (!Number.isInteger(target) || target < 0 || target >= totalSteps) {
-				throw new Error(`onResult goto target ${JSON.stringify(rule.actionValue)} must be an integer step index in [0, ${totalSteps - 1}]`);
-			}
-			return target;
+			return resolveGotoTarget(rule.actionValue, totalSteps, stepIds);
 		}
 		case 'abort':
 			appendLog(logPath, `[onResult] ABORT: ${rule.actionValue ?? 'condition matched'}`);
@@ -1249,6 +1305,9 @@ export function inspectSemanticResult(value: unknown): SemanticResultInspection 
 			reason: nonEmptyError(value.semanticWarning) ?? nonEmptyError(value.warning) ??
 				'command reported semantic status partial'
 		};
+	}
+	if (status === 'unknown' || semanticStatus === 'unknown') {
+		return { status: 'partial', reason: nonEmptyError(value.warning) ?? 'command reported semantic status unknown' };
 	}
 
 	if (Array.isArray(value.results) && value.results.length > 0) {
@@ -1302,6 +1361,8 @@ async function collectInputArtifactReferences(
 	resolvedCommand: string,
 	outputPath?: string,
 	commandResult?: unknown,
+	step?: PipelineStep,
+	stepIndex?: number,
 ): Promise<AnalysisArtifactReference[]> {
 	const pathKey = (candidate: string): string => {
 		const resolved = path.resolve(candidate);
@@ -1336,7 +1397,15 @@ async function collectInputArtifactReferences(
 			for (const item of Object.values(value)) { visit(item); }
 		}
 	};
-	visit(commandOptions);
+	const { pipelineArtifactBindings: _bindings, pipelineAbortSignal: _signal, ...artifactOptions } = commandOptions;
+	visit(artifactOptions);
+	if (step && stepIndex !== undefined) {
+		for (const reference of collectStepReferences(step.args ?? {})) {
+			const producerIndex = resolveStepToken(reference.token, stepIndex, stepRecords.stepIds);
+			const producer = stepRecords[producerIndex];
+			if (producer?.outputPath && pathKey(producer.outputPath) !== outputKey) { referenced.add(path.resolve(producer.outputPath)); }
+		}
+	}
 
 	// External inputs are not necessarily outputs of an earlier step in this job.
 	// Bind the scan to the bytes it actually read, not a later re-hash of mutable files.
@@ -1404,7 +1473,10 @@ function canonicalizeConfiguration(value: unknown): unknown {
 }
 
 function hashCommandConfiguration(commandOptions: PipelineCommandOptions): string {
-	const { file: _file, quiet: _quiet, output: _output, pipelineQueryContext: _observer, ...semanticOptions } = commandOptions;
+	const { file: _file, quiet: _quiet, output: _output, pipelineQueryContext: _observer,
+		pipelineInputQuality: _inputQuality, pipelineStepIdentity: _stepIdentity,
+		pipelineAbortSignal: _abortSignal, pipelineStepTimeoutMs: _stepTimeout,
+		pipelineArtifactBindings: _artifactBindings, ...semanticOptions } = commandOptions;
 	return crypto.createHash('sha256')
 		.update(JSON.stringify(canonicalizeConfiguration(semanticOptions)))
 		.digest('hex');
@@ -1456,12 +1528,19 @@ async function writeArtifactProvenance(
 		resolvedCommand,
 		outputPath,
 		commandResult,
+		step,
+		stepIndex,
 	);
+	const artifactKind = producerArtifactKind(resolvedCommand, resolveStepOutput(outDir, step, stepIndex).captureKind, semanticStatus);
+	const mediaType = artifactKind === 'failed-output' ? 'application/octet-stream'
+		: artifactKind === 'llvm-ir' ? 'text/x-llvm'
+			: artifactKind === 'c-source' ? 'text/x-c'
+				: resolveArtifactMediaType(outputPath, step.output?.format);
 	const artifact = {
 		id: `artifact:sha256:${artifactSha256}`,
 		path: outputPath,
 		sha256: artifactSha256,
-		mediaType: resolveArtifactMediaType(outputPath, step.output?.format),
+		mediaType,
 	};
 	if (inputs.some(input => path.resolve(input.path) === path.resolve(artifact.path) || input.id === artifact.id)) {
 		throw new Error(`Artifact provenance must be acyclic: ${artifact.path} cannot depend on itself`);
@@ -1487,9 +1566,11 @@ async function writeArtifactProvenance(
 		} } : {}),
 		step: {
 			index: stepIndex + 1,
+			...(step.id ? { stepId: step.id, stepIndex, occurrence: Number((commandOptions.pipelineStepIdentity as { occurrence?: number } | undefined)?.occurrence ?? 1) } : {}),
 			cmd: step.cmd,
 			resolvedCmd: resolvedCommand,
 			semanticStatus,
+			artifactKind,
 			configurationSha256: hashCommandConfiguration(commandOptions),
 		},
 		artifact: {
@@ -1502,6 +1583,10 @@ async function writeArtifactProvenance(
 	const manifest = readProvenanceManifest(provenancePath, run);
 	manifest.generatedAt = generatedAt;
 	manifest.execution = run;
+	if (step.id) {
+		const replaced = manifest.artifacts.filter(existing => existing.artifact.path === outputPath && existing.step.stepId);
+		if (replaced.length) { manifest.history = [...(manifest.history ?? []), ...replaced]; }
+	}
 	manifest.artifacts = manifest.artifacts.filter(existing => existing.artifact.path !== outputPath);
 	manifest.artifacts.push(entry);
 	writeJson(provenancePath, manifest);
@@ -1512,10 +1597,14 @@ interface ProvenanceManifestEntry {
 	generatedAt: string;
 	analysisContract: ReturnType<typeof createAnalysisArtifactProvenance>;
 	step: {
+		stepId?: string;
+		stepIndex?: number;
+		occurrence?: number;
 		index: number;
 		cmd: string;
 		resolvedCmd: string;
 		semanticStatus: 'ok' | 'partial' | 'error';
+		artifactKind?: PipelineArtifactKind;
 		configurationSha256: string;
 	};
 	artifact: { path: string; sha256: string };
@@ -1524,6 +1613,8 @@ interface ProvenanceManifestEntry {
 }
 
 interface ProvenanceManifest {
+	/** Prior named-step metadata, not a promise that overwritten output bytes remain available. */
+	history?: ProvenanceManifestEntry[];
 	schemaVersion: 1;
 	generatedAt: string;
 	status: 'running' | 'ok' | 'error' | 'partial';
@@ -1764,7 +1855,32 @@ export class AutomationPipelineRunner {
 		// Latest record keyed by the declared job-step index. A forward skip
 		// leaves a hole; a backward goto overwrites that step's stale first run.
 		const stepRecords: StepRecordTable = [];
+		stepRecords.stepIds = job.stepIds;
 		const terminalReportFinalizers = new Map<number, TerminalReportFinalizer>();
+		const identities = new Map<PipelineStep, { stepId: string; stepIndex: number; occurrence: number }>();
+		const attemptHistory = new Map<PipelineStep, NonNullable<PipelineStepStatus['attempts']>>();
+		const makeStepStatus = async (...args: Parameters<typeof createStepStatus>): Promise<PipelineStepStatus> => {
+			const existed = args[4] ? fs.existsSync(args[4]) : false;
+			const result = createStepStatus(...args);
+			const identity = identities.get(args[0]);
+			if (!identity) { return result; }
+			const named = { ...result, ...identity, attempts: (attemptHistory.get(args[0]) ?? []).map(attempt => ({ ...attempt })) };
+			if (named.status === 'error' && args[4] && !existed && fs.existsSync(args[4])) {
+				try {
+					const stub = JSON.parse(fs.readFileSync(args[4], 'utf8'));
+					if (stub.stub === true) { writeJson(args[4], { ...stub, ...identity }); }
+				} catch { /* The terminal status remains authoritative if diagnostic enrichment fails. */ }
+			}
+			// A named step can fail before dispatch (for example on a missing dependency).
+			// Replace its prior provenance too, rather than leaving a successful old entry.
+			if (named.status === 'error' && named.attempts.length === 0) {
+				try {
+					named.artifactProvenancePath = await writeArtifactProvenance(args[4], job.outDir, provenance,
+						identity.stepIndex, args[0], args[1], 'error', { file: job.file, pipelineStepIdentity: identity }, stepRecords);
+				} catch (error) { named.error = `${named.error ?? 'Step failed'}; provenance unavailable: ${toErrorMessage(error)}`; }
+			}
+			return named;
+		};
 
 		while (index < job.steps.length) {
 			// Check if job was aborted
@@ -1782,6 +1898,10 @@ export class AutomationPipelineRunner {
 			}
 
 			const step = job.steps[index];
+			if (step.id) {
+				identities.set(step, { stepId: step.id, stepIndex: index, occurrence: (identities.get(step)?.occurrence ?? 0) + 1 });
+				attemptHistory.set(step, []);
+			}
 			const resolvedCommand = resolveCommand(step.cmd);
 			const capability = COMMAND_CAPABILITIES.get(resolvedCommand);
 			const validateOutput = shouldValidateOutput(step, capability);
@@ -1796,9 +1916,9 @@ export class AutomationPipelineRunner {
 				// run() and froze status.json on 'running'. Record a clean step error and
 				// honour continueOnError instead.
 				const errorMessage = `Invalid step output path: ${toErrorMessage(outputError)}`;
-				const stepStatus = createStepStatus(step, resolvedCommand, new Date(), 1, undefined, 'error', errorMessage);
+				const stepStatus = await makeStepStatus(step, resolvedCommand, new Date(), 1, undefined, 'error', errorMessage);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: undefined, result: undefined };
+				stepRecords[index] = { outputPath: undefined, result: undefined, status: stepStatus.status };
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -1824,7 +1944,7 @@ export class AutomationPipelineRunner {
 
 			if (!capability) {
 				const errorMessage = `Command is not declared in pipeline capability map: ${resolvedCommand}`;
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1834,7 +1954,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -1849,7 +1969,7 @@ export class AutomationPipelineRunner {
 			if (!capability.headless) {
 				const reason = capability.reason ?? 'Command requires UI interaction.';
 				const errorMessage = `Command is not headless-safe for pipeline: ${resolvedCommand}. ${reason}`;
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1859,7 +1979,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -1877,7 +1997,7 @@ export class AutomationPipelineRunner {
 			// of letting ensureCommandReady fail with "not registered".
 			const emulatorGate = checkEmulatorGate(resolvedCommand);
 			if (emulatorGate.skip) {
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1887,7 +2007,7 @@ export class AutomationPipelineRunner {
 					emulatorGate.reason
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] SKIPPED: ${emulatorGate.reason}`);
 				writeJson(statusPath, status);
 				index++;
@@ -1900,7 +2020,7 @@ export class AutomationPipelineRunner {
 			// and reports the real reason instead of surfacing it as `error`.
 			const archGate = checkBinaryArchGate(resolvedCommand, job.file);
 			if (archGate.skip) {
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1910,7 +2030,7 @@ export class AutomationPipelineRunner {
 					archGate.reason
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] SKIPPED: ${archGate.reason}`);
 				writeJson(statusPath, status);
 				index++;
@@ -1919,7 +2039,7 @@ export class AutomationPipelineRunner {
 
 			const formatGate = checkBinaryFormatGate(resolvedCommand, job.file);
 			if (formatGate.skip) {
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1928,8 +2048,12 @@ export class AutomationPipelineRunner {
 					'skipped',
 					formatGate.reason,
 				);
+				if (formatGate.code) {
+					stepStatus.errorCode = formatGate.code;
+					stepStatus.detectedFormat = formatGate.detectedFormat;
+				}
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] SKIPPED: ${formatGate.reason}`);
 				writeJson(statusPath, status);
 				index++;
@@ -1940,7 +2064,7 @@ export class AutomationPipelineRunner {
 				await ensureCommandReady(resolvedCommand, logPath, index);
 			} catch (error: unknown) {
 				const errorMessage = normalizeExecutionError(error, resolvedCommand);
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1950,7 +2074,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -1963,15 +2087,33 @@ export class AutomationPipelineRunner {
 			}
 
 			let commandOptions: PipelineCommandOptions;
+			let inputPartialReasons: string[] = [];
 			try {
-				commandOptions = buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index, resolvedCommand);
+				commandOptions = await buildCommandOptions(job.file, step, output, job.quiet, stepRecords, index, resolvedCommand);
+				if (step.id) { commandOptions.pipelineStepIdentity = { ...identities.get(step)! }; }
+				else { delete commandOptions.pipelineStepIdentity; }
+				if (resolvedCommand !== 'hexcore.pipeline.composeReport') {
+					inputPartialReasons = await validatePipelineArtifactInputs(commandOptions, stepRecords, step.allowPartial === true,
+						vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd());
+					for (const reference of collectStepReferences(step.args ?? {})) {
+						const producer = stepRecords[resolveStepToken(reference.token, index, stepRecords.stepIds)];
+						if (producer?.status === 'partial') { inputPartialReasons.push(`Partial producer: $step[${reference.token}]`); }
+					}
+					inputPartialReasons = [...new Set(inputPartialReasons)];
+				}
+				commandOptions.pipelineInputQuality = { status: inputPartialReasons.length ? 'partial' : 'ok', reasons: inputPartialReasons };
+				commandOptions.pipelineArtifactBindings = resolvedCommand === 'hexcore.hql.queryHeadless'
+					? await collectPipelineArtifactBindings(commandOptions, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd())
+					: undefined;
+				commandOptions.pipelineAbortSignal = abortSignal;
+				commandOptions.pipelineStepTimeoutMs = timeoutMs;
 				commandOptions.pipelineTimeoutMs = timeoutMs;
 				if (resolvedCommand === 'hexcore.pipeline.jobStatus') {
 					commandOptions.pipelineQueryContext = { executionId: provenance.executionId, jobId: provenance.jobId };
 				}
 			} catch (error: unknown) {
 				const errorMessage = `Step arg interpolation failed: ${toErrorMessage(error)}`;
-				const stepStatus = createStepStatus(
+				const stepStatus = await makeStepStatus(
 					step,
 					resolvedCommand,
 					startedAt,
@@ -1981,7 +2123,7 @@ export class AutomationPipelineRunner {
 					errorMessage
 				);
 				status.steps.push(stepStatus);
-				stepRecords[index] = { outputPath: output?.path, result: undefined };
+				stepRecords[index] = { outputPath: output?.path, result: undefined, status: stepStatus.status, executionOrdinal: status.steps.length };
 				appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 				writeJson(statusPath, status);
 				failed = true;
@@ -1996,6 +2138,8 @@ export class AutomationPipelineRunner {
 			let attemptCount = 0;
 			let executionError: unknown;
 			let completed = false;
+			let completedStatus: 'ok' | 'partial' | undefined;
+			let completedOutputSha256: string | undefined;
 			// Captures the command's return value so onResult / $step[N].result
 			// can read it even when the step defines no `output` file (the marquee
 			// adaptive-triage templates put onResult on a step with no output).
@@ -2003,10 +2147,13 @@ export class AutomationPipelineRunner {
 
 			while (attemptCount < maxAttempts) {
 				attemptCount++;
+				const attemptStartedAt = new Date().toISOString();
 				if (attemptCount > 1 && output?.path) {
 					invalidatePriorStepArtifacts(output.path);
 				}
 				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
+				commandReturn = undefined;
+				completedOutputSha256 = undefined;
 
 				try {
 					commandReturn = await withTimeout(
@@ -2015,7 +2162,10 @@ export class AutomationPipelineRunner {
 						`Step ${index + 1} (${resolvedCommand}) timed out after ${timeoutMs}ms`
 					);
 
-					const semantic = inspectSemanticResult(commandReturn);
+					const commandSemantic = inspectSemanticResult(commandReturn);
+					const semantic = commandSemantic.status === 'ok' && inputPartialReasons.length > 0
+						? { status: 'partial' as const, reason: inputPartialReasons.join('; ') }
+						: commandSemantic;
 					if (isRecord(commandReturn) && isRecord(commandReturn.analysisContext)) {
 						const analysisContext = commandReturn.analysisContext;
 						appendLog(
@@ -2050,7 +2200,9 @@ export class AutomationPipelineRunner {
 					}
 
 					const stepResultStatus = semantic.status === 'partial' ? 'partial' : 'ok';
-					const stepStatus = createStepStatus(
+					if (step.id && output?.path && fs.existsSync(output.path)) { completedOutputSha256 = await sha256File(output.path); }
+					attemptHistory.get(step)?.push({ attempt: attemptCount, startedAt: attemptStartedAt, finishedAt: new Date().toISOString(), status: stepResultStatus });
+					const stepStatus = await makeStepStatus(
 						step,
 						resolvedCommand,
 						startedAt,
@@ -2090,6 +2242,7 @@ export class AutomationPipelineRunner {
 					appendLog(logPath, `[Step ${index + 1}] ${stepResultStatus.toUpperCase()} (${stepStatus.durationMs}ms, attempts=${attemptCount})${semantic.reason ? `: ${semantic.reason}` : ''}`);
 					writeJson(statusPath, status);
 					completed = true;
+					completedStatus = stepResultStatus;
 					break;
 				} catch (error: unknown) {
 					executionError = error;
@@ -2103,7 +2256,10 @@ export class AutomationPipelineRunner {
 						}
 					}
 
+					const attempts = attemptHistory.get(step);
+					if (attempts?.[attempts.length - 1]?.attempt === attemptCount) { attempts.pop(); }
 					if (attemptCount < maxAttempts) {
+						attemptHistory.get(step)?.push({ attempt: attemptCount, startedAt: attemptStartedAt, finishedAt: new Date().toISOString(), status: 'error', error: errorMessage });
 						appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount} failed: ${errorMessage}`);
 						appendLog(logPath, `[Step ${index + 1}] Retrying after ${retryDelayMs}ms...`);
 						if (retryDelayMs > 0) {
@@ -2112,7 +2268,8 @@ export class AutomationPipelineRunner {
 						continue;
 					}
 
-					const stepStatus = createStepStatus(
+					attemptHistory.get(step)?.push({ attempt: attemptCount, startedAt: attemptStartedAt, finishedAt: new Date().toISOString(), status: 'error', error: errorMessage });
+					const stepStatus = await makeStepStatus(
 						step,
 						resolvedCommand,
 						startedAt,
@@ -2174,7 +2331,13 @@ export class AutomationPipelineRunner {
 			}
 
 			// Record the completed step result so later steps can reference it via $step[N].
-			stepRecords[index] = { outputPath: output?.path, result: stepOutputData, resolvedCommand };
+			stepRecords[index] = {
+				outputPath: output?.path, result: stepOutputData, resolvedCommand,
+				...(step.id ? { stepId: step.id, outputSha256: completedOutputSha256 } : {}),
+				status: completedStatus ?? 'error',
+				executionOrdinal: status.steps.length,
+				artifactKind: producerArtifactKind(resolvedCommand, output?.captureKind, completedStatus ?? 'error'),
+			};
 
 			// Evaluate onResult conditional branching. evaluateOnResult can throw on a
 			// bad RegExp ('regex' operator) and applyOnResultAction throws on an invalid
@@ -2187,11 +2350,11 @@ export class AutomationPipelineRunner {
 				try {
 					matched = evaluateOnResult(step.onResult, stepOutputData);
 					if (matched) {
-						nextIndex = applyOnResultAction(step.onResult, index, job.steps.length, logPath);
+						nextIndex = applyOnResultAction(step.onResult, index, job.steps.length, logPath, job.stepIds);
 					}
 				} catch (onResultError: unknown) {
 					const errorMessage = `onResult evaluation failed: ${toErrorMessage(onResultError)}`;
-					status.steps.push(createStepStatus(step, resolvedCommand, startedAt, 1, output?.path, 'error', errorMessage));
+					status.steps.push(await makeStepStatus(step, resolvedCommand, startedAt, 1, output?.path, 'error', errorMessage));
 					appendLog(logPath, `[Step ${index + 1}] ERROR: ${errorMessage}`);
 					writeJson(statusPath, status);
 					failed = true;
@@ -2350,7 +2513,7 @@ export class AutomationPipelineRunner {
 }
 
 async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: string): Promise<PipelineJobValidationReport> {
-	const issues: PipelineValidationIssue[] = [];
+	const issues: PipelineValidationIssue[] = [...job.identityIssues];
 	const steps: PipelineValidationStep[] = [];
 	const registeredCommands = new Set(await vscode.commands.getCommands(true));
 
@@ -2392,6 +2555,7 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 
 		steps.push({
 			index: index + 1,
+			...(step.id !== undefined ? { stepId: step.id } : {}),
 			cmd: step.cmd,
 			resolvedCmd,
 			declared,
@@ -2461,12 +2625,18 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 			});
 		}
 
+		if (step.onResult?.action === 'goto') {
+			try { resolveGotoTarget(step.onResult.actionValue, job.steps.length, job.stepIds); }
+			catch (error) { issues.push({ level: 'error', code: 'GOTO_TARGET_INVALID', message: toErrorMessage(error), stepIndex: index + 1, command: resolvedCmd }); }
+		}
+
 		// $step[N] reference validation (static). The runtime resolver throws on
 		// forward/out-of-range references, but validation previously never parsed
 		// the tokens, so a forward-ref job was greenlit. Catch them here.
 		if (step.args) {
 			for (const ref of collectStepReferences(step.args)) {
-				const refIndex = ref.token === 'prev' ? index - 1 : parseInt(ref.token, 10);
+				let refIndex: number;
+				try { refIndex = resolveStepToken(ref.token, index, job.stepIds); } catch { refIndex = NaN; }
 				if (Number.isNaN(refIndex)) {
 					issues.push({
 						level: 'error',
@@ -2485,14 +2655,14 @@ async function createValidationReport(job: NormalizedPipelineJob, jobFilePath: s
 					});
 				} else if (refIndex >= index) {
 					issues.push({
-						level: 'error',
-						code: 'STEP_REF_FORWARD',
-						message: `Forward reference $step[${ref.token}] in step ${index + 1} (${step.cmd}) targets step ${refIndex + 1}, which has not run yet (references must point to an earlier step)`,
+						level: isNamedStepToken(ref.token) && refIndex !== index ? 'warning' : 'error',
+						code: isNamedStepToken(ref.token) ? 'STEP_REF_REQUIRES_PRIOR_EXECUTION' : 'STEP_REF_FORWARD',
+						message: `$step[${ref.token}] in step ${index + 1} requires a completed execution of step ${refIndex + 1}; runtime rejects an unavailable record`,
 						stepIndex: index + 1,
 						command: resolvedCmd
 					});
 				} else {
-					const skipper = findStepThatMaySkip(job.steps, refIndex);
+					const skipper = findStepThatMaySkip(job.steps, refIndex, job.stepIds);
 					if (skipper !== undefined) {
 						issues.push({
 							level: 'error',
@@ -2590,6 +2760,7 @@ function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolea
 	// for "continue through failures on this whole job") would see the first
 	// step-failure halt everything, because only step-level flags were read.
 	const jobDefaultContinueOnError = data.continueOnError === true;
+	const identities = inspectStepIdentities(rawSteps);
 
 	const steps: PipelineStep[] = rawSteps.map((step, index) => {
 		const normalized = normalizeStep(step, index, jobFilePath);
@@ -2623,6 +2794,8 @@ function normalizeJob(data: unknown, jobFilePath: string, quietOverride?: boolea
 		file,
 		outDir,
 		steps,
+		stepIds: identities.ids,
+		identityIssues: identities.issues,
 		quiet,
 		priority
 	};
@@ -2688,6 +2861,7 @@ export function normalizeStep(step: unknown, index: number, jobFilePath: string)
 
 	return {
 		cmd,
+		...(typeof step.id === 'string' ? { id: step.id } : {}),
 		args,
 		output,
 		continueOnError,
@@ -2840,9 +3014,10 @@ function resolveOutputFormat(outputPath: string, format?: PipelineOutputFormat):
 export function resolveStepReferences(
 	args: Record<string, unknown>,
 	stepRecords: StepRecordTable,
-	currentIndex: number
+	currentIndex: number,
+	allowFailureDiagnostics = false,
 ): Record<string, unknown> {
-	return resolveObject(args, stepRecords, currentIndex) as Record<string, unknown>;
+	return resolveObject(args, stepRecords, currentIndex, allowFailureDiagnostics) as Record<string, unknown>;
 }
 
 /** Read a step artifact without forcing text formats through JSON.parse. */
@@ -2877,7 +3052,7 @@ export function readStepOutputForCapture(
  */
 export function collectStepReferences(value: unknown): Array<{ token: string; accessor: string }> {
 	const found: Array<{ token: string; accessor: string }> = [];
-	const TOKEN_RE = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+	const TOKEN_RE = stepReferencePattern();
 	const walk = (v: unknown): void => {
 		if (typeof v === 'string') {
 			let m: RegExpExecArray | null;
@@ -2900,16 +3075,17 @@ export function collectStepReferences(value: unknown): Array<{ token: string; ac
 function resolveValue(
 	value: unknown,
 	stepRecords: StepRecordTable,
-	currentIndex: number
+	currentIndex: number,
+	allowFailureDiagnostics: boolean,
 ): unknown {
 	if (typeof value === 'string') {
-		return interpolateString(value, stepRecords, currentIndex);
+		return interpolateString(value, stepRecords, currentIndex, allowFailureDiagnostics);
 	}
 	if (Array.isArray(value)) {
-		return value.map(item => resolveValue(item, stepRecords, currentIndex));
+		return value.map(item => resolveValue(item, stepRecords, currentIndex, allowFailureDiagnostics));
 	}
 	if (isRecord(value)) {
-		return resolveObject(value, stepRecords, currentIndex);
+		return resolveObject(value, stepRecords, currentIndex, allowFailureDiagnostics);
 	}
 	return value;
 }
@@ -2917,11 +3093,12 @@ function resolveValue(
 function resolveObject(
 	obj: Record<string, unknown>,
 	stepRecords: StepRecordTable,
-	currentIndex: number
+	currentIndex: number,
+	allowFailureDiagnostics: boolean,
 ): Record<string, unknown> {
 	const result: Record<string, unknown> = {};
 	for (const [key, val] of Object.entries(obj)) {
-		result[key] = resolveValue(val, stepRecords, currentIndex);
+		result[key] = resolveValue(val, stepRecords, currentIndex, allowFailureDiagnostics);
 	}
 	return result;
 }
@@ -2936,11 +3113,12 @@ function resolveObject(
 function interpolateString(
 	raw: string,
 	stepRecords: StepRecordTable,
-	currentIndex: number
+	currentIndex: number,
+	allowFailureDiagnostics: boolean,
 ): unknown {
 	// Pattern: $step[N].output  or  $step[N].result.fieldName
 	//          $step[prev].output or $step[prev].result.fieldName
-	const TOKEN_RE = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+	const TOKEN_RE = stepReferencePattern();
 
 	// Fast-path: nothing to interpolate
 	if (!TOKEN_RE.test(raw)) {
@@ -2964,7 +3142,7 @@ function interpolateString(
 	// Resolve each token to a concrete value
 	const resolved = tokens.map(token => ({
 		token,
-		value: resolveToken(token.index, token.accessor, stepRecords, currentIndex)
+		value: resolveToken(token.index, token.accessor, stepRecords, currentIndex, allowFailureDiagnostics)
 	}));
 
 	// If the raw string is exactly one token and nothing else, return the
@@ -2974,11 +3152,12 @@ function interpolateString(
 	}
 
 	// Otherwise perform string substitution left-to-right.
-	const allTokenRe = /\$step\[(\d+|prev)\]\.(?:output|result\.[a-zA-Z0-9_]+)/g;
+	const allTokenRe = stepReferencePattern();
 	return raw.replace(allTokenRe, (_match, indexToken) => {
 		const dotPos = _match.indexOf('.', _match.indexOf(']'));
 		const accessor = _match.slice(dotPos + 1);
-		const resolvedVal = resolveToken(indexToken, accessor, stepRecords, currentIndex);
+		const resolvedVal = resolveToken(indexToken, accessor, stepRecords, currentIndex, allowFailureDiagnostics);
+		if (resolvedVal !== null && typeof resolvedVal === 'object') { throw new Error(`$step[${indexToken}].${accessor}: embedded interpolation requires a scalar value`); }
 		return resolvedVal === undefined || resolvedVal === null ? '' : String(resolvedVal);
 	});
 }
@@ -2987,9 +3166,10 @@ function resolveToken(
 	indexToken: string,
 	accessor: string,
 	stepRecords: StepRecordTable,
-	currentIndex: number
+	currentIndex: number,
+	allowFailureDiagnostics: boolean,
 ): unknown {
-	const stepIndex = indexToken === 'prev' ? currentIndex - 1 : parseInt(indexToken, 10);
+	const stepIndex = resolveStepToken(indexToken, currentIndex, stepRecords.stepIds);
 
 	if (isNaN(stepIndex)) {
 		throw new Error(`$step[${indexToken}]: invalid step index`);
@@ -2999,7 +3179,7 @@ function resolveToken(
 		throw new Error(`$step[${indexToken}]: index resolves to ${stepIndex}, which is out of bounds`);
 	}
 
-	if (stepIndex >= currentIndex) {
+	if (stepIndex >= currentIndex && !isNamedStepToken(indexToken)) {
 		throw new Error(
 			`$step[${indexToken}]: forward reference detected — step ${stepIndex} has not completed yet ` +
 			`(current step is ${currentIndex})`
@@ -3021,8 +3201,13 @@ function resolveToken(
 	}
 
 	if (accessor === 'output') {
+		if (!allowFailureDiagnostics) { assertProducerUsable(record, `$step[${stepIndex}]`, true); }
+		if (record.stepId && !allowFailureDiagnostics && (!record.outputPath || !record.outputSha256)) {
+			throw new Error(`$step[${indexToken}]: named step produced no verified output artifact`);
+		}
 		return record.outputPath ?? '';
 	}
+	if (!allowFailureDiagnostics) { assertProducerUsable(record, `$step[${stepIndex}]`, true); }
 
 	// accessor is "result.<fieldName>"
 	const fieldName = accessor.slice('result.'.length);
@@ -3031,7 +3216,9 @@ function resolveToken(
 			`$step[${stepIndex}].result.${fieldName}: step ${stepIndex} produced no parseable output`
 		);
 	}
-	return record.result[fieldName];
+	const value = resolveFieldPath(record.result, fieldName);
+	if (value === undefined) { throw new Error(`$step[${indexToken}].result.${fieldName}: field path is unavailable`); }
+	return value;
 }
 
 // Orchestration commands whose `file` arg is a *job file path*, not the
@@ -3076,7 +3263,7 @@ export function findPipelinePrngRecommendation(
 	return undefined;
 }
 
-function buildCommandOptions(
+async function buildCommandOptions(
 	filePath: string,
 	step: PipelineStep,
 	output: StepOutputPath | undefined,
@@ -3084,12 +3271,23 @@ function buildCommandOptions(
 	stepRecords: StepRecordTable,
 	currentIndex: number,
 	resolvedCommand?: string
-): PipelineCommandOptions {
+): Promise<PipelineCommandOptions> {
 	const merged: PipelineCommandOptions = {};
+	const allowFailureDiagnostics = resolvedCommand === 'hexcore.pipeline.composeReport';
 	const usesJobFileArg = resolvedCommand !== undefined && JOB_FILE_ARG_COMMANDS.has(resolvedCommand);
 	if (step.args) {
+		for (const reference of collectStepReferences(step.args)) {
+			const producerIndex = resolveStepToken(reference.token, currentIndex, stepRecords.stepIds);
+			const producer = stepRecords[producerIndex];
+			if (producer && !allowFailureDiagnostics) { assertProducerUsable(producer, `$step[${reference.token}]`, step.allowPartial === true); }
+			if (reference.accessor === 'output' && producer?.outputSha256 && producer.outputPath && !allowFailureDiagnostics) {
+				if (await sha256File(producer.outputPath) !== producer.outputSha256) {
+					throw new Error(`upstream-artifact-hash-mismatch: $step[${reference.token}] output was replaced after its recorded execution`);
+				}
+			}
+		}
 		// Resolve $step[N] references before spreading args into the command options.
-		const resolvedArgs = resolveStepReferences(step.args, stepRecords, currentIndex);
+		const resolvedArgs = resolveStepReferences(step.args, stepRecords, currentIndex, allowFailureDiagnostics);
 		for (const [key, value] of Object.entries(resolvedArgs)) {
 			// For orchestration commands, preserve the documented `file`/`jobFile`
 			// job-path arg by forwarding it as `jobFile` (it would otherwise be
@@ -3236,7 +3434,10 @@ function createStepStatus(
 				cmd: step.cmd,
 				resolvedCmd,
 				attemptCount,
-				stub: true
+				stub: true,
+				status: 'error',
+				artifactKind: 'failed-output',
+				mediaType: 'application/json',
 			}, null, 2));
 		} catch { /* ignore — status is still reported via status.json */ }
 	}
@@ -3253,6 +3454,7 @@ function createStepStatus(
 		cmd: step.cmd,
 		resolvedCmd,
 		status,
+		...(status === 'error' ? { artifactKind: 'failed-output' as const } : {}),
 		startedAt: startedAt.toISOString(),
 		finishedAt: finishedAt.toISOString(),
 		durationMs: finishedAt.getTime() - startedAt.getTime(),
@@ -3264,11 +3466,7 @@ function createStepStatus(
 }
 
 function normalizeExecutionError(error: unknown, resolvedCommand: string): string {
-	const base = toErrorMessage(error);
-	if (/command .*not found/i.test(base) || /command .* is not available/i.test(base)) {
-		return `Command is not available: ${resolvedCommand}`;
-	}
-	return base;
+	return normalizePipelineExecutionError(error, resolvedCommand);
 }
 
 function getExtensionStates(ownerIds: readonly string[]): PipelineDoctorExtensionState[] {

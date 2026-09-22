@@ -5,6 +5,225 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.5] - Unreleased
+
+### Release Candidate Reconciliation
+
+- Prepare product identity `3.8.5-rc.1` and reconcile canonical Helix
+  `0.9.4-rc.2` from the validated development source without carrying local
+  addons, dependency caches, dumps, private corpora, or generated reports.
+- Align Helix wrapper/native identity, require the exact source-tree-bound C++
+  dependency bundle, and make the prebuild wrapper honor
+  `HELIX_ENGINE_LIB_DIR` instead of silently selecting an older fallback lib.
+- Qualify the canonical Helix source with 389 native tests, 192 Rust workspace
+  tests, Clippy with warnings denied, deterministic pseudo-C/HAST smoke, and an
+  out-of-tree Windows N-API load. GitHub artifact and extracted-HexCore gates
+  remain pending.
+- Install and statically qualify the authorized Elixir, Strings, IOC and PE
+  Analyzer runtime bundle in development: four steps ok, zero partial/error,
+  exact transform-chain accounting, in-band IOC validation, and honest PE
+  directory coverage. Native Stalker/DRCOV remains a separate dynamic gate.
+- Make address-bound HQL scans fail closed when their HAST producer lacks the
+  target identity required to attach a live HXDB snapshot. Standalone IR/HAST
+  scans remain structural and do not inherit a foreign active session.
+- Pin the current Helix producer in the Function Atlas regression gate and
+  require its explicit `known-loss/damning-defect` quality barrier. Preserve
+  historical comparison artifacts under their original producer identities.
+- Force LLVM IR fixtures to LF in every checkout so their evidence hashes are
+  reproducible on Windows and Linux.
+
+### Ad-Hoc Query Executor Foundation
+
+- Add a canonical JSON query library over bound HAST/HXDB records, reusing
+  existing matcher semantics without temporary signatures. Typed results retain
+  evidence, identity and distinct matched/negative/unknown outcomes.
+- Isolate matching in a terminable worker with host-owned timeout/cancellation,
+  actual AST-node and operation budgets, bounded evidence and output. Unknown
+  collections cannot become absence-based results.
+- Register `hexcore.hql.queryHeadless` and `hexcore.hql.query` in the source
+  pipeline registry. Pinned binary producer integration is local; installed
+  development-IDE watcher acceptance passes; packaged acceptance remains.
+- Add the shared pinned HXDB query-input adapter and hydrate verified HAST bytes
+  inside the terminable worker, reusing the scanner adapter with explicit
+  hydration budgets and producer/address/architecture checks.
+- Attach exact snapshot-record origins to live semantic facts. Legacy summary
+  records without producer provenance remain signals, not inferred proofs.
+- Add read-only native context/input capture for already complete functions:
+  pinned semantic data, non-caching body inspection, exact byte/extent checks,
+  detached byte copies and rejection after image/model/revision changes.
+  Packaged query command acceptance remains pending.
+- Add development-only prepared native execution in a terminable child process,
+  covering both Remill and Helix with host-owned timeout/cancellation, phase/PID
+  heartbeats and completion only after exit. Complex Pathfinder cases and
+  packaged public-query routing remain qualification gates.
+- Retain Remill external symbols supplied before the first lifter is created;
+  replace/clear them on explicit updates and disposal to avoid stale reuse.
+- Share single-function x64 ELF relocation preparation between IDE lifting and
+  isolated queries. Retain source/prepared hashes and fixup records; propagate
+  unsupported, deferred, missing-data and invalid-range cases as partial.
+  Complex-flow/IR ancestry and packaged query acceptance are still pending.
+- Share scoped external-call/tail-jump IR resolution. Preserve ordinary integer
+  data, comments, strings and function bodies; avoid duplicate declarations and
+  report conflicts instead of destructive cleanup. Keep multiline diagnostics
+  within LLVM IR comment headers.
+- Require architecture and exact ftrace relocation evidence for legacy preamble
+  removal. The isolated producer records an explicit preserve-entry policy;
+  CET/NOP byte patterns are not silently applied to other architectures.
+- Stamp explicit LLVM entry identity before human-readable function renames.
+  The development addon and canonical RC.2 source consume it before lowering;
+  packaged acceptance is still pending.
+- Propagate queue cancellation and an inner cleanup deadline into ad-hoc native
+  producers/query workers. Runner-only control objects do not affect analyzer
+  configuration hashes or claim semantic evidence.
+- Add runner-minted IR ancestry for single-function ad-hoc queries. Verified
+  hash, artifact kind/status, producer, target, session generation and universe
+  must match the active snapshot; inline/forged/stale/tampered IR is rejected.
+
+### Semantic Explanation Contract
+
+- Add `hexcore.semantic.explain` over the immutable semantic view for prototypes,
+  type bindings, typed references, propagation effects, semantic conflicts and
+  persisted-record-backed HQL semantic matches.
+- Return the same deterministic graph/evidence-chain contract to headless callers
+  and Semantic Explorer. Preserve evidence ceilings, conflicts, lossy barriers,
+  missing links, navigation and explicit `ok/partial/unknown/error` status.
+- Add Explain actions and a bounded responsive dialog to Semantic Explorer.
+  Rows remain pinned to their rendered snapshot; navigation uses recorded
+  function addresses. Headless IDE acceptance passes; interactive/package
+  acceptance remains pending.
+- Treat `status:"unknown"` as semantic partial in pipeline orchestration, so a
+  missing explanation cannot become a green step without `allowPartial:true`.
+
+### Pipeline Result and IPC Reliability
+
+- Resolve arbitrary dotted own-field paths in `$step[id].result.*`; reject
+  missing paths and embedded object-to-string coercion. Preserve the producer
+  artifact as a provenance input for result-field dependencies.
+- Keep isolated `analyzeAll` IPC alive after terminal send. The parent validates
+  the snapshot and terminates the worker, preventing clean-exit races that lost
+  replies during persisted closure restoration.
+- Scope HQL quality reasons to condition domains. Unused semantic provenance
+  gaps no longer downgrade a structural-only query; mixed/semantic conditions
+  retain the existing partial gates.
+
+### Generation-Pinned Semantic View
+
+- Add a shared immutable SemanticQueryView over an existing bound HXDB session,
+  with target/session/universe validation, logical snapshot hashes, typed records,
+  explicit coverage failures and snapshot-bound pagination.
+- Capture under a query-only SQLite read snapshot, cache by local/external change
+  revision, and keep captured data stable after later writes. Queries do not
+  initialize a second store or advance generations.
+- Migrate installed HQL and Semantic Explorer reads to the view. HQL validates
+  producer target/architecture, includes snapshot identity in results/cache keys,
+  and does not turn semantic read failures into absence-based matches.
+- Preserve distinct session, engine, reference and propagation generations.
+  Replay-manifest counts are not mislabeled as whole-binary materialization.
+- Local concurrency, immutability, persistence and UI checks pass. A copied
+  3.42 MiB Poly HXDB captured cold in 121.30 ms and reopened in 98.87 ms with
+  stable identity; packaged visual acceptance remains separate.
+
+### Named Job Step IDs
+
+- Add optional unique step IDs, named output/result references and named goto
+  destinations using one job-local symbol index. Numeric references remain
+  supported; `prev` keeps its legacy meaning and is reserved as an ID.
+- Validate malformed/duplicate IDs and unknown targets before dispatch. Named
+  forward dependencies are explicitly warned and must have a completed record
+  at runtime; failed reruns cannot resurrect earlier successful results.
+- Preserve logical ID, declaration index, occurrence and retry history in status,
+  with superseded named-step provenance metadata retained separately. Primary
+  output hashes prevent another writer's bytes from being silently reused.
+- No-ID jobs retain their existing status shape. The new context is runner-owned
+  and excluded from analyzer configuration hashes. Schema, automation docs and
+  a named-dependency template are updated; the development matrix passes 17/17
+  and extracted-package acceptance remains pending.
+
+### AArch64 Import Context and Ownership
+
+- Bind AArch64 PLT stubs to verified JUMP_SLOT/GOT symbols through structured
+  Capstone operands, not relocation ordinal or a fixed 16-byte stride. Support
+  standard, padded, BTI and supported PAC forms; unknown or conflicting bindings
+  remain unresolved with diagnostics.
+- Bound symbol/name reads, retain relocation/decode-limit diagnostics, and reject
+  legacy AArch64 PLT snapshots that lack the new mapping revision. Reanalysis is
+  required instead of silently restoring obsolete aliases into a new generation.
+- Preserve CBZ/CBNZ/TBZ/TBNZ destinations and use reachable-block ownership for
+  non-relocatable ELF AArch64 functions, including tails after a RET/NOP sequence.
+  Independently seeded neighboring entries are not absorbed.
+- Preserve the x64 `.plt.sec` extent clamp when reachable-block selection runs.
+  The failing synthetic case also reproduced in the retained RC.2 package. Its
+  optional real-fixture test now isolates session writes and disambiguates legacy
+  versus `.plt.sec` symbols correctly.
+- Local native-decoder and source-engine tests pass; fresh IDE and packaged
+  release qualification remain pending. AArch64 decompiler semantics remain
+  experimental and are not declared complete by these context fixes.
+
+### YARA Advisory Scoring
+
+- Preserve advisory matches while excluding them from primary scoring. Bundled
+  generic hash constants, encoding alphabets and virtualization strings now
+  declare advisory-only policy rather than asserting behavior from presence.
+- Qualify architecture, optional rule formats and complete executable match
+  extents. Unknown architecture does not satisfy an architecture requirement;
+  executable evidence must satisfy the condition, not merely contain one hit.
+- Keep collected occurrences separate from the display preview when qualifying
+  count conditions. Limited cardinality evidence remains advisory.
+- Export score contribution, advisory totals and binary scan context in JSON
+  and Markdown. Zero-score UI/report labels no longer claim a clean file.
+- DEX/APK byte scans remain metadata/indicator inspection, not Android semantics.
+  Local corpus retests preserve their original matches without inflating the
+  primary score; full packaged/IDE qualification remains pending.
+
+### Producer-to-consumer artifact contracts
+
+- Record terminal producer state and artifact kind independently from the output
+  filename. Failed/skipped producer outputs cannot feed analysis through either
+  `$step[N]` or literal paths; unrelated steps may still continue after failure.
+- Require consumer `allowPartial:true` for partial inputs and preserve that
+  status in downstream step/provenance contracts. Forward validated input
+  quality to Helix/HQL instead of promoting a locally successful read to complete.
+- Check recognized error envelopes, IR kind mismatches and applicable ancestor
+  provenance within bounded workspace traversal. Hash mismatch or ambiguous,
+  unreadable or unknown producer metadata fails explicitly.
+- Keep diagnostic error stubs, labeled as failed outputs. Composer may read them
+  to explain failures; that exception cannot be enabled through analysis args.
+- Preserve clean external IR compatibility when no manifest is available; this
+  is not a claim of verified ancestry. Arbitrary JSON business fields alone are
+  not treated as HexCore producer contracts.
+
+### IR identity and HQL upstream quality
+
+- Resolve pre-lifted IR architecture from its target triple/lift header instead
+  of silently borrowing x64 when no active target is bound. Explicit/bound
+  architecture conflicts fail before decompilation; unknown legacy defaults
+  remain non-authoritative and partial.
+- Preserve partial lift status/warnings in the decompileIR result and retained
+  C header. Reject JSON error artifacts presented as IR before invoking LLVM.
+- Forward source identity and Helix quality to HQL. Incompatible architecture,
+  partial/unknown producer state or declared quality problems block signature
+  evaluation and return partial, semantically ineligible results rather than
+  clean negatives. Adapter coverage retains its separate meaning.
+- Include upstream context in scan cache identity. Full HQL suites, input
+  contract tests and target-bound HXDB bridge controls pass locally. A retained
+  AArch64 IR retest also passes with the unchanged qualified RC.2 Helix addon;
+  this is not a fresh lift or a full packaged IDE rerun.
+
+### Native input routing
+
+- Reject DEX, compact DEX, VDEX and ZIP/APK containers before native discovery,
+  decoding, session persistence or file-backed snapshot restoration. Recognition
+  uses header bytes, not extensions; raw architecture options do not override a
+  recognized incompatible format.
+- Native file pipeline commands record `unsupported-format` and `detectedFormat`
+  in skipped step status without fabricating an analysis output. Metadata tools
+  remain available; IR-input commands keep their own input validation path.
+- Preserve PE/ELF handling and explicit headerless raw architecture selection.
+  This does not add Android semantic support or a JADX wrapper.
+- Local validation covers routing, runner contracts, raw loading and incremental
+  closure. Packaged 3.8.5 acceptance is still pending; routing itself requires
+  no native-addon change, while Helix 0.9.4-rc.2 is qualified separately above.
+
 ## [3.8.4] - 2026-09-06
 
 Stable Windows x64 portable release following packaged RC.2 acceptance. Native

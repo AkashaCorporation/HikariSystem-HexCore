@@ -145,6 +145,7 @@ export class RemillWrapper {
 	private currentArch?: string;
 	private available: boolean = false;
 	private lastError?: string;
+	private externalSymbols: Record<string, string> = {};
 
 	constructor() {
 		this.tryLoad();
@@ -230,6 +231,7 @@ export class RemillWrapper {
 		}
 
 		this.lifter = new this.module!.RemillLifter(mapping.remillArch, effectiveOs);
+		if (Object.keys(this.externalSymbols).length) { this.lifter.setExternalSymbols?.(this.externalSymbols); }
 		this.currentArch = mapping.remillArch;
 		this.currentOs = effectiveOs;
 		return this.lifter;
@@ -242,18 +244,20 @@ export class RemillWrapper {
 	 * @param symbols Map of fakeAddr → symbolName
 	 */
 	setExternalSymbols(symbols: Map<number, string>): void {
-		if (!this.lifter?.setExternalSymbols) { return; }
 		const map: Record<string, string> = {};
 		for (const [addr, name] of symbols) {
 			map[String(addr)] = name;
 		}
-		this.lifter.setExternalSymbols(map);
+		this.externalSymbols = map;
+		this.lifter?.clearExternalSymbols?.();
+		this.lifter?.setExternalSymbols?.(map);
 	}
 
 	/**
 	 * FIX-011: Clear external symbol map after lifting.
 	 */
 	clearExternalSymbols(): void {
+		this.externalSymbols = {};
 		this.lifter?.clearExternalSymbols?.();
 	}
 
@@ -429,6 +433,7 @@ export class RemillWrapper {
 	 * Idempotente — pode ser chamado múltiplas vezes sem erro.
 	 */
 	dispose(): void {
+		this.externalSymbols = {};
 		if (this.lifter) {
 			this.lifter.close();
 			this.lifter = undefined;

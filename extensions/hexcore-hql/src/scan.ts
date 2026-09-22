@@ -22,6 +22,8 @@ export interface HQLFunctionFindings {
   hast: HASTModuleMetadata;
   /** Identity of the complete active signature set. */
   signatureSetSha256: string;
+  /** Clarifies that signatureSetSha256 identifies rules, not function input. */
+  signatureSetScope: 'active-rule-set';
   /** Identity of HAST + signatures + semantic budgets. */
   cacheKey: string;
   /** Explicit budget outcome; partial records are never clean negatives. */
@@ -38,10 +40,62 @@ export interface HQLFunctionFindings {
 }
 
 export interface HQLScanOptions {
+	semanticSnapshotSha256?: string;
   maxFunctions?: number;
   maxNodesPerFunction?: number;
   maxFindingsPerFunction?: number;
   signal?: AbortSignal;
+  /** Quality of the producer, distinct from the fidelity of HAST adaptation. */
+  upstream?: HQLUpstreamQuality;
+}
+
+export interface HQLUpstreamQuality {
+  architecture?: string;
+  status?: 'ok' | 'partial' | 'error';
+  semanticEligible?: boolean;
+  qualityIssues?: readonly unknown[];
+  warning?: string;
+}
+
+function normalizedArchitecture(value: string | undefined): string | undefined {
+  const name = value?.toLowerCase();
+  if (name === 'arm64') return 'aarch64';
+  if (name === 'x64' || name === 'amd64') return 'x86_64';
+  if (name && /^i[3-6]86$/.test(name)) return 'x86';
+  return name;
+}
+
+function formatUpstreamQualityIssue(issue: unknown): string {
+  if (typeof issue === 'string') return issue;
+  if (issue && typeof issue === 'object') {
+    const record = issue as Record<string, unknown>;
+    if (typeof record.detail === 'string' && record.detail.trim()) return record.detail.trim();
+    const kind = typeof record.kind === 'string' ? record.kind : undefined;
+    const count = typeof record.count === 'number' ? record.count : undefined;
+    if (kind) return count !== undefined ? `${kind} (${count})` : kind;
+    try { return JSON.stringify(record); } catch { return 'unserializable quality issue'; }
+  }
+  return String(issue);
+}
+
+function upstreamReasons(hast: HASTModuleMetadata | undefined, upstream: HQLUpstreamQuality | undefined): string[] {
+  const reasons: string[] = [];
+  if (hast?.semanticEligible !== true) reasons.push('HAST semantic contract is not eligible');
+  if (!hast?.nativeQuality || hast.nativeQuality.status === 'unreported') {
+    reasons.push('Native function quality was not reported');
+  } else if (hast.nativeQuality.status === 'known-loss') {
+    reasons.push(...hast.nativeQuality.issues.map(issue => `Native quality issue: ${issue}`));
+  }
+  if (!upstream) return reasons;
+  if (upstream.status !== 'ok') reasons.push(`Upstream semantic status: ${upstream.status ?? 'unknown'}`);
+  if (upstream.semanticEligible === false) reasons.push('Upstream semantics are not eligible');
+  for (const issue of upstream.qualityIssues ?? []) reasons.push(`Upstream quality issue: ${formatUpstreamQualityIssue(issue)}`);
+  if (upstream.warning) reasons.push(`Upstream warning: ${upstream.warning}`);
+  const expected = normalizedArchitecture(upstream.architecture);
+  const actual = normalizedArchitecture(hast?.architecture);
+  if (expected && expected !== actual) reasons.push(`HAST architecture mismatch: expected ${expected}, received ${actual ?? 'unknown'}`);
+  if (!expected || expected === 'unknown') reasons.push('Upstream architecture is unknown');
+  return [...new Set(reasons)];
 }
 
 const DEFAULT_SCAN_OPTIONS = Object.freeze({
@@ -94,6 +148,7 @@ export function scanHAST(
   session?: SessionDbReader,
   options: HQLScanOptions = {},
 ): HQLFunctionFindings[] {
+	if (options.semanticSnapshotSha256 !== undefined && !/^[a-f0-9]{64}$/i.test(options.semanticSnapshotSha256)) { throw new Error('Invalid semantic snapshot SHA-256'); }
   if (options.signal?.aborted) throw new Error('HQL scan cancelled before hydration');
   const activeSignatures = signatures ?? getDefaultSignatures();
   const fns = hydrateHAST(astBuffer, session);
@@ -110,10 +165,12 @@ export function scanHAST(
   const setSha256 = signatureSetSha256(activeSignatures);
   const astSha256 = createHash('sha256').update(astBuffer).digest('hex');
   const baseCacheIdentity = {
-    contract: 'hexcore-hql-scan-v2',
+    contract: 'hexcore-hql-scan-v5-native-quality',
     astSha256,
     signatureSetSha256: setSha256,
     limits,
+    upstream: options.upstream ?? null,
+    semanticSnapshotSha256: options.semanticSnapshotSha256?.toLowerCase() ?? null,
   };
   for (const fn of fns) {
     if (options.signal?.aborted) throw new Error(`HQL scan cancelled before function ${fn.address ?? fn.name}`);
@@ -129,7 +186,9 @@ export function scanHAST(
       unsupportedNodeCounts: {},
     };
     const truncationReasons: string[] = [];
+	const producerReasons = upstreamReasons(fn.hast, options.upstream);
 	const partialReasons: string[] = [
+		...producerReasons,
 		...(adapterCoverage.errors ?? []),
 		...semanticReadErrors.map(error => `HXDB semantic read failed: ${error}`),
 	];
@@ -139,7 +198,7 @@ export function scanHAST(
     let evaluatedSignatureCount = 0;
     if (adapterCoverage.totalNodes > limits.maxNodesPerFunction) {
       truncationReasons.push(`AST node budget exceeded: ${adapterCoverage.totalNodes} > ${limits.maxNodesPerFunction}`);
-    } else {
+    } else if (producerReasons.length === 0 && semanticReadErrors.length === 0) {
       for (const sig of activeSignatures) {
         if (options.signal?.aborted) throw new Error(`HQL scan cancelled while evaluating ${fn.address ?? fn.name}`);
         evaluatedSignatureCount++;
@@ -157,10 +216,11 @@ export function scanHAST(
       address: fn.address ?? '0x0',
       nodeCount: adapterCoverage.totalNodes,
       adapterCoverage,
-      hast: fn.hast ?? {
+      hast: { ...(fn.hast ?? {
         schemaMajor: 0, schemaMinor: 0, capabilities: [], architecture: 'unknown', pointerBits: 0, semanticEligible: false,
-      },
+      }), semanticEligible: fn.hast?.semanticEligible === true && partialReasons.length === 0 && truncationReasons.length === 0 },
       signatureSetSha256: setSha256,
+      signatureSetScope: 'active-rule-set',
       cacheKey,
       status: truncationReasons.length > 0 || partialReasons.length > 0 ? 'partial' : 'ok',
       truncated: truncationReasons.length > 0,

@@ -6,14 +6,13 @@
 
 import * as vscode from 'vscode';
 import * as path from 'path';
-import { RuleMatch, ScanResult } from './yaraEngine';
+import { RuleMatch, ScanResult, scorePriorityLabel } from './yaraEngine';
 
 // ── Tree Items ──────────────────────────────────────────────────────────────
 
 export class ThreatScoreItem extends vscode.TreeItem {
 	constructor(result: ScanResult) {
-		const scoreLabel = result.threatScore > 70 ? '🔴 CRITICAL' :
-			result.threatScore >= 30 ? '🟡 MEDIUM' : '🟢 CLEAN';
+		const scoreLabel = scorePriorityLabel(result.threatScore);
 
 		super(`Threat Score: ${result.threatScore}/100 — ${scoreLabel}`, vscode.TreeItemCollapsibleState.None);
 
@@ -22,10 +21,10 @@ export class ThreatScoreItem extends vscode.TreeItem {
 
 		// Badge color: green (< 30), yellow (30-70), red (> 70)
 		const iconId = result.threatScore > 70 ? 'error' :
-			result.threatScore >= 30 ? 'warning' : 'pass';
+			result.threatScore >= 30 ? 'warning' : 'info';
 		const iconColor = result.threatScore > 70 ? new vscode.ThemeColor('errorForeground') :
 			result.threatScore >= 30 ? new vscode.ThemeColor('editorWarning.foreground') :
-				new vscode.ThemeColor('charts.green');
+				new vscode.ThemeColor(result.threatScore === 0 ? 'descriptionForeground' : 'charts.green');
 		this.iconPath = new vscode.ThemeIcon(iconId, iconColor);
 
 		this.command = {

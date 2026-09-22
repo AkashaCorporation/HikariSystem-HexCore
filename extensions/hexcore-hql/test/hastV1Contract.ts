@@ -29,7 +29,8 @@ assert.deepStrictEqual(fn.hast, {
   producerVersion: '0.1.9',
   architecture: 'aarch64',
   pointerBits: 64,
-  semanticEligible: true,
+  semanticEligible: false,
+  nativeQuality: { status: 'unreported', issues: [] },
 });
 assert.strictEqual(fn.params[0].identityId, '0', 'present-zero variable identity must survive');
 assert.strictEqual(fn.params[0].parameterIndex, 0, 'present-zero parameter index must survive');

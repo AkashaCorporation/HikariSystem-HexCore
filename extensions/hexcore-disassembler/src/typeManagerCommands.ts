@@ -7,6 +7,7 @@ import type { DisassemblerEngine } from './disassemblerEngine';
 import { exportStructInfoJson, type StructInfoJson } from './elfBtfLoader';
 import { ingestDebugTypeInfo, type DebugTypeIngestionOptions, type ExtendedStructInfoJson } from './debugTypeIngestion';
 import { recoverRecordsFromPropagation } from './recordRecovery';
+import { normalizeRecordRecoveryOptions, requireCurrentCommittedPropagation } from './recordRecoveryCommandOptions';
 import type { SemanticTypeSpec } from './semanticModel';
 import { TypeManager, type TypeManagerExport } from './typeManager';
 import { syncWholeProgramPropagationIsolated } from './wholeProgramPropagationProducer';
@@ -87,13 +88,33 @@ export async function runDebugTypeIngest(
 	});
 }
 
-export async function runRecordRecovery(engine: DisassemblerEngine) {
-	const closure = await syncWholeProgramPropagationIsolated(engine);
-	if (!closure.run.committed) { throw new Error(`Record recovery requires committed propagation: ${closure.run.reason ?? closure.run.status}`); }
-	const recovery = recoverRecordsFromPropagation(storeFor(engine), closure.collection.analysisGeneration);
-	return { ok: true, command: 'hexcore.records.recover', closure: {
-		referenceGraphHash: closure.references.graphHash,
-		collectionHash: closure.collection.collectionHash,
-		propagationOutputHash: closure.run.outputHash,
-	}, worker: closure.worker, recovery };
+export async function runRecordRecovery(engine: DisassemblerEngine, rawOptions?: unknown) {
+	const options = normalizeRecordRecoveryOptions(rawOptions);
+	const store = storeFor(engine);
+	if (options.refresh === true) {
+		const { refresh: _refresh, ...solveOptions } = options;
+		const closure = await syncWholeProgramPropagationIsolated(engine, solveOptions);
+		if (!closure.run.committed) { throw new Error(`Record recovery requires committed propagation: ${closure.run.reason ?? closure.run.status}`); }
+		const recovery = recoverRecordsFromPropagation(store, closure.collection.analysisGeneration);
+		return { ok: true, semanticStatus: recovery.status, command: 'hexcore.records.recover', closure: {
+			source: 'refreshed' as const,
+			referenceGraphHash: closure.references.graphHash,
+			collectionHash: closure.collection.collectionHash,
+			propagationOutputHash: closure.run.outputHash,
+			solverOptions: solveOptions,
+		}, worker: closure.worker, recovery };
+	}
+
+	const propagation = store.getWholeProgramPropagationStore();
+	const summaries = propagation.listSummaries();
+	const dirty = propagation.listDirty();
+	const committed = requireCurrentCommittedPropagation(
+		engine.getAnalysisGeneration(), propagation.latestAcceptedGeneration(),
+		summaries.length, dirty.length);
+	const recovery = recoverRecordsFromPropagation(store, committed.analysisGeneration);
+	return { ok: true, semanticStatus: recovery.status, command: 'hexcore.records.recover', closure: {
+		source: 'committed' as const,
+		...committed,
+		referenceGraphHash: store.getReferenceGraph().exportHash(),
+	}, recovery };
 }

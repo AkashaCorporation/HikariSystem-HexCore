@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as crypto from 'crypto';
 import { createInvestigationJob } from './investigationJob';
+import { isTrustedPipelineArtifactBindings } from './pipelineArtifactInputs';
 
 type ExecuteCommand = (command: string, options: Record<string, unknown>) => Promise<unknown>;
 
@@ -19,6 +20,7 @@ let inspectBinaryIdentity: (filePath: string) => { format: string; architecture?
 let checkBinaryFormatGate: (command: string, filePath: string) => { skip: boolean; reason?: string };
 let resolveArtifactMediaType: (outputPath: string, format?: 'json' | 'md') => string;
 let formatAnalysisContextLog: (context: Record<string, unknown>) => string;
+let listPipelineCapabilities: () => Array<{ command: string; aliases: string[]; headless: boolean; validateOutput: boolean; requiredExtension: string[] }>;
 let JobQueueManager: new (poolSize: number) => any;
 
 function installVscodeMock(): void {
@@ -53,6 +55,8 @@ function installVscodeMock(): void {
 					'hexcore.hashcalc.calculate',
 					'hexcore.entropy.analyze',
 					'hexcore.hql.scanHeadless',
+					'hexcore.hql.queryHeadless',
+					'hexcore.semantic.explain',
 					'hexcore.pipeline.composeReport',
 					'hexcore.audit.refcountScan',
 					'hexcore.pipeline.jobStatus',
@@ -107,6 +111,7 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		checkBinaryFormatGate = runner.checkBinaryFormatGate;
 		resolveArtifactMediaType = runner.resolveArtifactMediaType;
 		formatAnalysisContextLog = runner.formatAnalysisContextLog;
+		listPipelineCapabilities = runner.listCapabilities;
 		JobQueueManager = runner.JobQueueManager;
 	});
 
@@ -122,6 +127,7 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 	});
 
 	test('semantic classifier rejects hidden HQL and debugger failures', () => {
+		assert.strictEqual(inspectSemanticResult({ success: true, status: 'unknown' }).status, 'partial');
 		assert.deepStrictEqual(
 			inspectSemanticResult({ success: true, results: [{ error: 'decompile failed' }] }).status,
 			'failed',
@@ -159,6 +165,172 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		});
 		assert.strictEqual(toleratedSolverTimeout.status, 'partial');
 		assert.strictEqual(toleratedSolverTimeout.reason, 'Z3 timed out');
+	});
+
+	test('publishes the ad-hoc query as a headless output-producing capability', () => {
+		const capability = listPipelineCapabilities().find(item => item.command === 'hexcore.hql.queryHeadless');
+		assert.ok(capability);
+		assert.strictEqual(capability.headless, true);
+		assert.strictEqual(capability.validateOutput, true);
+		assert.deepStrictEqual(capability.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		assert.ok(capability.aliases.includes('hexcore.hql.query'));
+	});
+
+	test('publishes semantic explanation as the same headless output contract used by UI', () => {
+		const capability = listPipelineCapabilities().find(item => item.command === 'hexcore.semantic.explain');
+		assert.ok(capability); assert.strictEqual(capability.headless, true); assert.strictEqual(capability.validateOutput, true);
+		assert.deepStrictEqual(capability.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+	});
+
+	test('mints immutable IR ancestry for the ad-hoc query without hashing runner controls', async () => {
+		const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));
+		const jobDir = path.join(tempDir, 'query-ir-binding'); fs.mkdirSync(jobDir);
+		const job = path.join(jobDir, 'query-ir-binding.hexcore_job.json');
+		fs.writeFileSync(job, JSON.stringify({ file: target, outDir: 'out', quiet: true, steps: [
+			{ id: 'lift', cmd: 'hexcore.disasm.liftToIR', output: { path: 'one.ll' } },
+			{ id: 'query', cmd: 'hexcore.hql.queryHeadless', args: { irPath: '$step[lift].output', condition: { query: { target: 'CReturnStmt' } }, addresses: ['0x1000'] }, output: { path: 'query.json' } },
+		] }), 'utf8');
+		let bindingPath = '';
+		executeCommand = async (command, options) => {
+			const output = (options.output as { path: string }).path;
+			if (command === 'hexcore.disasm.liftToIR') {
+				fs.writeFileSync(output, '; SemanticStatus: ok\ntarget triple = "x86_64-pc-windows-msvc"\ndefine ptr @lifted_4096(ptr %s, i64 %pc, ptr %m) { ret ptr %m }\n');
+				return { success: true, status: 'ok' };
+			}
+			assert.strictEqual(command, 'hexcore.hql.queryHeadless');
+			assert.ok(isTrustedPipelineArtifactBindings(options.pipelineArtifactBindings));
+			assert.strictEqual(options.pipelineArtifactBindings.length, 1);
+			const binding = options.pipelineArtifactBindings[0]; bindingPath = binding.path;
+			assert.strictEqual(binding.artifactKind, 'llvm-ir'); assert.strictEqual(binding.status, 'ok');
+			assert.strictEqual(binding.producerCommand, 'hexcore.disasm.liftToIR');
+			assert.match(binding.sha256, /^[a-f0-9]{64}$/); assert.match(binding.targetIdentity ?? '', /^target:sha256:/);
+			assert.throws(() => { (options.pipelineArtifactBindings as any).push({}); }, TypeError);
+			fs.writeFileSync(output, '{"success":true,"status":"ok"}'); return { success: true, status: 'ok' };
+		};
+		const status = await new AutomationPipelineRunner().runJobFile(job, true);
+		assert.strictEqual(status.status, 'ok', JSON.stringify(status)); assert.ok(bindingPath.endsWith('one.ll'));
+	});
+
+	test('DEX native routing records unsupported format without dispatch or output fabrication', async () => {
+		const target = path.join(tempDir, 'renamed.exe');
+		fs.writeFileSync(target, Buffer.from('dex\n039\0'));
+		let dispatched = 0;
+		executeCommand = async () => { dispatched++; return { status: 'ok' }; };
+		const job = writeJob(tempDir, 'dex-routing', target, {
+			cmd: 'hexcore.disasm.analyzeAll', output: { path: 'analysis.json' },
+		});
+		await new AutomationPipelineRunner().runJobFile(job, true);
+		const status = JSON.parse(fs.readFileSync(path.join(path.dirname(job), 'out', 'hexcore-pipeline.status.json'), 'utf8'));
+		assert.strictEqual(dispatched, 0);
+		assert.strictEqual(status.steps[0].status, 'skipped');
+		assert.strictEqual(status.steps[0].errorCode, 'unsupported-format');
+		assert.strictEqual(status.steps[0].detectedFormat, 'dex');
+		assert.strictEqual(fs.existsSync(path.join(path.dirname(job), 'out', 'analysis.json')), false);
+		assert.strictEqual(fs.existsSync(path.join(tempDir, '.hexcore_session.db')), false);
+	});
+
+	for (const reference of ['$step[0].output', 'literal']) {
+		test(`blocks an error artifact before downstream dispatch (${reference})`, async () => {
+			const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));
+			const outDir = path.join(tempDir, 'out');
+			const job = path.join(tempDir, 'dependency.draft.json');
+			fs.writeFileSync(job, JSON.stringify({ file: target, outDir, quiet: true, continueOnError: true, steps: [
+				{ cmd: 'hexcore.disasm.liftToIR', output: { path: 'broken.ll' } },
+				{ cmd: 'hexcore.helix.decompileIR', args: { irPath: reference === 'literal' ? path.join(outDir, 'broken.ll') : reference, allowFailureDiagnostics: true }, output: { path: 'result.c' } },
+				{ cmd: 'hexcore.hashcalc.calculate', output: { path: 'hash.json' } },
+			] }));
+			const called: string[] = [];
+			executeCommand = async (command, options) => {
+				called.push(command);
+				const result = command === 'hexcore.disasm.liftToIR' ? { success: false, stub: true, error: 'boundary failure' } : { success: true };
+				fs.writeFileSync((options.output as { path: string }).path, JSON.stringify(result));
+				return result;
+			};
+			await new AutomationPipelineRunner().runJobFile(job, true);
+			assert.deepStrictEqual(called, ['hexcore.disasm.liftToIR', 'hexcore.hashcalc.calculate']);
+			const status = JSON.parse(fs.readFileSync(path.join(outDir, 'hexcore-pipeline.status.json'), 'utf8'));
+			assert.strictEqual(status.steps[1].status, 'error');
+			assert.match(status.steps[1].error, /upstream-artifact/);
+			const rejected = JSON.parse(fs.readFileSync(path.join(outDir, 'result.c'), 'utf8'));
+			assert.strictEqual(rejected.stub, true);
+			assert.strictEqual(rejected.ok, false);
+			assert.strictEqual(rejected.artifactKind, 'failed-output');
+		});
+	}
+
+	for (const allowPartial of [false, true]) {
+		test(`propagates partial producer status with explicit consumer opt-in (${allowPartial})`, async () => {
+			const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));
+			const outDir = path.join(tempDir, 'out');
+			const job = path.join(tempDir, 'partial.draft.json');
+			fs.writeFileSync(job, JSON.stringify({ file: target, outDir, quiet: true, steps: [
+				{ cmd: 'hexcore.disasm.liftToIR', allowPartial: true, output: { path: 'partial.ll' } },
+				{ cmd: 'hexcore.helix.decompileIR', allowPartial, args: { irPath: '$step[0].output', pipelineInputQuality: { status: 'ok', reasons: [] } }, output: { path: 'result.c' } },
+			] }));
+			let consumers = 0;
+			executeCommand = async (command, options) => {
+				if (command === 'hexcore.disasm.liftToIR') {
+					fs.writeFileSync((options.output as { path: string }).path, 'define void @f() { ret void }');
+					return { success: true, status: 'partial', semanticWarning: 'incomplete boundary' };
+				}
+				consumers++;
+				assert.strictEqual((options.pipelineInputQuality as { status: string }).status, 'partial');
+				fs.writeFileSync((options.output as { path: string }).path, 'void f(void) {}');
+				return { success: true, status: 'ok' };
+			};
+			await new AutomationPipelineRunner().runJobFile(job, true);
+			const status = JSON.parse(fs.readFileSync(path.join(outDir, 'hexcore-pipeline.status.json'), 'utf8'));
+			assert.strictEqual(consumers, allowPartial ? 1 : 0);
+			assert.strictEqual(status.steps[1].status, allowPartial ? 'partial' : 'error');
+			if (allowPartial) {
+				const manifest = JSON.parse(fs.readFileSync(path.join(outDir, '.hexcore-meta', 'provenance.json'), 'utf8'));
+				const entry = manifest.artifacts.find((value: any) => value.step.index === 2);
+				assert.strictEqual(entry.analysisContract.status, 'partial');
+				assert.strictEqual(entry.step.artifactKind, 'c-source');
+			}
+		});
+	}
+
+	test('Composer may read a failure stub for diagnostics without enabling semantic consumers', async () => {
+		const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));
+		const outDir = path.join(tempDir, 'out');
+		const job = path.join(tempDir, 'diagnostics.draft.json');
+		fs.writeFileSync(job, JSON.stringify({ file: target, outDir, quiet: true, continueOnError: true, steps: [
+			{ cmd: 'hexcore.disasm.liftToIR', output: { path: 'broken.ll' } },
+			{ cmd: 'hexcore.pipeline.composeReport', args: { input: '$step[0].output' }, output: { path: 'report.md' } },
+		] }));
+		let reports = 0;
+		executeCommand = async (command, options) => {
+			if (command === 'hexcore.disasm.liftToIR') { return { success: false, error: 'fixture failure' }; }
+			reports++;
+			assert.strictEqual(JSON.parse(fs.readFileSync(String(options.input), 'utf8')).stub, true);
+			fs.writeFileSync((options.output as { path: string }).path, '# Diagnostic report');
+			return { success: true };
+		};
+		await new AutomationPipelineRunner().runJobFile(job, true);
+		assert.ok(reports >= 1);
+		const status = JSON.parse(fs.readFileSync(path.join(outDir, 'hexcore-pipeline.status.json'), 'utf8'));
+		assert.strictEqual(status.steps[1].status, 'ok');
+		assert.strictEqual(status.status, 'partial');
+	});
+
+	test('derived input quality cannot be forged and does not change the configuration hash', async () => {
+		const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));
+		const job = writeJob(tempDir, 'quality-config', target, {
+			cmd: 'hexcore.hashcalc.calculate', args: { pipelineInputQuality: { status: 'partial', reasons: ['caller-supplied'] } },
+			output: { path: 'hash.json' },
+		});
+		let expectedHash = '';
+		executeCommand = async (_command, options) => {
+			assert.deepStrictEqual(options.pipelineInputQuality, { status: 'ok', reasons: [] });
+			assert.strictEqual(options.pipelineStepTimeoutMs, 90000);
+			expectedHash = crypto.createHash('sha256').update(JSON.stringify({ pipelineTimeoutMs: options.pipelineTimeoutMs })).digest('hex');
+			fs.writeFileSync((options.output as { path: string }).path, '{"success":true}');
+			return { success: true };
+		};
+		await new AutomationPipelineRunner().runJobFile(job, true);
+		const manifest = JSON.parse(fs.readFileSync(path.join(path.dirname(job), 'out', '.hexcore-meta', 'provenance.json'), 'utf8'));
+		assert.strictEqual(manifest.artifacts[0].step.configurationSha256, expectedHash);
 	});
 
 	test('external refcount input and consumed ancestry are lineage inputs, not empty or re-hashed later', async () => {
