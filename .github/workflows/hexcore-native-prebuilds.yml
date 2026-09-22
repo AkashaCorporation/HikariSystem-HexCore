@@ -319,7 +319,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/engine/deps/llvm-mlir
-          key: helix-llvm-mlir-win32-x64-bdcef941a323f6d144dee7a5879609a269e2474ef962bffc3180c4372a1a2aaa
+          key: helix-llvm-mlir-win32-x64-591dcbf3f4304dbadbd1fd645f3d971e964fa0b7f25bb02c97bf97e327e38b01
 
       - name: Download Helix LLVM/MLIR Deps
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
@@ -351,7 +351,7 @@ jobs:
             }
           }
 
-          $expectedHash = 'BDCEF941A323F6D144DEE7A5879609A269E2474EF962BFFC3180C4372A1A2AAA'
+          $expectedHash = '591DCBF3F4304DBADBD1FD645F3D971E964FA0B7F25BB02C97BF97E327E38B01'
           if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $expectedHash) {
             throw 'Helix dependency bundle hash mismatch'
           }
