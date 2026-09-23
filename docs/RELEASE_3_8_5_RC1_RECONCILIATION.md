@@ -27,8 +27,8 @@ Excluded from the release boundary:
 - Helix wrapper/native candidate: `0.9.4-rc.2`.
 - Canonical Helix candidate commit:
   `89a4a392d0ce511a694a937240a3045779b0fe41`.
-- Windows x64 Helix addon SHA-256:
-  `D7023EC230C1ADE03E5E28ECBD3F997B89190F9BE6E8301ACD2EDE6C8B2733AB`.
+- Official GitHub Actions Windows x64 Helix addon SHA-256:
+  `D2E6594745667122835B293D321622860503256E29DD170BDE3A177139493B15`.
 - Version-matched LLVM/MLIR dependency bundle SHA-256:
   `A579068C95ED68AC9BD202CE3B0BE51DDC8F5D23CF371775DD66B804CAEC221D`.
 
