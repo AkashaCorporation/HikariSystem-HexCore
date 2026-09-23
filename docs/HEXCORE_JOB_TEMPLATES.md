@@ -1,14 +1,61 @@
-# HexCore Job Templates - v3.8.4 Analysis Contract
+# HexCore Job Templates - v3.8.5 Development Analysis Contract
 
 Safe default job templates for users and AI agents.
+
+## 3.8.5 Development: Named Dependencies
+
+This example uses the same engine commands with stable logical step references.
+The address is illustrative and must belong to the selected binary.
+
+```json
+{
+  "file": "sample.exe",
+  "outDir": "hexcore-reports/named-function",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "analyze",
+      "cmd": "hexcore.disasm.analyzeAll",
+      "allowPartial": true,
+      "output": { "path": "analysis.json" }
+    },
+    {
+      "id": "lift-main",
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": { "address": "0x140001000" },
+      "allowPartial": true,
+      "output": { "path": "main.ll" }
+    },
+    {
+      "id": "decompile-main",
+      "cmd": "hexcore.helix.decompileIR",
+      "args": { "irPath": "$step[lift-main].output" },
+      "allowPartial": true,
+      "output": { "path": "main.c" }
+    }
+  ]
+}
+```
+
+Inserting an earlier step does not require changing `lift-main` references.
+Do not name a step `prev`; it remains the legacy positional alias. Partial is
+intentionally allowed for exploration and is not a correctness or clean verdict.
 
 For 3.8.4 RC discovery, prefer `analyzeAll` JSON with `includeInstructions:false`
 when enumerating functions. It includes lazy index entries. Markdown only previews
 the first 100 functions by address. Materialize selected bodies explicitly and
 check closure/completeness; neither `allowLazy:false` nor a ratio threshold forces
 eager decoding. A lazy body or missing xref is not a negative behavioral result.
+Use `hexcore.disasm.materializeFunctions` with an explicit address list; ad-hoc
+HQL/query commands intentionally never hydrate bodies on their own.
 
 ## Downstream Audit Quality
+
+For the 3.8.5 development runner, set `allowPartial:true` on both the producer
+and each consumer when intentionally exploring incomplete output. A producer's
+`continueOnError:true` does not authorize consuming its error stub. Keep report
+composition as a diagnostic step; do not route a failed `.ll` or `.c` into another
+analysis engine merely because the expected file exists.
 
 Chain decompilation output explicitly using `input: "$step[N].output"` for
 `hexcore.audit.refcountScan`. In exploratory jobs use `allowPartial:true` to
@@ -473,6 +520,10 @@ Quick check: validate analyst annotations against instruction immediates.
 }
 ```
 
+This strict template expects at least one unambiguous numeric annotation. If
+none can be evaluated, the step is `partial/not-assessed` rather than a false
+clean result. Add `allowPartial:true` only for exploratory retention.
+
 ---
 
 ## Template: Lean Two-Step (analyzeAll + checkConstants)
@@ -496,11 +547,16 @@ Run deep analysis then validate constants. No large intermediate files.
       "cmd": "hexcore.disasm.checkConstants",
       "args": { "maxFindings": 200 },
       "output": { "path": "constant-sanity.md", "format": "md" },
+      "allowPartial": true,
       "timeoutMs": 300000
     }
   ]
 }
 ```
+
+This template intentionally allows a partial constant result because it does
+not provide a notes file. Inspect `negativeEvidenceUsable`; zero annotations
+means `not-assessed`, not "no mismatch proven".
 
 ---
 
@@ -1950,6 +2006,84 @@ Because `continueOnError` is inherited, the wrong format-specific analyzer is ex
 
 The HQL `irPath` above is the Remill-compatible artifact produced by `liftToIR`; arbitrary LLVM IR is not a supported substitute. Preserve `signatureSetSha256`, clean function records, `adapterCoverage`, and unsupported-node counts when comparing runs. Findings report structural completeness and an evidence level; confidence is absent unless a named corpus calibration exists.
 
+## Template: Pinned Ad-Hoc HQL Query (3.8.5 development)
+
+This template makes materialization explicit before a structural ad-hoc query.
+The query itself uses `materialization:"never"` and cannot expand the accepted
+analysis universe. Replace the target address and condition with evidence-backed
+values for the current binary.
+
+```json
+{
+  "file": ".\\target.exe",
+  "outDir": ".\\hexcore-reports\\hql-ad-hoc",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "index",
+      "cmd": "hexcore.disasm.analyzeAll",
+      "output": { "path": "00-analysis.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "id": "materialize_target",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": { "address": "0x140001000", "count": 250000, "stopAtFunctionBoundary": true },
+      "output": { "path": "01-target-disassembly.json" },
+      "allowPartial": true,
+      "timeoutMs": 120000
+    },
+    {
+      "id": "ask_free_semantics",
+      "cmd": "hexcore.hql.queryHeadless",
+      "args": {
+        "condition": {
+          "all": [
+            { "query": { "target": "CCallExpr", "attributes": [{ "field": "callee", "value": "free" }] } },
+            { "fact": { "fact": "summary-ownership", "attributes": [{ "field": "ownershipKind", "value": "free" }] } }
+          ]
+        },
+        "addresses": ["0x140001000"],
+        "materialization": "never",
+        "maxFunctions": 1,
+        "maxRows": 64
+      },
+      "output": { "path": "02-query.json" },
+      "allowPartial": true,
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+`allowPartial` does not convert unknown evidence into a match; it lets the job
+retain an honestly partial artifact. Inspect `evaluations`, `partialReasons`,
+`coverage`, native producer outcomes and the pinned identity fields. Remove the
+materialization step for a fact-only HXDB query. For IR, set `irPath` to an exact
+`$step[id].output` produced earlier in the same/persisted pipeline and keep one
+address filter; the runner binds its hash and analysis identity. External paths,
+inline IR and copied provenance fields are rejected. Textual HQL is reserved for 3.8.6.
+
+To explain a retained row in a follow-up job, pass its exact semantic identity:
+
+```json
+{
+  "cmd": "hexcore.semantic.explain",
+  "args": {
+    "kind": "hql-semantic-match",
+    "identity": "hql-semantic:<snapshot-sha256>:<collection>:<record-sha256>",
+    "expected": { "snapshotSha256": "<snapshot-sha256>" }
+  },
+  "output": { "path": "03-explanation.json" },
+  "allowPartial": true,
+  "timeoutMs": 30000
+}
+```
+
+Use the literal `explainIdentity` returned in HQL fact evidence; do not construct
+one from a label or address. Prototype/binding/reference/conflict IDs can be
+passed directly with their matching `kind`. A stale snapshot returns an error.
+
 ## Template: Managed .NET Route - C# + IL (v3.8.3 RC)
 
 This template deliberately runs Helix once to preserve the managed-routing marker, then sends the same target to Revenant.
@@ -2145,7 +2279,14 @@ requires `allowPartial:true` on that pipeline step.
     },
     {
       "cmd": "hexcore.helix.decompileIR",
-      "args": { "irPath": "$step[2].output" },
+      "args": {
+        "irPath": "$step[2].output",
+        "exactRange": ["0x140001000", "0x140001080"],
+        "skipOptimization": false,
+        "functionStarts": ["0x140001000", "0x140001080"],
+        "dataSections": [{ "name": ".rdata" }],
+        "variableRenames": [{ "oldName": "v1", "newName": "health" }]
+      },
       "output": { "path": "02-function.helix.c" },
       "allowPartial": true,
       "timeoutMs": 180000
@@ -2169,6 +2310,10 @@ of decoded intervals, not a linear endpoint cursor.
 When no trustworthy `endExclusive` exists, use `count` only as pagination and
 follow `nextAddress`; do not label that artifact a complete function. A Helix
 result with `semanticCoverage:1` still covers only decoded instructions.
+Also require `instructionBoundary.status` to be `aligned`, or require
+`instructionBoundary.recoveredByAutoBacktrack:true`. A proven
+`mid-instruction` request with no recovery is intentionally `partial` even if
+Capstone can resynchronize and emit plausible-looking instructions.
 Require zero unsupported/decode failures, no damning `qualityIssues`,
 `securityEvidenceUsable:true`, and inspect all `confidenceAxes` before using C
 as security evidence.
@@ -2178,6 +2323,95 @@ Require `closureRestoration.status:"restored"`, the same session generation and
 `universeSha256`, and the same materialized/lazy counts as the prior closed
 universe. Audit repeat equality should use the artifact's declared
 `normalization.sha256`, not an undocumented local JSON rewrite.
+
+## Template: Targeted Function Materialization
+
+```json
+{
+  "file": ".\\target.exe",
+  "outDir": ".\\hexcore-reports\\targeted-materialization",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "index",
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": { "allowLazy": true, "includeInstructions": false },
+      "output": { "path": "00-function-index.json" },
+      "allowPartial": true,
+      "timeoutMs": 600000
+    },
+    {
+      "id": "materialize",
+      "cmd": "hexcore.disasm.materializeFunctions",
+      "args": {
+        "addresses": ["0x1400014E0", "0x140001470"],
+        "maxFunctions": 64,
+        "maxBytesPerFn": 65536
+      },
+      "output": { "path": "01-materialized.json" },
+      "allowPartial": true,
+      "timeoutMs": 300000
+    },
+    {
+      "cmd": "hexcore.references.export",
+      "output": { "path": "02-references.json" },
+      "allowPartial": true,
+      "timeoutMs": 180000
+    },
+    {
+      "cmd": "hexcore.session.export",
+      "args": {
+        "include": ["functions", "xrefs", "callers", "imports", "strings", "sections", "unwind"],
+        "limit": 100000
+      },
+      "output": { "path": "03-session.json" },
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+Replace the addresses with starts emitted by the index. Acceptance requires
+`truncated:false`, zero `partial`/`decodeEmpty`/`unknownFunctions`, complete
+per-function coverage, and a stable universe on a fresh-process replay. An
+exploratory `allowPartial:true` retains diagnostics; it does not accept them.
+
+For a thunk-aware call query after materialization:
+
+```json
+{
+  "cmd": "hexcore.references.query",
+  "args": {
+    "to": "0x1400015E0",
+    "kinds": ["call"],
+    "resolveThunks": true,
+    "owner": true
+  },
+  "output": { "path": "04-callers-resolved.json" }
+}
+```
+
+The edge keeps its physical target and adds the proven linker-thunk chain.
+
+Reachability can be appended after explicitly materializing the intended
+universe:
+
+```json
+{
+  "cmd": "hexcore.xref.unreachableFrom",
+  "args": {
+    "roots": ["entry"],
+    "scope": "functionStarts",
+    "emit": ["list", "count"],
+    "limit": 100000
+  },
+  "output": { "path": "05-unreachable.json" },
+  "allowPartial": true
+}
+```
+
+Do not call a listed function dead unless `negativeEvidenceUsable:true` and the
+coverage block reports zero lazy, partial, and decode-empty functions.
 
 ## Template: Semantic Prototype and Closure
 
@@ -2225,7 +2459,11 @@ Replace the illustrative prototype with evidence-backed types. Accept record
 recovery only when `sameObjectProven:true`; overlaps remain union candidates.
 Require `run.status:"committed"`, zero callback failures, and stable normalized
 hashes on a fresh-process repeat. The propagation/record artifacts must also
-show `worker.transport:"perseus-sab-v1"` and `hardTerminated:false`. A committed
-run can still be semantically `partial` when references contain deferred future-
+show `worker.transport:"perseus-sab-v1"` and `hardTerminated:false` on the
+propagation step. `records.recover` should report
+`closure.source:"committed"` and must not launch a second worker. Use
+`refresh:true` with the same explicit budgets only when a second solve is
+deliberately requested. A committed run can still be semantically `partial`
+when references contain deferred future-
 generation invalidations; treat that barrier as conservative evidence, not as
 complete closure.

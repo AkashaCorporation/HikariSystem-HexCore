@@ -319,7 +319,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/engine/deps/llvm-mlir
-          key: helix-llvm-mlir-win32-x64-bc05a44b7b9860ca2a257516e0d1d744f87720badda5a5bef587b4f87f9908b7
+          key: helix-llvm-mlir-win32-x64-a579068c95ed68ac9bd202ce3b0be51ddc8f5d23cf371775dd66b804caec221d
 
       - name: Download Helix LLVM/MLIR Deps
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
@@ -351,7 +351,7 @@ jobs:
             }
           }
 
-          $expectedHash = 'BC05A44B7B9860CA2A257516E0D1D744F87720BADDA5A5BEF587B4F87F9908B7'
+          $expectedHash = 'A579068C95ED68AC9BD202CE3B0BE51DDC8F5D23CF371775DD66B804CAEC221D'
           if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $expectedHash) {
             throw 'Helix dependency bundle hash mismatch'
           }
@@ -393,7 +393,7 @@ jobs:
         working-directory: engine
         env:
           LLVM_LIB_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/lib
-          HELIX_ENGINE_LIB: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/engine
+          HELIX_ENGINE_LIB_DIR: ${{ github.workspace }}/engine/engine/deps/llvm-mlir/engine
         run: npm run build
 
       - name: Read Engine Version

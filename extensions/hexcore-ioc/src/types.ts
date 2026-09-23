@@ -69,6 +69,16 @@ export interface IOCSummary {
 	categoryCounts: Record<IOCCategory, number>;
 	/** True if we hit maxMatches before scanning the whole file. */
 	truncated: boolean;
+	validation: {
+		scope: 'extractor';
+		rawPatternMatches: number;
+		acceptedUnique: number;
+		rejectedValidator: number;
+		rejectedPrintableContext: number;
+		suppressedPrivate: number;
+		suppressedDuplicate: number;
+		rejectedTotal: number;
+	};
 }
 
 /** Complete extraction result returned by the command. */

@@ -15,6 +15,7 @@ const clean: HqlFunctionFindings = {
 	adapterCoverage: { totalNodes: 12, lossyNodes: 0, coverage: 1, unsupportedNodeCounts: {} },
 	hast: { schemaMajor: 1, schemaMinor: 0, capabilities: ['node-ids', 'symbol-identities', 'typed-child-roles'], architecture: 'x86_64', pointerBits: 64, semanticEligible: true },
 	signatureSetSha256: 'a'.repeat(64),
+	signatureSetScope: 'active-rule-set',
 	cacheKey: 'b'.repeat(64),
 	status: 'ok',
 	truncated: false,
@@ -33,6 +34,7 @@ assert.strictEqual(cleanResult.address, '0x140001000');
 assert.strictEqual(cleanResult.nodeCount, 12);
 	assert.strictEqual(cleanResult.findings.length, 0);
 	assert.strictEqual(cleanResult.signatureSetSha256, 'a'.repeat(64));
+	assert.strictEqual(cleanResult.signatureSetScope, 'active-rule-set');
 	assert.strictEqual(cleanResult.semanticFactCount, 0);
 	assert.strictEqual(cleanResult.semanticFactsSha256, 'c'.repeat(64));
 
@@ -84,6 +86,7 @@ assert.deepStrictEqual(buildScanTargets({ file: 'x.exe', addresses: ['0x1', '0x1
 	{ file: 'x.exe', address: '0x2' },
 ]);
 assert.deepStrictEqual(buildScanTargets({ irPath: 'sample.ll', addresses: ['0x1'] }), [{ irPath: 'sample.ll', irText: undefined }]);
+assert.deepStrictEqual(buildScanTargets({ file: 'source.so', irPath: 'sample.ll' }), [{ irPath: 'sample.ll', irText: undefined, file: 'source.so' }]);
 
 void (async () => {
 	let active = 0;

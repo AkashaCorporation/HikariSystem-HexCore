@@ -10,6 +10,8 @@ import type { AnalysisBinaryFormat } from 'hexcore-common';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
 import { SessionStore } from './sessionStore';
+import { resolveAarch64PltBindings } from './aarch64Plt';
+import { detectUnsupportedNativeFormat, UnsupportedNativeInputError } from './nativeInputFormat';
 import { lookupApi, formatApiSignature, formatApiSignatureCompact, ApiSignature, ApiCategory, CATEGORY_LABELS } from './peApiDatabase';
 import {
 	isX86PcRelativeDataRelocation,
@@ -23,6 +25,7 @@ import {
 	validateAddressTakenFunctionExtent,
 } from './addressTakenFunctionDiscovery';
 import { assessStringEvidence, findCrc32LookupRanges, type ByteRange } from './stringEvidence';
+import { assessInstructionBoundary } from './disassemblyBoundary';
 
 // Types
 export interface Instruction {
@@ -500,12 +503,39 @@ export interface FileInfo {
 	characteristics?: string[];
 	/** v3.7.4: True when target is an ELF ET_REL (relocatable / .ko kernel module) */
 	isRelocatable?: boolean;
+	pltResolution?: {
+		version: 1;
+		status: 'ok' | 'partial';
+		gotSlots: number;
+		resolvedStubs: number;
+		unresolvedGotSlots: string[];
+		ambiguousGotSlots: string[];
+		relocationsTruncated: boolean;
+		relocationReadErrors: number;
+		decodeTruncated: boolean;
+		decoderAvailable: boolean;
+	};
 }
 
 export interface DisassemblyOptions {
 	architecture: ArchitectureConfig;
 	baseAddress: number;
 	entryPoint?: number;
+}
+
+function cloneFileInfo(info: FileInfo): FileInfo {
+	return { ...info, ...(info.pltResolution ? { pltResolution: {
+		...info.pltResolution, unresolvedGotSlots: [...info.pltResolution.unresolvedGotSlots],
+		ambiguousGotSlots: [...info.pltResolution.ambiguousGotSlots],
+	} } : {}) };
+}
+
+function assertSnapshotPltVersion(snapshot: AnalysisEngineSnapshotV1): void {
+	if (snapshot.architecture === 'arm64' && snapshot.fileInfo?.format === 'ELF64' &&
+		snapshot.sections.some(section => ['.plt', '.plt.sec', '.plt.got'].includes(section.name)) &&
+		snapshot.fileInfo.pltResolution?.version !== 1) {
+		throw new Error('stale-analysis-snapshot: AArch64 PLT bindings require a fresh analyzeAll run');
+	}
 }
 
 export type FunctionBodyStatus = 'materialized' | 'partial' | 'lazy' | 'decode-empty';
@@ -520,6 +550,11 @@ export interface FunctionAnalysisMaterialization {
 	engineGenerationAfter: number;
 	sessionGenerationBefore?: number;
 	sessionGenerationAfter?: number;
+}
+
+export interface FunctionMaterializationOptions {
+	/** Decoder byte ceiling for this attempt. A lower bound yields partial, retryable state. */
+	maxBytes?: number;
 }
 
 export interface AnalysisClosureRestoration {
@@ -879,8 +914,11 @@ export class DisassemblerEngine {
 				throw new Error(`File too large (${(stats.size / (1024 * 1024)).toFixed(0)}MB). Maximum supported size is 512MB.`);
 			}
 
+			const fileBuffer = fs.readFileSync(filePath);
+			const unsupportedFormat = detectUnsupportedNativeFormat(fileBuffer);
+			if (unsupportedFormat) { throw new UnsupportedNativeInputError(unsupportedFormat); }
 			this.currentFile = filePath;
-			this.fileBuffer = fs.readFileSync(filePath);
+			this.fileBuffer = fileBuffer;
 			// Reset state
 			this.sections = [];
 			this.imports = [];
@@ -951,6 +989,7 @@ export class DisassemblerEngine {
 			}
 
 			await this.ensureCapstoneInitialized();
+			await this.resolveAarch64PltImports();
 
 			// v3.8.5: decide the trap-handler gate BEFORE any function discovery runs, so
 			// analyzeFunction can sweep past ud2/int3/hlt on trap-handler binaries.
@@ -1009,6 +1048,7 @@ export class DisassemblerEngine {
 
 			return true;
 		} catch (error) {
+			if (error instanceof UnsupportedNativeInputError) { throw error; }
 			const msg = error instanceof Error ? `${error.message}\n${error.stack}` : String(error);
 			console.log(`[HexCore] loadFile FAILED: ${msg}`);
 			console.error('[HexCore] loadFile error:', error);
@@ -1096,6 +1136,14 @@ export class DisassemblerEngine {
 		phase('scan-function-prologs');
 		// Scan for function prologs in code sections
 		await this.scanForFunctionPrologs();
+
+		// Recover optimized MSVC leaf functions that deliberately have neither an
+		// unwind entry nor a conventional integer-register prologue.
+		phase('discover-padding-leaves');
+		await this.discoverPaddingDelimitedLeafFunctions();
+
+		phase('discover-linker-thunks');
+		await this.discoverPeDirectJumpThunkRuns();
 
 		// Callfuscation removes ordinary prologues and connects tiny nodes with
 		// call-as-jmp edges. Recover logical function entries from genuine decoded
@@ -3758,20 +3806,34 @@ export class DisassemblerEngine {
 		if (pltSection && pltSection.addr > 0) {
 			// Parse .rela.plt to map GOT slots to symbol names
 			const relaPlt = elfSections.find(s => s.name === '.rela.plt' || s.name === '.rel.plt');
-			const dynsymSec = elfSections.find(s => s.type === 11); // SHT_DYNSYM
+			const dynsymSec = this.architecture === 'arm64'
+				? (relaPlt && elfSections[relaPlt.link]?.type === 11 ? elfSections[relaPlt.link] : undefined)
+				: elfSections.find(s => s.type === 11); // SHT_DYNSYM
 			const dynstrSec = dynsymSec ? elfSections[dynsymSec.link] : undefined;
 
 			if (relaPlt && dynsymSec && dynstrSec) {
 				const isRela = relaPlt.name.startsWith('.rela');
 				const relEntSize = isRela ? (is64Bit ? 24 : 12) : (is64Bit ? 16 : 8);
 				const numRel = relEntSize > 0 ? Math.floor(relaPlt.size / relEntSize) : 0;
+				const ambiguousGotSlots = new Set<number>();
+				if (this.architecture === 'arm64' && this.fileInfo) {
+					this.fileInfo.pltResolution = {
+						version: 1, status: 'partial', gotSlots: 0, resolvedStubs: 0, unresolvedGotSlots: [], ambiguousGotSlots: [],
+						relocationsTruncated: numRel > 4096, relocationReadErrors: 0, decodeTruncated: false, decoderAvailable: false,
+					};
+				}
 
 				for (let i = 0; i < numRel && i < 4096; i++) {
 					const relOff = relaPlt.offset + i * relEntSize;
-					if (relOff + relEntSize > this.fileBuffer.length) { break; }
+					if (relOff + relEntSize > this.fileBuffer.length) {
+						if (this.architecture === 'arm64') { this.fileInfo!.pltResolution!.relocationReadErrors++; }
+						break;
+					}
 
 					const rOffset = is64Bit ? Number(readU64(relOff)) : readU32(relOff);
 					const rInfo = is64Bit ? Number(readU64(relOff + 8)) : readU32(relOff + 4);
+					const arm64Info = this.architecture === 'arm64' && is64Bit ? readU64(relOff + 8) : undefined;
+					if (this.architecture === 'arm64' && (arm64Info === undefined || Number(arm64Info & 0xffffffffn) !== 1026)) { continue; }
 
 					// Extract symbol index from r_info.
 					// BUG (pre-v3.8.2): `rInfo >> 32` on a JS number coerces to int32 first
@@ -3779,24 +3841,35 @@ export class DisassemblerEngine {
 					// entries resolved to the SAME wrong symbol (observed: every PLT stub
 					// mapped to "rand"). For 64-bit, the symbol index is the high dword:
 					// use float division, not the bitwise shift.
-					const symIdx = is64Bit ? Math.floor(rInfo / 0x100000000) : (rInfo >> 8);
+					const symIdx = arm64Info !== undefined ? Number(arm64Info >> 32n)
+						: is64Bit ? Math.floor(rInfo / 0x100000000) : (rInfo >> 8);
 
 					// Read symbol name from .dynsym
 					const symEntSize = is64Bit ? 24 : 16;
 					const symOff = dynsymSec.offset + symIdx * symEntSize;
-					if (symOff + symEntSize > this.fileBuffer.length) { continue; }
+					if (symOff + symEntSize > this.fileBuffer.length ||
+						(this.architecture === 'arm64' && symOff + symEntSize > dynsymSec.offset + dynsymSec.size)) {
+						if (this.architecture === 'arm64') { this.fileInfo!.pltResolution!.relocationReadErrors++; }
+						continue;
+					}
 
 					const stName = readU32(symOff);
+					if (this.architecture === 'arm64' && stName >= dynstrSec.size) { this.fileInfo!.pltResolution!.relocationReadErrors++; continue; }
 					let symName = '';
 					const symNameOff = dynstrSec.offset + stName;
 					if (symNameOff < this.fileBuffer.length) {
-						for (let j = symNameOff; j < this.fileBuffer.length && this.fileBuffer[j] !== 0; j++) {
+						const nameEnd = this.architecture === 'arm64' ? Math.min(this.fileBuffer.length, dynstrSec.offset + dynstrSec.size) : this.fileBuffer.length;
+						for (let j = symNameOff; j < nameEnd && this.fileBuffer[j] !== 0; j++) {
 							symName += String.fromCharCode(this.fileBuffer[j]);
 							if (symName.length > 256) { break; }
 						}
 					}
 
-					if (symName.length === 0) { continue; }
+					if (symName.length === 0 || (this.architecture === 'arm64' &&
+						(symNameOff + symName.length >= dynstrSec.offset + dynstrSec.size || this.fileBuffer[symNameOff + symName.length] !== 0))) {
+						if (this.architecture === 'arm64') { this.fileInfo!.pltResolution!.relocationReadErrors++; }
+						continue;
+					}
 
 					// PLT entry address: PLT base + (i+1) * PLT entry size (first entry is stub)
 					// Standard PLT entry size is 16 bytes on x86-64
@@ -3811,15 +3884,28 @@ export class DisassemblerEngine {
 					// update below only sets the FIRST matching import's address and can
 					// leave some imports at 0x0 (observed: srand). This map is complete and
 					// is what detectPRNG uses to resolve `call <pltStub>` -> symbol name.
-					this._pltSymbolMap.set(adjustedPltAddr, symName);
+					if (this.architecture !== 'arm64') { this._pltSymbolMap.set(adjustedPltAddr, symName); }
 
 					// v3.8.5: also key by the GOT slot VA. On CET/IBT binaries the call site
 					// targets the `.plt.sec` thunk (endbr64 ; bnd jmp *GOT[n](%rip)), whose VA is
 					// NOT adjustedPltAddr; resolving it requires reading its GOT reference and
 					// matching it here. (Used by the trap-handler gate and PLT-stub naming.)
 					if (adjustedGotAddr > 0) {
+						if (this.architecture === 'arm64') {
+							if (ambiguousGotSlots.has(adjustedGotAddr)) { continue; }
+							const previous = this._gotSymbolMap.get(adjustedGotAddr);
+							if (previous && previous !== symName) {
+								this._gotSymbolMap.delete(adjustedGotAddr);
+								ambiguousGotSlots.add(adjustedGotAddr);
+								this.fileInfo!.pltResolution!.ambiguousGotSlots = [...ambiguousGotSlots].map(slot => `0x${slot.toString(16)}`);
+								continue;
+							}
+						}
 						this._gotSymbolMap.set(adjustedGotAddr, symName);
 					}
+					// AArch64 entries are resolved from decoded GOT dataflow after
+					// Capstone initialization, never from relocation ordinal * 16.
+					if (this.architecture === 'arm64') { continue; }
 
 					// Update import entries with PLT addresses
 					for (const lib of this.imports) {
@@ -4412,15 +4498,52 @@ export class DisassemblerEngine {
 	// Function Analysis
 	// ============================================================================
 
-	/**
-	 * v3.8.5: Resolve a PLT-family stub VA (`.plt`, `.plt.sec`, `.plt.got`) to its import
-	 * symbol name, or undefined if it is not a stub. Two paths:
-	 *   (1) direct hit in _pltSymbolMap (legacy `.plt` VA, keyed during .rela.plt parse), or
-	 *   (2) the IBT/CET `.plt.sec` thunk: endbr64 (F3 0F 1E FA) ; bnd jmp *off(%rip)
-	 *       (F2 FF 25 disp32) -- decode the rip-relative GOT slot and look it up in
-	 *       _gotSymbolMap. (Also handles the non-bnd `FF 25 disp32` form.)
-	 * x86/x64 only; returns undefined on other arches.
-	 */
+	/** Resolve AArch64 PLT entries after detail decoding is available. */
+	private async resolveAarch64PltImports(): Promise<void> {
+		if (this.architecture !== 'arm64' || this.fileInfo?.format !== 'ELF64' || !this.fileBuffer) { return; }
+		const sections = this.sections.filter(section => ['.plt', '.plt.sec', '.plt.got'].includes(section.name));
+		if (!sections.length) { return; }
+		this._pltSymbolMap.clear();
+		const symbolNames = new Set(this._gotSymbolMap.values());
+		for (const library of this.imports) {
+			for (const fn of library.functions) { if (symbolNames.has(fn.name)) { fn.address = 0; } }
+		}
+		const resolvedSlots = new Set<number>();
+		let decodeTruncated = false;
+		if (this.capstoneInitialized) {
+			for (const section of sections) {
+				if (section.rawAddress < 0 || section.rawAddress >= this.fileBuffer.length) { decodeTruncated = true; continue; }
+				const size = Math.min(section.rawSize, this.fileBuffer.length - section.rawAddress, 1024 * 1024);
+				if (size <= 0) { continue; }
+				try {
+					const instructions = await this.capstone.disassemble(this.fileBuffer.subarray(section.rawAddress, section.rawAddress + size), section.virtualAddress, Math.floor(size / 4));
+					decodeTruncated ||= size < section.rawSize || instructions.length * 4 !== size;
+					const bindings = resolveAarch64PltBindings(instructions, this._gotSymbolMap, id => this.capstone.getRegisterName(id));
+					for (const binding of bindings) {
+						this._pltSymbolMap.set(binding.address, binding.symbol);
+						this.functionSeeds.record(binding.address, { kind: 'import-thunk' });
+						resolvedSlots.add(binding.gotAddress);
+						for (const library of this.imports) {
+							const fn = library.functions.find(fn => fn.name === binding.symbol);
+							if (fn && fn.address === 0) { fn.address = binding.address; }
+						}
+					}
+				} catch { decodeTruncated = true; }
+			}
+		}
+		const unresolvedGotSlots = [...this._gotSymbolMap.keys()].filter(slot => !resolvedSlots.has(slot)).map(slot => `0x${slot.toString(16)}`);
+		const relocationsTruncated = this.fileInfo.pltResolution?.relocationsTruncated ?? false;
+		const relocationReadErrors = this.fileInfo.pltResolution?.relocationReadErrors ?? 0;
+		const ambiguousGotSlots = this.fileInfo.pltResolution?.ambiguousGotSlots ?? [];
+		this.fileInfo.pltResolution = {
+			version: 1,
+			status: !this.capstoneInitialized || decodeTruncated || relocationsTruncated || relocationReadErrors || unresolvedGotSlots.length || ambiguousGotSlots.length || !this._gotSymbolMap.size ? 'partial' : 'ok',
+			gotSlots: this._gotSymbolMap.size, resolvedStubs: this._pltSymbolMap.size, unresolvedGotSlots,
+			ambiguousGotSlots,
+			relocationsTruncated, relocationReadErrors, decodeTruncated, decoderAvailable: this.capstoneInitialized,
+		};
+	}
+
 	private resolveStubSymbol(stubVA: number): string | undefined {
 		const direct = this._pltSymbolMap.get(stubVA);
 		if (direct) { return direct.split('@')[0]; }
@@ -4661,7 +4784,7 @@ export class DisassemblerEngine {
 		});
 	}
 
-	async materializeFunction(address: number): Promise<Function | undefined> {
+	async materializeFunction(address: number, options?: FunctionMaterializationOptions): Promise<Function | undefined> {
 		// Safety: coerce BigInt from Capstone prebuilds to number (same as analyzeFunction).
 		if (typeof address === 'bigint') { address = Number(address); }
 		const fn = this.functions.get(address);
@@ -4674,7 +4797,10 @@ export class DisassemblerEngine {
 
 		const endAddress = typeof fn.endAddress === 'bigint' ? Number(fn.endAddress) : fn.endAddress;
 		const span = (endAddress - address) || this.maxFunctionSize;
-		const size = Math.min(span, this.maxFunctionSize);
+		const requestedMaxBytes = options?.maxBytes === undefined
+			? Number.POSITIVE_INFINITY
+			: Math.max(1, Math.trunc(options.maxBytes));
+		const size = Math.min(span, this.maxFunctionSize, requestedMaxBytes);
 
 		let insns: Instruction[] = [];
 		try {
@@ -4839,7 +4965,10 @@ export class DisassemblerEngine {
 	 * presentation-only accessor: a successful commit advances both engine and
 	 * persisted analysis generations.
 	 */
-	async materializeFunctionForAnalysis(address: number): Promise<FunctionAnalysisMaterialization> {
+	async materializeFunctionForAnalysis(
+		address: number,
+		options?: FunctionMaterializationOptions,
+	): Promise<FunctionAnalysisMaterialization> {
 		if (typeof address === 'bigint') { address = Number(address); }
 		const engineGenerationBefore = this.analysisGeneration;
 		const sessionGenerationBefore = this.sessionStore?.getAnalysisSession()?.generation;
@@ -4862,7 +4991,7 @@ export class DisassemblerEngine {
 			};
 		}
 
-		const materialized = await this.materializeFunction(address);
+		const materialized = await this.materializeFunction(address, options);
 		if (!materialized || materialized.instructions.length === 0) {
 			const bodyCompleteness = materialized ? this.getFunctionBodyCompleteness(address) : undefined;
 			return {
@@ -4949,7 +5078,7 @@ export class DisassemblerEngine {
 			this.functionSeeds.record(address, { kind: 'prologue' });
 		}
 
-		const instructions = await this.disassembleRange(address, this.maxFunctionSize);
+		let instructions = await this.disassembleRange(address, this.maxFunctionSize);
 
 		if (instructions.length === 0) {
 			const offset = this.addressToOffset(address);
@@ -4984,10 +5113,29 @@ export class DisassemblerEngine {
 		// normal indirect `jmp [rip+disp]` (jump tables / tail calls) stay byte-identical.
 		const addrForRegion = typeof address === 'bigint' ? Number(address) : address;
 		const isPltStub = this.isPltSecAddress(addrForRegion);
+		const firstInstruction = instructions[0];
+		const entryTransferTarget = this.functionSeeds.get(addrForRegion).some(seed => seed.kind === 'entry') &&
+			firstInstruction?.isJump === true && !firstInstruction.isConditional &&
+			firstInstruction.targetAddress !== undefined &&
+			Number(firstInstruction.targetAddress) !== addrForRegion &&
+			this.isAnalyzableFunctionAddress(Number(firstInstruction.targetAddress))
+				? Number(firstInstruction.targetAddress)
+				: undefined;
+		if (entryTransferTarget !== undefined) {
+			// An independently established image entry that immediately transfers control
+			// is a loader/linker trampoline, not ownership evidence for the destination's
+			// whole body. Preserve the one-instruction entry and promote the destination.
+			this.functionSeeds.record(entryTransferTarget, {
+				kind: 'validated-tail-call',
+				sourceAddress: addrForRegion,
+			});
+		} else {
+			instructions = await this.expandArm64ReachableBranchIslands(instructions, addrForRegion);
+		}
 
-		let endIdx = instructions.length;
+		let endIdx = entryTransferTarget === undefined ? instructions.length : 1;
 		let lastRetIdx = -1;
-		for (let i = 0; i < instructions.length; i++) {
+		for (let i = 0; entryTransferTarget === undefined && i < instructions.length; i++) {
 			// v3.8.5: `.plt.sec` extent clamp (see above). Runs BEFORE the trap-handler-gate
 			// skip so a stub's `bnd jmp` terminator wins even when the gate would otherwise
 			// keep sweeping through the section's shared `hlt` padding.
@@ -5032,9 +5180,9 @@ export class DisassemblerEngine {
 						if (next.bytes.length >= 4) {
 							const nextWord = next.bytes.readUInt32LE(0);
 							const isARM64Prolog =
-								(nextWord & 0xFC407FFF) === 0xA8007BFD ||  // STP x29, x30, [sp, #off]
+								this.isArm64StackFramePrologueWord(nextWord) ||
 								nextWord === 0xD503233F ||                  // PACIASP
-								((nextWord & 0xFF0003FF) === 0xD10003FF && ((nextWord >> 5) & 0x1F) === 31); // SUB SP, SP, #N
+								(((nextWord & 0xFF0003FF) >>> 0) === 0xD10003FF && ((nextWord >> 5) & 0x1F) === 31); // SUB SP, SP, #N
 							const isARM32Prolog =
 								(nextWord & 0xFFFF0000) === 0xE92D0000 && (nextWord & (1 << 14)) !== 0; // PUSH {..., lr}
 							const isNop =
@@ -5100,10 +5248,12 @@ export class DisassemblerEngine {
 		let internalBlockTargets = new Set<number>();
 		let funcInstructions = instructions.slice(0, endIdx);
 		const useReachableBlockOwnership =
-			(this.architecture === 'x86' || this.architecture === 'x64') &&
-			this.getPdataEntries().length === 0 &&
+			!isPltStub &&
+			entryTransferTarget === undefined &&
 			this.fileInfo?.isRelocatable !== true &&
-			!this.fileInfo?.format.startsWith('ELF');
+			(((this.architecture === 'x86' || this.architecture === 'x64') &&
+				this.getPdataEntries().length === 0 && !this.fileInfo?.format.startsWith('ELF')) ||
+				(this.architecture === 'arm64' && this.fileInfo?.format === 'ELF64'));
 		if (useReachableBlockOwnership) {
 			const reachable = this.selectReachableFunctionInstructions(instructions, Number(address));
 			if (reachable.instructions.length > 0) {
@@ -5206,7 +5356,8 @@ export class DisassemblerEngine {
 					inst.targetAddress !== address &&
 					!interiorToSelf &&
 					!internalBlockTargets.has(inst.targetAddress) &&
-					this.hasValidatedTailEntryPattern(inst.targetAddress);
+					(this.functionSeeds.isStrong(inst.targetAddress) ||
+						this.hasValidatedTailEntryPattern(inst.targetAddress));
 				if (validatedTailCall) {
 					this.functionSeeds.record(inst.targetAddress, {
 						kind: 'validated-tail-call',
@@ -5243,7 +5394,7 @@ export class DisassemblerEngine {
 
 		const conditionalTargets = new Set<number>();
 		for (const instruction of instructions) {
-			if (instruction.isJump && instruction.isConditional && instruction.targetAddress !== undefined &&
+			if (this.architecture !== 'arm64' && instruction.isJump && instruction.isConditional && instruction.targetAddress !== undefined &&
 				indexByAddress.has(Number(instruction.targetAddress))) {
 				conditionalTargets.add(Number(instruction.targetAddress));
 			}
@@ -5265,7 +5416,7 @@ export class DisassemblerEngine {
 				if (visited.has(address)) {
 					break;
 				}
-				if (address !== leader && address !== functionStart && this.functionSeeds.isStrong(address)) {
+				if ((address !== leader || this.architecture === 'arm64') && address !== functionStart && this.functionSeeds.isStrong(address)) {
 					break;
 				}
 				if (!this.trapHandlerGate && instruction.mnemonic.toLowerCase() === 'int3') {
@@ -5280,8 +5431,10 @@ export class DisassemblerEngine {
 				if (instruction.isJump) {
 					const target = instruction.targetAddress === undefined ? undefined : Number(instruction.targetAddress);
 					if (target !== undefined && indexByAddress.has(target)) {
-						const internalTarget = instruction.isConditional || conditionalTargets.has(target) ||
-							!this.hasValidatedTailEntryPattern(target);
+					const shortEntryContinuation = this.functionSeeds.get(functionStart).some(seed => seed.kind === 'entry') &&
+						address < functionStart + 16 && target > functionStart && target <= functionStart + 64;
+					const internalTarget = instruction.isConditional || conditionalTargets.has(target) ||
+						shortEntryContinuation || !this.hasValidatedTailEntryPattern(target);
 						if (internalTarget && !queued.has(target)) {
 							queued.add(target);
 							pending.push(target);
@@ -5309,6 +5462,59 @@ export class DisassemblerEngine {
 				.sort((left, right) => Number(left.address) - Number(right.address)),
 			internalBlockTargets,
 		};
+	}
+
+	/**
+	 * Capstone's linear decode stops at the first invalid AArch64 word. A live branch may
+	 * legitimately jump over inline data or anti-disassembly bytes, so seed bounded decode
+	 * islands from reachable branch destinations before CFG ownership is selected.
+	 */
+	private async expandArm64ReachableBranchIslands(
+		instructions: Instruction[],
+		functionStart: number,
+	): Promise<Instruction[]> {
+		if (this.architecture !== 'arm64' || this.fileInfo?.format !== 'ELF64' || instructions.length === 0) {
+			return instructions;
+		}
+		const upperBound = functionStart + this.maxFunctionSize;
+		const byAddress = new Map<number, Instruction>();
+		for (const instruction of instructions) {
+			byAddress.set(Number(instruction.address), instruction);
+		}
+		const pending: number[] = [];
+		const queued = new Set<number>();
+		const queueTargets = (decoded: readonly Instruction[]) => {
+			for (const instruction of decoded) {
+				if (!instruction.isJump || instruction.targetAddress === undefined) { continue; }
+				const target = Number(instruction.targetAddress);
+				if (target < functionStart || target >= upperBound || byAddress.has(target) || queued.has(target) ||
+					this.functionSeeds.isStrong(target) || !this.isAnalyzableFunctionAddress(target)) {
+					continue;
+				}
+				queued.add(target);
+				pending.push(target);
+			}
+		};
+		queueTargets(instructions);
+		let islands = 0;
+		while (pending.length > 0 && islands < 256 && byAddress.size < 100000) {
+			const target = pending.shift()!;
+			if (byAddress.has(target) || this.functionSeeds.isStrong(target)) { continue; }
+			const byteBudget = upperBound - target;
+			if (byteBudget <= 0) { continue; }
+			const instructionBudget = Math.min(100000 - byAddress.size, Math.ceil(byteBudget / 4));
+			const decoded = await this.disassembleRange(target, byteBudget, instructionBudget);
+			islands++;
+			for (const instruction of decoded) {
+				const instructionAddress = Number(instruction.address);
+				if (instructionAddress < functionStart || instructionAddress >= upperBound || byAddress.has(instructionAddress)) {
+					continue;
+				}
+				byAddress.set(instructionAddress, instruction);
+			}
+			queueTargets(decoded);
+		}
+		return [...byAddress.values()].sort((left, right) => Number(left.address) - Number(right.address));
 	}
 
 	/**
@@ -5375,12 +5581,37 @@ export class DisassemblerEngine {
 		}
 		const word = remaining.readUInt32LE(0);
 		if (this.architecture === 'arm64') {
-			return (word & 0xfc407fff) === 0xa8007bfd || word === 0xd503233f;
+			return this.isArm64StackFramePrologueWord(word) ||
+				((word & 0xff0003ff) === 0xd10003ff && ((word >> 5) & 0x1f) === 31) ||
+				word === 0xd503233f;
 		}
 		if (this.architecture === 'arm') {
 			return (word & 0xffff0000) === 0xe92d0000 && (word & (1 << 14)) !== 0;
 		}
 		return false;
+	}
+
+	private isArm64StackFramePrologueWord(word: number): boolean {
+		// STP Xt1, Xt2, [SP, #-imm]! saving a conventional callee-saved pair.
+		if (((word & 0xffc003e0) >>> 0) !== 0xa98003e0) {
+			return false;
+		}
+		const first = word & 0x1f;
+		const second = (word >>> 10) & 0x1f;
+		return first >= 19 && first <= 29 && second >= 19 && second <= 30;
+	}
+
+	private isInlineEntryBranchTarget(address: number): boolean {
+		const entryPoint = this.fileInfo?.entryPoint;
+		if (entryPoint === undefined || address <= entryPoint || address > entryPoint + 64) {
+			return false;
+		}
+		const entry = this.functions.get(entryPoint);
+		return entry !== undefined &&
+			entry.instructions.some(instruction => Number(instruction.address) === address) &&
+			entry.instructions.some(instruction => instruction.isJump &&
+				!instruction.isConditional && Number(instruction.targetAddress) === address &&
+				Number(instruction.address) < entryPoint + 16);
 	}
 
 	private hasValidatedTailEntryPattern(address: number): boolean {
@@ -5708,6 +5939,15 @@ export class DisassemblerEngine {
 				preferredNames.set(anchor.address, anchor.name);
 			}
 		}
+		// Independently proven starts outside unwind ranges (direct-call targets and
+		// padding-delimited leaves) are authoritative PE leaf boundaries too. Without
+		// this, the overlap sweep can delete a real leaf merely because an earlier
+		// heuristic decode ran through its first few bytes.
+		for (const address of this.functionSeeds.strongAddresses()) {
+			if (!findRangeContaining(address) && !protectedOutsideRanges.includes(address)) {
+				protectedOutsideRanges.push(address);
+			}
+		}
 		protectedOutsideRanges.sort((a, b) => a - b);
 		const protectedStarts = new Set(protectedOutsideRanges);
 		const authoritativeStarts = Array.from(new Set([...beginsArr, ...protectedOutsideRanges]))
@@ -6006,7 +6246,9 @@ export class DisassemblerEngine {
 	 * stronger chunk-aware boundary model and are intentionally left untouched.
 	 */
 	private reconcileFunctionsWithStrongSeeds(): void {
-		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable || this.fileInfo?.format.startsWith('ELF')) {
+		const fixedWidthElf = this.architecture === 'arm64' && this.fileInfo?.format === 'ELF64';
+		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable ||
+			(this.fileInfo?.format.startsWith('ELF') && !fixedWidthElf)) {
 			return;
 		}
 		const starts = this.functionSeeds.strongAddresses().filter(address => this.functions.has(address));
@@ -6217,7 +6459,7 @@ export class DisassemblerEngine {
 		let maxEnd = Number.NEGATIVE_INFINITY;
 		const dropped = new Set<number>();
 		for (const fn of sorted) {
-			if (fn.address < maxEnd && fn.callers.length === 0) {
+			if (fn.address < maxEnd && fn.callers.length === 0 && !this.functionSeeds.isStrong(fn.address)) {
 				this.functions.delete(fn.address);
 				dropped.add(fn.address);
 				continue;
@@ -6464,9 +6706,11 @@ export class DisassemblerEngine {
 					// Check: opc=10, fixed=101, V=0, L=0(store), Rt2=30, Rn=31(SP), Rt=29
 					// Mask out: mode bits[25:23], imm7 bits[21:15]
 					// Mask: 0xFC407FFF  Value: 0xA8007BFD
-					if ((word & 0xFC407FFF) === 0xA8007BFD) {
+					if (this.isArm64StackFramePrologueWord(word)) {
 						// STP x29, x30, [sp, #off] — classic ARM64 prolog
 						const addr = this.sectionOffsetToAddress(off, section);
+						if (this.isInlineEntryBranchTarget(addr)) { continue; }
+						this.functionSeeds.record(addr, { kind: 'fixed-width-prologue' });
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
 						}
@@ -6476,8 +6720,10 @@ export class DisassemblerEngine {
 					// Pattern 2: SUB SP, SP, #imm (frame setup without STP)
 					// Encoding: 1101_0001_00ii_iiii_iiii_ii11_111x_xxxx
 					// Check: bits[31]=1(64-bit), [30]=1(SUB), [29]=0, [28:24]=10001, Rn=SP(31), Rd=SP(31)
-					if ((word & 0xFF0003FF) === 0xD10003FF && ((word >> 5) & 0x1F) === 31) {
+					if (((word & 0xFF0003FF) >>> 0) === 0xD10003FF && ((word >> 5) & 0x1F) === 31) {
 						const addr = this.sectionOffsetToAddress(off, section);
+						if (this.isInlineEntryBranchTarget(addr)) { continue; }
+						this.functionSeeds.record(addr, { kind: 'fixed-width-prologue' });
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
 						}
@@ -6488,6 +6734,8 @@ export class DisassemblerEngine {
 					// Encoding: 0xD503233F
 					if (word === 0xD503233F) {
 						const addr = this.sectionOffsetToAddress(off, section);
+						if (this.isInlineEntryBranchTarget(addr)) { continue; }
+						this.functionSeeds.record(addr, { kind: 'fixed-width-prologue' });
 						if (addr > 0 && !this.functions.has(addr)) {
 							await this.analyzeFunction(addr);
 						}
@@ -6661,6 +6909,130 @@ export class DisassemblerEngine {
 		return this.fileInfo;
 	}
 
+	private async discoverPaddingDelimitedLeafFunctions(): Promise<void> {
+		if (!this.fileBuffer || this.architecture !== 'x64' || this.fileInfo?.format !== 'PE64') {
+			return;
+		}
+		const pdata = this.getPdataEntries().map(entry => ({
+			...entry,
+			beginAddress: entry.beginAddress + this.baseAddress,
+			endAddress: entry.endAddress + this.baseAddress,
+		}));
+		const insidePdata = (address: number) => pdata.some(entry =>
+			address >= entry.beginAddress && address < entry.endAddress);
+		for (const section of this.sections) {
+			if (!section.isCode && !section.isExecutable) { continue; }
+			const rawStart = Math.max(0, section.rawAddress);
+			const rawEnd = Math.min(this.fileBuffer.length, section.rawAddress + section.rawSize);
+			let cursor = rawStart;
+			while (cursor < rawEnd && this.functions.size < this.maxStubFunctions) {
+				if (this.fileBuffer[cursor] !== 0xcc) { cursor++; continue; }
+				const paddingStart = cursor;
+				while (cursor < rawEnd && this.fileBuffer[cursor] === 0xcc) { cursor++; }
+				if (cursor - paddingStart < 3 || cursor >= rawEnd) { continue; }
+				const candidate = this.sectionOffsetToAddress(cursor, section);
+				if (candidate <= 0 || (candidate & 0xf) !== 0 || this.functions.has(candidate) || insidePdata(candidate)) {
+					continue;
+				}
+				const nextPdata = pdata
+					.map(entry => entry.beginAddress)
+					.filter(address => address > candidate)
+					.reduce((nearest, address) => Math.min(nearest, address), Number.POSITIVE_INFINITY);
+				const sectionEndAddress = this.sectionOffsetToAddress(rawEnd, section);
+				const byteBudget = Math.min(this.maxFunctionSize,
+					(Number.isFinite(nextPdata) ? nextPdata : sectionEndAddress) - candidate);
+				if (byteBudget <= 0) { continue; }
+				const decoded = await this.disassembleRange(candidate, byteBudget, Math.min(4096, byteBudget));
+				let terminalIndex = -1;
+				for (let index = 0; index < decoded.length; index++) {
+					const instruction = decoded[index];
+					if (!instruction.isRet) { continue; }
+					const terminalEnd = Number(instruction.address) + Number(instruction.size);
+					const terminalOffset = this.addressToOffset(terminalEnd);
+					if (terminalOffset < 0 || terminalOffset + 3 > rawEnd ||
+						this.fileBuffer[terminalOffset] !== 0xcc || this.fileBuffer[terminalOffset + 1] !== 0xcc ||
+						this.fileBuffer[terminalOffset + 2] !== 0xcc) {
+						continue;
+					}
+					const contiguous = decoded.slice(0, index).every((current, currentIndex) =>
+						Number(current.address) + Number(current.size) === Number(decoded[currentIndex + 1].address));
+					const externalJump = decoded.slice(0, index + 1).some(current => current.isJump &&
+						current.targetAddress !== undefined &&
+						(Number(current.targetAddress) < candidate || Number(current.targetAddress) >= terminalEnd));
+					if (contiguous && !externalJump) {
+						terminalIndex = index;
+						break;
+					}
+				}
+				if (terminalIndex < 0) { continue; }
+				this.functionSeeds.record(candidate, {
+					kind: 'padding-delimited-leaf',
+					sourceAddress: this.sectionOffsetToAddress(paddingStart, section),
+				});
+				await this.analyzeFunction(candidate);
+			}
+		}
+	}
+
+	private async discoverPeDirectJumpThunkRuns(): Promise<void> {
+		if (!this.fileBuffer || (this.architecture !== 'x64' && this.architecture !== 'x86') ||
+			this.fileInfo?.format.startsWith('PE') !== true) {
+			return;
+		}
+		for (const section of this.sections) {
+			if (!section.isCode && !section.isExecutable) { continue; }
+			const rawEnd = Math.min(this.fileBuffer.length, section.rawAddress + section.rawSize);
+			let cursor = Math.max(0, section.rawAddress);
+			while (cursor + 5 <= rawEnd && this.functions.size < this.maxStubFunctions) {
+				const run: Array<{ offset: number; address: number; target: number }> = [];
+				let scan = cursor;
+				while (scan + 5 <= rawEnd && this.fileBuffer[scan] === 0xe9) {
+					const address = this.sectionOffsetToAddress(scan, section);
+					const target = address + 5 + this.fileBuffer.readInt32LE(scan + 1);
+					if (address <= 0 || !this.isAnalyzableFunctionAddress(target)) { break; }
+					run.push({ offset: scan, address, target });
+					scan += 5;
+				}
+				if (run.length < 4) { cursor++; continue; }
+				for (const candidate of run) {
+					const [instruction] = await this.disassembleRange(candidate.address, 5, 1);
+					if (!instruction || instruction.size !== 5 || !instruction.isJump || instruction.isConditional ||
+						instruction.targetAddress !== candidate.target) {
+						continue;
+					}
+					this.functionSeeds.record(candidate.address, {
+						kind: 'linker-thunk', sourceAddress: candidate.address,
+					});
+					const existing = this.functions.get(candidate.address);
+					const fn: Function = existing ?? {
+						address: candidate.address,
+						name: `sub_${candidate.address.toString(16).toUpperCase()}`,
+						size: 5,
+						endAddress: candidate.address + 5,
+						instructions: [], callers: [], callees: [],
+					};
+					fn.size = 5;
+					fn.endAddress = candidate.address + 5;
+					fn.instructions = [instruction];
+					fn.bodyCompleteness = Object.freeze({
+						state: 'complete',
+						authoritativeStart: candidate.address,
+						authoritativeEndExclusive: candidate.address + 5,
+						decodedEndExclusive: candidate.address + 5,
+						semanticEndExclusive: candidate.address + 5,
+						boundaryReached: true,
+						stopReason: 'function-end',
+						byteCoverage: 1,
+					});
+					this.functions.set(candidate.address, fn);
+					this.unmaterializedStubs.delete(candidate.address);
+					this.addXRef({ from: candidate.address, to: candidate.target, type: 'jump' });
+				}
+				cursor = scan;
+			}
+		}
+	}
+
 	getLastAnalysisDelta(): Readonly<{ added: number; removed: number; netChange: number }> {
 		return this.lastAnalysisDelta;
 	}
@@ -6700,7 +7072,7 @@ export class DisassemblerEngine {
 			baseAddress: this.baseAddress,
 			architecture: this.architecture,
 			limits: { maxFunctions: this.maxFunctions, maxFunctionSize: this.maxFunctionSize },
-			...(this.fileInfo ? { fileInfo: { ...this.fileInfo } } : {}),
+			...(this.fileInfo ? { fileInfo: cloneFileInfo(this.fileInfo) } : {}),
 			sections: this.sections.map(section => ({ ...section })),
 			imports: this.imports.map(library => ({ ...library, functions: library.functions.map(fn => ({ ...fn })) })),
 			exports: this.exports.map(entry => ({ ...entry })),
@@ -6739,6 +7111,7 @@ export class DisassemblerEngine {
 
 	importAnalysisSnapshot(snapshot: AnalysisEngineSnapshotV1): void {
 		if (snapshot.schemaVersion !== 1) { throw new Error(`Unsupported analysis snapshot schema: ${String((snapshot as any).schemaVersion)}`); }
+		assertSnapshotPltVersion(snapshot);
 		if (!this.fileBuffer) { throw new Error('Load the target before importing an analysis snapshot'); }
 		const currentSha256 = crypto.createHash('sha256').update(this.fileBuffer).digest('hex');
 		if (snapshot.target.fileSha256 !== currentSha256 || snapshot.target.fileSize !== this.fileBuffer.length) {
@@ -6749,7 +7122,7 @@ export class DisassemblerEngine {
 		this.architecture = snapshot.architecture;
 		this.maxFunctions = snapshot.limits.maxFunctions;
 		this.maxFunctionSize = snapshot.limits.maxFunctionSize;
-		this.fileInfo = snapshot.fileInfo ? { ...snapshot.fileInfo } : undefined;
+		this.fileInfo = snapshot.fileInfo ? cloneFileInfo(snapshot.fileInfo) : undefined;
 		this.sections = snapshot.sections.map(section => ({ ...section }));
 		this.imports = snapshot.imports.map(library => ({ ...library, functions: library.functions.map(fn => ({ ...fn })) }));
 		this.exports = snapshot.exports.map(entry => ({ ...entry }));
@@ -6794,12 +7167,16 @@ export class DisassemblerEngine {
 	}
 
 	async loadAnalysisSnapshot(filePath: string, snapshot: AnalysisEngineSnapshotV1): Promise<void> {
+		assertSnapshotPltVersion(snapshot);
 		if (!fs.existsSync(filePath)) { throw new Error(`Snapshot target does not exist: ${filePath}`); }
 		const stats = fs.statSync(filePath);
 		const maxFileSize = 512 * 1024 * 1024;
 		if (stats.size > maxFileSize) { throw new Error(`Snapshot target exceeds ${maxFileSize} bytes`); }
+		const fileBuffer = fs.readFileSync(filePath);
+		const unsupportedFormat = detectUnsupportedNativeFormat(fileBuffer);
+		if (unsupportedFormat) { throw new UnsupportedNativeInputError(unsupportedFormat); }
 		this.currentFile = filePath;
-		this.fileBuffer = fs.readFileSync(filePath);
+		this.fileBuffer = fileBuffer;
 		try {
 			this.sessionStore?.dispose();
 			this.sessionStore = new SessionStore(filePath);
@@ -6846,6 +7223,14 @@ export class DisassemblerEngine {
 	}
 
 	getFunctionBodyCompleteness(address: number): Readonly<FunctionBodyCompleteness> | undefined {
+		const result = this.peekFunctionBodyCompleteness(address);
+		const fn = this.functions.get(address);
+		if (fn && result && result.state !== 'lazy' && !fn.bodyCompleteness) { fn.bodyCompleteness = result; }
+		return result;
+	}
+
+	/** Inspect accepted instructions without materializing or caching a derived assessment. */
+	peekFunctionBodyCompleteness(address: number): Readonly<FunctionBodyCompleteness> | undefined {
 		const fn = this.functions.get(address);
 		if (!fn) { return undefined; }
 		if (fn.bodyCompleteness) { return fn.bodyCompleteness; }
@@ -6861,8 +7246,7 @@ export class DisassemblerEngine {
 				byteCoverage: 0,
 			});
 		}
-		fn.bodyCompleteness = this.assessFunctionBodyCompleteness(fn);
-		return fn.bodyCompleteness;
+		return this.assessFunctionBodyCompleteness(fn);
 	}
 
 	getSections(): Section[] {
@@ -7196,6 +7580,30 @@ export class DisassemblerEngine {
 		return this.functionSeeds.get(address);
 	}
 
+	resolveKnownLinkerThunk(address: number, maxHops = 32): {
+		target: number;
+		chain: ReadonlyArray<{ from: number; to: number }>;
+		complete: boolean;
+	} {
+		const chain: Array<{ from: number; to: number }> = [];
+		const visited = new Set<number>();
+		let current = address;
+		for (let hop = 0; hop < maxHops; hop++) {
+			if (visited.has(current)) { return { target: current, chain: Object.freeze(chain), complete: false }; }
+			visited.add(current);
+			const isLinkerThunk = this.functionSeeds.get(current).some(seed => seed.kind === 'linker-thunk');
+			const fn = this.functions.get(current);
+			const instruction = fn?.instructions.length === 1 ? fn.instructions[0] : undefined;
+			if (!isLinkerThunk || !instruction?.isJump || instruction.isConditional || instruction.targetAddress === undefined) {
+				return { target: current, chain: Object.freeze(chain), complete: this.functions.has(current) };
+			}
+			const target = Number(instruction.targetAddress);
+			chain.push({ from: current, to: target });
+			current = target;
+		}
+		return { target: current, chain: Object.freeze(chain), complete: false };
+	}
+
 	getStrings(): StringReference[] {
 		return Array.from(this.strings.values()).sort((a, b) => a.address - b.address);
 	}
@@ -7436,15 +7844,26 @@ export class DisassemblerEngine {
 		try {
 			const buf = this.fileBuffer.subarray(offset, endOffset);
 			const insns = await this.capstone.disassemble(buf, startAddr, 1000);
+			const materializedBoundary = assessInstructionBoundary(targetAddress, insns);
+			if (materializedBoundary.status === 'aligned') { return { aligned: true }; }
+			if (materializedBoundary.status === 'mid-instruction') {
+				return { aligned: false, suggestedAddress: materializedBoundary.suggestedAddress };
+			}
 
+			let previousInstruction: { address: number; size: number } | undefined;
 			for (const insn of insns) {
 				if (insn.address === targetAddress) {
 					return { aligned: true };
 				}
 				if (insn.address > targetAddress) {
 					// Previous instruction spans over target — mid-instruction
-					return { aligned: false, suggestedAddress: insn.address };
+					const containingStart = previousInstruction &&
+						previousInstruction.address + previousInstruction.size > targetAddress
+						? previousInstruction.address
+						: insn.address;
+					return { aligned: false, suggestedAddress: containingStart };
 				}
+				previousInstruction = insn;
 			}
 		} catch {
 			// Disassembly failed — assume aligned
@@ -7486,6 +7905,11 @@ export class DisassemblerEngine {
 	 */
 	getBufferSize(): number {
 		return this.fileBuffer?.length ?? 0;
+	}
+
+	/** Recompute because legacy byte views can mutate the backing image without a revision event. */
+	getAnalysisImageSha256(): string | undefined {
+		return this.fileBuffer ? crypto.createHash('sha256').update(this.fileBuffer).digest('hex') : undefined;
 	}
 
 	/**

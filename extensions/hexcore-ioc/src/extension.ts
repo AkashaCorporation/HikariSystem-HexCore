@@ -345,11 +345,21 @@ function buildCancelledResult(
 		filePath,
 		fileSize,
 		storageBackend: 'memory',
-		summary: {
+			summary: {
 			totalIndicators: 0,
 			uniqueIndicators: 0,
 			categoryCounts,
-			truncated: false,
+				truncated: false,
+				validation: {
+					scope: 'extractor',
+					rawPatternMatches: 0,
+					acceptedUnique: 0,
+					rejectedValidator: 0,
+					rejectedPrintableContext: 0,
+					suppressedPrivate: 0,
+					suppressedDuplicate: 0,
+					rejectedTotal: 0,
+				},
 		},
 		indicators,
 		reportMarkdown: `# IOC Extraction Cancelled\n\nExtraction was cancelled by the user.\n`,

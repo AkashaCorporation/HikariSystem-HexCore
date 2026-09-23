@@ -17,7 +17,29 @@ function installVscodeShim(): void {
 }
 
 let phase = 'waiting-request';
-const send = (message: unknown) => { try { process.send?.(message); } catch { /* parent exited */ } };
+const send = (message: unknown) => { try { if (process.connected) { process.send?.(message, () => undefined); } } catch { /* parent exited */ } };
+const sendTerminal = (message: unknown): Promise<boolean> => new Promise(resolve => {
+	try {
+		if (!process.connected || !process.send) { resolve(false); return; }
+		process.send(message, (error: Error | null) => resolve(!error));
+	} catch { resolve(false); }
+});
+const sendTerminalAndHold = async (message: unknown): Promise<boolean> => {
+	// `process.once('message')` removes the only IPC listener after the request.
+	// Without another referenced handle, Node may exit after the send callback
+	// (locally queued) but before Electron's parent observes the message. Keep the
+	// child alive until the parent validates the snapshot and kills it. The timer
+	// is only a leak guard for a parent that disappears between send and receipt.
+	const terminalHold = setTimeout(() => {
+		process.exit(process.exitCode ?? 0);
+	}, 10_000);
+	const sent = await sendTerminal(message);
+	if (!sent) {
+		clearTimeout(terminalHold);
+		process.exitCode = 1;
+	}
+	return sent;
+};
 const setPhase = (next: string) => {
 	phase = next;
 	send({ type: 'phase', phase, at: new Date().toISOString(), pid: process.pid });
@@ -59,19 +81,22 @@ process.once('message', async (request: IsolatedAnalyzeAllRequest) => {
 		try { engine.dispose(); } catch { /* process exit is the final boundary */ }
 		engine = undefined;
 		setPhase('reply');
-		send({
+		clearInterval(heartbeat);
+		await sendTerminalAndHold({
 			type: 'result', functionNetChange, snapshotPath: request.snapshotPath,
 			snapshotSha256, snapshotBytes: compressed.length, snapshotUncompressedBytes: serialized.length,
 		});
-		clearInterval(heartbeat);
-		setTimeout(() => process.exit(0), 10);
+		// Keep IPC referenced until the parent validates the snapshot and kills us.
+		// A send callback only means locally queued; immediate disconnect can race
+		// Electron's parent-side message delivery.
 	} catch (error: unknown) {
 		clearInterval(heartbeat);
 		try { engine?.dispose(); } catch { /* process exit closes native state */ }
-		send({
+		await sendTerminalAndHold({
 			type: 'error', phase,
 			error: error instanceof Error ? `${error.message}\n${error.stack ?? ''}` : String(error),
 		});
-		setTimeout(() => process.exit(1), 10);
+		process.exitCode = 1;
+		// Parent receives the typed error and owns termination/watchdog cleanup.
 	}
 });

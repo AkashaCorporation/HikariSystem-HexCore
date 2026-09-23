@@ -25,10 +25,12 @@ import {
 	type TypeBindingScope,
 	type TypeBindingSpec,
 } from './semanticModel';
-import { TypedReferenceGraph, type ReferenceGraphSnapshot } from './typedReferenceGraph';
+import { TypedReferenceGraph, type ReferenceGraphSnapshot, type CanonicalReferenceEdge, type ReferenceEdgeVersion, type ReferenceStoredConflict } from './typedReferenceGraph';
 import {
 	WholeProgramPropagationStore,
 	type PropagationStoreSnapshot,
+	type FunctionPropagationSummary,
+	type PropagationDirtyRecord,
 } from './wholeProgramPropagation';
 
 export const HXDB_SEMANTIC_SCHEMA_VERSION = SEMANTIC_SCHEMA_VERSION;
@@ -87,6 +89,21 @@ export interface SemanticSnapshot {
 	referenceGraph: ReferenceGraphSnapshot;
 	wholeProgramPropagation: PropagationStoreSnapshot;
 }
+
+export interface SemanticQueryData {
+	types: CanonicalSemanticType[];
+	prototypes: CanonicalFunctionPrototype[];
+	bindings: CanonicalTypeBinding[];
+	references: CanonicalReferenceEdge[];
+	referenceVersions: ReferenceEdgeVersion[];
+	referenceConflicts: ReferenceStoredConflict[];
+	summaries: FunctionPropagationSummary[];
+	dirty: PropagationDirtyRecord[];
+	conflicts: SemanticStoredConflict[];
+	generations: SemanticStoredGeneration[];
+}
+
+export interface SemanticQueryReadError { collection: keyof SemanticQueryData; code: 'read-failed' | 'budget-exceeded'; detail: string }
 
 export interface SemanticStoredConflict {
 	conflictHash: string;
@@ -1136,6 +1153,52 @@ export class SemanticStore {
 			referenceGraph: this.referenceGraph.exportSnapshot(),
 			wholeProgramPropagation: this.wholeProgramPropagation.exportSnapshot(),
 		};
+	}
+
+	/** Internal adapter: bound allocation before hydrating the public read-only view. */
+	readQueryData(maxRows: number, maxBytes: number): { data: SemanticQueryData; errors: SemanticQueryReadError[] } {
+		const errors: SemanticQueryReadError[] = [];
+		let rows = 0;
+		let bytes = 0;
+		const read = <T>(collection: keyof SemanticQueryData, table: string, columns: string, targetColumn: string, load: () => T[]): T[] => {
+			try {
+				const measure = this.db.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(length(CAST(${columns} AS BLOB))),0) AS bytes FROM ${table} WHERE ${targetColumn} = ?`).get(this.targetIdentity) as { count: number; bytes: number };
+				if (rows + measure.count > maxRows || bytes + measure.bytes + measure.count * 512 > maxBytes) {
+					errors.push({ collection, code: 'budget-exceeded', detail: 'Semantic snapshot row/byte budget exceeded' }); return [];
+				}
+				const records = load();
+				const actualBytes = Buffer.byteLength(canonicalSerialize(records));
+				if (bytes + actualBytes > maxBytes) { errors.push({ collection, code: 'budget-exceeded', detail: 'Serialized semantic snapshot byte budget exceeded' }); return []; }
+				rows += measure.count; bytes += actualBytes;
+				return records;
+			} catch (error) { errors.push({ collection, code: 'read-failed', detail: error instanceof Error ? error.message : String(error) }); return []; }
+		};
+		return { data: {
+			types: read('types', 'types', 'record_json', 'target_identity', () => this.listTypes()),
+			prototypes: read('prototypes', 'function_prototypes', 'record_json', 'target_identity', () => this.listPrototypes()),
+			bindings: read('bindings', 'type_bindings', 'record_json', 'target_identity', () => this.findTypeBindings()),
+			references: read('references', 'reference_edges', 'record_json', 'analysis_target_identity', () => {
+				const edges = this.referenceGraph.query({ direction: 'both', includeInvalidated: false });
+				if (edges.some(edge => edge.analysisTargetIdentity !== this.targetIdentity)) { throw new Error('Reference record target mismatch'); }
+				return edges;
+			}),
+			referenceVersions: read('referenceVersions', 'reference_edge_versions', 'record_json', 'analysis_target_identity', () => this.referenceGraph.listVersions()),
+			referenceConflicts: read('referenceConflicts', 'reference_edge_conflicts', "winner_json || loser_json || reason", 'analysis_target_identity', () => this.referenceGraph.listConflicts()),
+			summaries: read('summaries', 'propagation_summaries', 'record_json', 'analysis_target_identity', () => {
+				const summaries = this.wholeProgramPropagation.listSummaries();
+				for (const summary of summaries) {
+					if (summary.analysisTargetIdentity !== this.targetIdentity || summary.schemaVersion !== 1 ||
+						!Number.isSafeInteger(summary.generation) || summary.generation < 0 || typeof summary.functionIdentity !== 'string' ||
+						![summary.calls, summary.globalEffects, summary.fieldAccesses, summary.ownershipEffects, summary.barriers, summary.conflicts].every(Array.isArray)) {
+						throw new Error('Invalid or wrong-target propagation summary');
+					}
+				}
+				return summaries;
+			}),
+			dirty: read('dirty', 'propagation_dirty', "function_identity || reason", 'analysis_target_identity', () => this.wholeProgramPropagation.listDirty()),
+			conflicts: read('conflicts', 'fact_conflicts', "winner_json || loser_json || reason", 'target_identity', () => this.listConflicts()),
+			generations: read('generations', 'fact_generations', "generation_hash || transaction_hash || fact_key", 'target_identity', () => this.listGenerations()),
+		}, errors };
 	}
 
 	exportCanonical(): string {

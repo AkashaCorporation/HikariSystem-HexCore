@@ -9,7 +9,10 @@ import * as path from 'path';
 import * as v8 from 'v8';
 import * as zlib from 'zlib';
 import * as vscode from 'vscode';
-import { encodeX86PcRelativeDataDisplacement } from './elfTextRelocation';
+import { inspectHelixIrInput, type HelixIrInputContract } from './helixIrInputContract';
+import { pipelineInputPartialReasons } from './pipelineArtifactInputs';
+import { prepareLiftRelocations } from './liftRelocationPreparation';
+import { resolveLiftExternalSymbols, renameLiftedEntry } from './liftExternalSymbols';
 import { DisassemblyEditorProvider } from './disassemblyEditor';
 import { FunctionTreeProvider } from './functionTree';
 import { StringRefProvider } from './stringRefTree';
@@ -40,6 +43,15 @@ import {
 	assessFunctionMaterialization,
 	normalizeFunctionMaterializationPolicy,
 } from './functionMaterializationCoverage';
+import {
+	runFunctionMaterializationCommand,
+	type FunctionMaterializationCommandOptions,
+} from './functionMaterializationCommand';
+import { runSessionExport, type SessionExportOptions } from './sessionExport';
+import {
+	runFunctionReachability,
+	type FunctionReachabilityOptions,
+} from './functionReachability';
 import { decideAnalysisContextOwnership } from './analysisContextOwnership';
 import { describeCanonicalArtifactIdentity } from './artifactNormalization';
 import { describeQueueObservation, type QueueQueryContext } from './queueObservation';
@@ -49,6 +61,10 @@ import {
 	classifyDisassemblyInstructionRole,
 	type DisassemblyInstructionRole,
 } from './disassemblyInstructionRole';
+import { resolveInstructionBoundaryContract } from './disassemblyBoundary';
+import { scanBytePatternPage } from './bytePatternSearch';
+import { classifySouperOutcome, stampSouperOutcome } from './souperOutcome';
+import { canReuseAnalyzeAll, createAnalyzeAllReuseKey, sha256AnalyzeAllFile } from './analyzeAllReuse';
 import type { InvestigationFindingEntry, SessionStore } from './sessionStore';
 import { resolvePathWithinRoots, type AnalysisEngineIdentity } from 'hexcore-common';
 import { decorateOkResult, decoratePipelineRunStatus, decorateValidationReport, type ContractDecorated } from './commandResult';
@@ -95,6 +111,8 @@ import { auditRefcount } from './refcountAuditScanner';
 import { readAuditInputQuality } from './auditInputQuality';
 import { mapCapstoneToRemill } from './archMapper';
 import { planLiftPreamble, type LiftPreambleTransformation } from './liftPreamble';
+import { runHqlQueryHeadlessCommand } from './hqlQueryHeadlessCommand';
+import { runSemanticExplainCommand } from './semanticExplainCommand';
 import {
 	PipelineJobTemplate,
 	PipelinePreset,
@@ -117,6 +135,10 @@ import {
 	shouldHonorExplicitLiftWindow,
 	isBacktrackWithinSection,
 	hasHeadlessHelixIrInput,
+	parseExplicitHelixFunctionStarts,
+	parseHelixVariableRenames,
+	parseHelixExactRange,
+	resolveExplicitHelixDataSections,
 	type ResolvedLiftByteSize,
 } from './helixPackaging';
 import {
@@ -312,6 +334,13 @@ interface AnalyzeAllResult {
 	};
 	closureRestoration: ReturnType<DisassemblerEngine['getAnalysisClosureRestoration']>;
 	nativeExecution?: NativeAnalyzeExecution;
+	analysisReuse?: {
+		reused: boolean;
+		reason: string;
+		identitySha256: string;
+		fileSha256: string;
+		generation: number;
+	};
 	totalFunctionInstructions: number;
 	totalStrings: number;
 	architecture: string;
@@ -450,6 +479,12 @@ export interface DisassembleAtResult {
 	semanticInstructionCount: number;
 	paddingInstructionCount: number;
 	unclassifiedInstructionCount: number;
+	instructionBoundary: {
+		status: 'aligned' | 'mid-instruction' | 'unassessed';
+		source: 'materialized-function-body' | 'lookbehind-decoder' | 'none';
+		recoveredByAutoBacktrack: boolean;
+		suggestedAddress?: string;
+	};
 	analysisClosure: {
 		status: FunctionAnalysisMaterialization['status'] | 'display-only';
 		functionAddress?: string;
@@ -888,6 +923,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Use Factory to get the initial global engine (or specific if we knew context)
 	const factory = DisassemblerFactory.getInstance();
 	const engine = factory.getEngine(); // Default global engine for now
+	let lastAcceptedAnalyzeAllKey: string | undefined;
 
 	// Event emitter for synchronization between views
 	const onDidChangeActiveEditor = new vscode.EventEmitter<string | undefined>();
@@ -958,7 +994,6 @@ export function activate(context: vscode.ExtensionContext): void {
 			return undefined;
 		}
 	};
-
 	// Issue #32 (HONESTY): detect a managed .NET (CIL) assembly before the native
 	// x86 lift/decompile path runs. On a .NET PE the `.text` holds CIL + metadata, not
 	// native machine code — lifting it as x86 produces the `_CorExeMain` thunk plus a
@@ -1504,6 +1539,25 @@ export function activate(context: vscode.ExtensionContext): void {
 		if (!engine.isFileLoaded()) {
 			throw new Error('Reference graph command requires a loaded binary or an explicit file path.');
 		}
+	};
+	const prepareCompleteFunctionIndex = async (options: Record<string, unknown>): Promise<string> => {
+		const requestedFile = typeof options.file === 'string' && options.file.trim().length > 0
+			? path.resolve(options.file)
+			: engine.getFilePath();
+		if (!requestedFile) {
+			throw new Error('Command requires an analyzed binary or an explicit file path.');
+		}
+		const targetChanged = !engine.getFilePath() ||
+			path.resolve(engine.getFilePath()!).toLowerCase() !== requestedFile.toLowerCase();
+		if (targetChanged || !engine.isAnalysisComplete()) {
+			await vscode.commands.executeCommand('hexcore.disasm.analyzeAll', {
+				file: requestedFile,
+				quiet: true,
+				allowLazy: true,
+				allowDecodeEmpty: false,
+			});
+		}
+		return requestedFile;
 	};
 	const writeReferenceGraphOutput = (options: ReferenceGraphCommandInvocationOptions, result: unknown): string | undefined => {
 		const rawOutput = options.output as unknown;
@@ -2817,7 +2871,7 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('hexcore.records.recover', async (arg?: unknown) => {
 			const options = isRecord(arg) ? arg : {};
 			await prepareReferenceGraphTarget(options);
-			const result = await runRecordRecovery(engine);
+			const result = await runRecordRecovery(engine, options);
 			writeReferenceGraphOutput(options, result);
 			return result;
 		}),
@@ -2848,6 +2902,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			const options = isRecord(arg) ? arg : {};
 			await prepareReferenceGraphTarget(options);
 			const result = applyImportSignatureProvider(engine);
+			writeReferenceGraphOutput(options, result);
+			return result;
+		}),
+		vscode.commands.registerCommand('hexcore.semantic.explain', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			const result = runSemanticExplainCommand(engine, options);
 			writeReferenceGraphOutput(options, result);
 			return result;
 		}),
@@ -3040,7 +3100,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			if (!options.quiet) {
-				if (result.mismatchedAnnotations > 0) {
+				if (result.status === 'partial') {
+					vscode.window.showWarningMessage(
+						`Constant sanity check is partial: ${result.diagnostics[0]?.message ?? 'coverage is incomplete'}`
+					);
+				} else if (result.mismatchedAnnotations > 0) {
 					vscode.window.showWarningMessage(
 						`Constant sanity checker found ${result.mismatchedAnnotations} mismatches.`
 					);
@@ -3768,7 +3832,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				const isRelocatableElf = fileInfo?.isRelocatable === true;
 				const firstBytes = Array.from(bytes.subarray(0, Math.min(16, bytes.length))).map(b => b.toString(16).padStart(2, '0')).join(' ');
 				console.log(`[HexCore] liftToIR FIX-017 probe: addr=0x${startAddress.toString(16)} first16=[${firstBytes}] len=${bytes.length}`);
-				const preamblePlan = planLiftPreamble(bytes, startAddress, isRelocatableElf);
+				const preamblePlan = planLiftPreamble(bytes, startAddress, isRelocatableElf, {
+					architecture: arch, textSectionAddress: engine.getSections().find(section => section.name === '.text')?.virtualAddress,
+					textRelocations: engine.getTextRelocations(),
+				});
 				const skip = preamblePlan.skipBytes;
 				liftTransformations.push(...preamblePlan.transformations);
 
@@ -3782,168 +3849,18 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Update size to actual bytes extracted (may be truncated at file boundary)
 			size = bytes.length;
 
-			// FIX-011: For ET_REL (relocatable ELF), pre-patch call displacements
-			// so the Remill lifter sees real call targets instead of `call +5` (NOP).
-			// Without patching, unresolved relocations have displacement=0, which
-			// makes calls disappear from the IR (fall-through optimization).
-			// Strategy: patch bytes → Remill emits `call @sub_<fakeAddr>` →
-			// post-process IR to replace `@sub_<fakeAddr>` with `@mutex_lock` etc.
-			let symbolMap: Map<number, string> | undefined; // fakeAddr → symbolName
-			// FIX-097: relocated data sections (fake base VA → raw section bytes)
-			// carried from the byte-patch step to the post-lift metadata emit.
-			let dataSectionFakes: Array<{ vaStart: number; bytes: Buffer }> | undefined;
 			const fileInfo = engine.getFileInfo();
-			const textRelocs = engine.getTextRelocations();
-
-			console.log(`[HexCore] liftToIR FIX-011: isRelocatable=${fileInfo?.isRelocatable}, textRelocs.size=${textRelocs.size}`);
-			if (fileInfo?.isRelocatable && textRelocs.size > 0) {
-				const patchedBytes = Buffer.from(bytes);
-				symbolMap = new Map();
-				let fakeAddr = 0x7FFF0000; // fake address space for external symbols
-				const symbolAddrs = new Map<string, number>(); // dedup: name → fakeAddr
-
-				const textSection = engine.getSections().find(s => s.name === '.text');
-				const textSectionVA = textSection?.virtualAddress ?? 0;
-				const liftOffsetInText = startAddress - textSectionVA;
-				let patchCount = 0;
-
-				// Kernel infrastructure — NOPs at runtime, skip patching.
-				// FIX-098: do NOT skip __x86_return_thunk. Spectre/retbleed-mitigated
-				// kernel modules (e.g. mali_kbase.ko = 2641 of them) compile EVERY
-				// `ret` as `jmp __x86_return_thunk` (e9 00000000 + PLT32 reloc, no c3
-				// byte). Skipping the reloc left the displacement 0, so Remill decoded
-				// the jmp as `jmp PC+5` = a forward branch into the body, NOT a return
-				// -> the lifted IR had ZERO `ret` edges -> every early return orphaned
-				// the rest of the body = the "N unreachable statements after return"
-				// premature-return defect. By PATCHING it like a normal symbol (below),
-				// the jmp target lands in externalSymbols_ and the native Remill FIX-019
-				// (remill_wrapper.cpp ~915/1224) recognizes the name and emits a RET in
-				// Phase 4. (The __x86_indirect_thunk_* retpolines stay skipped — those
-				// are indirect call/jump trampolines, not returns.)
-				const infraSymbols = new Set([
-					'__fentry__', '__cfi_check',
-					'__x86_indirect_thunk_rax', '__x86_indirect_thunk_rbx',
-					'__x86_indirect_thunk_rcx', '__x86_indirect_thunk_rdx',
-					'__x86_indirect_thunk_rsi', '__x86_indirect_thunk_rdi',
-					'__x86_indirect_thunk_rbp', '__x86_indirect_thunk_r8',
-					'__x86_indirect_thunk_r9', '__x86_indirect_thunk_r10',
-					'__x86_indirect_thunk_r11', '__x86_indirect_thunk_r12',
-					'__x86_indirect_thunk_r13', '__x86_indirect_thunk_r14',
-					'__x86_indirect_thunk_r15',
-				]);
-
-				for (const [textOffset, reloc] of textRelocs) {
-					// Only patch relocations within our lift range
-					const patchOffset = textOffset - liftOffsetInText;
-					if (patchOffset < 0 || patchOffset + 4 > patchedBytes.length) {
-						continue;
-					}
-					if (infraSymbols.has(reloc.name)) {
-						continue;
-					}
-					// R_X86_64_PLT32(4) and PC32(2) are direct call/jump relocations
-					if (reloc.type !== 2 && reloc.type !== 4) {
-						continue;
-					}
-
-					// Allocate or reuse fake address for this symbol
-					let targetAddr = symbolAddrs.get(reloc.name);
-					if (targetAddr === undefined) {
-						targetAddr = fakeAddr;
-						fakeAddr += 0x10; // 16-byte spacing
-						symbolAddrs.set(reloc.name, targetAddr);
-					}
-
-					// Patch the 32-bit displacement: S + A - P
-					// P = virtual address of the relocation site
-					const relocVA = textSectionVA + textOffset;
-					const displacement = (targetAddr + reloc.addend - relocVA) | 0;
-					patchedBytes.writeInt32LE(displacement, patchOffset);
-
-					// Record the RESOLVED target that Remill will actually see:
-					// target = PC_after_call + displacement = (relocVA + 4) + displacement
-					// This accounts for the addend (typically -4 for R_X86_64_PLT32)
-					const resolvedTarget = ((relocVA + 4) + displacement) >>> 0;
-					if (!symbolMap.has(resolvedTarget)) {
-						symbolMap.set(resolvedTarget, reloc.name);
-					}
-					patchCount++;
-				}
-
-				console.log(`[HexCore] liftToIR FIX-011: Patched ${patchCount} call displacements, ` +
-					`${symbolMap.size} unique external symbols (fakeAddr range 0x7FFF0000–0x${(fakeAddr - 0x10).toString(16)})`);
-
-				// Use patched buffer for lifting
-				bytes = patchedBytes;
-			}
-
-			// FIX-097: patch DATA relocations (string/constant loads). The engine
-			// collected R_X86_64_32/32S relocs against SECTION symbols (e.g.
-			// `mov rdi, .rodata.str1.1+OFF`) that FIX-011 dropped, leaving the
-			// operand `i64 0` => `printk(0, ...)`. We assign each referenced data
-			// section a non-overlapping fake base VA (well below the 0x7FFF0000 call
-			// range), patch the absolute 32-bit operand to base+offset, and carry the
-			// section bytes out as `dataSectionFakes`. The post-lift step embeds them
-			// as `!helix.strings` metadata so the decompiler can readCString(base+OFF)
-			// and render the real string literal.
-			const dataRelocs = engine.getDataRelocations();
-			if (fileInfo?.isRelocatable && dataRelocs.size > 0) {
-				const patchedBytes = Buffer.from(bytes); // may already carry FIX-011 patches
-				const textSection = engine.getSections().find(s => s.name === '.text');
-				const textSectionVA = textSection?.virtualAddress ?? 0;
-				const liftOffsetInText = startAddress - textSectionVA;
-				const sectionFakeBase = new Map<string, number>(); // section → fake base VA
-				let nextBase = 0x7F000000;
-				let dataPatchCount = 0;
-
-				for (const [textOffset, dreloc] of dataRelocs) {
-					const patchOffset = textOffset - liftOffsetInText;
-					if (patchOffset < 0 || patchOffset + 4 > patchedBytes.length) {
-						continue; // outside our lift window
-					}
-					// String literals live in .rodata*; skip .data/.text/module
-					// pointer relocs so we don't mis-render real data pointers as
-					// strings (and don't disturb their existing `i64 0` semantics).
-					if (!dreloc.sectionName.startsWith('.rodata')) {
-						continue;
-					}
-					let base = sectionFakeBase.get(dreloc.sectionName);
-					if (base === undefined) {
-						base = nextBase;
-						nextBase += 0x00100000; // 1 MiB spacing per section
-						sectionFakeBase.set(dreloc.sectionName, base);
-					}
-					const targetAddress = base + dreloc.addend;
-					if (dreloc.type === 2) {
-						// R_X86_64_PC32 is consumed by a RIP-relative operand.
-						// Encode from the end of its four-byte displacement so
-						// Remill observes the synthetic .rodata address exactly.
-						const relocVA = textSectionVA + textOffset;
-						const displacement = encodeX86PcRelativeDataDisplacement(
-							targetAddress,
-							relocVA,
-						);
-						patchedBytes.writeInt32LE(displacement, patchOffset);
-					} else {
-						// R_X86_64_32/32S store an absolute 32-bit value.
-						patchedBytes.writeInt32LE(targetAddress | 0, patchOffset);
-					}
-					dataPatchCount++;
-				}
-
-				if (dataPatchCount > 0) {
-					dataSectionFakes = [];
-					for (const [name, base] of sectionFakeBase) {
-						const secBytes = engine.getSectionBytesByName(name);
-						if (secBytes && secBytes.length > 0) {
-							dataSectionFakes.push({ vaStart: base, bytes: secBytes });
-						}
-					}
-					bytes = patchedBytes;
-				}
-				console.log(`[HexCore] liftToIR FIX-097: patched ${dataPatchCount} data relocs across ` +
-					`${sectionFakeBase.size} section(s); ${dataSectionFakes?.length ?? 0} fake data section(s) ` +
-					`carried (bases from 0x7F000000): ${[...sectionFakeBase].map(([n, b]) => `${n}@0x${b.toString(16)}`).join(', ')}`);
+			const relocationPreparation = prepareLiftRelocations({
+				bytes, startAddress, relocatable: fileInfo?.isRelocatable === true, architecture: engine.getArchitecture(),
+				textSectionAddress: engine.getSections().find(section => section.name === '.text')?.virtualAddress,
+				textRelocations: engine.getTextRelocations(), dataRelocations: engine.getDataRelocations(),
+				readDataSection: name => engine.getSectionBytesByName(name),
+			});
+			bytes = relocationPreparation.bytes;
+			const symbolMap = relocationPreparation.symbolMap;
+			const dataSectionFakes = relocationPreparation.dataSections;
+			if (relocationPreparation.patches.length || relocationPreparation.issues.length) {
+				console.log(`[HexCore] lift relocations: patches=${relocationPreparation.patches.length}, issues=${relocationPreparation.issues.length}`);
 			}
 
 			// Note: callfuscation deflattening (call-as-jmp) is applied centrally in
@@ -4181,115 +4098,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				return undefined;
 			}
 
-			// FIX-011 post-processing: Inject external symbol declarations into IR.
-			//
-			// The Remill Phase 4.5 (calliTargets) is supposed to replace CALLI
-			// arguments with concrete target addresses, but the LLVM CallInst
-			// pointers can become stale after block construction. Instead, we use
-			// TWO complementary strategies:
-			//
-			// Strategy A: Use liftResult.callTargets (populated by Phase 3 in C++)
-			//   to map fakeAddr → symbolName, then replace any `i64 <decimal>` or
-			//   `@sub_<hex>` patterns that match.
-			//
-			// Strategy B: Inject `@__hxreloc__` declarations so the Helix engine's
-			//   resolveCallTargets() can map call instruction addresses → symbols.
-			//   This works even when Strategy A finds no text matches.
-			let processedIR = liftResult.ir;
-			if (symbolMap && symbolMap.size > 0) {
-				let replaceCount = 0;
-				const declares = new Set<string>();
-
-				// Strategy A: Direct IR text replacement
-				const sortedEntries = [...symbolMap.entries()].sort((a, b) => b[0] - a[0]);
-				for (const [addr, name] of sortedEntries) {
-					const fakeHex = addr.toString(16);
-					const before = processedIR;
-
-					// Replace @sub_<hex> and @lifted_<hex> patterns
-					processedIR = processedIR
-						.replace(new RegExp(`@sub_${fakeHex}\\b`, 'gi'), `@${name}`)
-						.replace(new RegExp(`@lifted_${fakeHex}\\b`, 'gi'), `@${name}`);
-
-					// Replace i64 <decimal> in CALLI arguments
-					const decPattern = `i64 ${addr}`;
-					if (processedIR.includes(decPattern)) {
-						processedIR = processedIR.split(decPattern).join(`i64 ptrtoint (ptr @${name} to i64)`);
-					}
-
-					if (processedIR !== before) {
-						replaceCount++;
-						declares.add(name);
-					}
-				}
-
-				// Strategy B: Inject @__hxreloc__ declarations for Helix resolveCallTargets()
-				// Also builds the full symbol set from callTargets array (more reliable than text matching)
-				const callTargets: number[] = liftResult.callTargets ?? [];
-				console.log(`[HexCore] liftToIR FIX-011 Strategy B: callTargets=[${callTargets.slice(0, 10).map(t => '0x' + t.toString(16)).join(', ')}${callTargets.length > 10 ? '...' : ''}] (${callTargets.length} total), symbolMap keys=[${[...symbolMap.keys()].slice(0, 10).map(k => '0x' + k.toString(16)).join(', ')}${symbolMap.size > 10 ? '...' : ''}] (${symbolMap.size} total)`);
-				let matchedTargets = 0;
-				for (const target of callTargets) {
-					const name = symbolMap.get(target);
-					if (name) {
-						declares.add(name);
-						matchedTargets++;
-					}
-				}
-				console.log(`[HexCore] liftToIR FIX-011 Strategy B: ${matchedTargets}/${callTargets.length} callTargets matched symbolMap`);
-
-				// Clean up orphaned fake-address references
-				processedIR = processedIR.replace(/^(define|declare) [^\n]*@sub_7ff[0-9a-f]+[^\n]*\n/gmi, '');
-				processedIR = processedIR.replace(/^(define|declare) [^\n]*@lifted_7ff[0-9a-f]+[^\n]*\n/gmi, '');
-
-				// Build annotation block with declares + hxreloc metadata
-				if (declares.size > 0) {
-					// v3.7.5 FIX: Deduplicate — skip symbols already declared inline
-					// by the Remill lifter (C++ side emits declare during lift).
-					const alreadyDeclared = new Set<string>();
-					for (const match of processedIR.matchAll(/^declare\s+\S+\s+@(\w+)\s*\(/gm)) {
-						alreadyDeclared.add(match[1]);
-					}
-					const newDeclares = [...declares].filter(n => !alreadyDeclared.has(n));
-					const declareLines = newDeclares.map(n => `declare ptr @${n}(...)`);
-
-					// Machine-readable relocation declarations for Helix
-					const relocDeclares: string[] = [];
-					const relocEntries = [...symbolMap.entries()]
-						.filter(([, name]) => declares.has(name))
-						.sort((a, b) => a[0] - b[0]);
-					for (const [addr, name] of relocEntries) {
-						const hexAddr = addr.toString(16).padStart(16, '0');
-						relocDeclares.push(`declare void @__hxreloc__${hexAddr}__${name}()`);
-					}
-
-					// Only build block if there are new declares or reloc metadata to inject
-					const blockParts: string[] = [];
-					if (declareLines.length > 0) { blockParts.push(declareLines.join('\n')); }
-					if (relocDeclares.length > 0) { blockParts.push(relocDeclares.join('\n')); }
-
-					const declareBlock = blockParts.length > 0
-						? '\n; --- External symbols (resolved from .rela.text, ' + declares.size + ' symbols) ---\n' + blockParts.join('\n') + '\n'
-						: '';
-
-					if (declareBlock.length > 0) {
-						const lastDeclareIdx = processedIR.lastIndexOf('\ndeclare ');
-						if (lastDeclareIdx >= 0) {
-							const lineEnd = processedIR.indexOf('\n', lastDeclareIdx + 1);
-							processedIR = processedIR.slice(0, lineEnd) + '\n' + declareBlock + processedIR.slice(lineEnd);
-						} else {
-							const firstDefine = processedIR.indexOf('\ndefine ');
-							if (firstDefine >= 0) {
-								processedIR = processedIR.slice(0, firstDefine) + '\n' + declareBlock + processedIR.slice(firstDefine);
-							} else {
-								processedIR = declareBlock + processedIR;
-							}
-						}
-					}
-
-					console.log(`[HexCore] liftToIR FIX-011: ${replaceCount} text replacements, ` +
-						`${declares.size} external declares (${newDeclares.length} new, ${alreadyDeclared.size} deduped), ${callTargets.length} callTargets from Remill`);
-				}
-			}
+			// Resolve only typed Remill target operands and declared synthetic globals.
+			// Ordinary integer data and existing function definitions stay intact.
+			const externalResolution = resolveLiftExternalSymbols(liftResult.ir, symbolMap, liftResult.callTargets);
+			let processedIR = externalResolution.ir;
 
 			// v3.8.0: Resolve real symbol name from ELF symtab.
 			// This runs AFTER all branches (file, address, functionAddress, interactive)
@@ -4338,9 +4150,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			if (functionName && !functionName.startsWith('sub_')) {
 				const liftedName = `lifted_${startAddress}`;
 				// Replace all occurrences: define, call, references
-				const nameRegex = new RegExp(`\\b${liftedName}\\b`, 'g');
 				if (processedIR.includes(liftedName)) {
-					processedIR = processedIR.replace(nameRegex, functionName);
+					processedIR = renameLiftedEntry(processedIR, startAddress, functionName);
 					console.log(`[HexCore] liftToIR: Renamed ${liftedName} → ${functionName} in IR`);
 				}
 			}
@@ -4459,6 +4270,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				liftResult,
 				minimumSemanticCoverage,
 			);
+			if (relocationPreparation.issues.length || externalResolution.issues.length) {
+				liftSemantics.status = 'partial';
+				liftSemantics.reason = [liftSemantics.reason, ...relocationPreparation.issues, ...externalResolution.issues].filter(Boolean).join('; ');
+			}
 			if (explicitScopeLimited) {
 				liftSemantics.status = 'partial';
 				const scopeReason = `explicit instruction scope limited to ${effectiveInstructionLimit} instruction(s)`;
@@ -5552,6 +5367,19 @@ export function activate(context: vscode.ExtensionContext): void {
 				{ location: vscode.ProgressLocation.Notification, title: 'Souper: Optimizing IR...', cancellable: false },
 				async () => souperWrapper.optimize(irText, souperOpts)
 			);
+			const souperStats = {
+				candidatesFound: result.candidatesFound,
+				candidatesAttempted: result.candidatesAttempted,
+				candidatesInferred: result.candidatesInferred,
+				candidatesReplaced: result.candidatesReplaced,
+				solverTimeouts: result.solverTimeouts,
+			};
+			const outcome = result.success
+				? classifySouperOutcome(irText, result.ir, souperStats)
+				: undefined;
+			const outputIr = result.success && outcome
+				? stampSouperOutcome(result.ir, outcome, souperStats)
+				: result.ir;
 
 			if (!quiet) {
 				if (result.success) {
@@ -5567,17 +5395,24 @@ export function activate(context: vscode.ExtensionContext): void {
 				: (options.output && typeof (options.output as any).path === 'string')
 					? (options.output as any).path
 					: undefined;
-			if (result.success && result.ir && outputPath) {
+			if (result.success && outputIr && outputPath) {
 				const outPath = path.isAbsolute(outputPath)
 					? outputPath
 					: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', outputPath);
 				fs.mkdirSync(path.dirname(outPath), { recursive: true });
-				fs.writeFileSync(outPath, result.ir, 'utf-8');
+				fs.writeFileSync(outPath, outputIr, 'utf-8');
 			}
 
 			return {
 				success: result.success,
-				ir: result.ir,
+				status: result.success ? outcome?.status : 'error',
+				ir: outputIr,
+				semanticChanged: outcome?.semanticChanged ?? false,
+				textChanged: outcome?.textChanged ?? false,
+				inputSha256: outcome?.inputSha256,
+				nativeOutputSha256: outcome?.nativeOutputSha256,
+				partialReasons: outcome?.partialReasons ?? [],
+				noOpReason: outcome?.noOpReason,
 				candidatesFound: result.candidatesFound,
 				candidatesAttempted: result.candidatesAttempted,
 				candidatesInferred: result.candidatesInferred,
@@ -5607,6 +5442,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
+			const exactRange = parseHelixExactRange(options);
 			const sourceTargetFile = typeof options.sourceTargetFile === 'string'
 				? options.sourceTargetFile
 				: typeof options.file === 'string' ? options.file : undefined;
@@ -5618,9 +5454,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const requestedArch = typeof options.architecture === 'string'
 				? options.architecture
 				: typeof options.arch === 'string' ? options.arch : undefined;
-			const arch = requestedArch && ['x86', 'x64', 'arm', 'arm64'].includes(requestedArch)
-				? requestedArch as ReturnType<typeof engine.getArchitecture>
-				: useActiveEngineContext ? engine.getArchitecture() : 'x64';
+			let arch: ReturnType<typeof engine.getArchitecture> = useActiveEngineContext ? engine.getArchitecture() : 'x64';
 			if (!useActiveEngineContext) {
 				console.log(
 					`[hexcore-helix] active engine context denied for decompileIR ` +
@@ -5683,6 +5517,20 @@ export function activate(context: vscode.ExtensionContext): void {
 				irText = activeEditor.document.getText();
 			}
 
+			let inputContract: HelixIrInputContract;
+			try {
+				inputContract = inspectHelixIrInput(irText, requestedArch, useActiveEngineContext ? engine.getArchitecture() : undefined,
+					pipelineInputPartialReasons(options.pipelineInputQuality));
+				arch = inputContract.architecture;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				if (quiet || isHeadless) {
+					return { success: false, status: 'error', code: '', functionCount: 0, address: '', architecture: arch, error: message, analysisContext };
+				}
+				vscode.window.showErrorMessage(message);
+				return undefined;
+			}
+
 			// FIX-QUALITY-001: cast layer ON by default; functionStarts enriched below.
 			// NOTE: must be `let` — sessionRenames and structInfo may promote fields.
 			let helixIROptions: {
@@ -5693,19 +5541,23 @@ export function activate(context: vscode.ExtensionContext): void {
 				functionStarts?: number[];
 				semanticContext?: HelixAnalysisContext;
 			} = { ...resolveHelixBaseOptions(options) };
+			const explicitRenames = parseHelixVariableRenames(options.variableRenames);
+			const explicitFunctionStarts = parseExplicitHelixFunctionStarts(options.functionStarts);
 
 			// v3.7.5 P3: Collect session variable renames for this function and pass
 			// them to the Helix engine so the C AST walker can apply them surgically.
 			const sessionRenames = useActiveEngineContext
-				? collectSessionVariableRenames(options, engine)
+				? collectSessionVariableRenames(exactRange ? { ...options, startAddress: exactRange.startAddress } : options, engine)
 				: [];
-			if (sessionRenames.length > 0) {
-				helixIROptions = helixIROptions ?? {};
-				helixIROptions.variableRenames = sessionRenames;
+			if (sessionRenames.length > 0 || explicitRenames) {
+				const merged = new Map(sessionRenames.map(item => [item.oldName, item.newName]));
+				for (const item of explicitRenames ?? []) { merged.set(item.oldName, item.newName); }
+				helixIROptions.variableRenames = [...merged.entries()].map(([oldName, newName]) => ({ oldName, newName }));
 			}
 
 			// v3.8.0: Extract struct field info from BTF for struct field naming
-			const funcAddr = parseAddressValue(options.functionAddress as string | number | undefined)
+			const funcAddr = exactRange?.startAddress
+				?? parseAddressValue(options.functionAddress as string | number | undefined)
 				?? parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined)
 				?? parseAddressValue(options.targetAddress as string | number | undefined);
@@ -5787,9 +5639,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			// binary collapses to `goto default` in the decompiled output.
 			const binaryForSections = isHeadless && typeof options.file === 'string'
 				? options.file : undefined;
-			const peSections = await getDataSectionsFor(binaryForSections);
-			if (peSections && peSections.length > 0) {
-				helixIROptions = helixIROptions ?? {};
+			const explicitDataSections = resolveExplicitHelixDataSections(engine, options.dataSections, useActiveEngineContext);
+			const peSections = explicitDataSections ? undefined : await getDataSectionsFor(binaryForSections);
+			if (explicitDataSections) {
+				helixIROptions.dataSections = explicitDataSections;
+			} else if (peSections && peSections.length > 0) {
 				helixIROptions.dataSections = peSections.map(s => ({
 					vaStart: s.vaStart, bytes: s.bytes
 				}));
@@ -5797,7 +5651,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// A completed immutable context owns the function-start table. Older or
 			// incomplete contexts retain the explicit honesty-mode fallback.
-			if (semanticContext?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
+			if (explicitFunctionStarts) {
+				helixIROptions.functionStarts = explicitFunctionStarts;
+			} else if (semanticContext?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
 				helixIROptions.functionStarts = [...semanticContext.functionStarts];
 				if (!quiet) {
 					console.log(
@@ -5906,6 +5762,59 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 			}
+			if (inputContract.status === 'partial') {
+				fullCode = ['// InputIRStatus: partial', ...inputContract.reasons.map(reason =>
+					`// InputIRWarning: ${reason.replace(/[\r\n]+/g, ' ')}`), fullCode].join('\n');
+			}
+			const irRequestedRange = inputContract.liftEvidence?.requestedByteRange;
+			const irDecodedCoverage = inputContract.liftEvidence?.decodedByteCoverage;
+			fullCode = applyHonestyCap(fullCode, {
+				...(irDecodedCoverage ? {
+					bytesConsumed: irDecodedCoverage.decodedBytes,
+					knownFunctionSize: irDecodedCoverage.requestedBytes,
+				} : {}),
+				semanticCoverage: inputContract.liftEvidence?.semanticInstructionCoverage,
+			});
+			const helixInvocation = {
+				mode: 'decompileIR' as const,
+				...(exactRange ? {
+					exactRange: {
+						startAddress: `0x${exactRange.startAddress.toString(16).toUpperCase()}`,
+						endExclusive: `0x${exactRange.endExclusive.toString(16).toUpperCase()}`,
+						size: exactRange.size,
+					},
+				} : {}),
+				useCastLayer: helixIROptions.useCastLayer !== false,
+				skipOptimization: helixIROptions.optimizeIR === false,
+				functionStarts: {
+					source: explicitFunctionStarts ? 'explicit' as const
+						: semanticContext?.analysis.functionStartsAuthoritative ? 'analysis-context' as const
+							: helixIROptions.functionStarts ? 'derived' as const : 'omitted' as const,
+					count: helixIROptions.functionStarts?.length ?? 0,
+				},
+				dataSections: helixIROptions.dataSections?.length ?? 0,
+				variableRenames: helixIROptions.variableRenames?.length ?? 0,
+			};
+			const irDiagStart = exactRange?.startAddress ?? irRequestedRange?.startAddress ?? funcAddr ?? parseAddressValue(decompileResult.entryAddress) ?? 0;
+			const irDiagEnd = exactRange?.endExclusive ?? irRequestedRange?.endExclusive;
+			const irConsumed = irDecodedCoverage?.decodedBytes;
+			const irRequested = irDecodedCoverage?.requestedBytes ?? irRequestedRange?.size;
+			const irDiag =
+				`// LiftDiag: addr=0x${irDiagStart.toString(16)} ` +
+				`range=${irDiagEnd !== undefined ? `0x${irDiagStart.toString(16)}-0x${irDiagEnd.toString(16)}` : '?'} ` +
+				`bytesConsumed=${irConsumed !== undefined ? irConsumed : '?'}/${irRequested !== undefined ? irRequested : '?'} ` +
+				`irLines=${irForHelix.split('\n').length} cLines=${fullCode.split('\n').length} ` +
+				`cast=${helixInvocation.useCastLayer} fnStarts=${helixInvocation.functionStarts.count} ` +
+				`dataSections=${helixInvocation.dataSections} skipOpt=${helixInvocation.skipOptimization} ` +
+				`renames=${helixInvocation.variableRenames} ` +
+				`semanticCoverage=${inputContract.liftEvidence?.semanticInstructionCoverage !== undefined
+					? (inputContract.liftEvidence.semanticInstructionCoverage * 100).toFixed(1) + '%' : '?'} ` +
+				`source=decompileIR`;
+			if (/Confidence:\s*[\d.]+%/.test(fullCode)) {
+				fullCode = fullCode.replace(/(Confidence:\s*[\d.]+%[^\n]*\n)/, `$1${irDiag}\n`);
+			} else {
+				fullCode = `${irDiag}\n${fullCode}`;
+			}
 			const outputQuality = inspectHelixOutputQuality(fullCode);
 			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
 
@@ -5920,7 +5829,8 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const commandResult = {
 				success: true,
-				status: outputQuality.status,
+				status: inputContract.status === 'partial' ? 'partial' as const : outputQuality.status,
+				inputContract,
 				code: fullCode,
 				functionCount: decompileResult.instructionCount,
 				address: decompileResult.entryAddress,
@@ -5929,12 +5839,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				confidenceAxes: outputQuality.confidenceAxes,
 				qualityIssues: outputQuality.qualityIssues,
 				qualityIssueMessages: outputQuality.issues,
-				securityEvidenceUsable: outputQuality.securityEvidenceUsable,
-				warning: outputQuality.reason ?? '',
+				securityEvidenceUsable: outputQuality.securityEvidenceUsable && inputContract.status === 'ok',
+				warning: [...inputContract.reasons, ...(outputQuality.reason ? [outputQuality.reason] : [])].join('; '),
 				error: '',
 				analysisContext,
+				helixInvocation,
 				semanticContext: semanticContext ? {
 					contextVersion: semanticContext.contextVersion,
+					target: semanticContext.target,
 					contextSha256: semanticContext.contextSha256,
 					function: semanticContext.function,
 					analysis: semanticContext.analysis,
@@ -5969,6 +5881,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const options = isHeadless ? arg as Record<string, unknown> : {};
 			const quiet = options.quiet === true;
+			const exactRange2 = parseHelixExactRange(options);
 			const arch = engine.getArchitecture();
 
 			if (!remillWrapper.isAvailable()) {
@@ -6043,8 +5956,16 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			// Lift machine code to LLVM IR via liftToIR command
+			const liftOptions = exactRange2 ? {
+				...options,
+				address: exactRange2.startAddress,
+				startAddress: exactRange2.startAddress,
+				endExclusive: exactRange2.endExclusive,
+				size: exactRange2.size,
+				autoBacktrack: false,
+			} : options;
 			const liftResult: LiftResult | undefined = await vscode.commands.executeCommand(
-				'hexcore.disasm.liftToIR', { ...options, quiet: true, output: undefined }
+				'hexcore.disasm.liftToIR', { ...liftOptions, quiet: true, output: undefined }
 			);
 
 			if (!liftResult || !liftResult.success) {
@@ -6068,16 +5989,23 @@ export function activate(context: vscode.ExtensionContext): void {
 				functionStarts?: number[];
 				semanticContext?: HelixAnalysisContext;
 			} = { ...resolveHelixBaseOptions(options) };
+			const explicitRenames2 = parseHelixVariableRenames(options.variableRenames);
+			const explicitFunctionStarts2 = parseExplicitHelixFunctionStarts(options.functionStarts);
 
 			// v3.7.5 P3: Collect session variable renames and pass to Helix engine
-			const sessionRenames2 = collectSessionVariableRenames(options, engine);
-			if (sessionRenames2.length > 0) {
-				helixOptions = helixOptions ?? {};
-				helixOptions.variableRenames = sessionRenames2;
+			const sessionRenames2 = collectSessionVariableRenames(
+				exactRange2 ? { ...options, startAddress: exactRange2.startAddress } : options,
+				engine,
+			);
+			if (sessionRenames2.length > 0 || explicitRenames2) {
+				const merged = new Map(sessionRenames2.map(item => [item.oldName, item.newName]));
+				for (const item of explicitRenames2 ?? []) { merged.set(item.oldName, item.newName); }
+				helixOptions.variableRenames = [...merged.entries()].map(([oldName, newName]) => ({ oldName, newName }));
 			}
 
 			// v3.8.0: Extract struct field info from BTF for struct field naming
-			const funcAddr2 = (typeof liftResult.address === 'number' ? liftResult.address : undefined)
+			const funcAddr2 = exactRange2?.startAddress
+				?? (typeof liftResult.address === 'number' ? liftResult.address : undefined)
 				?? parseAddressValue(options.address as string | number | undefined)
 				?? parseAddressValue(options.startAddress as string | number | undefined);
 			const semanticContext2 = funcAddr2 !== undefined
@@ -6142,14 +6070,18 @@ export function activate(context: vscode.ExtensionContext): void {
 			const peSections2 = await getDataSectionsFor(
 				typeof options.file === 'string' ? options.file : undefined
 			);
-			if (peSections2 && peSections2.length > 0) {
-				helixOptions = helixOptions ?? {};
+			const explicitDataSections2 = resolveExplicitHelixDataSections(engine, options.dataSections, true);
+			if (explicitDataSections2) {
+				helixOptions.dataSections = explicitDataSections2;
+			} else if (peSections2 && peSections2.length > 0) {
 				helixOptions.dataSections = peSections2.map(s => ({
 					vaStart: s.vaStart, bytes: s.bytes
 				}));
 			}
 
-			if (semanticContext2?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
+			if (explicitFunctionStarts2) {
+				helixOptions.functionStarts = explicitFunctionStarts2;
+			} else if (semanticContext2?.analysis.functionStartsAuthoritative && options.functionStarts !== false) {
 				helixOptions.functionStarts = [...semanticContext2.functionStarts];
 				if (!quiet) {
 					console.log(
@@ -6213,11 +6145,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// FIX-QUALITY-002: stamp lift diagnostics into the C header so job
 			// outputs self-describe whether Remill under-lifted (silent gap).
+			let helixInvocation2: unknown;
 			{
 				const irLines = (liftResult.ir || '').split('\n').length;
 				const cLines = fullCode.split('\n').length;
 				const consumed = typeof liftResult.bytesConsumed === 'number' ? liftResult.bytesConsumed : -1;
 				const knownSz = (() => {
+					if (exactRange2) { return exactRange2.size; }
 					const a = typeof liftResult.address === 'number'
 						? liftResult.address
 						: (funcAddr ?? origAddr ?? 0);
@@ -6241,20 +6175,45 @@ export function activate(context: vscode.ExtensionContext): void {
 						instructionLimit: liftResult.requestedInstructionLimit,
 					} : undefined,
 				});
-				const requestedLiftAddress = typeof liftResult.requestedAddress === 'number'
-					? liftResult.requestedAddress : (origAddr ?? funcAddr ?? 0);
+				const requestedLiftAddress = exactRange2?.startAddress ?? (typeof liftResult.requestedAddress === 'number'
+					? liftResult.requestedAddress : (origAddr ?? funcAddr ?? 0));
+				const diagnosticEnd = exactRange2?.endExclusive ??
+					(knownSz > 0 ? requestedLiftAddress + knownSz : undefined);
 				const effectiveLiftAddress = typeof liftResult.address === 'number'
 					? liftResult.address : 0;
+				helixInvocation2 = {
+					mode: 'decompile' as const,
+					...(exactRange2 ? {
+						exactRange: {
+							startAddress: `0x${exactRange2.startAddress.toString(16).toUpperCase()}`,
+							endExclusive: `0x${exactRange2.endExclusive.toString(16).toUpperCase()}`,
+							size: exactRange2.size,
+						},
+					} : {}),
+					useCastLayer: helixOptions.useCastLayer !== false,
+					skipOptimization: helixOptions.optimizeIR === false,
+					functionStarts: {
+						source: explicitFunctionStarts2 ? 'explicit' as const
+							: semanticContext2?.analysis.functionStartsAuthoritative ? 'analysis-context' as const
+								: helixOptions.functionStarts ? 'derived' as const : 'omitted' as const,
+						count: helixOptions.functionStarts?.length ?? 0,
+					},
+					dataSections: helixOptions.dataSections?.length ?? 0,
+					variableRenames: helixOptions.variableRenames?.length ?? 0,
+				};
 				const transformations = Array.isArray(liftResult.liftTransformations)
 					? liftResult.liftTransformations as Array<{ kind: string; address: number; bytes: number }>
 					: [];
 				const diag =
 					`// LiftDiag: addr=0x${effectiveLiftAddress.toString(16)} ` +
 					`requested=0x${requestedLiftAddress.toString(16)} effective=0x${effectiveLiftAddress.toString(16)} ` +
-					`range=${knownSz > 0 ? `0x${effectiveLiftAddress.toString(16)}-0x${(effectiveLiftAddress + knownSz).toString(16)}` : '?'} ` +
+					`range=${diagnosticEnd !== undefined ? `0x${requestedLiftAddress.toString(16)}-0x${diagnosticEnd.toString(16)}` : '?'} ` +
 					`bytesConsumed=${consumed}/${knownSz || '?'} irLines=${irLines} cLines=${cLines} ` +
 					`cast=${helixOptions.useCastLayer !== false} ` +
 					`fnStarts=${helixOptions.functionStarts?.length ?? 0} ` +
+					`dataSections=${helixOptions.dataSections?.length ?? 0} ` +
+					`skipOpt=${helixOptions.optimizeIR === false} ` +
+					`renames=${helixOptions.variableRenames?.length ?? 0} ` +
 					`semanticCoverage=${typeof liftResult.semanticCoverage === 'number' ? (liftResult.semanticCoverage * 100).toFixed(1) + '%' : '?'} ` +
 					`unsupported=${liftResult.unsupportedInstructions ?? '?'} ` +
 					`decodeFailures=${liftResult.decodeFailureInstructions ?? '?'}` +
@@ -6277,6 +6236,12 @@ export function activate(context: vscode.ExtensionContext): void {
 			const outputQuality = inspectHelixOutputQuality(fullCode);
 			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
 
+			const inheritedInputReasons = pipelineInputPartialReasons(options.pipelineInputQuality);
+			if (inheritedInputReasons.length > 0) {
+				fullCode = ['// InputArtifactStatus: partial', ...inheritedInputReasons.map(reason =>
+					`// InputArtifactWarning: ${reason.replace(/[\r\n]+/g, ' ')}`), fullCode].join('\n');
+			}
+
 			if (isHeadless && options.output) {
 				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
 				// Bug #36/2: ensure the output directory exists before writing.
@@ -6286,7 +6251,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const commandResult = {
 				success: true,
-				status: liftResult.status === 'partial' ? 'partial' as const : outputQuality.status,
+				status: liftResult.status === 'partial' || inheritedInputReasons.length > 0 ? 'partial' as const : outputQuality.status,
 				code: fullCode,
 				functionCount: decompileResult.instructionCount,
 				address: decompileResult.entryAddress || String(liftResult.address || ''),
@@ -6295,8 +6260,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				confidenceAxes: outputQuality.confidenceAxes,
 				qualityIssues: outputQuality.qualityIssues,
 				qualityIssueMessages: outputQuality.issues,
-				securityEvidenceUsable: outputQuality.securityEvidenceUsable,
-				warning: liftResult.semanticWarning || outputQuality.reason || '',
+				securityEvidenceUsable: outputQuality.securityEvidenceUsable && liftResult.status !== 'partial' && inheritedInputReasons.length === 0,
+					warning: [liftResult.semanticWarning, outputQuality.reason, ...inheritedInputReasons].filter(Boolean).join('; '),
+				helixInvocation: helixInvocation2,
 				liftSemantics: {
 					decodedInstructions: liftResult.decodedInstructions,
 					liftedInstructions: liftResult.liftedInstructions,
@@ -6310,6 +6276,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				},
 				semanticContext: semanticContext2 ? {
 					contextVersion: semanticContext2.contextVersion,
+					target: semanticContext2.target,
 					contextSha256: semanticContext2.contextSha256,
 					function: semanticContext2.function,
 					analysis: semanticContext2.analysis,
@@ -6348,6 +6315,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				{
 					...(target.irPath !== undefined ? { irPath: target.irPath } : {}),
 					...(target.irText !== undefined ? { irText: target.irText } : {}),
+					...(target.file !== undefined ? { sourceTargetFile: target.file } : {}),
 					quiet: true,
 					output: undefined,
 				}
@@ -6459,6 +6427,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			const report = await runHqlScanBatch(file, targets, hqlDecompile, {
+				inputPartialReasons: pipelineInputPartialReasons(arg?.pipelineInputQuality),
 				maxTargets: positiveIntegerArg('maxTargets'),
 				maxConcurrency: positiveIntegerArg('maxConcurrency'),
 				maxFunctionsPerHast: positiveIntegerArg('maxFunctionsPerHast'),
@@ -6472,6 +6441,25 @@ export function activate(context: vscode.ExtensionContext): void {
 				// and trips the runner's "output file not created" mask.
 				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 				fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf-8');
+			}
+			return report;
+		})
+	);
+
+	// Ad-hoc queries are pinned to the current accepted session. The core
+	// implementation neither opens targets nor writes artifacts.
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.hql.queryHeadless', async (arg?: Record<string, unknown>) => {
+			const outputPath = typeof arg?.output === 'string' ? arg.output
+				: typeof (arg?.output as { path?: unknown })?.path === 'string' ? (arg!.output as { path: string }).path : undefined;
+			const runnerSignal = arg?.pipelineAbortSignal;
+			const signal = runnerSignal && typeof runnerSignal === 'object' && typeof (runnerSignal as AbortSignal).addEventListener === 'function'
+				? runnerSignal as AbortSignal : undefined;
+			const stepTimeoutMs = typeof arg?.pipelineStepTimeoutMs === 'number' ? arg.pipelineStepTimeoutMs : undefined;
+			const report = await runHqlQueryHeadlessCommand(engine, arg, undefined, { signal, stepTimeoutMs });
+			if (outputPath) {
+				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+				fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf8');
 			}
 			return report;
 		})
@@ -6569,13 +6557,44 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			let nativeExecution: NativeAnalyzeExecution | undefined;
+			engine.reloadConfig();
+			const defaultLimits = engine.getAnalysisLimits();
+			const requestedLimits = resolveAnalyzeAllLimits(options);
+			const maxFunctions = requestedLimits.maxFunctions ?? defaultLimits.maxFunctions;
+			const maxFunctionSize = requestedLimits.maxFunctionSize ?? defaultLimits.maxFunctionSize;
+			const requestedBase = parseOptionalRawBaseAddress(options.baseAddress);
+			const requestedArchitecture = options.arch ?? vscode.workspace
+				.getConfiguration('hexcore.disassembler')
+				.get<string>('defaultArchitecture', 'x64');
+			const fileSha256 = await sha256AnalyzeAllFile(targetFilePath);
+			const reuseKey = createAnalyzeAllReuseKey({
+				targetPath: targetFilePath,
+				fileSha256,
+				architecture: requestedArchitecture,
+				baseAddress: requestedBase,
+				maxFunctions,
+				maxFunctionSize,
+				filterJunk: options.filterJunk === true,
+				detectVM: options.detectVM === true,
+				detectPRNG: options.detectPRNG === true,
+			});
+			const reuseDecision = canReuseAnalyzeAll({
+				forceReload: shouldForceReloadAnalyzeAll(options),
+				lastAcceptedKey: lastAcceptedAnalyzeAllKey,
+				requestedKey: reuseKey,
+				analysisComplete: engine.isAnalysisComplete(),
+				loadedPath: engine.getFilePath(),
+				requestedPath: targetFilePath,
+				loadedImageSha256: engine.getAnalysisImageSha256(),
+				requestedFileSha256: fileSha256,
+			});
+			let reused = false;
 			const runAnalysis = async (progress?: vscode.Progress<{ message?: string }>): Promise<number> => {
-				engine.reloadConfig();
-				const defaultLimits = engine.getAnalysisLimits();
-				const requestedLimits = resolveAnalyzeAllLimits(options);
-				const maxFunctions = requestedLimits.maxFunctions ?? defaultLimits.maxFunctions;
-				const maxFunctionSize = requestedLimits.maxFunctionSize ?? defaultLimits.maxFunctionSize;
-				const requestedBase = parseOptionalRawBaseAddress(options.baseAddress);
+				if (reuseDecision.reusable) {
+					reused = true;
+					progress?.report({ message: 'Reusing exact accepted analysis universe...' });
+					return 0;
+				}
 				const pipelineTimeout = Number.isFinite(options.pipelineTimeoutMs)
 					? Math.max(1_000, Math.trunc(options.pipelineTimeoutMs!))
 					: 600_000;
@@ -6604,6 +6623,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				} finally {
 					try { fs.unlinkSync(isolated.snapshotPath); } catch { /* heartbeat retains execution evidence */ }
 				}
+				lastAcceptedAnalyzeAllKey = reuseKey;
 				return isolated.functionNetChange;
 			};
 
@@ -6632,6 +6652,18 @@ export function activate(context: vscode.ExtensionContext): void {
 				allowDecodeEmpty: options.allowDecodeEmpty,
 				minMaterializedRatio: options.minMaterializedRatio,
 			});
+			if (reused) {
+				result.newFunctions = 0;
+				result.removedFunctions = 0;
+				result.functionNetChange = 0;
+			}
+			result.analysisReuse = {
+				reused,
+				reason: reuseDecision.reason,
+				identitySha256: reuseKey,
+				fileSha256,
+				generation: engine.getAnalysisGeneration(),
+			};
 			if (nativeExecution) { result.nativeExecution = nativeExecution; }
 			if (options.output) {
 				writeAnalyzeAllOutput(result, options.output);
@@ -6652,6 +6684,71 @@ export function activate(context: vscode.ExtensionContext): void {
 			cancelled: analyzeAllProcessController.cancelActive(),
 		}))
 	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.disasm.materializeFunctions', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			if (!Array.isArray(options.addresses) || options.addresses.length === 0) {
+				throw new Error('materializeFunctions requires a non-empty addresses array.');
+			}
+			await prepareCompleteFunctionIndex(options);
+			const result = await runFunctionMaterializationCommand(engine, {
+				addresses: options.addresses as Array<string | number>,
+				...(options.maxFunctions !== undefined ? { maxFunctions: options.maxFunctions as number } : {}),
+				...(options.maxBytesPerFn !== undefined ? { maxBytesPerFn: options.maxBytesPerFn as number } : {}),
+			} satisfies FunctionMaterializationCommandOptions);
+			writeReferenceGraphOutput(options, result);
+			functionProvider.refresh();
+			disasmEditorProvider.refresh();
+			analysisCenterProvider.refresh();
+			if (options.quiet !== true) {
+				vscode.window.showInformationMessage(
+					`Materialized ${result.committed} new, ${result.alreadyCurrent} current, ` +
+					`${result.partial + result.decodeEmpty + result.unknownFunctions} unresolved function(s).`
+				);
+			}
+			return result;
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand('hexcore.session.export', async (arg?: unknown) => {
+			const options = isRecord(arg) ? arg : {};
+			await prepareCompleteFunctionIndex(options);
+			const result = runSessionExport(engine, {
+				...(options.format !== undefined ? { format: options.format as SessionExportOptions['format'] } : {}),
+				...(options.include !== undefined ? { include: options.include as SessionExportOptions['include'] } : {}),
+				...(options.limit !== undefined ? { limit: options.limit as number } : {}),
+			});
+			writeReferenceGraphOutput(options, result);
+			if (options.quiet !== true) {
+				vscode.window.showInformationMessage(
+					`Session export complete${result.truncatedCollections.length > 0 ? ` (truncated: ${result.truncatedCollections.join(', ')})` : ''}.`
+				);
+			}
+			return result;
+		})
+	);
+
+	for (const [command, mode] of [
+		['hexcore.xref.reachableFrom', 'reachable'],
+		['hexcore.xref.unreachableFrom', 'unreachable'],
+	] as const) {
+		context.subscriptions.push(
+			vscode.commands.registerCommand(command, async (arg?: unknown) => {
+				const options = isRecord(arg) ? arg : {};
+				await prepareCompleteFunctionIndex(options);
+				const result = runFunctionReachability(engine, mode, {
+					roots: options.roots as FunctionReachabilityOptions['roots'],
+					...(options.scope !== undefined ? { scope: options.scope as FunctionReachabilityOptions['scope'] } : {}),
+					...(options.emit !== undefined ? { emit: options.emit as FunctionReachabilityOptions['emit'] } : {}),
+					...(options.limit !== undefined ? { limit: options.limit as number } : {}),
+				});
+				writeReferenceGraphOutput(options, result);
+				return result;
+			})
+		);
+	}
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('hexcore.disasm.windowsFilesystemAuditHeadless', async (arg?: WindowsFilesystemAuditCommandOptions) => {
@@ -6867,6 +6964,24 @@ export function activate(context: vscode.ExtensionContext): void {
 			const semanticAddresses = new Set(
 				(owningFunction?.instructions ?? []).map(instruction => Number(instruction.address)),
 			);
+			const boundaryContract = resolveInstructionBoundaryContract({
+				requestedAddress: params.address,
+				effectiveAddress,
+				autoBacktrack,
+				instructions: (owningFunction?.instructions ?? []).map(instruction => ({
+					address: Number(instruction.address),
+					size: Number(instruction.size),
+				})),
+				lookbehindAligned: alignmentCheck.aligned,
+				lookbehindSuggestedAddress: alignmentCheck.suggestedAddress,
+			});
+			const unresolvedMidInstruction = boundaryContract.requiresPartial;
+			const boundaryWarning = unresolvedMidInstruction
+				? `Requested address 0x${params.address.toString(16).toUpperCase()} is a mid-instruction start` +
+					(boundaryContract.suggestedAddress !== undefined
+						? `; use boundary 0x${boundaryContract.suggestedAddress.toString(16).toUpperCase()} or enable autoBacktrack.`
+						: '; enable autoBacktrack or provide an instruction boundary.')
+				: undefined;
 			const lastSemanticInstruction = owningFunction?.instructions.at(-1);
 			const semanticEnd = lastSemanticInstruction
 				? Number(lastSemanticInstruction.address) + Number(lastSemanticInstruction.size)
@@ -6983,11 +7098,12 @@ export function activate(context: vscode.ExtensionContext): void {
 						? 'Decoded bytes were not committed as a classified function body; downstream audits are unchanged.'
 						: 'No authoritative function body was available for an analysis-context commit.';
 			const coverageStatus = requestedByteCoverage?.status ?? 'ok';
-			const semanticStatus = coverageStatus === 'partial' || semanticInstructionCount === 0 || displayOnly
+			const semanticStatus = coverageStatus === 'partial' || semanticInstructionCount === 0 || displayOnly || unresolvedMidInstruction
 				? 'partial' as const
 				: 'ok' as const;
 			const warnings = [
 				requestedByteCoverage?.reason,
+				boundaryWarning,
 				semanticInstructionCount === 0 ? 'Decoded window contains zero classified semantic instructions.' : undefined,
 				displayOnly ? closureReason : undefined,
 			].filter((warning): warning is string => Boolean(warning));
@@ -7010,6 +7126,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				semanticInstructionCount,
 				paddingInstructionCount,
 				unclassifiedInstructionCount,
+				instructionBoundary: {
+					status: boundaryContract.status,
+					source: boundaryContract.source,
+					recoveredByAutoBacktrack: boundaryContract.recoveredByAutoBacktrack,
+					...(boundaryContract.suggestedAddress !== undefined
+						? { suggestedAddress: `0x${boundaryContract.suggestedAddress.toString(16).toUpperCase()}` }
+						: {}),
+				},
 				analysisClosure: {
 					status: closureResult?.status ?? 'display-only',
 					...(knownFunctionAddress !== undefined ? { functionAddress: `0x${knownFunctionAddress.toString(16).toUpperCase()}` } : {}),
@@ -7657,6 +7781,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			const maxResults = typeof arg?.maxResults === 'number' && Number.isInteger(arg.maxResults) && arg.maxResults > 0
 				? arg.maxResults
 				: 100;
+			const startOffset = arg?.startOffset === undefined
+				? 0
+				: typeof arg.startOffset === 'number' && Number.isInteger(arg.startOffset) && arg.startOffset >= 0
+					? arg.startOffset
+					: (() => { throw new Error('searchBytesHeadless: "startOffset" must be a non-negative integer.'); })();
 			const outputPath = typeof arg?.output === 'string'
 				? arg.output
 				: (typeof (arg?.output as any)?.path === 'string' ? (arg!.output as any).path : undefined);
@@ -7678,6 +7807,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				throw new Error('searchBytesHeadless requires a "file" argument or a previously loaded file.');
 			}
 			const fileBuffer = fs.readFileSync(targetPath);
+			if (startOffset > fileBuffer.length) {
+				throw new Error('searchBytesHeadless: "startOffset" is outside the input file.');
+			}
 
 			// Parse the pattern string into bytes and mask
 			// Supports: "48 8B ?? ?? 0F 84" or "488B????0F84" or mixed
@@ -7731,28 +7863,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				return offset + baseAddress;
 			};
 
-			// Linear scan
-			const matches: Array<{ address: string; offset: number }> = [];
-			const patternLen = patternBytes.length;
-			const scanLimit = fileBuffer.length - patternLen;
-
-			for (let i = 0; i <= scanLimit && matches.length < maxResults; i++) {
-				let matched = true;
-				for (let j = 0; j < patternLen; j++) {
-					const entry = patternBytes[j];
-					if (!entry.wildcard && fileBuffer[i + j] !== entry.value) {
-						matched = false;
-						break;
-					}
-				}
-				if (matched) {
-					const va = offsetToVA(i);
-					matches.push({
-						address: `0x${va.toString(16).toUpperCase()}`,
-						offset: i,
-					});
-				}
-			}
+			const page = scanBytePatternPage(fileBuffer, patternBytes, maxResults, startOffset);
+			const matches = page.offsets.map(offset => ({
+				address: `0x${offsetToVA(offset).toString(16).toUpperCase()}`,
+				offset,
+			}));
 
 			// Normalize the pattern for display (space-separated)
 			const displayPattern = patternBytes
@@ -7764,6 +7879,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				pattern: displayPattern,
 				matches,
 				totalMatches: matches.length,
+				returnedMatches: matches.length,
+				totalMatchesExact: !page.truncated,
+				startOffset,
+				truncated: page.truncated,
+				...(page.nextOffset !== undefined ? { nextOffset: page.nextOffset } : {}),
 				generatedAt: new Date().toISOString(),
 			};
 
@@ -8421,6 +8541,8 @@ async function liftAllExecutableSections(
 			bytesToLift,
 			execSec.virtualAddress || execSec.offset,
 			true,
+			{ architecture: engine.getArchitecture(), textSectionAddress: execSec.virtualAddress || execSec.offset,
+				textRelocations: execSec.name === '.text' ? engine.getTextRelocations() : undefined },
 		).skipBytes;
 
 		if (skipBytes > 0) {
@@ -9666,6 +9788,7 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		materializationPolicy: result.materializationPolicy,
 		closureRestoration: result.closureRestoration,
 		nativeExecution: result.nativeExecution,
+		analysisReuse: result.analysisReuse,
 		status: result.status,
 		warning: result.warning,
 		totalFunctionInstructions: result.totalFunctionInstructions,

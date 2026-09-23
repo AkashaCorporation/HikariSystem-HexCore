@@ -150,6 +150,19 @@ suite('Unit tests: listCapabilities', () => {
 		}
 	});
 
+	test('materialization and session export are headless, artifact-producing and owned by the disassembler', () => {
+		for (const command of [
+			'hexcore.disasm.materializeFunctions', 'hexcore.session.export',
+			'hexcore.xref.reachableFrom', 'hexcore.xref.unreachableFrom',
+		]) {
+			const entry = allEntries.find(candidate => candidate.command === command);
+			assert.ok(entry, `missing ${command} capability`);
+			assert.strictEqual(entry!.headless, true);
+			assert.strictEqual(entry!.validateOutput, true);
+			assert.deepStrictEqual(entry!.requiredExtension, ['hikarisystem.hexcore-disassembler']);
+		}
+	});
+
 	/**
 	 * Total capabilities count is reasonable (> 30 entries).
 	 */

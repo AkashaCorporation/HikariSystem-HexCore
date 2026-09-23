@@ -10,6 +10,8 @@
 rule Obfuscation_XOR_Loop_Pattern
 {
     meta:
+        architecture = "x86"
+        requires_executable = "true"
         description = "Single-byte XOR decoder loop instruction pattern"
         severity = "medium"
         author = "HexCore"
@@ -28,6 +30,8 @@ rule Obfuscation_XOR_Loop_Pattern
 rule Obfuscation_Stack_String_Construction
 {
     meta:
+        architecture = "x86"
+        requires_executable = "true"
         description = "Stack string construction via repeated mov byte [rbp+N], imm8"
         severity = "medium"
         author = "HexCore"
@@ -46,6 +50,8 @@ rule Obfuscation_Stack_String_Construction
 rule Obfuscation_Base64_Alphabet
 {
     meta:
+        advisory_only = "true"
+        advisory_reason = "A common encoding alphabet is not behavioral evidence."
         description = "Contains embedded base64 alphabet"
         severity = "low"
         author = "HexCore"
@@ -61,6 +67,8 @@ rule Obfuscation_Base64_Alphabet
 rule Obfuscation_Custom_Base64_Alphabet
 {
     meta:
+        advisory_only = "true"
+        advisory_reason = "An alphabet-like string does not establish custom encoding or obfuscation."
         description = "Contains 64-character alphabet-like string (possible custom base64)"
         severity = "medium"
         author = "HexCore"
@@ -77,6 +85,8 @@ rule Obfuscation_Custom_Base64_Alphabet
 rule Obfuscation_Large_XOR_Immediate
 {
     meta:
+        architecture = "x86_64"
+        requires_executable = "true"
         description = "Uses multi-byte XOR immediate (indicates obfuscation/encryption)"
         severity = "low"
         author = "HexCore"

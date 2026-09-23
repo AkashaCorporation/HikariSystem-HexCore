@@ -92,3 +92,16 @@ docs/AgentsNoGit/
 **/helix_dump_*.mlir
 **/*.node.*
 /vc140.pdb
+# HexCore session files
+.hexcore_session.db
+.hexcore_session.db-shm
+.hexcore_session.db-wal
+.hexcore_session.db.migration-backup-*
+.hexcore_session.db.target-mismatch-*
+
+# HexCore local release/test scratch
+/.tmp/
+/extensions/**/.goal385-*/
+/extensions/hexcore-disassembler/src/**/*.js
+/extensions/hexcore-disassembler/src/**/*.js.map
+/extensions/hexcore-souper/prebuilds/

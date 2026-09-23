@@ -1,0 +1,173 @@
+{
+  "schemaVersion": 1,
+  "runnerVersion": "hast-remill-v1",
+  "corpus": {
+    "id": "hexcore-semantic-benchmark-v1",
+    "sourceSha256": "0a137da1ce6c88a7adf3279a0d63974007ffa3b3b7420aba8eb46a9210be4695",
+    "groundTruthSha256": "9caf941e7c9f156b61cc451c9d508922f5015cd857f4d232aea60b3a5b1051a0",
+    "binaryCount": 16,
+    "functionCount": 224,
+    "corpusIdentitySha256": "5da048bad29a27690773e6e80d831f23c946f31d32fa1f81caaeafe81f48fac6"
+  },
+  "engines": {
+    "helix": {
+      "version": "helix-js=0.1.9 native=0.1.9",
+      "nodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776"
+    },
+    "remill": {
+      "version": "0.5.4",
+      "upstreamVersion": "6.0.1",
+      "upstreamCommit": "0e324aee8c67a63ec759ef379dcfafa0b3cb1448",
+      "nodeSha256": "1002fd9b85a6f1e68c52d8b1f451dc5bd536ed27df404b769149ae17f22ac257"
+    }
+  },
+  "artifacts": [
+    {
+      "program": "clangcl-x64-O0-debug",
+      "binarySha256": "e969bf5daf729080251caa50fc25e0e1290fe4145d97a68eab5a5d4d88affa81",
+      "queryCount": 14,
+      "artifactSha256": "be6a029b2d97b17bca8671567dec7ec7cf1bb09733f7ea63224f876ce1dfd07d"
+    },
+    {
+      "program": "clangcl-x64-O0-stripped",
+      "binarySha256": "8dc6574db121db0a80517208ce9b910ff56a24a24ccd2bcd8aef7573ea9db55a",
+      "queryCount": 14,
+      "artifactSha256": "d0b6fc5cd61eda4926a3c2a86f2144f66e1f1ea9116907222f496910afa37856"
+    },
+    {
+      "program": "clangcl-x64-O2-debug",
+      "binarySha256": "fa972b1eac358a2b54ea345a8a1fbf4b022d3558dc62d2d6834008afb9ab9267",
+      "queryCount": 14,
+      "artifactSha256": "dbc8c326683b5feb087afd1ace92ebd986c319f7763dce8be460e9ac6616d568"
+    },
+    {
+      "program": "clangcl-x64-O2-stripped",
+      "binarySha256": "76f563b6a214eabf03684f61a8b612435e88155b48e88dcc62aff40226fba765",
+      "queryCount": 14,
+      "artifactSha256": "46255bf4caa84f07d9fa1d317ed9597eba6979e7c20e44fa8fdecd4adb56ce3c"
+    },
+    {
+      "program": "clangcl-x86-O0-debug",
+      "binarySha256": "5ffd3c8c0cfdec49f9d6a1657eef10028bae54e1ffcb8c94a479db97a34c5b1c",
+      "queryCount": 14,
+      "artifactSha256": "87391d67efef9495130a0cf29a53ff91884fece0653f214437e5d499c1c0ca68"
+    },
+    {
+      "program": "clangcl-x86-O0-stripped",
+      "binarySha256": "fb9ea167c14ba24c2d6a2f3561ab9ed3a2d992b2a54dac821b36771509ee735d",
+      "queryCount": 14,
+      "artifactSha256": "786cc08785029f3cc67ef1a1347d29f7bad13141aac2870b03ec3420a4ef23af"
+    },
+    {
+      "program": "clangcl-x86-O2-debug",
+      "binarySha256": "68c656a4b20446fa7dc96ad824ee744764089b3b1b956d729151b799d9296838",
+      "queryCount": 14,
+      "artifactSha256": "4f75002457ae92d91cb9ec81b417b9fd10c714d53224fd734cbd772e7a8a0e17"
+    },
+    {
+      "program": "clangcl-x86-O2-stripped",
+      "binarySha256": "25a6eac88e5e029d2ae6c32dd7965d7b195dfe544957520e3fbe0f1354245ef9",
+      "queryCount": 14,
+      "artifactSha256": "07e8ea45689f7cc2f34f81f10129c63a1f897846325fb52ec1d301a62c98c7c9"
+    },
+    {
+      "program": "msvc-x64-O0-debug",
+      "binarySha256": "5e8ca1bb3a7a0073f5cef3c4a9e107eee616fc9f641d386ae77ea081c628be16",
+      "queryCount": 14,
+      "artifactSha256": "e052e5cf70d356c8b5e64d1fddde6b5942ed41fba7fede5a4501ccb0bce03f2e"
+    },
+    {
+      "program": "msvc-x64-O0-stripped",
+      "binarySha256": "f6047fe6362dbab7b2950198cde7f93b756b7539aae4db376bdfb04786273c5e",
+      "queryCount": 14,
+      "artifactSha256": "292e30862643855d5e811b4a90bf4630fe5b597c8cd26e92732f063d6616ce4b"
+    },
+    {
+      "program": "msvc-x64-O2-debug",
+      "binarySha256": "556ac8cdc265ee058861b42b7b1a02e1b649924b35535edb191ad73444af5775",
+      "queryCount": 14,
+      "artifactSha256": "848da80d650d370399fd4ee79451ff28307fbcb5a60dc0facb8efe521fa063a9"
+    },
+    {
+      "program": "msvc-x64-O2-stripped",
+      "binarySha256": "2f5a5f42e933ab514e0063ea9f4655b5d2c21da9f4aefdb97aa661a7563b37f1",
+      "queryCount": 14,
+      "artifactSha256": "e844ba35c096fdc9a5d365f191da57d0c7be34dd585a92aeb96dbba6b850449e"
+    },
+    {
+      "program": "msvc-x86-O0-debug",
+      "binarySha256": "fa4e18bfd7e4bbaf5c5cfbe9f3e1fbbd95431771c24ed2526008aeeec0949931",
+      "queryCount": 14,
+      "artifactSha256": "ee51840e49d37c84fd7634330f369f147615a9d687b963b0bb5912a44b1b1c74"
+    },
+    {
+      "program": "msvc-x86-O0-stripped",
+      "binarySha256": "a2892ae5b76dd076511fa9abeda569c3676b0465c44861a88d8f7abbde884580",
+      "queryCount": 14,
+      "artifactSha256": "3948108a11d4742181e630e32f72f967464bc0c33788d51b2a548fcf98d30791"
+    },
+    {
+      "program": "msvc-x86-O2-debug",
+      "binarySha256": "c7463a31c5b23c410c699df88dae6e2cb4c310b91658a9048c28314bf46e4c03",
+      "queryCount": 14,
+      "artifactSha256": "b60e99985e77f5e2bbf6a1a3e4e92b6050ed709c70831e1a4e02ddb620945dd2"
+    },
+    {
+      "program": "msvc-x86-O2-stripped",
+      "binarySha256": "abbf00f42fe0f3ac0000d6ad1b2dc9aecb7a0fddc9003995b90e8edd83abf6b3",
+      "queryCount": 14,
+      "artifactSha256": "b9b5ddb2dffc4a9fb910d8876ed2cadfd06acdc3ab59b6ec1acf77473ebb6d4d"
+    }
+  ],
+  "evidenceSha256": "1793026f9223daf5c4dcd6e308c5c768852204b47e22fdfee9480673f049b4bf",
+  "comparison": {
+    "schemaVersion": 1,
+    "groundTruthSha256": "9caf941e7c9f156b61cc451c9d508922f5015cd857f4d232aea60b3a5b1051a0",
+    "bsim": {
+      "inputSha256": "a2dfd47dc834c057348e8574065ee1bc773b3ef244911854b3196cf06cccdc7e",
+      "metrics": {
+        "queryCount": 224,
+        "eligibleQueryCount": 224,
+        "suppressedQueryCount": 0,
+        "top1Correct": 36,
+        "top1Accuracy": 0.160714286,
+        "top5Correct": 107,
+        "top5Accuracy": 0.477678571,
+        "meanReciprocalRank": 0.306862842,
+        "expectedMatches": 3360,
+        "retrievedCorrectMatches": 556,
+        "recall": 0.16547619,
+        "falseMatches": 2626,
+        "falseMatchesAt5": 340,
+        "queriesWithoutCorrectMatch": 112
+      }
+    },
+    "functionAtlas": {
+      "inputSha256": "ac165bbae95bebfdccf14e1771e5e520eb5df1e357f1be0bde96c05cebc5dec6",
+      "metrics": {
+        "queryCount": 224,
+        "eligibleQueryCount": 216,
+        "suppressedQueryCount": 8,
+        "top1Correct": 216,
+        "top1Accuracy": 1,
+        "top5Correct": 216,
+        "top5Accuracy": 1,
+        "meanReciprocalRank": 1,
+        "expectedMatches": 3240,
+        "retrievedCorrectMatches": 1156,
+        "recall": 0.356790123,
+        "falseMatches": 5756,
+        "falseMatchesAt5": 494,
+        "queriesWithoutCorrectMatch": 0
+      }
+    },
+    "comparison": {
+      "top1AccuracyDelta": 0.839285714,
+      "top5AccuracyDelta": 0.522321429,
+      "meanReciprocalRankDelta": 0.693137158,
+      "recallDelta": 0.191313933,
+      "falseMatchesDelta": 3130
+    }
+  },
+  "artifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3"
+}

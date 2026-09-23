@@ -63,6 +63,8 @@ rule AntiVM_HyperV_Strings
 rule AntiVM_Generic_Virtual_Strings
 {
     meta:
+        advisory_only = "true"
+        advisory_reason = "Generic virtualization strings do not establish a VM-detection check."
         description = "Contains generic virtualization indicator strings"
         severity = "medium"
         author = "HexCore"

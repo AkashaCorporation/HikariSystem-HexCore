@@ -1,8 +1,8 @@
-# HexCore Automation - v3.8.4 (Analysis Contract)
+# HexCore Automation - v3.8.5 Development (Analysis Contract)
 
 HexCore supports running analysis pipelines from workspace job files.
 
-This document describes the `3.8.4` analysis-contract surface. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
+This document describes the unreleased `3.8.5` development surface, including the retained `3.8.4` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
 Relevant integrated versions: disassembler `1.4.68`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.1`, Elixir `1.0.4`, and Report Composer `1.0.14`.
 
@@ -301,8 +301,60 @@ Steps can reference outputs from previously-completed steps using `$step[N]` tok
 | Token | Description |
 |-------|-------------|
 | `$step[N].output` | Output file path produced by step N (0-based index) |
-| `$step[N].result.fieldName` | A specific field from the JSON result of step N |
+| `$step[N].result.fieldName` | A field from the JSON result of step N; dotted paths such as `result.prototype.prototypeId` are supported |
 | `$step[prev].output` | Output file path from the immediately preceding step |
+
+### 3.8.5 Development: Named Step IDs
+
+Steps may declare an optional unique, case-sensitive `id` matching
+`[A-Za-z][A-Za-z0-9_-]{0,63}`. `prev` is reserved for the legacy positional token.
+Use `$step[lift-main].output` or `$step[lift-main].result.prototype.prototypeId` for stable
+references and `onResult.actionValue: "lift-main"` with `action: "goto"` for a
+named branch destination. Numeric references and numeric goto targets remain
+supported; `prev` still means the preceding declaration index, not the last
+executed step.
+
+Named references resolve the latest terminal execution of that logical step.
+An unavailable, skipped or failed producer fails explicitly, rather than falling
+back to an earlier success. A named producer's primary output hash is checked
+before use; replacement by another step is not silently accepted. Partial input
+still requires consumer `allowPartial:true`.
+
+Dotted result access walks own object fields only. A missing segment fails before
+dispatch. A token that occupies the complete argument preserves its scalar or
+structured type; embedding a structured object in surrounding text is rejected
+instead of producing `[object Object]`. Result-field dependencies also retain the
+producer output artifact in provenance, even when no file path appears in the
+resolved command arguments.
+
+Forward-declared named dependencies produce a validation warning because their
+availability depends on control flow. They can resolve at runtime only after the
+producer actually executes. Missing names, duplicate IDs, self references and
+known skippable dependencies are rejected. This is not a full path-feasibility solver.
+
+For named steps, status includes `stepId`, zero-based `stepIndex`, `occurrence`
+and command-attempt history. Provenance preserves those identities alongside its
+legacy one-based `index`. `history` retains superseded named-step metadata within
+the run, not copies of overwritten artifact bytes. Default filenames still use
+declaration indexes; give outputs explicit paths when external tools need stable
+names. `pipelineStepIdentity` is runner-owned and excluded from configuration hashes.
+
+### 3.8.5 Development: Producer Outcome Gates
+
+The runner rejects failed/skipped producer artifacts before dispatching an
+analysis consumer, including literal paths to known outputs. `continueOnError`
+allows independent steps to continue; it does not make a failed artifact usable.
+Consumers of partial outputs must explicitly set `allowPartial:true`; the
+consumer step and its provenance remain partial even if local processing succeeds.
+
+Recognized error contracts and incompatible IR inputs are rejected independently
+of filename extensions. Available matching provenance is hash-checked within
+bounded workspace ancestor lookup. No manifest means unverified ancestry, not a
+verified clean producer. Diagnostic error stubs remain on disk, with failed-output
+kind; the Composer can read them for reporting without authorizing semantic use.
+
+`pipelineInputQuality` is runner-owned context, not a job argument for overriding
+producer status. Its derived contents do not participate in configuration hashes.
 
 **Example — auto-wire liftToIR → decompileIR:**
 
@@ -357,6 +409,14 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.strings.extract` | 120s | ASCII/Unicode string extraction with categorization | All |
 | `hexcore.strings.extractAdvanced` | 180s | Confidence-scored, deduplicated and section-attributed deobfuscation with bounded output budgets. Optional evidence chains decode hex to ASCII to Base64 and probe JSON without hiding intermediate transformations. | All |
 | `hexcore.peanalyzer.analyze` | 120s | PE headers, sections, embedded execution manifest, DLL-characteristics mitigations, and Windows capability signals | PE only |
+
+The shallow PE result includes `analysisCoverage` for imports, exports,
+resources, TLS, exceptions, relocations and debug data. Each directory is
+`not-present`, `parsed`, `partial`, or `not-assessed`; an empty array is never
+the only indication of parser coverage. Resources, TLS and x64 exception data
+use their bounded parsers. Export, relocation and debug directories remain
+explicitly `not-assessed` when present until their parsers are implemented.
+`antiDebug` also publishes its bounded imports/image-scan basis.
 | `hexcore.pe.extractSection` | 120s | Extract one named PE section as a bounded binary artifact for later pipeline steps | PE only |
 | `hexcore.crypto.rc4` | 120s | Apply bounded passive RC4 to an explicit input artifact; supports UTF-8, hex, Base64, or byte-array keys | All |
 | `hexcore.disasm.analyzePEHeadless` | 120s | **Deep PE analysis**: typed imports (180+ API signatures), exports, sections, TLS/Debug/CLR/DelayImport, security indicators, category summary | PE only |
@@ -366,6 +426,14 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.yara.scan` | 180s | YARA rule scanning with threat scoring. Scans the bundled rule set by default (7 built-in + 7 AntiAnalysis `.yar` = ~14 rules). The 76k+ DefenderYara rule set is **not bundled**; supply it (see note below) and pass `categories`/`loadEssentials` to scan against it headlessly. | All |
 | `hexcore.yara.updateRules` | 60s | Reload YARA rule files | N/A |
 | `hexcore.ioc.extract` | 120s | IOC extraction across 12 categories: URL, email, IPv4, IPv6, domain, registry key, file path, named pipe, mutex/GUID, hash (MD5/SHA1/SHA256), user-agent, crypto wallet. Binary-aware noise reduction, dedup, optional SQLite backend (auto at >=64MB or >=20k matches). | All |
+
+IOC JSON includes `summary.validation` with extractor-scoped raw matches,
+accepted unique values, validator/context rejections, private-address
+suppression and duplicate suppression. These counters explain the direct
+extractor result; Composer may apply stricter evidence validation later and
+records those separate rejection reasons in the composed report. IPv4-looking
+prefixes inside longer dotted OIDs and syntactically invalid short IPv6 forms
+are rejected by the extractor.
 
 ### Disassembly & Analysis
 
@@ -387,6 +455,8 @@ These commands accept `file`, `quiet`, and `output` options and can run without 
 | `hexcore.revenant.decompile` | 180s | Recover C# from classic CLR PE or a supported .NET single-file apphost via the bundled ICSharpCode.Decompiler route. | Managed .NET |
 | `hexcore.revenant.decompileIL` | 180s | Recover IL from classic CLR PE or a supported .NET single-file apphost. | Managed .NET |
 | `hexcore.hql.scanHeadless` | 180s | Decompile one or more functions and evaluate semantic signatures over Helix HAST. | Helix-supported targets / IR |
+| `hexcore.hql.queryHeadless` | 180s | Run a bounded ad-hoc JSON HAST/HXDB query against the pinned active session; never materializes implicitly. | Active analyzed native target |
+| `hexcore.semantic.explain` | 30s | Explain a persisted prototype, binding, reference, propagation effect, conflict, or HQL semantic match from the pinned snapshot. | Active HXDB session |
 | `hexcore.souper.optimize` | 60s | Optimize LLVM IR with Souper/Z3. Intended for explicit `.ll` experiments, MBA, crypto, and bitwise-heavy code. | LLVM IR |
 | `hexcore.constraints.solveHeadless` | 300s | Solve bounded Int/BitVec constraints with Z3 and return concrete models plus solver provenance. | JSON / SMT-LIB assertions |
 | `hexcore.extractStructInfo` | 30s | Export BTF/DWARF struct and function type information from the loaded ELF analysis. | ELF with BTF or DWARF |
@@ -450,7 +520,7 @@ Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's 
 | `hexcore.elixir.version` | — | Show the native Elixir engine version string (interactive toast). Not pipeline-safe. | n/a |
 | `hexcore.elixir.smokeTestHeadless` | 30s | Verify the native `.node` loaded and capability surface is exposed. Returns the legacy native `version` plus explicit `wrapperVersion`, `nativeVersion`, and `versionAligned`; wrapper and native use independent release clocks. | n/a |
 | `hexcore.elixir.emulateHeadless` | 600s | Full emulation run: load PE32+ → `run(entry, 0n)` → collect API calls + stop reason. Returns `{file, entry, runStart, stopReason, apiCallCount, apiCalls, apiCallsPath, apiCallsTotal, warning}` — `runStart` is the actual start address used (= `entry` unless `startVa` was set); `warning` is non-null when `AddressOfEntryPoint==0` and no `startVa` was given (packed-PE hint). When the API-call log is large, the full list is spilled to a `<output-base>.apicalls.json` companion (`apiCallsPath` points to it; `apiCalls` then holds a capped preview, `apiCallsTotal` the true count). **Accepts an optional `startVa` (start-address override, see the args table — essential for packed PEs) and an optional `oracle` arg that switches it to AI-driven mode (see "Oracle Hook" below). ELF targets are deliberately gated to HexCore Debugger until the Azoth loader supports them.** | PE32+ x86_64 |
-| `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes DRCOV v2 binary (IDA Lighthouse format) to `output.path.drcov`. Returns `{file, entry, stopReason, blockCount, drcovBytes}`. | PE32+ x86_64 |
+| `hexcore.elixir.stalkerDrcovHeadless` | 600s | Same as emulate but with Stalker basic-block tracing enabled. Writes a DRCOV v2 binary (IDA Lighthouse format), plus separate JSON metadata with exact paths, byte count and SHA-256. | PE32+ x86_64 |
 | `hexcore.elixir.snapshotRoundTripHeadless` | 60s | Load binary, save emulator snapshot via `snapshotSave()`, restore via `snapshotRestore()`. Returns `{file, entry, snapshotBytes, restored}`. Verifies snapshot subsystem end-to-end. **Runs IN-HOST (no worker fork) — it loads + snapshots but never calls `run()`/`uc_emu_start`, so ACG does not apply; uses a fixed 100k cap and ignores the `maxInstructions` arg.** | PE32+ x86_64 |
 
 **Args for emulateHeadless / stalkerDrcovHeadless / snapshotRoundTripHeadless:**
@@ -461,7 +531,7 @@ Clean-room Rust+C++23 dynamic analysis engine that replaces Qiling as HexCore's 
 | `maxInstructions` | number | `1_000_000` | Instruction cap for the emulation run. (Not used by snapshot command.) |
 | `startVa` | string\|number | — | **(v3.8.x)** *(emulate / stalker)* Override the run **start address** (`"0x…"` hex or decimal). By default the run starts at `load()`'s entry — but on a **packed/protected PE with `AddressOfEntryPoint == 0`** that resolves to `ImageBase` (the non-executable PE header) and the run faults at **0 instructions** (`UC_ERR_FETCH_PROT`). Set `startVa` to the **TLS-callback VA** (the real protector stub, from `IMAGE_DIRECTORY_ENTRY_TLS` / `AddressOfCallBacks`) to start there instead. When `AOE==0` and no `startVa` is given, the result carries a `warning` explaining this. The result also echoes `runStart`. |
 | `verbose` | boolean | `false` | Stream additional trace lines to the Elixir output channel. **Only honored by `emulateHeadless`; `stalkerDrcovHeadless` and `snapshotRoundTripHeadless` hardcode it off and ignore the arg.** |
-| `output.path` | string | — | Write JSON result to this path. For `stalkerDrcovHeadless`, a `.drcov` variant is written alongside (or replaces `.json` with `.drcov`). For `emulateHeadless`, an `.apicalls.json` companion may be written alongside (see its return). |
+| `output.path` | string | — | Write the primary result to this path. For `stalkerDrcovHeadless`, a `.drcov` path is the binary primary and metadata is written to `<path>.json`; a `.json` path is metadata and its sibling `.drcov` is binary. Other paths remain metadata and gain a `.drcov` companion. The two artifacts are never written to the same path. For `emulateHeadless`, an `.apicalls.json` companion may be written alongside (see its return). |
 | `oracle` | object | — | *(optional, `emulateHeadless` only)* Enables the Project Pythia AI-oracle pause/resume run. See "Oracle Hook" below. |
 
 **stopReason shape:** `{ kind: "Exit" | "InsnLimit" | "Error" | "User", address: string, instructionsExecuted: number, message: string }`. (Under the Oracle Hook, `run()` can also stop with `kind: "breakpoint"`.)
@@ -808,6 +878,7 @@ These commands require UI interaction (file pickers, input boxes, webviews) and 
 | `hexcore.disasm.disassembleAt` | `hexcore.disasm.disassembleAtHeadless` |
 | `hexcore.hql.scan` | `hexcore.hql.scanHeadless` |
 | `hexcore.hql.scanFunctions` | `hexcore.hql.scanHeadless` |
+| `hexcore.hql.query` | `hexcore.hql.queryHeadless` |
 | `hexcore.debug.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
 | `hexcore.unicorn.searchMemory` | `hexcore.debug.searchMemoryHeadless` |
 | `hexcore.unicorn.searchMemoryHeadless` | `hexcore.debug.searchMemoryHeadless` |
@@ -870,7 +941,7 @@ Use one of these input forms:
 - `irPath` for one retained Remill-compatible LLVM IR artifact.
 - `irText` for one inline Remill-compatible IR target.
 
-Ordinary LLVM IR is not currently part of this command contract. The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`, and every scanned function, including clean negatives. Per-target records carry function/address identity, AST node count, adapter coverage and unsupported-node counts, plus the active `signatureSetSha256`. Findings carry `signatureId`, `structuralCompleteness`, `evidenceLevel`, and `matchCount`; `confidence` exists only for an explicitly corpus-calibrated signature. HQL signature `severity` is presentation priority, not vulnerability severity.
+Ordinary LLVM IR is not currently part of this command contract. The JSON report includes `targetCount`, `matchedFunctionCount`, `totalFindings`, and every scanned function, including clean negatives. Per-target records carry function/address identity, AST node count, adapter coverage and unsupported-node counts, plus the active `signatureSetSha256`. `signatureSetScope:"active-rule-set"` makes explicit that this digest identifies the global evaluated rule set and is expected to remain identical across functions; `cacheKey` carries HAST, rule, semantic-fact and budget identity. Findings carry `signatureId`, `structuralCompleteness`, `evidenceLevel`, and `matchCount`; `confidence` exists only for an explicitly corpus-calibrated signature. HQL signature `severity` is presentation priority, not vulnerability severity.
 
 ```json
 {
@@ -1094,7 +1165,7 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 
 ## Architecture Notes
 
-- **Arch-agnostic commands** (filetype, hash, entropy, strings, YARA, IOC, base64) operate on raw bytes — no architecture dependency.
+- **Byte-oriented commands** (filetype, hash, entropy, strings, YARA, IOC, base64) can inspect raw bytes. YARA score eligibility additionally depends on declared format/architecture/executable-evidence requirements; a byte match alone is not native behavior.
 - **Disassembler** auto-detects architecture from ELF `e_machine` and PE `Machine` headers. Raw files default to x64, but `analyzeAll` accepts explicit `arch` and `baseAddress`; structured PE/ELF headers remain authoritative.
 - **buildFormula** recognizes x86/x64 registers AND ARM64 (`x0`-`x30`, `w0`-`w30`, `sp`, `lr`, `fp`, `xzr`, `wzr`) and ARM32 (`r0`-`r15`) registers, plus ARM mnemonics (`movz`/`movk`/`movn`, 3-operand `add`/`sub`). It is NOT x86/x64-only.
 - **checkConstants** is architecture-neutral — it only compares numeric literals.
@@ -1104,6 +1175,14 @@ When an ELF file contains a `.BTF` (BPF Type Format) section, type data is autom
 - **Remill IR Lifter** supports x86, x86-64, and AArch64 in the current `0.5.4` package. ISA-extension coverage is not uniform; low AArch64 coverage is reported rather than hidden.
 - **Rellic Decompiler** is a disabled legacy compatibility surface. Its commands remain directly addressable for old jobs, but new work must use Helix. Do not claim a removal date that has not been scheduled.
 - **Helix Decompiler** runs the MLIR lowering/pass pipeline on Remill IR: type propagation, calling-convention recovery, structured control-flow reconstruction, and PseudoC emission with confidence scoring. x86/x64 is the qualified route; AArch64 remains experimental and must be judged against retained IR/disassembly. Use `hexcore.helix.decompile` or `liftToIR` + `hexcore.helix.decompileIR`. Pass `optimizeIR: false` only when isolating pass-pipeline behavior.
+
+**3.8.5 development:** ELF AArch64 file metadata can include `pltResolution` with
+resolved/unknown GOT bindings and decoder/relocation diagnostics. This describes
+indexed PLT import evidence, not complete execution semantics. Older AArch64 PLT
+snapshots without the mapping revision require a fresh `analyzeAll` run; preserve
+the old artifacts instead of relabeling their aliases in place. CBZ/CBNZ/TBZ/TBNZ
+destinations and reachable tails are retained on the new source path, but this
+does not close the broader experimental AArch64 Helix lowering limitations.
 - **Managed routing** is explicit: classic CLR PE and detected .NET single-file apphosts are not native Helix inputs. Helix emits `managed: true`, `managedFormat`, and `confidence: 0`; use Revenant for C# or IL.
 - **Souper** is tri-state on the Helix route in `3.8.3`: omitted or `"auto"` runs only on sufficiently bitwise/rotate-heavy IR, `true` forces it, and `false` disables it. The standalone `hexcore.souper.optimize` command is for explicit IR experiments.
 - **Auto-backtrack** (v3.7.3+) — `disassembleAtHeadless`, `helix.decompile`, and `liftToIR` auto-detect function boundaries. If the supplied address lands mid-function, the engine backtracks to the real function start. v3.7.4 adds `forceProbe` mode, Capstone backward disassembly, ftrace preamble skip, and `endbr64` recognition. Disable with `autoBacktrack: false`.
@@ -1165,14 +1244,101 @@ is synchronously blocked. Successful runs return a digest-verified gzip/V8
 engine snapshot, hydrate the parent without repeating whole-binary analysis,
 and delete the transient snapshot. `nativeExecution` records outcome, worker
 PID, duration, final phase, heartbeat path, and compressed/raw snapshot sizes.
+The child keeps IPC referenced after queuing its terminal result; the parent
+validates the snapshot/hash and owns termination. This prevents a clean exit from
+racing and dropping the reply during persisted-session restoration.
 The heartbeat under `.hexcore-meta` is updated by the supervisor independently
 of the worker and remains as terminal evidence for success, timeout, cancel,
-or crash. Pipeline timeout automatically invokes
+or crash. Heartbeat writes use unique temporary files; Windows rename
+contention falls back to best-effort overwrite and cannot terminate the
+Extension Host or native analysis. Pipeline timeout automatically invokes
 `hexcore.disasm.cancelAnalyzeAll`.
 
 On startup, an unchanged job left `running` by a dead prior host is archived
 and marked terminal after `hexcore.pipeline.staleRunningMs` (default 15 min),
 then becomes eligible for retry. Recovery never overwrites the archived status.
+
+### `hexcore.disasm.materializeFunctions`
+
+Explicitly decode and commit selected function bodies after `analyzeAll`. This
+is an opt-in state transition; HQL and semantic read queries remain read-only
+and never invoke it implicitly.
+
+```json
+{
+  "cmd": "hexcore.disasm.materializeFunctions",
+  "args": {
+    "addresses": ["0x1400014E0", "0x140001470"],
+    "maxFunctions": 64,
+    "maxBytesPerFn": 65536
+  },
+  "output": { "path": "materialized-functions.json" },
+  "allowPartial": true,
+  "timeoutMs": 300000
+}
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `addresses` | `(string \| number)[]` | required | Known function starts. String addresses require a `0x` prefix. Duplicates are removed in first-seen order. |
+| `maxFunctions` | `number` | `256` | Work ceiling, range 1..4096. Excess unique addresses produce an explicit `partial` result with `truncated:true`. |
+| `maxBytesPerFn` | `number` | function extent | Per-function decoder ceiling, range 1..16 MiB. A clipped body remains `partial`, retryable, and outside the accepted semantic universe. |
+
+The artifact records one of `committed`, `already-current`, `partial`,
+`decode-empty`, or `unknown-function` for every processed address. Only complete
+bodies advance engine/session generations and enter the persisted universe.
+Inspect `universeSha256`, `sessionGeneration`, `bodyCompleteness`, and `warnings`
+before running references, propagation, HQL, or Helix consumers.
+
+### `hexcore.session.export`
+
+Export the accepted in-memory/HXDB analysis view without opening SQLite
+directly. The export is deterministic and uses exact hexadecimal addresses.
+
+```json
+{
+  "cmd": "hexcore.session.export",
+  "args": {
+    "format": "json",
+    "include": ["functions", "xrefs", "callers", "imports", "strings", "sections", "unwind"],
+    "limit": 100000
+  },
+  "output": { "path": "session.json" },
+  "timeoutMs": 180000
+}
+```
+
+Each collection reports `total`, `returned`, and `truncated`. Function entries
+carry exact `[address,endExclusive)`, body status/completeness, discovery
+evidence, caller sites and callees. Xrefs include their owning function. PE
+unwind entries expose both RVA and rebased VA. A bounded collection returns
+`status:"partial"`; inspect `truncatedCollections`. `outputHash` is reproducible
+for the same accepted state.
+
+### `hexcore.xref.reachableFrom` / `hexcore.xref.unreachableFrom`
+
+Traverse the discovered function-start call graph from one or more exact roots.
+
+```json
+{
+  "cmd": "hexcore.xref.unreachableFrom",
+  "args": {
+    "roots": ["entry"],
+    "scope": "functionStarts",
+    "emit": ["list", "count"],
+    "limit": 100000
+  },
+  "output": { "path": "unreachable.json" },
+  "allowPartial": true
+}
+```
+
+`reachableFrom` remains useful positive evidence with partial coverage.
+`unreachableFrom` is negative evidence only when `negativeEvidenceUsable:true`.
+Any lazy, partial, decode-empty body, incomplete analysis, or result truncation
+adds an explicit barrier and forces `status:"partial"`. The command never
+materializes functions implicitly; use `materializeFunctions` first when a
+whole-scope negative claim is required.
 
 ### `hexcore.disasm.windowsFilesystemAuditHeadless`
 
@@ -1269,6 +1435,14 @@ persisted session generation and `universeSha256` remain included.
 }
 ```
 
+The result includes `status`, `conclusion`, `evaluatedAnnotations`,
+`negativeEvidenceUsable`, and typed `diagnostics`. A zero-mismatch result is
+usable as negative evidence only when at least one annotation was evaluated,
+the report was not truncated, and `negativeEvidenceUsable:true`. No
+instructions, no immediates, no annotations, or only ambiguous annotations
+returns `status:"partial"`, `conclusion:"not-assessed"`; use step-level
+`allowPartial:true` only when retaining that diagnostic state is intentional.
+
 ### `hexcore.disasm.searchStringHeadless`
 
 Single query mode (unchanged):
@@ -1332,7 +1506,10 @@ Use explicit budgets for large binaries, and opt in to multi-stage decoding:
 `deobfuscationBudget` records generated, retained, and discarded candidates.
 `transformChains` preserves every hex/ASCII/Base64/JSON step with source
 offset, bounded previews, SHA-256, confidence, and JSON validity;
-`transformChainBudget` records its output gate. A transform chain is evidence,
+`transformChainBudget` closes the candidate balance with accepted,
+budget-discarded, duplicate, invalid-hex, non-printable, Base64-shape,
+decoded-payload and non-JSON-like counters. `accountedCandidates` must equal
+`candidates` and `unaccountedCandidates` must be zero. A transform chain is evidence,
 not automatic proof that the decoded payload is trustworthy or executable.
 
 ### `hexcore.disasm.rttiScanHeadless` **(v3.7.3)**
@@ -1370,7 +1547,8 @@ AOB (array-of-bytes) scan across the entire binary with wildcard support.
   "args": {
     "file": "sample.exe",
     "pattern": "48 8B ?? ?? 0F 84",
-    "maxResults": 100
+    "maxResults": 100,
+    "startOffset": 0
   }
 }
 ```
@@ -1380,6 +1558,7 @@ AOB (array-of-bytes) scan across the entire binary with wildcard support.
 | `file` | `string` | *(from job)* | Path to binary. Inherited from job-level `file` if omitted. |
 | `pattern` | `string` | *(required)* | Byte pattern — space-separated (`"48 8B ?? 00"`) or compact (`"488B??00"`). `??` is a single-byte wildcard. |
 | `maxResults` | `number` | `100` | Maximum matches to return. |
+| `startOffset` | `number` | `0` | Inclusive raw-file offset used to continue a truncated search. Pass the prior result's `nextOffset`. |
 
 **Returns:**
 
@@ -1390,9 +1569,18 @@ AOB (array-of-bytes) scan across the entire binary with wildcard support.
   "matches": [
     { "address": "0x140001234", "offset": 4660 }
   ],
-  "totalMatches": 1
+  "totalMatches": 1,
+  "returnedMatches": 1,
+  "totalMatchesExact": true,
+  "startOffset": 0,
+  "truncated": false
 }
 ```
+
+The scanner probes one match beyond `maxResults`. A truncated page returns
+`truncated:true`, `totalMatchesExact:false`, and `nextOffset` pointing to the
+first omitted match. Resume with that exact `nextOffset`; it is inclusive, so
+the omitted match is not lost.
 
 **Aliases:** `hexcore.disasm.searchBytes`, `hexcore.disasm.aobScan`
 
@@ -1441,6 +1629,22 @@ coverage. `stopReason` is one of `count-limit`, `requested-end`,
 not reached returns `partial`; a full count page is never proof that the
 function ended.
 
+`instructionBoundary` reports whether the requested address is an exact
+materialized instruction start, a `mid-instruction` address, or could not be
+assessed. With `autoBacktrack:false`, a proven mid-instruction start returns
+`status:"partial"` and an explicit `semanticWarning`; the bytes may be useful
+for display but are not sound semantic evidence. When auto-backtracking
+actually moves to a valid function start, `recoveredByAutoBacktrack:true`
+records the recovery.
+
+For `hexcore.disasm.analyzeAll`, headless jobs still default to a fresh
+isolated analysis. An explicit `forceReload:false` reuses work only after the
+same Extension Host has accepted the exact file SHA-256 and the same
+architecture/base, limits and optional analysis flags. `analysisReuse` records
+the decision, identity digest, file digest and generation. Changed bytes,
+configuration, target ownership or incomplete state fail closed to a new child
+analysis.
+
 When the range belongs to a known lazy function, the command materializes and
 commits that body to the active analysis universe. `analysisClosure` records
 whether the result was `committed`, `already-current`, `decode-empty`,
@@ -1449,6 +1653,13 @@ engine/session generation transitions, and `auditUniverseChanged`. A decoded
 window with zero semantic instructions is `partial` even when byte coverage is
 1.0. Downstream shared-analysis commands inherit committed disassembly
 artifacts in provenance and consume the new generation.
+
+Helix `confidenceAxes.liftCoverage` is requested byte-range coverage only.
+`semanticInstructionCoverage` describes supported semantics inside the decoded
+fragment and must not be read as whole-function coverage. `liftCoverageBasis`
+states whether a byte-range denominator was available. Explicit `SCOPED`
+fragments and `UNDERLIFT` results are `partial`, publish an
+`incomplete-lift` quality issue, and set `securityEvidenceUsable:false`.
 
 Committed closures survive process/job boundaries. The session stores a
 replayable manifest of exact function ranges and decoded-body hashes; the next
@@ -1640,6 +1851,11 @@ Decompile binary to high-quality pseudo-C in one step using the **Helix MLIR pip
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `150` | Number of instructions to lift before decompiling. |
 | `optimizeIR` | `boolean` | `true` | When `false`, skips MLIR optimization passes and emits IR as-is. Useful for debugging pass pipeline issues. **(v3.7.3)** |
+| `skipOptimization` | `boolean` | `false` | Alias inverse of `optimizeIR`. Contradictory values are rejected. |
+| `exactRange` | `[address, endExclusive]` | â€” | Authoritative half-open lift range. Disables auto-backtrack and overrides count/size heuristics. Aliases: `startAddress` + `endExclusive`/`endAddress`. |
+| `functionStarts` | `boolean \| address[]` | omitted | `true` requests the derived honesty table; an explicit array installs exactly that complete table. |
+| `dataSections` | section descriptor[] | auto PE data sections | `{name}` or `{vaStart,size}` ranges read from the active target; in-process callers may supply `{vaStart,bytes}`. Foreign target state is rejected. |
+| `variableRenames` | `{oldName,newName}[]` | session renames | Explicit renames override the same session key; conflicts inside the explicit array are rejected. |
 | `souper` | `boolean \| "auto"` | `"auto"` | Tri-state gate: omitted/`"auto"` runs only when IR signal density justifies solver cost; `true` forces optimization; `false` disables it. |
 | `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
 | `souperAutoThreshold` | `number` | `0.25` | Minimum bitwise/rotate signal density used by the automatic gate. |
@@ -1683,6 +1899,11 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `irPath` | `string` | *(required)* | Path to a `.ll` LLVM IR file. Relative paths are resolved from the workspace root. Absolute paths are used as-is. |
+| `exactRange` | `[address, endExclusive]` | IR/header evidence | Validates and records the already-lifted half-open range in `LiftDiag`; it does not relift the `.ll`. |
+| `optimizeIR` / `skipOptimization` | `boolean` | optimize | Direct and inverse optimization controls; contradictory values fail. |
+| `functionStarts` | `boolean \| address[]` | context/omitted | Derived honesty table or an explicit complete table. Explicit arrays take precedence over active analysis context. |
+| `dataSections` | section descriptor[] | auto when bound | Named or VA/size file-backed ranges from the target owning the IR. |
+| `variableRenames` | `{oldName,newName}[]` | session renames | Explicit AST renames merged over persisted session renames. |
 | `souper` | `boolean \| "auto"` | `"auto"` | Tri-state gate: automatic density-based selection, forced on with `true`, or off with `false`. |
 | `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
 | `souperAutoThreshold` | `number` | `0.25` | Minimum bitwise/rotate signal density used by the automatic gate. |
@@ -1690,6 +1911,15 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 | `output` | `{ path? }` | — | Output file path for pseudo-C code. Relative to `outDir`. |
 
 > **Important:** `irPath` must be the **path to the `.ll` file**, not inline IR text. The pipeline runner always sets `options.file` to the binary target, so `irPath` is the dedicated arg for specifying the IR file path.
+
+Both commands return `helixInvocation` and stamp `LiftDiag` with the effective
+range, function-start count/source, data-section count, optimization mode, and
+rename count. For retained Remill IR, `decompileIR` also reads
+`RequestedByteRange`, `RemillDecodedByteSet` and `SemanticCoverage` from the
+producer header. The resulting pseudo-C records exact consumed/requested bytes
+and distinct byte/semantic coverage axes. An under-lifted retained input is
+`partial` and receives the same honesty cap as the binary route. Unsupported or
+malformed knobs fail instead of being ignored.
 
 **Two-step pipeline example (recommended):**
 
@@ -1716,6 +1946,10 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 ```
 
 > **Tip:** Prefer `"irPath": "$step[N].output"` (N = the 0-based index of the `liftToIR` step) over a hardcoded path. The runner resolves it to the exact file the lift step wrote, so it cannot drift if `outDir` or the lift's `output.path` changes. A mismatched hardcoded `irPath` makes `decompileIR` fail with `IR file not found`, which the pipeline surfaces only as the generic `Expected output file was not created` — the real error is in the Extension Host console (Help > Toggle Developer Tools > Console).
+
+Current behavior preserves command-owner activation and detailed execution
+diagnostics in pipeline errors; the historical generic missing-output message
+is no longer the only retained cause.
 
 ---
 
@@ -1805,6 +2039,101 @@ Pass binary `address`/`addresses`, or one Remill-compatible `irPath`/`irText` ta
 
 The report declares `status: "ok" | "partial" | "failed"`, `completedTargetCount`, and `failedTargetCount`. A partial child result fails the pipeline step by default. Add step-level `"allowPartial": true` only when downstream logic explicitly accepts incomplete semantic coverage; the step and terminal job remain visibly `partial`. Treat `signal` and `candidate` as discovery evidence. A completed HQL job, structural completeness `1`, or a high presentation severity does not prove maliciousness, exploitability, or a vulnerability.
 
+### `hexcore.hql.queryHeadless` (3.8.5 development)
+
+Runs one canonical JSON query without installing a signature. The command is
+registered in the source tree and pipeline registry; the development watcher
+job passes and packaged acceptance is still pending. It requires the requested binary
+to be the currently loaded, target-bound session. It never changes targets and
+accepts only `"materialization":"never"` in 3.8.5.
+
+```json
+{
+  "cmd": "hexcore.hql.queryHeadless",
+  "args": {
+    "condition": {
+      "all": [
+        { "query": { "target": "CCallExpr", "attributes": [{ "field": "callee", "value": "free" }] } },
+        { "fact": { "fact": "summary-ownership", "attributes": [{ "field": "ownershipKind", "value": "free" }] } }
+      ]
+    },
+    "addresses": ["0x140001000"],
+    "select": ["function", "address", "proofStatus", "evidence"],
+    "materialization": "never",
+    "maxFunctions": 16,
+    "maxRows": 256,
+    "timeoutMs": 180000
+  },
+  "output": { "path": "hql-query.json" },
+  "allowPartial": true
+}
+```
+
+The alternative `args.query` form accepts the complete canonical object with
+`schemaVersion:1`, `condition`, filters, projection, and materialization. Do not
+combine that form with top-level query fields. Textual HQL belongs to 3.8.6 and
+is not accepted here.
+
+Results contain typed matched rows plus an evaluation for each selected function:
+`matched`, `negative`, or `unknown`. Unknown is not a clean negative. An incomplete
+AST/HXDB collection, missing selector, lazy body, native failure, cancellation,
+budget exhaustion or upstream partial input stays explicit. Positive evidence
+can survive a global selection limit, while `coverage.unevaluatedFunctions`
+records omitted work. `querySha256` and `resultSha256` cover normalized logical
+content; PID/timing diagnostics are not part of these hashes.
+
+Structural conditions require an already materialized complete function. The
+command does not invoke lazy closure. It captures bytes/context read-only and
+runs Remill plus Helix in a terminable child process. The job cancel signal reaches
+the child/query worker; its deadline reserves cleanup time before the outer step
+timeout. A partial result requires step-level `allowPartial:true`.
+
+Current binary-byte routing supports qualified simple functions and preserves
+explicit preparation gaps. Functions needing unresolved Pathfinder/indirect-flow
+context or unqualified ftrace handling remain partial. `irPath` is accepted only
+when it names an LLVM-IR artifact produced by an earlier pipeline step and its
+runner-minted hash, target, session, generation and universe match the active
+snapshot. The 3.8.5 IR lane requires exactly one query address. Inline `irText`,
+external unbound files, forged binding JSON, modified artifacts and stale-universe
+IR are rejected. Use `hql.scanHeadless` for curated signature scans over other
+supported IR inputs.
+
+The output repeats `targetIdentity`, session generation, universe and snapshot
+hashes, `materialization:"never"`, native producer hashes/outcomes, coverage,
+proof status and evidence. Semantic facts without historical producer provenance
+remain signals with an exact persisted-record origin; the command does not invent
+lineage or upgrade a match into a vulnerability verdict.
+
+### `hexcore.semantic.explain` (3.8.5 development)
+
+Explains one stable semantic entity from the already active session. It performs
+no target load, materialization or native analysis. Pass `kind` plus the persisted
+identity (`prototypeId`, `bindingId`, `edgeId`, effect identity, `conflictHash`,
+or HQL fact `explainIdentity`). Optional `expected` identity fields fail closed
+if the UI/job refers to a stale snapshot.
+
+```json
+{
+  "cmd": "hexcore.semantic.explain",
+  "args": {
+    "kind": "typed-reference",
+    "identity": "xref:sha256:...",
+    "expected": { "snapshotSha256": "..." },
+    "maxNodes": 256,
+    "maxEdges": 512
+  },
+  "output": { "path": "reference-explanation.json" },
+  "allowPartial": true
+}
+```
+
+The result is a deterministic structured graph plus compact evidence chain,
+conflicts, barriers, missing links and function/address navigation. `partial`
+means the claim exists but the chain stops; `unknown` means the entity was not
+available; neither is a clean proof. HQL semantic facts carry an exact
+`explainIdentity` where backed by a persisted semantic record. See
+`docs/SEMANTIC_EXPLANATION.md` for entity identities and status semantics.
+
 ### `hexcore.souper.optimize`
 
 Optimize LLVM IR supplied through `irPath`, `irText`, or the job `file` when that file is itself `.ll`. Options are `maxCandidates`, `timeoutMs`, and `aggressiveMode`.
@@ -1824,7 +2153,13 @@ Optimize LLVM IR supplied through `irPath`, `irText`, or the job `file` when tha
 }
 ```
 
-The result reports `candidatesFound`, `candidatesReplaced`, and `optimizationTimeMs`. Zero replacements is a valid result, especially for ordinary non-MBA code.
+The result reports `status:"optimized"|"no-op"|"partial"|"error"`,
+`semanticChanged`, `textChanged`, candidate/solver counters, input/native-output
+SHA-256 values and typed partial reasons. Zero replacements is a valid explicit
+`no-op`, especially for ordinary non-MBA code; an LLVM textual reprint alone is
+not reported as a semantic optimization. Solver timeouts or a candidate budget
+that leaves findings unevaluated produce `partial`. The retained `.ll` begins
+with the same outcome metadata as an LLVM comment.
 
 ### `hexcore.extractStructInfo`
 
@@ -2515,6 +2850,9 @@ The semantic model is target-bound in `.hexcore_session.db`.
 |----------------|---------|
 | `hexcore.types.*` | Apply, edit, explain, import/export, or undo full prototypes |
 | `hexcore.references.query/export` | Query/export typed R33 references |
+| `hexcore.disasm.materializeFunctions` | Explicitly commit a bounded list of complete function bodies before semantic consumers |
+| `hexcore.session.export` | Deterministically export functions, legacy xrefs, callers, imports, strings, sections and unwind state |
+| `hexcore.xref.reachableFrom/unreachableFrom` | Traverse function starts; unreachable negatives require complete materialization |
 | `hexcore.propagation.solve/status/export` | Run and inspect the bounded R34 fixed point |
 | `hexcore.typeManager.*` | Transactional type create/edit/rename/delete/undo/import/export |
 | `hexcore.types.ingestDebug` | Normalize BTF/DWARF records into HXDB |
@@ -2528,9 +2866,31 @@ timeout, or budget exhaustion preserves the prior accepted generation. An
 unresolved direct target remains an `address`; an indirect target remains a
 qualified candidate until points-to/runtime evidence resolves it.
 
-`hexcore.propagation.solve` and `hexcore.records.recover` run the fixed point
-in a pure TypeScript Worker Thread over a read-only semantic snapshot. Their
-artifacts expose `worker.transport:"perseus-sab-v1"`, worker duration,
+`hexcore.references.query` accepts either canonical `args.query` or top-level
+convenience filters: `to`, `from`, `address`, `functionIdentity`, and
+`kinds:["call","jump","lea","data","string"]`. `to` is incoming and `from`
+is outgoing. With `resolveThunks:true`, direct linker-thunk chains are resolved
+in the returned view while `physicalTarget` remains unchanged; the result adds
+`thunkResolution.chain` and `resolvedTarget` rather than rewriting HXDB truth.
+
+PDB procedure addresses from incremental/module records are not automatically
+runtime VAs. `pdb.importSemantics` imports a prototype only when the address and
+extent exactly match a known function, or an export/thunk name reconciles it.
+Everything else increments `unreconciledFunctionCount`, returns `partial`, and
+is excluded from HXDB. A matching GUID/age proves file identity, not address
+reconciliation; never use raw PDB module offsets as function names/locations.
+
+`hexcore.propagation.solve` runs the fixed point in a pure TypeScript Worker
+Thread over a read-only semantic snapshot. `hexcore.records.recover` reuses the
+current clean committed propagation by default; it fails closed when the
+accepted generation is missing, stale, or dirty. Set `refresh:true` only when a
+new solve is intended and pass the same explicit `changedFunctions`,
+`maxIterations`, `maxMilliseconds`, `maxValues`,
+`maxTypeHypothesesPerValue`, and `maxPointsToPerValue` budget contract. The
+result identifies `closure.source:"committed"|"refreshed"`; refreshed artifacts
+also retain `solverOptions`.
+
+Worker-backed artifacts expose `worker.transport:"perseus-sab-v1"`, worker duration,
 heartbeat count, last phase/iteration, affected-function count, terminal state,
 snapshot hash, `snapshotPreparationMs`, and `hardTerminated`. The sibling
 `preparation` block separates reference sync, input collection, and summary

@@ -57,12 +57,13 @@
 					},
 					"id": {
 						"type": "string",
-						"pattern": "^[A-Za-z0-9_\\-]+$",
-						"description": "Optional stable identifier for this step (not consumed by runner today; reserved for named step references in a future revision)."
+						"pattern": "^[A-Za-z][A-Za-z0-9_-]{0,63}$",
+						"not": { "const": "prev" },
+						"description": "Optional unique, case-sensitive step ID for $step[id] references and named goto targets. The name prev is reserved."
 					},
 					"args": {
 						"type": "object",
-						"description": "Additional command arguments merged into headless options. String values may include $step[N].output / $step[N].result.<field> / $step[prev].* tokens for inter-step data flow.",
+						"description": "Additional command arguments. References may use $step[N], $step[id], or $step[prev] followed by .output or .result.<field>.",
 						"additionalProperties": true
 					},
 					"output": {
@@ -138,7 +139,7 @@
 							"action": {
 								"type": "string",
 								"enum": ["skip", "goto", "abort", "log"],
-								"description": "skip N (actionValue=N, default 1); goto INDEX (actionValue=0-based step index); abort (actionValue=reason string); log (actionValue=message)."
+								"description": "skip N (actionValue=N, default 1); goto INDEX or ID (zero-based index or declared step ID); abort (reason string); log (message)."
 							},
 							"actionValue": {
 								"type": ["string", "number"],

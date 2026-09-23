@@ -285,6 +285,10 @@ export interface HASTModuleMetadata {
   architecture?: string;
   pointerBits?: number;
   semanticEligible: boolean;
+  nativeQuality?: {
+    status: 'unreported' | 'no-known-loss' | 'known-loss';
+    issues: string[];
+  };
 }
 
 export const HAST_CAPABILITIES = Object.freeze([
@@ -295,6 +299,7 @@ export const HAST_CAPABILITIES = Object.freeze([
   'call-targets',
   'field-offsets',
   'expression-result-types',
+  'native-function-quality',
 ] as const);
 
 // ─── Discriminated Union ───

@@ -5,6 +5,7 @@ ThirdPartyNotices.txt eol=crlf
 *.cmd eol=crlf
 *.ps1 eol=lf
 *.sh eol=lf
+*.ll eol=lf
 *.rtf -text
 **/*.json linguist-language=jsonc
 extensions/hexcore-unicorn/deps/unicorn/lib/*.lib filter=lfs diff=lfs merge=lfs -text

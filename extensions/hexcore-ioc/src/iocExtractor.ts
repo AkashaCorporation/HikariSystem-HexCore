@@ -5,6 +5,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
+import * as net from 'net';
 import type {
 	IOCCategory,
 	IOCMatch,
@@ -249,6 +250,7 @@ const IOC_PATTERNS: IOCPattern[] = [
 	{
 		category: 'ipv6',
 		regex: /\b(?:[0-9a-fA-F]{1,4}:){2,7}[0-9a-fA-F]{1,4}\b/g,
+		validate: raw => net.isIP(raw) === 6 ? raw.toLowerCase() : null,
 	},
 	{
 		category: 'domain',
@@ -556,6 +558,13 @@ export function extractIOCs(options: ExtractOptions): CoreExtractionResult {
 	const activePatterns = IOC_PATTERNS.filter(p => categories.includes(p.category));
 
 	let totalUniqueCount = 0;
+	const validation = {
+		rawPatternMatches: 0,
+		rejectedValidator: 0,
+		rejectedPrintableContext: 0,
+		suppressedPrivate: 0,
+		suppressedDuplicate: 0,
+	};
 	let truncated = false;
 	let cancelled = false;
 	let offset = 0;
@@ -604,6 +613,7 @@ export function extractIOCs(options: ExtractOptions): CoreExtractionResult {
 					() => totalUniqueCount,
 					() => { totalUniqueCount++; },
 					maxMatches,
+					validation,
 				);
 			}
 
@@ -630,6 +640,7 @@ export function extractIOCs(options: ExtractOptions): CoreExtractionResult {
 					() => totalUniqueCount,
 					() => { totalUniqueCount++; },
 					maxMatches,
+					validation,
 				);
 			}
 
@@ -643,11 +654,23 @@ export function extractIOCs(options: ExtractOptions): CoreExtractionResult {
 		}
 
 		const snapshot = store.snapshot(categories);
+		const rejectedTotal = validation.rejectedValidator + validation.rejectedPrintableContext +
+			validation.suppressedPrivate + validation.suppressedDuplicate;
 		const summary: IOCSummary = {
 			totalIndicators: snapshot.totalUniqueCount,
 			uniqueIndicators: snapshot.totalUniqueCount,
 			categoryCounts: snapshot.categoryCounts,
 			truncated,
+			validation: {
+				scope: 'extractor',
+				rawPatternMatches: validation.rawPatternMatches,
+				acceptedUnique: snapshot.totalUniqueCount,
+				rejectedValidator: validation.rejectedValidator,
+				rejectedPrintableContext: validation.rejectedPrintableContext,
+				suppressedPrivate: validation.suppressedPrivate,
+				suppressedDuplicate: validation.suppressedDuplicate,
+				rejectedTotal,
+			},
 		};
 
 		return {
@@ -679,6 +702,13 @@ function matchPatterns(
 	getCount: () => number,
 	incrementCount: () => void,
 	maxMatches: number,
+	validation: {
+		rawPatternMatches: number;
+		rejectedValidator: number;
+		rejectedPrintableContext: number;
+		suppressedPrivate: number;
+		suppressedDuplicate: number;
+	},
 ): void {
 	for (const pattern of patterns) {
 		if (getCount() >= maxMatches) { return; }
@@ -689,6 +719,7 @@ function matchPatterns(
 		let match: RegExpExecArray | null;
 		while ((match = pattern.regex.exec(text)) !== null) {
 			if (getCount() >= maxMatches) { return; }
+			validation.rawPatternMatches++;
 
 			let value = match[0];
 			// Regex indices are character-based on decoded text. For UTF-16LE
@@ -696,15 +727,25 @@ function matchPatterns(
 			const matchIndexInSource = encoding === 'UTF-16LE' ? match.index * 2 : match.index;
 			const matchLengthInSource = encoding === 'UTF-16LE' ? match[0].length * 2 : match[0].length;
 
+			if (pattern.category === 'ipv4') {
+				const before = match.index > 0 ? text[match.index - 1] : '';
+				const after = text.slice(match.index + match[0].length, match.index + match[0].length + 2);
+				if ((before === '.' && /\d/.test(text[match.index - 2] ?? '')) || /^\.\d/.test(after)) {
+					validation.rejectedValidator++;
+					continue;
+				}
+			}
+
 			// Run validator if present
 			if (pattern.validate) {
 				const validated = pattern.validate(value);
-				if (validated === null) { continue; }
+				if (validated === null) { validation.rejectedValidator++; continue; }
 				value = validated;
 			}
 
 			// Private IP filter
 			if (excludePrivate && pattern.category === 'ipv4' && isPrivateIPv4(value)) {
+				validation.suppressedPrivate++;
 				continue;
 			}
 
@@ -712,6 +753,7 @@ function matchPatterns(
 			if (encoding === 'ASCII') {
 				const matchInBuffer = regionBufferOffset + matchIndexInSource;
 				if (!hasValidPrintableContext(buffer, 0, matchInBuffer, matchLengthInSource)) {
+					validation.rejectedPrintableContext++;
 					continue;
 				}
 			}
@@ -750,6 +792,7 @@ function matchPatterns(
 				...(tags ? { tags } : {}),
 			});
 			if (!added) {
+				validation.suppressedDuplicate++;
 				continue;
 			}
 

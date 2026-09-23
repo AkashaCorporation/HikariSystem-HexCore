@@ -28,14 +28,23 @@ export interface ConstantSanityFinding {
 }
 
 export interface ConstantSanityAnalysis {
+	status: 'ok' | 'partial';
+	conclusion: 'matched' | 'mismatched' | 'not-assessed';
 	scannedInstructions: number;
 	instructionsWithImmediates: number;
 	annotationsConsidered: number;
+	evaluatedAnnotations: number;
 	matchedAnnotations: number;
 	mismatchedAnnotations: number;
 	ambiguousAnnotations: number;
+	negativeEvidenceUsable: boolean;
 	maxFindingsReached: boolean;
 	notesFilePath?: string;
+	diagnostics: Array<{
+		severity: 'warning';
+		code: 'NO_INSTRUCTIONS' | 'NO_IMMEDIATES' | 'NO_ANNOTATIONS' | 'NO_EVALUABLE_ANNOTATIONS' | 'FINDINGS_TRUNCATED';
+		message: string;
+	}>;
 	findings: ConstantSanityFinding[];
 	reportMarkdown: string;
 }
@@ -127,28 +136,58 @@ export function analyzeConstantSanity(
 		}
 	}
 
+	const evaluatedAnnotations = matchedAnnotations + mismatchedAnnotations;
+	const diagnostics: ConstantSanityAnalysis['diagnostics'] = [];
+	if (scannedInstructions === 0) {
+		diagnostics.push({ severity: 'warning', code: 'NO_INSTRUCTIONS', message: 'No analyzed instructions were available for constant validation.' });
+	} else if (instructionsWithImmediates === 0) {
+		diagnostics.push({ severity: 'warning', code: 'NO_IMMEDIATES', message: 'No instruction immediates were available for constant validation.' });
+	} else if (annotationsConsidered === 0) {
+		diagnostics.push({ severity: 'warning', code: 'NO_ANNOTATIONS', message: 'No numeric annotations were available for comparison.' });
+	} else if (evaluatedAnnotations === 0) {
+		diagnostics.push({ severity: 'warning', code: 'NO_EVALUABLE_ANNOTATIONS', message: 'All candidate annotations were ambiguous; no comparison was evaluated.' });
+	}
+	if (maxFindingsReached) {
+		diagnostics.push({ severity: 'warning', code: 'FINDINGS_TRUNCATED', message: 'Mismatch findings reached maxFindings and were truncated.' });
+	}
+	const conclusion: ConstantSanityAnalysis['conclusion'] = mismatchedAnnotations > 0
+		? 'mismatched'
+		: evaluatedAnnotations > 0 ? 'matched' : 'not-assessed';
+	const status: ConstantSanityAnalysis['status'] = diagnostics.length > 0 ? 'partial' : 'ok';
+	const negativeEvidenceUsable = status === 'ok' && conclusion === 'matched';
+
 	const reportMarkdown = generateReportMarkdown({
+		status,
+		conclusion,
 		scannedInstructions,
 		instructionsWithImmediates,
 		annotationsConsidered,
+		evaluatedAnnotations,
 		matchedAnnotations,
 		mismatchedAnnotations,
 		ambiguousAnnotations,
+		negativeEvidenceUsable,
 		maxFindingsReached,
 		notesFilePath: options.notesFilePath,
+		diagnostics,
 		findings,
 		reportMarkdown: ''
 	});
 
 	return {
+		status,
+		conclusion,
 		scannedInstructions,
 		instructionsWithImmediates,
 		annotationsConsidered,
+		evaluatedAnnotations,
 		matchedAnnotations,
 		mismatchedAnnotations,
 		ambiguousAnnotations,
+		negativeEvidenceUsable,
 		maxFindingsReached,
 		notesFilePath: options.notesFilePath,
+		diagnostics,
 		findings,
 		reportMarkdown
 	};
@@ -353,21 +392,34 @@ function generateReportMarkdown(result: ConstantSanityAnalysis): string {
 
 ## Summary
 
+- Status: \`${result.status}\`
+- Conclusion: \`${result.conclusion}\`
 - Scanned instructions: \`${result.scannedInstructions}\`
 - Instructions with immediates: \`${result.instructionsWithImmediates}\`
 - Annotations considered: \`${result.annotationsConsidered}\`
+- Evaluated annotations: \`${result.evaluatedAnnotations}\`
 - Matched annotations: \`${result.matchedAnnotations}\`
 - Mismatched annotations: \`${result.mismatchedAnnotations}\`
 - Ambiguous annotations: \`${result.ambiguousAnnotations}\`
+- Negative evidence usable: \`${result.negativeEvidenceUsable ? 'yes' : 'no'}\`
 - Notes file: \`${result.notesFilePath ? path.basename(result.notesFilePath) : 'none'}\`
 - Findings truncated: \`${result.maxFindingsReached ? 'yes' : 'no'}\`
 
 `;
+	if (result.diagnostics.length > 0) {
+		markdown += `## Diagnostics
+
+${result.diagnostics.map(diagnostic => `- **${diagnostic.code}**: ${diagnostic.message}`).join('\n')}
+
+`;
+	}
 
 	if (result.findings.length === 0) {
 		markdown += `## Findings
 
-No mismatches were detected.
+${result.conclusion === 'not-assessed'
+	? 'No annotation comparison was evaluated; absence of mismatches is not negative evidence.'
+	: 'No mismatches were detected among the evaluated annotations.'}
 `;
 		return markdown;
 	}

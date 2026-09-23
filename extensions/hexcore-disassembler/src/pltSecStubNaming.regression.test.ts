@@ -33,6 +33,8 @@
 
 import * as assert from 'assert';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 /** Minimal vscode mock -- DisassemblerEngine imports 'vscode' for configuration. */
 function installVscodeMock(): void {
@@ -224,36 +226,30 @@ suite('IBT/CET .plt.sec PLT-stub naming + extent (v3.8.5)', () => {
 		// @ts-ignore mocha timeout
 		if (typeof this?.timeout === 'function') { this.timeout(120000); }
 		const engine = new DisassemblerEngine() as any;
-		const loaded = await engine.loadFile(REAL_BTS);
-		assert.strictEqual(loaded, true, 'behindthescenes must load');
-		await engine.analyzeAll();
-
-		const pltSec = engine.getSections().find((s: { name: string }) => s.name === '.plt.sec');
-		assert.ok(pltSec, '.plt.sec section present (IBT/CET binary)');
-		const secStart = pltSec.virtualAddress;
-		const secEnd = pltSec.virtualAddress + pltSec.virtualSize;
-
-		const funcs = engine.getFunctions();
-		const stubs = funcs.filter((f: { address: number }) => f.address >= secStart && f.address < secEnd);
-		assert.ok(stubs.length >= 7, `.plt.sec thunks discovered (found ${stubs.length})`);
-
-		// Every imported stub called by main must now be `<symbol>@plt`, NOT sub_*.
-		const wanted = ['sigaction', 'memset', 'sigemptyset', 'strncmp', 'strlen', 'printf', 'puts'];
-		for (const w of wanted) {
-			const hit = funcs.find((f: { name: string }) => f.name === `${w}@plt`);
-			assert.ok(hit, `${w}@plt named (not sub_*)`);
-			assert.ok(hit.address >= secStart && hit.address < secEnd, `${w}@plt is a .plt.sec thunk`);
-		}
-
-		// EXTENT: no .plt.sec thunk over-reads. Each is its own ~16-byte function; none reaches
-		// the shared hlt at the section tail (pre-fix every stub ran to a shared end ~0x...191/199).
-		for (const s of stubs) {
-			assert.ok(s.size <= 16,
-				`${s.name} bounded to its 16-byte stride (size=${s.size})`);
-			assert.ok(s.endAddress <= secEnd,
-				`${s.name} ends within .plt.sec (end=0x${s.endAddress.toString(16)} <= 0x${secEnd.toString(16)})`);
-			assert.ok(s.endAddress <= 0x55555555516e,
-				`${s.name} does NOT over-read into the shared hlt at 0x55555555516e (end=0x${s.endAddress.toString(16)})`);
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-pltsec-'));
+		try {
+			const copy = path.join(directory, 'sample.elf');
+			fs.copyFileSync(REAL_BTS, copy);
+			assert.strictEqual(await engine.loadFile(copy), true, 'behindthescenes must load');
+			await engine.analyzeAll();
+			const pltSec = engine.getSections().find((s: { name: string }) => s.name === '.plt.sec');
+			assert.ok(pltSec, '.plt.sec section present (IBT/CET binary)');
+			const secStart = pltSec.virtualAddress;
+			const secEnd = pltSec.virtualAddress + pltSec.virtualSize;
+			const stubs = engine.getFunctions().filter((f: { address: number }) => f.address >= secStart && f.address < secEnd);
+			assert.ok(stubs.length >= 7, `.plt.sec thunks discovered (found ${stubs.length})`);
+			// Legacy .plt and .plt.sec may legitimately expose the same symbol name.
+			for (const name of ['sigaction', 'memset', 'sigemptyset', 'strncmp', 'strlen', 'printf', 'puts']) {
+				assert.ok(stubs.find((f: { name: string }) => f.name === `${name}@plt`), `${name}@plt named in .plt.sec`);
+			}
+			for (const stub of stubs) {
+				assert.ok(stub.size <= 16, `${stub.name} bounded to its stride (size=${stub.size})`);
+				assert.ok(stub.endAddress <= secEnd, `${stub.name} ends within .plt.sec`);
+				assert.ok(stub.endAddress <= 0x55555555516e, `${stub.name} does not reach the shared hlt`);
+			}
+		} finally {
+			engine.dispose();
+			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
 });

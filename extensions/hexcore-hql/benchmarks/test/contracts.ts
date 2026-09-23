@@ -90,7 +90,7 @@ const x86Metadata = readJson<{
 	irSha256: string;
 	irBytes: number;
 	originalFailures: string[];
-	expected: { pipeline: string; hastSchema: number; semanticEligible: boolean; adapterCoverage: number };
+	expected: { pipeline: string; hastSchema: number; semanticEligible: boolean; nativeQualityStatus: string; adapterCoverage: number };
 	acceptedBy: { functionCount: number; binaryCount: number; functionAtlasArtifactSha256: string };
 }>(path.join(regressionRoot, 'x86-width-and-unary-regression.json'));
 const x86Ir = fs.readFileSync(path.join(regressionRoot, 'x86-width-and-unary-regression.ll'));
@@ -100,7 +100,8 @@ check(x86Metadata.status === 'resolved'
 	&& x86Metadata.originalFailures.length === 2
 	&& x86Metadata.expected.pipeline === 'mlir'
 	&& x86Metadata.expected.hastSchema === 1
-	&& x86Metadata.expected.semanticEligible
+	&& !x86Metadata.expected.semanticEligible
+	&& x86Metadata.expected.nativeQualityStatus === 'known-loss'
 	&& x86Metadata.expected.adapterCoverage === 1
 	&& x86Metadata.acceptedBy.functionCount === 224
 	&& x86Metadata.acceptedBy.binaryCount === 16,

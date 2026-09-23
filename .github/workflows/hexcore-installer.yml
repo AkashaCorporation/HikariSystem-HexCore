@@ -8,7 +8,7 @@ on:
       version:
         description: "Version tag matching product.json (e.g., v3.8.4)"
         required: true
-        default: "v3.8.4"
+        default: "v3.8.5-rc.1"
       build_linux:
         description: "Build the experimental Linux package"
         required: true

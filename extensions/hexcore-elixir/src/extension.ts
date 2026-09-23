@@ -2,7 +2,9 @@ import * as vscode from 'vscode';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as cp from 'child_process';
+import * as crypto from 'crypto';
 import { preflightPeMachine } from './pePreflight';
+import { resolveDrcovOutputPaths } from './drcovOutputPaths';
 
 interface EmulatorConfig {
 	arch: 'x86_64';
@@ -429,8 +431,8 @@ export function activate(context: vscode.ExtensionContext): void {
 		})
 	);
 
-	function writeJsonResult(opts: HeadlessArgs, result: unknown): void {
-		const outPath = opts?.output?.path;
+	function writeJsonResult(opts: HeadlessArgs, result: unknown, explicitPath?: string): void {
+		const outPath = explicitPath ?? opts?.output?.path;
 		if (!outPath) {
 			return;
 		}
@@ -588,25 +590,30 @@ export function activate(context: vscode.ExtensionContext): void {
 					throw new Error('Unexpected worker result kind for stalker op');
 				}
 				const drcov = Buffer.from(workerResult.drcovBase64, 'base64');
-				if (args.output?.path) {
-					const drcovOut = args.output.path.endsWith('.drcov')
-						? args.output.path
-						: args.output.path.replace(/\.json$/i, '.drcov');
-					fs.mkdirSync(path.dirname(drcovOut), { recursive: true });
-					fs.writeFileSync(drcovOut, drcov);
-					output.appendLine(`[elixir] wrote ${drcovOut}`);
+				const paths = args.output?.path
+					? resolveDrcovOutputPaths(args.output.path)
+					: undefined;
+				if (paths) {
+					fs.mkdirSync(path.dirname(paths.drcovPath), { recursive: true });
+					fs.writeFileSync(paths.drcovPath, drcov);
+					output.appendLine(`[elixir] wrote ${paths.drcovPath}`);
 				}
 				const result = {
 					file,
 					entry: workerResult.entry,
 					stopReason: workerResult.stopReason,
 					blockCount: workerResult.blockCount,
-					drcovBytes: drcov.length
+					drcovBytes: drcov.length,
+					drcovSha256: crypto.createHash('sha256').update(drcov).digest('hex'),
+					...(paths ? {
+						drcovPath: paths.drcovPath,
+						metadataPath: paths.metadataPath,
+					} : {}),
 				};
 				output.appendLine(
 					`[elixir] stalker → ${result.blockCount} blocks, ${result.drcovBytes} bytes drcov`
 				);
-				writeJsonResult(args, result);
+				writeJsonResult(args, result, paths?.metadataPath);
 				return result;
 			}
 		)

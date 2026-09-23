@@ -10,6 +10,7 @@ import {
 	type ExecutionManifestSummary,
 	type WindowsSecuritySummary,
 } from './windowsSecuritySummary';
+import { assessPEAnalysisCoverage, type PEAnalysisCoverageEntry } from './peAnalysisCoverage';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -41,6 +42,16 @@ export interface PEAnalysis {
 	exceptions: ExceptionEntry[];
 	relocations: RelocationEntry[];
 	debugInfo: DebugEntry[];
+	analysisCoverage?: {
+		imports: PEAnalysisCoverageEntry;
+		exports: PEAnalysisCoverageEntry;
+		resources: PEAnalysisCoverageEntry;
+		tls: PEAnalysisCoverageEntry;
+		exceptions: PEAnalysisCoverageEntry;
+		relocations: PEAnalysisCoverageEntry;
+		debug: PEAnalysisCoverageEntry;
+		antiDebug: { status: 'parsed'; recordCount: number; basis: 'imports-and-bounded-image-scan' };
+	};
 
 	// Security Analysis
 	entropy: number;
@@ -665,6 +676,36 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[1]?.size > 0) {
 			analysis.imports = parseImports(fd, buffer, analysis.optionalHeader.dataDirectories[1], analysis.sections, analysis.optionalHeader.is64Bit);
 		}
+		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[2]?.size > 0) {
+			analysis.resources = parseResources(fd, buffer, analysis.optionalHeader.dataDirectories[2], analysis.sections);
+		}
+		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[3]?.size > 0) {
+			analysis.exceptions = parseExceptions(fd, buffer, analysis.optionalHeader.dataDirectories[3], analysis.sections);
+		}
+		if (analysis.optionalHeader && analysis.optionalHeader.dataDirectories[9]?.size > 0) {
+			analysis.tlsCallbacks = parseTLSDirectory(
+				fd,
+				buffer,
+				analysis.optionalHeader.dataDirectories[9],
+				analysis.sections,
+			);
+		}
+		analysis.antiDebug = detectAntiDebug(buffer, analysis.imports);
+		const directories = analysis.optionalHeader?.dataDirectories ?? [];
+		analysis.analysisCoverage = {
+			imports: assessPEAnalysisCoverage(directories[1], true, analysis.imports.length),
+			exports: assessPEAnalysisCoverage(directories[0], false, analysis.exports.length),
+			resources: assessPEAnalysisCoverage(directories[2], true, analysis.resources.length),
+			tls: assessPEAnalysisCoverage(directories[9], true, analysis.tlsCallbacks.length),
+			exceptions: assessPEAnalysisCoverage(directories[3], true, analysis.exceptions.length),
+			relocations: assessPEAnalysisCoverage(directories[5], false, analysis.relocations.length),
+			debug: assessPEAnalysisCoverage(directories[6], false, analysis.debugInfo.length),
+			antiDebug: {
+				status: 'parsed',
+				recordCount: analysis.antiDebug.length,
+				basis: 'imports-and-bounded-image-scan',
+			},
+		};
 		analysis.windowsSecuritySummary = buildWindowsSecuritySummary(
 			analysis.executionManifest,
 			analysis.mitigations,
