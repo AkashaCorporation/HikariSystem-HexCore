@@ -26,11 +26,11 @@ Excluded from the release boundary:
 - HexCore product: `3.8.5-rc.1`.
 - Helix wrapper/native candidate: `0.9.4-rc.2`.
 - Canonical Helix candidate commit:
-  `3f1a18978e34de3e695fe554dbbaca2972223ae8`.
+  `89a4a392d0ce511a694a937240a3045779b0fe41`.
 - Windows x64 Helix addon SHA-256:
-  `D2E2F000D7B8EB74044FFF34A1E2A67F1859392E2B8C7760AA5AA0B9649F4DC0`.
+  `D7023EC230C1ADE03E5E28ECBD3F997B89190F9BE6E8301ACD2EDE6C8B2733AB`.
 - Version-matched LLVM/MLIR dependency bundle SHA-256:
-  `591DCBF3F4304DBADBD1FD645F3D971E964FA0B7F25BB02C97BF97E327E38B01`.
+  `A579068C95ED68AC9BD202CE3B0BE51DDC8F5D23CF371775DD66B804CAEC221D`.
 
 The prebuild workflow verifies package version, engine source tree and static
 library hash, uses a cache key derived from the dependency-bundle hash, and

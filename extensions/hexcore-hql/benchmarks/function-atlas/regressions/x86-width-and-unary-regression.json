@@ -10,7 +10,7 @@
     },
     "helix": {
       "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
-      "nodeSha256": "d2e2f000d7b8eb74044fff34a1e2a67f1859392e2b8c7760aa5aa0b9649f4dc0",
+      "nodeSha256": "d7023ec230c1ade03e5e28ecbd3f997b89190f9be6e8301acd2ede6c8b2733ab",
       "hastSchema": 1
     }
   },
