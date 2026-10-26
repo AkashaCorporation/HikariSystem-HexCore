@@ -113,14 +113,14 @@ result as complete.
 | Extension | Version | Description |
 |-----------|---------|-------------|
 | **Debugger** | 2.1.22 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, and binary/input/trace-bound runtime corroboration |
-| **Disassembler** | 1.4.68 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
-| **Revenant** | 0.4.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 10 backend |
+| **Disassembler** | 1.4.70 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
+| **Revenant** | 0.5.0 | Portable managed .NET decompilation to C# or IL, including bounded single-file apphost recovery and native dependency-collision rejection through the bundled ILSpy 11.1 backend |
 | **Hex Viewer** | 1.2.4 | Chunk-backed binary viewer with scaled large-file scrolling, data inspection, editing, templates, and offset sync |
-| **PE Analyzer** | 1.1.3 | Comprehensive PE analysis with binary transforms, Windows security summaries, and headless mode |
+| **PE Analyzer** | 1.1.4 | Comprehensive PE analysis with overlay/container evidence, binary transforms, Windows security summaries, and headless mode |
 | **Strings Extractor** | 1.3.3 | Memory-efficient ASCII/UTF-16 extraction, bounded deobfuscation, provenance-bound transform chains, and stack strings |
 | **Hash Calculator** | 1.1.2 | Fast file hashing with VirusTotal integration |
 | **Entropy Analyzer** | 1.1.2 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
-| **File Type Detector** | 1.0.2 | Magic bytes signature detection |
+| **File Type Detector** | 1.0.3 | Magic bytes plus bounded PE overlay/container detection |
 | **Base64 Decoder** | 2.0.2 | Detect and decode Base64 strings |
 | **YARA Scanner** | 2.1.3 | YARA scanning with qualified condition/ISA evidence and headless pipeline support |
 | **IOC Extractor** | 1.1.2 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |

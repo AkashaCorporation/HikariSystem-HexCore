@@ -14,13 +14,16 @@ export interface HelixOutputQuality {
 	confidenceAxes: {
 		translation?: number;
 		liftCoverage?: number;
+		liftCoverageBasis: 'requested-byte-range' | 'not-assessed';
+		semanticInstructionCoverage?: number;
+		scopeLimited: boolean;
 		semanticType: null;
 		semanticTypeStatus: 'not-assessed';
 	};
 }
 
 export interface HelixStructuredQualityIssue {
-	kind: 'placeholder-variable' | 'self-reference' | 'uninitialized-return' | 'duplicate-local' | 'damning-defect';
+	kind: 'placeholder-variable' | 'self-reference' | 'uninitialized-return' | 'duplicate-local' | 'unqualified-instrumentation' | 'incomplete-lift' | 'damning-defect';
 	severity: 'damning';
 	count: number;
 	detail: string;
@@ -69,12 +72,22 @@ export function inspectHelixOutputQuality(source: string): HelixOutputQuality {
 	const confidence = confidenceMatch ? Number(confidenceMatch[1]) : undefined;
 	const rating = confidenceMatch?.[2]?.trim();
 	const issues = Array.from(source.matchAll(/^\/\/\s*Issues?:\s*(.+)$/gmi), match => match[1].trim());
-	const liftCoverageMatch = source.match(/\bsemanticCoverage=([0-9]+(?:\.[0-9]+)?)%/i);
-	const liftCoverage = liftCoverageMatch ? Number(liftCoverageMatch[1]) : undefined;
+	const semanticCoverageMatch = source.match(/\bsemanticCoverage=([0-9]+(?:\.[0-9]+)?)%/i);
+	const semanticInstructionCoverage = semanticCoverageMatch ? Number(semanticCoverageMatch[1]) : undefined;
+	const byteCoverageMatch = source.match(/\bbytesConsumed=(\d+)\/(\d+)\b/i);
+	const consumedBytes = byteCoverageMatch ? Number(byteCoverageMatch[1]) : undefined;
+	const requestedBytes = byteCoverageMatch ? Number(byteCoverageMatch[2]) : undefined;
+	const liftCoverage = consumedBytes !== undefined && requestedBytes !== undefined && requestedBytes > 0
+		? Math.min(100, (consumedBytes / requestedBytes) * 100)
+		: undefined;
+	const scopeLimited = /\bSCOPED\s*\(/i.test(source);
+	const underLift = /\bUNDERLIFT\b/i.test(source) ||
+		(liftCoverage !== undefined && liftCoverage < 85);
 	const damning = issues.some(issue => /damning honesty defect/i.test(issue));
 	const placeholderCount = issueCount(issues, /(\d+)\s+auto-declared placeholder variable/i);
 	const selfReferenceCount = issueCount(issues, /(\d+)\s+suspicious self-referencing assignment/i);
 	const uninitializedReturn = issues.some(issue => /uninitialized (?:return value|result)/i.test(issue));
+	const unqualifiedInstrumentationCount = issueCount(issues, /unqualified runtime instrumentation \((\d+) call/i);
 	const duplicateLocals = findDuplicateLocals(source);
 	const qualityIssues: HelixStructuredQualityIssue[] = [];
 	if (placeholderCount > 0) {
@@ -88,6 +101,29 @@ export function inspectHelixOutputQuality(source: string): HelixOutputQuality {
 	}
 	if (duplicateLocals.length > 0) {
 		qualityIssues.push({ kind: 'duplicate-local', severity: 'damning', count: duplicateLocals.length, detail: `duplicate local definition(s): ${duplicateLocals.join(', ')}` });
+	}
+	if (unqualifiedInstrumentationCount > 0) {
+		qualityIssues.push({
+			kind: 'unqualified-instrumentation', severity: 'damning',
+			count: unqualifiedInstrumentationCount,
+			detail: `${unqualifiedInstrumentationCount} unqualified runtime instrumentation call(s); source-level register preservation only`,
+		});
+	}
+	if (underLift || scopeLimited) {
+		const details = [
+			underLift
+				? liftCoverage !== undefined
+					? `requested byte coverage is ${liftCoverage.toFixed(1)}%`
+					: 'requested byte range is under-lifted'
+				: undefined,
+			scopeLimited ? 'result covers an explicit scoped fragment' : undefined,
+		].filter((detail): detail is string => Boolean(detail));
+		qualityIssues.push({
+			kind: 'incomplete-lift',
+			severity: 'damning',
+			count: 1,
+			detail: details.join('; '),
+		});
 	}
 	if (damning && !uninitializedReturn) {
 		qualityIssues.push({ kind: 'damning-defect', severity: 'damning', count: 1, detail: issues.find(issue => /damning honesty defect/i.test(issue)) ?? 'damning honesty defect' });
@@ -109,6 +145,9 @@ export function inspectHelixOutputQuality(source: string): HelixOutputQuality {
 		confidenceAxes: {
 			...(confidence !== undefined ? { translation: confidence } : {}),
 			...(liftCoverage !== undefined ? { liftCoverage } : {}),
+			liftCoverageBasis: liftCoverage !== undefined ? 'requested-byte-range' : 'not-assessed',
+			...(semanticInstructionCoverage !== undefined ? { semanticInstructionCoverage } : {}),
+			scopeLimited,
 			semanticType: null,
 			semanticTypeStatus: 'not-assessed',
 		},

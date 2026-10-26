@@ -205,6 +205,7 @@ export interface CFunctionDecl extends ASTNodeBase {
   name: string;
   address?: string;
   returnType: string;
+  returnTypeEvidence?: HASTTypeEvidence;
   params: CVarDecl[];
   locals?: CVarDecl[];
   body?: CBlockStmt;
@@ -223,6 +224,7 @@ export interface CVarDecl extends ASTNodeBase {
   storage?: 'stack' | 'register' | 'global' | 'parameter' | 'temporary' | 'unknown';
   stackOffset?: number | string;
   parameterIndex?: number;
+  typeEvidence?: HASTTypeEvidence;
 }
 
 export interface CStructDecl extends ASTNodeBase {
@@ -276,6 +278,25 @@ export interface HASTAdapterCoverage {
   errors?: string[];
 }
 
+export interface HASTEvidenceOrigin {
+  producer?: string;
+  generation?: string;
+  targetIdentity?: string;
+  snapshotHash?: string;
+}
+
+export interface HASTTypeEvidence {
+  source: 'unknown' | 'legacy' | 'dataflow' | 'structural' |
+    'interprocedural' | 'signature-db' | 'debug-info' | 'user' | string;
+  state: 'unreported' | 'selected' | 'selected-with-conflict' |
+    'unresolved' | string;
+  authority: 'unknown' | 'heuristic' | 'derived' | 'authoritative' | string;
+  strength: number;
+  rejectedSpelling?: string;
+  originId?: number;
+  origin?: HASTEvidenceOrigin;
+}
+
 export interface HASTModuleMetadata {
   schemaMajor: number;
   schemaMinor: number;
@@ -285,6 +306,11 @@ export interface HASTModuleMetadata {
   architecture?: string;
   pointerBits?: number;
   semanticEligible: boolean;
+  evidenceOrigins?: HASTEvidenceOrigin[];
+  nativeQuality?: {
+    status: 'unreported' | 'no-known-loss' | 'known-loss';
+    issues: string[];
+  };
 }
 
 export const HAST_CAPABILITIES = Object.freeze([
@@ -295,6 +321,8 @@ export const HAST_CAPABILITIES = Object.freeze([
   'call-targets',
   'field-offsets',
   'expression-result-types',
+  'native-function-quality',
+  'declaration-type-evidence',
 ] as const);
 
 // ─── Discriminated Union ───

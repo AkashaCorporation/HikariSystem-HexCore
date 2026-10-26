@@ -16,6 +16,10 @@ import {
 	getAuthoritativeFunctionExtent,
 	shouldHonorExplicitLiftWindow,
 	hasHeadlessHelixIrInput,
+	parseExplicitHelixFunctionStarts,
+	parseHelixVariableRenames,
+	parseHelixExactRange,
+	resolveExplicitHelixDataSections,
 } from './helixPackaging';
 
 function makeEngineStub(opts: {
@@ -130,6 +134,51 @@ define ptr @lifted_5368865820() {
 		assert.strictEqual(resolveHelixBaseOptions({}).useCastLayer, true);
 		assert.strictEqual(resolveHelixBaseOptions({ useCastLayer: true }).useCastLayer, true);
 		assert.strictEqual(resolveHelixBaseOptions({ useCastLayer: false }).useCastLayer, false);
+	});
+
+	test('resolves skipOptimization alias and rejects contradictory flags', () => {
+		assert.strictEqual(resolveHelixBaseOptions({ skipOptimization: true }).optimizeIR, false);
+		assert.strictEqual(resolveHelixBaseOptions({ skipOptimization: false }).optimizeIR, true);
+		assert.throws(() => resolveHelixBaseOptions({ optimizeIR: true, skipOptimization: true }), /conflicts/);
+		assert.throws(() => resolveHelixBaseOptions({ skipOptimization: 'yes' }), /boolean/);
+	});
+
+	test('parses explicit function starts and variable renames without silent coercion', () => {
+		assert.deepStrictEqual(parseExplicitHelixFunctionStarts(['0x2000', 0x1000, '0x2000']), [0x1000, 0x2000]);
+		assert.strictEqual(parseExplicitHelixFunctionStarts(true), undefined);
+		assert.throws(() => parseExplicitHelixFunctionStarts([]));
+		assert.deepStrictEqual(parseHelixVariableRenames([
+			{ oldName: 'v1', newName: 'health' }, { oldName: 'v1', newName: 'health' },
+		]), [{ oldName: 'v1', newName: 'health' }]);
+		assert.throws(() => parseHelixVariableRenames([
+			{ oldName: 'v1', newName: 'health' }, { oldName: 'v1', newName: 'ammo' },
+		]), /Conflicting/);
+	});
+
+	test('normalizes exactRange and compatible aliases to one half-open range', () => {
+		assert.deepStrictEqual(parseHelixExactRange({ exactRange: ['0x1000', '0x1040'] }), {
+			startAddress: 0x1000, endExclusive: 0x1040, size: 0x40,
+		});
+		assert.deepStrictEqual(parseHelixExactRange({ startAddress: '0x1000', endAddress: '0x1040' }), {
+			startAddress: 0x1000, endExclusive: 0x1040, size: 0x40,
+		});
+		assert.throws(() => parseHelixExactRange({ exactRange: ['0x1000', '0x1040'], address: '0x1004' }), /conflicts/);
+		assert.throws(() => parseHelixExactRange({ exactRange: ['0x1040', '0x1000'] }), /greater/);
+	});
+
+	test('resolves explicit data sections only from the owning file-backed engine', () => {
+		const image = Buffer.from('00112233445566778899aabbccddeeff', 'hex');
+		const eng = {
+			getSections: () => [{ name: '.rdata', virtualAddress: 0x2000, rawSize: 8 }],
+			getBytes: (address: number, size: number) => address === 0x2000 ? image.subarray(0, size) : undefined,
+		};
+		const named = resolveExplicitHelixDataSections(eng as any, [{ name: '.rdata' }], true)!;
+		assert.strictEqual(named[0].vaStart, 0x2000n);
+		assert.strictEqual(named[0].bytes.toString('hex'), '0011223344556677');
+		const ranged = resolveExplicitHelixDataSections(eng as any, [{ vaStart: '0x2000', size: 4 }], true)!;
+		assert.strictEqual(ranged[0].bytes.toString('hex'), '00112233');
+		assert.throws(() => resolveExplicitHelixDataSections(eng as any, [{ name: '.rdata' }], false), /own/);
+		assert.throws(() => resolveExplicitHelixDataSections(eng as any, [{ vaStart: '0x3000', size: 4 }], true), /file-backed/);
 	});
 
 	test('wantsHelixFunctionStarts defaults OFF (quality path)', () => {

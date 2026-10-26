@@ -86,7 +86,7 @@ function rejectUnknownKeys(value: Record<string, unknown>, allowed: ReadonlySet<
   }
 }
 
-function validateQuery(value: unknown, path: string, errors: string[]): value is HQLQuery {
+export function validateQuery(value: unknown, path: string, errors: string[]): value is HQLQuery {
   if (!isRecord(value)) { errors.push(`${path}: expected query object`); return false; }
   rejectUnknownKeys(value, QUERY_KEYS, path, errors);
   const target = value.target;
@@ -183,17 +183,17 @@ function validateCondition(value: unknown, path: string, errors: string[]): valu
   return errors.length === 0;
 }
 
-function validateSemanticQuery(value: unknown, path: string, errors: string[]): boolean {
+export function validateSemanticQuery(value: unknown, path: string, errors: string[]): boolean {
   if (!isRecord(value)) { errors.push(`${path}: expected semantic query object`); return false; }
   rejectUnknownKeys(value, new Set(['fact', 'attributes']), path, errors);
-  if (typeof value.fact !== 'string' || !SEMANTIC_FACT_FIELDS[value.fact]) errors.push(`${path}.fact: invalid semantic fact kind`);
+  if (typeof value.fact !== 'string' || !Object.hasOwn(SEMANTIC_FACT_FIELDS, value.fact)) errors.push(`${path}.fact: invalid semantic fact kind`);
   if (value.attributes !== undefined) {
     if (!Array.isArray(value.attributes)) errors.push(`${path}.attributes: expected array`);
     else value.attributes.forEach((raw, index) => {
       const attrPath = `${path}.attributes[${index}]`;
       if (!isRecord(raw)) { errors.push(`${attrPath}: expected object`); return; }
       rejectUnknownKeys(raw, new Set(['field', 'value']), attrPath, errors);
-      if (typeof raw.field !== 'string' || !SEMANTIC_FACT_FIELDS[String(value.fact)]?.has(raw.field)) errors.push(`${attrPath}.field: invalid for ${String(value.fact)}`);
+      if (typeof raw.field !== 'string' || !Object.hasOwn(SEMANTIC_FACT_FIELDS, String(value.fact)) || !SEMANTIC_FACT_FIELDS[String(value.fact)].has(raw.field)) errors.push(`${attrPath}.field: invalid for ${String(value.fact)}`);
       if (!['string', 'number', 'boolean'].includes(typeof raw.value)) errors.push(`${attrPath}.value: expected scalar`);
       if (typeof raw.value === 'string' && raw.value.startsWith('re:')) {
         try { new RegExp(raw.value.slice(3)); } catch { errors.push(`${attrPath}.value: invalid regex`); }

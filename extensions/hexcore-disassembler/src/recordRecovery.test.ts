@@ -12,6 +12,7 @@ import { recoverRecordsFromPropagation } from './recordRecovery';
 import { canonicalizeSemanticType, type SemanticEvidence } from './semanticModel';
 import { SemanticStore, type SemanticSqliteFactory } from './semanticStore';
 import { TypeManager } from './typeManager';
+import { normalizeRecordRecoveryOptions, requireCurrentCommittedPropagation } from './recordRecoveryCommandOptions';
 import { WholeProgramPropagationEngine, type FunctionSummaryInput, type PropagationValueRef } from './wholeProgramPropagation';
 
 function sqlite(): SemanticSqliteFactory {
@@ -27,6 +28,37 @@ function value(kind: PropagationValueRef['kind'], identity: string, functionIden
 }
 
 suite('R35 debug types, type manager and record recovery', () => {
+	test('record recovery reuses only the current clean committed generation', () => {
+		assert.deepStrictEqual(
+			requireCurrentCommittedPropagation(7, 7, 12, 0),
+			{ analysisGeneration: 7, summaryCount: 12, dirtyCount: 0 });
+		assert.throws(() => requireCurrentCommittedPropagation(7, undefined, 0, 0), /requires committed propagation/);
+		assert.throws(() => requireCurrentCommittedPropagation(8, 7, 12, 0), /stale/);
+		assert.throws(() => requireCurrentCommittedPropagation(7, 7, 12, 2), /dirty function/);
+	});
+
+	test('record recovery refresh validates and preserves explicit solver budgets', () => {
+		assert.deepStrictEqual(normalizeRecordRecoveryOptions({
+			refresh: true,
+			maxIterations: 19,
+			maxMilliseconds: 1234,
+			maxValues: 456,
+			maxTypeHypothesesPerValue: 7,
+			maxPointsToPerValue: 8,
+			changedFunctions: ['function:0x2', 'function:0x1', 'function:0x2'],
+		}), {
+			refresh: true,
+			maxIterations: 19,
+			maxMilliseconds: 1234,
+			maxValues: 456,
+			maxTypeHypothesesPerValue: 7,
+			maxPointsToPerValue: 8,
+			changedFunctions: ['function:0x1', 'function:0x2'],
+		});
+		assert.throws(() => normalizeRecordRecoveryOptions({ refresh: true, maxValues: 0 }), /positive safe integer/);
+		assert.throws(() => normalizeRecordRecoveryOptions({ changedFunctions: [''] }), /non-empty strings/);
+	});
+
 	test('declares every R35 command once across manifest, extension and pipeline ownership', () => {
 		const root = path.resolve(__dirname, '..');
 		const manifest = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as {

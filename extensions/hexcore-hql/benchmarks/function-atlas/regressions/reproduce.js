@@ -43,13 +43,15 @@ async function main() {
 	const functions = hql.hydrateHAST(result.astBuffer);
 	if (functions.length !== 1
 		|| functions[0].hast?.schemaMajor !== metadata.expected.hastSchema
+		|| functions[0].hast?.nativeQuality?.status !== metadata.expected.nativeQualityStatus
+		|| !functions[0].hast?.nativeQuality?.issues?.includes('damning-defect')
 		|| functions[0].hast?.semanticEligible !== metadata.expected.semanticEligible
 		|| functions[0].adapterCoverage?.coverage !== metadata.expected.adapterCoverage) {
 		throw new Error(`Resolved x86 regression failed HAST gate: ${JSON.stringify(functions.map(fn => ({
 			address: fn.address, hast: fn.hast, adapterCoverage: fn.adapterCoverage,
 		})))}`);
 	}
-	console.log(`x86 regression resolved: ${metadata.function} ${metadata.irSha256}`);
+	console.log(`x86 current-producer regression passed with honest native-quality barrier: ${metadata.function} ${metadata.irSha256}`);
 }
 
 main().catch(error => {

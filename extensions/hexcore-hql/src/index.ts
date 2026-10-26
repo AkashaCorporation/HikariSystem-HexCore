@@ -82,7 +82,11 @@ export {
   mergeSignatureLibraries,
 } from './signatures/loader.js';
 export { scanHAST, signatureSetSha256 } from './scan.js';
-export type { HQLFunctionFindings, HQLScanOptions } from './scan.js';
+export type { HQLFunctionFindings, HQLScanOptions, HQLUpstreamQuality } from './scan.js';
+export { normalizeAdHocQuery } from './query/contract.js';
+export { runAdHocQuery } from './query/run.js';
+export type { AdHocQuery, AdHocCondition, AdHocQueryResult, QueryInput, QueryFunctionInput, QueryIdentity, QueryLimits, QueryHastSource } from './query/contract.js';
+export type { AdHocExecutionOptions } from './query/run.js';
 export * from './atlas/index.js';
 
 // v3.7.4: Session DB Reader (read-only access to disassembler's .hexcore_session.db)

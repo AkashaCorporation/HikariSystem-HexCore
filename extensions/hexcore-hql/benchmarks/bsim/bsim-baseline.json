@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "groundTruthSha256": "9caf941e7c9f156b61cc451c9d508922f5015cd857f4d232aea60b3a5b1051a0",
+  "bsim": {
+    "inputSha256": "a2dfd47dc834c057348e8574065ee1bc773b3ef244911854b3196cf06cccdc7e",
+    "metrics": {
+      "queryCount": 224,
+      "eligibleQueryCount": 224,
+      "suppressedQueryCount": 0,
+      "top1Correct": 36,
+      "top1Accuracy": 0.160714286,
+      "top5Correct": 107,
+      "top5Accuracy": 0.477678571,
+      "meanReciprocalRank": 0.306862842,
+      "expectedMatches": 3360,
+      "retrievedCorrectMatches": 556,
+      "recall": 0.16547619,
+      "falseMatches": 2626,
+      "falseMatchesAt5": 340,
+      "queriesWithoutCorrectMatch": 112
+    }
+  },
+  "provenance": {
+    "schemaVersion": 1,
+    "ghidraVersion": "12.1.2",
+    "ghidraRevision": "c0f584bf229fffba61b36431f3ce30c0c3e4e682",
+    "databaseTemplate": "medium_nosize",
+    "corpusManifestSha256": "d1f0c671eb2ad6428dd76ef1af746fc9651bede0009778eb1cdad544ac70926f",
+    "queryFiles": [
+      {
+        "path": "clangcl-x64-O0-debug.json",
+        "sha256": "96885488cdcb7a996c0ba67bf3a53eb85d13748b8cebc09b804d6828ddd0b4ef"
+      },
+      {
+        "path": "clangcl-x64-O0-stripped.json",
+        "sha256": "07093e73c89cd0595b906b008754da5c3e88ed39e4d533da6a8e05c59a3e71b8"
+      },
+      {
+        "path": "clangcl-x64-O2-debug.json",
+        "sha256": "a09a11a0a0af260b448d7128fbf55e94ade2b3e55ee1e8c7df68cb4348da9ef4"
+      },
+      {
+        "path": "clangcl-x64-O2-stripped.json",
+        "sha256": "c40cf51f27fa5868b8f488f0626348f64a2be65637104c955f196f6285bdc2e3"
+      },
+      {
+        "path": "clangcl-x86-O0-debug.json",
+        "sha256": "b186260a064c251028bc3c34ff83938949399c159f7a82a1c3836a1606d5dfb9"
+      },
+      {
+        "path": "clangcl-x86-O0-stripped.json",
+        "sha256": "37297e194a2ca5393818ea75cfe5069a825a23eff4c93989f8ef5abc375475c7"
+      },
+      {
+        "path": "clangcl-x86-O2-debug.json",
+        "sha256": "30c6c82ec9e83679cd59db1de85e4e7891931397fb3fd4d387f26282635d8be7"
+      },
+      {
+        "path": "clangcl-x86-O2-stripped.json",
+        "sha256": "905a82ecf8d9e1dcd6628085238a13ef9f7c7a3f0210005709fc7e492ab2478d"
+      },
+      {
+        "path": "msvc-x64-O0-debug.json",
+        "sha256": "fffd9c54d59e7bd4e35d97cb39626de980145eb96a6b39c94a8246a9298d6f72"
+      },
+      {
+        "path": "msvc-x64-O0-stripped.json",
+        "sha256": "0270cc415609dc1f7a27f3aede32a1d963d4a38605a6cfb8244beb48d006b1fa"
+      },
+      {
+        "path": "msvc-x64-O2-debug.json",
+        "sha256": "9548c322119c70160daada669753309a8d986974cb811a278b48212dd82ef4c2"
+      },
+      {
+        "path": "msvc-x64-O2-stripped.json",
+        "sha256": "0bae045fadb67b565b9bb9ae8148a3409c56a0fe4d0006aca71c9deb04dd7041"
+      },
+      {
+        "path": "msvc-x86-O0-debug.json",
+        "sha256": "6192a64897d1d103b771907d8caa4b2f7f619a8dee1bce522094890648515aa0"
+      },
+      {
+        "path": "msvc-x86-O0-stripped.json",
+        "sha256": "710a34ab8a3fb67f6ba24403a800a98f387f621b0093f4079a721b0b2d92b242"
+      },
+      {
+        "path": "msvc-x86-O2-debug.json",
+        "sha256": "5876e0efedcf3751c60ca0fb5339385045b556a384a9831a2da0ffce820ca144"
+      },
+      {
+        "path": "msvc-x86-O2-stripped.json",
+        "sha256": "49d8524f74e4e29d0a6efab489bd8dbb613a743a01866d13da0fe3e8aa3c7901"
+      }
+    ]
+  },
+  "provenanceSha256": "74589356edd9aa44556cea70fa92f82ccf48db1816fee32f28e39514f6e17673"
+}

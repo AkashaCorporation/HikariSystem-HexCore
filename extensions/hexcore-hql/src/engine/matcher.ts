@@ -2,7 +2,7 @@
 // Recursive tree-walking matcher. Pure TS, zero allocations in hot paths.
 // This is where arcaico byte-matching tools go to die.
 
-import type { CNode } from '../types/ast.js';
+import type { CNode, HASTTypeEvidence } from '../types/ast.js';
 import type {
   HQLQuery,
   HQLAttributeCheck,
@@ -21,7 +21,7 @@ import type {
  * No reflection, no Object.values noise — explicit structural extraction
  * for maximum V8 inline cache performance.
  */
-function getChildren(node: CNode): CNode[] {
+export function getChildren(node: CNode): CNode[] {
   switch (node.kind) {
     // ── Expressions with children ──
     case 'CBinaryExpr':
@@ -75,7 +75,7 @@ function getChildren(node: CNode): CNode[] {
 
     // ── Declarations ──
     case 'CFunctionDecl': {
-      const children: CNode[] = [...node.params];
+      const children: CNode[] = [...node.params, ...(node.locals ?? [])];
       if (node.body) children.push(node.body);
       return children;
     }
@@ -181,6 +181,7 @@ interface ConditionEvaluation {
   matches: CNode[];
   satisfiedLeaves: number;
   totalLeaves: number;
+  typeEvidence: HASTTypeEvidence[];
 }
 
 interface SemanticConditionEvaluation {
@@ -190,6 +191,13 @@ interface SemanticConditionEvaluation {
   totalLeaves: number;
 }
 
+export interface HQLTypeEvidenceContext {
+  /** HXDB target identity independently bound by the caller. */
+  targetIdentity?: string;
+  /** HXDB snapshot SHA-256 independently bound by the caller. */
+  snapshotSha256?: string;
+}
+
 /**
  * HQLMatcher — Semantic Pattern Matching Engine.
  *
@@ -197,11 +205,16 @@ interface SemanticConditionEvaluation {
  * against node properties. No bytes, no opcodes — pure semantic analysis.
  */
 export class HQLMatcher {
+  constructor(
+    private readonly checkpoint?: () => void,
+    private readonly typeEvidenceContext: HQLTypeEvidenceContext = {},
+  ) {}
   /**
    * Check if a single node matches a query (non-recursive into children
    * unless `contains` or `operands` require it).
    */
   match(node: CNode, query: HQLQuery): boolean {
+    this.checkpoint?.();
     // 1. Kind filter — fast reject
     if (query.target && node.kind !== query.target) {
       return false;
@@ -245,7 +258,7 @@ export class HQLMatcher {
       : undefined);
     const evaluated = condition
       ? this.evaluateCondition(root, condition)
-      : { matched: true, matches: [], satisfiedLeaves: 0, totalLeaves: 0 };
+      : { matched: true, matches: [], satisfiedLeaves: 0, totalLeaves: 0, typeEvidence: [] };
     if (!evaluated.matched) return null;
     const semantic = signature.semanticCondition
       ? this.evaluateSemanticCondition(semanticFacts, signature.semanticCondition)
@@ -264,6 +277,14 @@ export class HQLMatcher {
       const semanticCeiling = semantic.matches.reduce<HQLEvidenceLevel>((ceiling, fact) =>
         this.lowerEvidenceLevel(ceiling, fact.proofStatus), 'proven');
       evidenceLevel = this.lowerEvidenceLevel(evidenceLevel, semanticCeiling);
+    }
+    if (evaluated.typeEvidence.length > 0) {
+      const declarationTypeCeiling = evaluated.typeEvidence.reduce<HQLEvidenceLevel>(
+        (ceiling, evidence) => this.lowerEvidenceLevel(
+          ceiling, this.declarationTypeEvidenceLevel(evidence)),
+        'proven',
+      );
+      evidenceLevel = this.lowerEvidenceLevel(evidenceLevel, declarationTypeCeiling);
     }
 
     return {
@@ -307,7 +328,14 @@ export class HQLMatcher {
   evaluateCondition(root: CNode, condition: HQLCondition): ConditionEvaluation {
     if ('query' in condition) {
       const matches = this.scan(root, condition.query);
-      return { matched: matches.length > 0, matches, satisfiedLeaves: matches.length > 0 ? 1 : 0, totalLeaves: 1 };
+      return {
+        matched: matches.length > 0,
+        matches,
+        satisfiedLeaves: matches.length > 0 ? 1 : 0,
+        totalLeaves: 1,
+        typeEvidence: matches.flatMap(node =>
+          this.collectMatchedTypeEvidence(node, condition.query)),
+      };
     }
     if ('all' in condition) {
       const parts = condition.all.map(child => this.evaluateCondition(root, child));
@@ -316,6 +344,7 @@ export class HQLMatcher {
         matches: parts.flatMap(part => part.matches),
         satisfiedLeaves: parts.reduce((sum, part) => sum + part.satisfiedLeaves, 0),
         totalLeaves: parts.reduce((sum, part) => sum + part.totalLeaves, 0),
+        typeEvidence: parts.flatMap(part => part.typeEvidence),
       };
     }
     if ('any' in condition) {
@@ -326,18 +355,27 @@ export class HQLMatcher {
         matches: matchedParts.flatMap(part => part.matches),
         satisfiedLeaves: matchedParts.length > 0 ? 1 : 0,
         totalLeaves: 1,
+        typeEvidence: matchedParts.flatMap(part => part.typeEvidence),
       };
     }
     if ('not' in condition) {
       const inner = this.evaluateCondition(root, condition.not);
-      return { matched: !inner.matched, matches: [], satisfiedLeaves: inner.matched ? 0 : 1, totalLeaves: 1 };
+      return { matched: !inner.matched, matches: [], satisfiedLeaves: inner.matched ? 0 : 1, totalLeaves: 1, typeEvidence: [] };
     }
     const matches = this.scan(root, condition.count.query);
     const { exactly, min, max } = condition.count;
     const matched = exactly !== undefined
       ? matches.length === exactly
       : matches.length >= (min ?? 1) && matches.length <= (max ?? Infinity);
-    return { matched, matches: matched ? matches : [], satisfiedLeaves: matched ? 1 : 0, totalLeaves: 1 };
+    return {
+      matched,
+      matches: matched ? matches : [],
+      satisfiedLeaves: matched ? 1 : 0,
+      totalLeaves: 1,
+      typeEvidence: matched
+        ? matches.flatMap(node => this.collectMatchedTypeEvidence(node, condition.count.query))
+        : [],
+    };
   }
 
   // ─── Private ───
@@ -366,6 +404,7 @@ export class HQLMatcher {
   }
 
   private matchSemanticFact(fact: HQLSemanticFact, query: HQLSemanticQuery): boolean {
+    this.checkpoint?.();
     if (fact.kind !== query.fact) return false;
     return (query.attributes ?? []).every(attribute => matchValue(fact.attributes[attribute.field], attribute.value));
   }
@@ -373,6 +412,73 @@ export class HQLMatcher {
   private lowerEvidenceLevel(left: HQLEvidenceLevel, right: HQLEvidenceLevel): HQLEvidenceLevel {
     const rank: Record<HQLEvidenceLevel, number> = { signal: 0, candidate: 1, proven: 2 };
     return rank[left] <= rank[right] ? left : right;
+  }
+
+  private declarationTypeEvidenceLevel(evidence: HASTTypeEvidence): HQLEvidenceLevel {
+    if (evidence.state !== 'selected') return 'signal';
+    if (evidence.authority === 'derived') return 'candidate';
+    if (evidence.authority !== 'authoritative') return 'signal';
+
+    const origin = evidence.origin;
+    const expectedTarget = this.typeEvidenceContext.targetIdentity;
+    const expectedSnapshot = this.typeEvidenceContext.snapshotSha256;
+    if (!origin?.targetIdentity || !origin.snapshotHash ||
+        !expectedTarget || !expectedSnapshot) return 'candidate';
+    return origin.targetIdentity === expectedTarget &&
+      origin.snapshotHash.toLowerCase() === expectedSnapshot.toLowerCase()
+      ? 'proven'
+      : 'candidate';
+  }
+
+  private collectMatchedTypeEvidence(node: CNode, query: HQLQuery): HASTTypeEvidence[] {
+    const evidence: HASTTypeEvidence[] = [];
+    const fields = new Set((query.attributes ?? []).map(attribute => attribute.field));
+    if (node.kind === 'CVarDecl' && fields.has('type')) {
+      evidence.push(node.typeEvidence ?? {
+        source: 'unknown', state: 'unreported', authority: 'unknown', strength: 0,
+      });
+    }
+    if (node.kind === 'CFunctionDecl' && fields.has('returnType')) {
+      evidence.push(node.returnTypeEvidence ?? {
+        source: 'unknown', state: 'unreported', authority: 'unknown', strength: 0,
+      });
+    }
+
+    for (const check of query.operands ?? []) {
+      const operand = getOperands(node)[check.position];
+      if (operand && this.match(operand, check.query)) {
+        evidence.push(...this.collectMatchedTypeEvidence(operand, check.query));
+      }
+    }
+    for (const subQuery of query.contains ?? []) {
+      const matches: CNode[] = [];
+      this.collectContainedMatches(
+        node, subQuery, 0, query.minDepth ?? 0,
+        query.maxDepth ?? Infinity, matches,
+      );
+      for (const match of matches) {
+        evidence.push(...this.collectMatchedTypeEvidence(match, subQuery));
+      }
+    }
+    return evidence;
+  }
+
+  private collectContainedMatches(
+    node: CNode,
+    query: HQLQuery,
+    depth: number,
+    minDepth: number,
+    maxDepth: number,
+    matches: CNode[],
+  ): void {
+    this.checkpoint?.();
+    if (depth > maxDepth) return;
+    if (depth >= minDepth && this.match(node, query)) matches.push(node);
+    for (const child of getChildren(node)) {
+      this.collectContainedMatches(
+        child, query, depth + 1, minDepth, maxDepth, matches,
+      );
+    }
   }
 
   /** Verify positional operands satisfy their sub-queries */
@@ -419,6 +525,7 @@ export class HQLMatcher {
     minDepth: number,
     maxDepth: number
   ): boolean {
+    this.checkpoint?.();
     if (depth > maxDepth) return false;
 
     if (depth >= minDepth && this.match(node, query)) {

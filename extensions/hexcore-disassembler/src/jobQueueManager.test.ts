@@ -371,4 +371,48 @@ suite('JobQueueManager — watcher path deduplication', () => {
 		assert.strictEqual(second.jobId, first.jobId);
 		m.dispose();
 	});
+
+	test('queues a changed watcher revision behind the active revision without concurrent execution', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		const first = m.queueJobIfAbsent('revisioned.hexcore_job.json', 'low', undefined, 'sha-a');
+		await sleep(40);
+		const second = m.queueJobIfAbsent('revisioned.hexcore_job.json', 'low', undefined, 'sha-b');
+		assert.strictEqual(second.deduped, false);
+		assert.notStrictEqual(second.jobId, first.jobId);
+		assert.strictEqual(m.getJobStatus(second.jobId)?.status, 'queued');
+		assert.deepStrictEqual(
+			{ running: m.getQueueStats().running, queued: m.getQueueStats().queued },
+			{ running: 1, queued: 1 },
+		);
+		ctl.release('revisioned.hexcore_job.json');
+		for (let i = 0; i < 40 && m.getJobStatus(second.jobId)?.status !== 'running'; i++) {
+			await sleep(5);
+		}
+		assert.strictEqual(m.getJobStatus(second.jobId)?.status, 'running');
+		ctl.releaseAll();
+		await m.stop();
+		m.dispose();
+	});
+
+	test('coalesces repeated edits into the latest queued watcher revision', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-a');
+		await sleep(40);
+		const pending = m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-b');
+		const updated = m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-c');
+		assert.strictEqual(updated.deduped, true);
+		assert.strictEqual(updated.revisionUpdated, true);
+		assert.strictEqual(updated.jobId, pending.jobId);
+		assert.strictEqual(m.getJobStatus(pending.jobId)?.revision, 'sha-c');
+		assert.strictEqual(m.getQueueStats().queued, 1);
+		ctl.releaseAll();
+		await m.stop();
+		m.dispose();
+	});
 });

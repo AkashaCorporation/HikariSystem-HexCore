@@ -304,7 +304,22 @@ export class CapstoneWrapper {
 			}
 		}
 
-		// v3.8.2 FIX-028: defensive address coercion at the single decode chokepoint.
+		// These AArch64 branches place the destination after a register/bit operand.
+		if (this.architecture === 'arm64' && ['cbz', 'cbnz', 'tbz', 'tbnz'].includes(mnemonic)) {
+			const detail = inst.detail?.arm64;
+			const operand = detail?.operands[mnemonic.startsWith('tb') ? 2 : 1];
+			if (detail) {
+				targetAddress = operand?.type === 2 && Number.isSafeInteger(operand.imm) ? operand.imm : undefined;
+			} else {
+				const match = inst.opStr.match(mnemonic.startsWith('tb')
+					? /^[wx](?:\d+|zr),\s*#(?:0x[\da-f]+|\d+),\s*#?0x(?<target>[\da-f]+)$/i
+					: /^[wx](?:\d+|zr),\s*#?0x(?<target>[\da-f]+)$/i);
+				const address = match?.groups?.target ? Number.parseInt(match.groups.target, 16) : NaN;
+				targetAddress = Number.isSafeInteger(address) ? address : undefined;
+			}
+		}
+
+		// v3.8.2 FIX-028: normalize instruction addresses independently from operands.
 		// The native binding currently loaded returns `address` as a Number, but a newer
 		// (v1.3.4+) build of hexcore-capstone emits it as a BigInt (with an `addressAsNumber`
 		// companion). Coercing here means a binding swap can never silently corrupt addresses:

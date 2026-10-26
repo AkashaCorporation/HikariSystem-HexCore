@@ -14,6 +14,8 @@ export interface FormulaStep {
 }
 
 export interface FormulaBuildResult {
+	status: 'ok' | 'partial';
+	formulaStatus: 'complete' | 'partial-expression';
 	targetRegister: string;
 	expression: string;
 	instructionCount: number;
@@ -138,49 +140,57 @@ export function buildInstructionFormula(
 				const c = resolveOperandExpression(operands[3], state, false);
 				updatedExpression = `((${a} * ${b}) + ${c})`;
 			}
-		} else if (mnemonic === 'neg' && operands.length >= 2) {
-			// ARM64: neg x0, x1 → x0 = -x1
+		} else if (mnemonic === 'neg' && operands.length >= 1) {
 			const dst = normalizeRegister(operands[0]);
 			if (dst) {
 				updatedRegister = dst;
-				updatedExpression = `-(${resolveOperandExpression(operands[1], state, false)})`;
+				// x86: neg rax; ARM: neg x0, x1.
+				const source = operands.length >= 2
+					? resolveOperandExpression(operands[1], state, false)
+					: state.get(dst) ?? dst;
+				updatedExpression = `-(${source})`;
 			}
 		} else if ((mnemonic === 'xor' || mnemonic === 'eor') && operands.length >= 2) {
 			const dst = normalizeRegister(operands[0]);
 			if (mnemonic === 'eor' && operands.length >= 3) {
-				// ARM 3-operand: eor x0, x1, x2
-				const src1 = normalizeRegister(operands[1]);
-				const src2 = normalizeRegister(operands[2]);
-				if (dst && src1 && src2 && src1 === src2) {
+				if (dst) {
 					updatedRegister = dst;
-					updatedExpression = '0';
+					const left = resolveOperandExpression(operands[1], state, false);
+					const right = resolveOperandExpression(operands[2], state, false);
+					updatedExpression = left === right ? '0' : `(${left} ^ ${right})`;
 				}
 			} else {
-				// x86 2-operand: xor eax, eax
-				const src = normalizeRegister(operands[1]);
-				if (dst && src && dst === src) {
+				if (dst) {
 					updatedRegister = dst;
-					updatedExpression = '0';
+					const left = state.get(dst) ?? dst;
+					const right = resolveOperandExpression(operands[1], state, false);
+					updatedExpression = left === right ? '0' : `(${left} ^ ${right})`;
 				}
 			}
-		} else if ((mnemonic === 'lsl' || mnemonic === 'lsr' || mnemonic === 'asr') && operands.length >= 3) {
-			// ARM: lsl x0, x1, #4 → x0 = x1 << 4
+		} else if ((mnemonic === 'lsl' || mnemonic === 'lsr' || mnemonic === 'asr' ||
+			mnemonic === 'shl' || mnemonic === 'sal' || mnemonic === 'shr' || mnemonic === 'sar') && operands.length >= 2) {
 			const dst = normalizeRegister(operands[0]);
 			if (dst) {
 				updatedRegister = dst;
-				const src = resolveOperandExpression(operands[1], state, false);
-				const shift = resolveOperandExpression(operands[2], state, false);
-				const op = mnemonic === 'lsl' ? '<<' : mnemonic === 'lsr' ? '>>' : '>>>';
+				const armForm = (mnemonic === 'lsl' || mnemonic === 'lsr' || mnemonic === 'asr') && operands.length >= 3;
+				const src = armForm
+					? resolveOperandExpression(operands[1], state, false)
+					: state.get(dst) ?? dst;
+				const shift = resolveOperandExpression(operands[armForm ? 2 : 1], state, false);
+				const op = mnemonic === 'asr' || mnemonic === 'sar' ? '>>>'
+					: mnemonic === 'lsr' || mnemonic === 'shr' ? '>>' : '<<';
 				updatedExpression = `(${src} ${op} ${shift})`;
 			}
-		} else if ((mnemonic === 'orr' || mnemonic === 'and') && operands.length >= 3) {
-			// ARM: orr x0, x1, x2 / and x0, x1, x2
+		} else if ((mnemonic === 'orr' || mnemonic === 'or' || mnemonic === 'and') && operands.length >= 2) {
 			const dst = normalizeRegister(operands[0]);
 			if (dst) {
 				updatedRegister = dst;
-				const left = resolveOperandExpression(operands[1], state, false);
-				const right = resolveOperandExpression(operands[2], state, false);
-				const op = mnemonic === 'orr' ? '|' : '&';
+				const armForm = operands.length >= 3;
+				const left = armForm
+					? resolveOperandExpression(operands[1], state, false)
+					: state.get(dst) ?? dst;
+				const right = resolveOperandExpression(operands[armForm ? 2 : 1], state, false);
+				const op = mnemonic === 'orr' || mnemonic === 'or' ? '|' : '&';
 				updatedExpression = `(${left} ${op} ${right})`;
 			}
 		}
@@ -226,9 +236,13 @@ export function buildInstructionFormula(
 	}
 
 	const expression = registerExpressions[primaryRegister] ?? primaryRegister;
-	const reportMarkdown = generateFormulaReport(primaryRegister, expression, steps, unsupported);
+	const formulaStatus = unsupported.length === 0 ? 'complete' as const : 'partial-expression' as const;
+	const status = formulaStatus === 'complete' ? 'ok' as const : 'partial' as const;
+	const reportMarkdown = generateFormulaReport(primaryRegister, expression, steps, unsupported, formulaStatus);
 
 	return {
+		status,
+		formulaStatus,
 		targetRegister: primaryRegister,
 		expression,
 		instructionCount: instructions.length,
@@ -243,7 +257,8 @@ export function buildInstructionFormula(
 function isPotentialMathInstruction(mnemonic: string): boolean {
 	return [
 		// x86/x64
-		'mov', 'lea', 'imul', 'add', 'sub', 'xor',
+		'mov', 'lea', 'imul', 'mul', 'add', 'sub', 'xor', 'and', 'or', 'neg',
+		'shl', 'sal', 'shr', 'sar', 'not', 'idiv', 'div',
 		// ARM64/ARM32 equivalents
 		'movz', 'movk', 'movn', 'mul', 'madd', 'msub', 'neg',
 		'eor', 'orr', 'and', 'lsl', 'lsr', 'asr',
@@ -383,16 +398,22 @@ function generateFormulaReport(
 	targetRegister: string,
 	expression: string,
 	steps: FormulaStep[],
-	unsupported: FormulaStep[]
+	unsupported: FormulaStep[],
+	formulaStatus: FormulaBuildResult['formulaStatus'],
 ): string {
 	let markdown = `# HexCore Formula Extraction Report
 
 ## Result
 
+- Formula status: \`${formulaStatus}\`
 - Target register: \`${targetRegister}\`
 - Normalized expression: \`${expression}\`
 - Processed instructions: \`${steps.length}\`
 - Unsupported math instructions: \`${unsupported.length}\`
+
+${formulaStatus === 'partial-expression'
+		? '> **Partial expression:** unsupported instructions may invalidate the expression. Do not treat it as semantically equivalent to the input.\n'
+		: ''}
 
 ## Step Trace
 

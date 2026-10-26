@@ -36,6 +36,8 @@ export interface QueuedJob {
 	startedAt?: number;
 	completedAt?: number;
 	filePath: string;
+	/** Content identity captured by watcher submissions. */
+	revision?: string;
 	result?: any;
 	error?: string;
 	abortController: AbortController;
@@ -98,6 +100,7 @@ export interface JobStatusReport {
 	startedAt?: number;
 	completedAt?: number;
 	filePath: string;
+	revision?: string;
 	sessionId?: string;
 	workerId?: number;
 	result?: any;
@@ -469,7 +472,7 @@ export class JobQueueManager {
 	 *        stateless and runs on any free worker (original behavior).
 	 * @returns The job ID (UUID)
 	 */
-	queueJob(filePath: string, priority: JobPriority = 'normal', sessionId?: string): string {
+	queueJob(filePath: string, priority: JobPriority = 'normal', sessionId?: string, revision?: string): string {
 		const jobId = crypto.randomUUID();
 		const job: QueuedJob = {
 			jobId,
@@ -478,7 +481,8 @@ export class JobQueueManager {
 			createdAt: Date.now(),
 			filePath: path.resolve(filePath),
 			abortController: new AbortController(),
-			...(sessionId ? { sessionId } : {})
+			...(sessionId ? { sessionId } : {}),
+			...(revision ? { revision } : {}),
 		};
 
 		this.jobs.set(jobId, job);
@@ -526,12 +530,33 @@ export class JobQueueManager {
 	 * @returns The new job ID, or the existing in-flight job ID if a duplicate
 	 *          was suppressed, or undefined if it could not be queued
 	 */
-	queueJobIfAbsent(filePath: string, priority: JobPriority = 'normal', sessionId?: string): { jobId: string; deduped: boolean } {
-		const existing = this.getActiveJobForPath(filePath);
-		if (existing) {
-			return { jobId: existing.jobId, deduped: true };
+	queueJobIfAbsent(
+		filePath: string,
+		priority: JobPriority = 'normal',
+		sessionId?: string,
+		revision?: string,
+	): { jobId: string; deduped: boolean; revisionUpdated?: boolean } {
+		const normalized = jobPathIdentity(filePath);
+		const active = [...this.jobs.values()].filter(job =>
+			jobPathIdentity(job.filePath) === normalized &&
+			(job.status === 'queued' || job.status === 'running' || this.runningJobs.has(job.jobId))
+		);
+		if (!revision) {
+			const existing = active[0];
+			return existing
+				? { jobId: existing.jobId, deduped: true }
+				: { jobId: this.queueJob(filePath, priority, sessionId), deduped: false };
 		}
-		return { jobId: this.queueJob(filePath, priority, sessionId), deduped: false };
+		const sameRevision = active.find(job => job.revision === revision);
+		if (sameRevision) {
+			return { jobId: sameRevision.jobId, deduped: true };
+		}
+		const pending = active.find(job => job.status === 'queued');
+		if (pending) {
+			pending.revision = revision;
+			return { jobId: pending.jobId, deduped: true, revisionUpdated: true };
+		}
+		return { jobId: this.queueJob(filePath, priority, sessionId, revision), deduped: false };
 	}
 
 	/** Observe an existing submission without scheduling another execution. */
@@ -643,6 +668,7 @@ export class JobQueueManager {
 		if (job.startedAt !== undefined) { report.startedAt = job.startedAt; }
 		if (job.completedAt !== undefined) { report.completedAt = job.completedAt; }
 		if (job.sessionId !== undefined) { report.sessionId = job.sessionId; }
+		if (job.revision !== undefined) { report.revision = job.revision; }
 		if (job.workerId !== undefined) { report.workerId = job.workerId; }
 		if (job.result !== undefined) { report.result = job.result; }
 		if (job.error !== undefined) { report.error = job.error; }
@@ -751,6 +777,14 @@ export class JobQueueManager {
 	 *   worker only if none is unbound.
 	 */
 	private pickWorkerFor(job: QueuedJob): WorkerSlot | undefined {
+		const samePathIsRunning = [...this.jobs.values()].some(other =>
+			other.jobId !== job.jobId &&
+			jobPathIdentity(other.filePath) === jobPathIdentity(job.filePath) &&
+			this.runningJobs.has(other.jobId)
+		);
+		if (samePathIsRunning) {
+			return undefined;
+		}
 		if (!job.sessionId) {
 			return this.workers.find(w => !w.busy);
 		}

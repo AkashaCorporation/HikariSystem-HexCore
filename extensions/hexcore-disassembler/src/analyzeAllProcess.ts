@@ -41,11 +41,27 @@ type WorkerMessage =
 	| { type: 'result'; functionNetChange: number; snapshotPath: string; snapshotSha256: string; snapshotBytes: number; snapshotUncompressedBytes?: number }
 	| { type: 'error'; error: string; phase: string };
 
-function writeJsonAtomic(filePath: string, value: unknown): void {
+export function writeJsonAtomic(filePath: string, value: unknown): boolean {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
-	const temporary = `${filePath}.tmp-${process.pid}`;
-	fs.writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf8');
-	fs.renameSync(temporary, filePath);
+	const temporary = `${filePath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+	try {
+		fs.writeFileSync(temporary, JSON.stringify(value, null, 2), 'utf8');
+		try {
+			fs.renameSync(temporary, filePath);
+		} catch (error: unknown) {
+			const code = (error as NodeJS.ErrnoException)?.code;
+			if (code !== 'EPERM' && code !== 'EACCES' && code !== 'EEXIST') { throw error; }
+			// Windows scanners/readers can transiently prevent replacement by rename.
+			// A heartbeat is observational; overwrite-copy is an acceptable fallback
+			// and must never terminate the Extension Host or the native analysis.
+			fs.copyFileSync(temporary, filePath);
+			fs.unlinkSync(temporary);
+		}
+		return true;
+	} catch {
+		try { fs.unlinkSync(temporary); } catch { /* best-effort cleanup */ }
+		return false;
+	}
 }
 
 export type AnalyzeAllChildLauncher = () => ChildProcess;
@@ -163,10 +179,14 @@ export class AnalyzeAllProcessController {
 			});
 			child.on('error', error => settleError('crashed', `Isolated analyzeAll launch error: ${error.message}`));
 			child.on('exit', code => {
-				if (!settled) {
-					const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
-					settleError('crashed', `Isolated analyzeAll exited before a result (code=${String(code)})${detail}`);
-				}
+				// IPC messages queued immediately before process exit may be delivered on
+				// the next turn. Give them that turn before classifying a clean exit.
+				setImmediate(() => {
+					if (!settled) {
+						const detail = stderr.trim() ? `: ${stderr.trim()}` : '';
+						settleError('crashed', `Isolated analyzeAll exited before a result (code=${String(code)})${detail}`);
+					}
+				});
 			});
 			child.send(request);
 		});

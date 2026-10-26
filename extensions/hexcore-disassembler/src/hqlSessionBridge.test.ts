@@ -42,8 +42,8 @@ void (async () => {
 	db.close();
 
 	try {
-		const astBuffer = fs.readFileSync(path.resolve(__dirname, '..', '..', 'hexcore-hql', 'test', 'fixtures', 'canonical-hast-v1.fb'));
-		const decompile = async () => ({ success: true, code: '', address, error: '', astBuffer });
+		const astBuffer = fs.readFileSync(path.resolve(__dirname, '..', '..', 'hexcore-hql', 'test', 'fixtures', 'semantic-quality-v1_1.fb'));
+		const decompile = async () => ({ success: true, status: 'ok' as const, architecture: 'arm64', securityEvidenceUsable: true, code: '', address, error: '', astBuffer });
 		const results = await scanTargetFunctions(
 			{ address },
 			decompile,
@@ -53,6 +53,48 @@ void (async () => {
 		assert.strictEqual(results[0].status, 'ok');
 		assert.strictEqual(results[0].semanticFactCount, 1);
 		assert.match(results[0].semanticFactsSha256 ?? '', /^[0-9a-f]{64}$/);
+		const standaloneIr = await scanTargetFunctions(
+			{ irText: '; standalone Remill fixture' },
+			decompile,
+			{ session: {
+				getSnapshotIdentity: () => ({
+					targetIdentity,
+					sessionId: 'standalone-test',
+					generation: 1,
+					universeSha256: 'b'.repeat(64),
+					snapshotSha256: 'c'.repeat(64),
+					architecture: 'arm64',
+					format: 'pe',
+					propagationGeneration: null,
+					referenceGeneration: null,
+					engines: [],
+				}),
+				getTargetIdentity: () => targetIdentity,
+				getFunctionName: () => undefined,
+				getFunctionReturnType: () => undefined,
+				getVariableRenames: () => [],
+				getSemanticFacts: () => { throw new Error('foreign HXDB must not be read'); },
+				getSemanticReadErrors: () => [],
+				dispose: () => undefined,
+			} },
+		);
+		assert.notStrictEqual(standaloneIr[0].status, 'error');
+		assert.strictEqual(standaloneIr[0].semanticFactCount, 0);
+		const partial = await scanTargetFunctions({ address }, async () => ({
+			...await decompile(), status: 'partial', warning: 'function boundary not reached',
+		}), { session: { dbPath, expectedTargetIdentity: targetIdentity } });
+		assert.strictEqual(partial[0].status, 'partial');
+		assert.strictEqual(partial[0].hast?.semanticEligible, false);
+		assert.strictEqual(partial[0].semanticFactCount, 1, 'facts remain inspectable, not promoted');
+		assert.strictEqual(partial[0].evaluatedSignatureCount, 0);
+		assert.ok(partial[0].partialReasons?.some(reason => reason.includes('boundary not reached')));
+		const wrongArch = await scanTargetFunctions({ address }, async () => ({ ...await decompile(), architecture: 'x64' }));
+		assert.strictEqual(wrongArch[0].status, 'partial');
+		assert.strictEqual(wrongArch[0].hast?.semanticEligible, false);
+		const inherited = await scanTargetFunctions({ address }, decompile, { inputPartialReasons: ['Partial persisted input'] });
+		assert.strictEqual(inherited[0].status, 'partial');
+		assert.strictEqual(inherited[0].hast?.semanticEligible, false);
+		assert.strictEqual(inherited[0].evaluatedSignatureCount, 0);
 
 		const mismatch = await scanTargetFunctions(
 			{ address },

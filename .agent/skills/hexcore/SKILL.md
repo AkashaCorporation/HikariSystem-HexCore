@@ -3,7 +3,7 @@ name: HexCore Binary Analysis
 description: Analyze authorized binaries with HexCore's static, decompilation, managed, emulation, query, and evidence pipelines.
 ---
 
-# HexCore Binary Analysis Skill - v3.8.4 (Analysis Contract)
+# HexCore Binary Analysis Skill - v3.8.5 (Analysis Contract)
 
 ## Scope
 
@@ -11,7 +11,7 @@ HexCore is a VS Code-based reverse-engineering environment. Use it only for bina
 
 The automation source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`. Validate jobs before treating examples in prose as executable contracts.
 
-> Release train: HexCore `3.8.4` in development, "Analysis Contract".
+> Release train: HexCore `3.8.5` in development, "Analysis Contract".
 >
 > Contract additions an agent must respect: pipeline admin commands (`runJob`, `validateJob`, `listCapabilities`, `queueJob`, `jobStatus`) return contract-decorated responses (`contractVersion: 1`, canonical `status` (`ok|partial|failed|skipped`), typed `diagnostics`, `artifacts`) with all legacy fields preserved. The file-level `hexcore-pipeline.status.json` keeps the legacy `error` run status; only the command response uses `failed`. Error codes come from the `ANALYSIS_ERROR_CODES` registry in `hexcore-common`. When the target's `.hexcore_session.db` exists, run provenance records the persisted session ID/generation and the session engine manifest instead of a synthetic session; `contextGeneration` remains the runner's execution counter. Finding IDs are stable contract IDs (`finding:sha256:<digest>:...`) that survive re-runs with saved marks intact; cross-target references are rejected as `wrong-target`.
 
@@ -48,9 +48,9 @@ The automation source of truth is `extensions/hexcore-disassembler/src/automatio
 
 ### Current native package versions
 
-`capstone 1.3.6`, `unicorn 1.3.2`, `remill 0.5.4`, `llvm-mc 1.0.2`, `better-sqlite3 2.0.3`, `souper 0.2.2`, `elixir 1.0.4`, `common 1.3.0`.
+`capstone 1.3.6`, `unicorn 1.3.2`, `remill 0.5.4`, `llvm-mc 1.0.2`, `better-sqlite3 2.0.3`, `souper 0.2.2`, `elixir 1.0.4`, `common 1.3.1`.
 
-Current integrated extensions relevant to automation: `hexcore-disassembler 1.4.57`, `hexcore-debugger 2.1.21`, `hexcore-strings 1.3.3`, `hexcore-yara 2.1.3`, `hexcore-revenant 0.4.0`, `hexcore-helix 0.9.3`, `hexcore-peanalyzer 1.1.3`, and `hexcore-report-composer 1.0.11`.
+Current integrated extensions relevant to automation: `hexcore-disassembler 1.4.70`, `hexcore-debugger 2.1.22`, `hexcore-strings 1.3.3`, `hexcore-yara 2.1.3`, `hexcore-revenant 0.5.0` (`ICSharpCode.Decompiler 11.1.0.9782`), `hexcore-filetype 1.0.3`, `hexcore-helix 0.9.4-rc.2`, `hexcore-peanalyzer 1.1.4`, and `hexcore-report-composer 1.0.14`.
 
 ## Job Rules
 
@@ -121,6 +121,7 @@ This list mirrors the v3.8.4 capability registry. Aliases are listed separately.
 - `hexcore.disasm.searchStringHeadless`
 - `hexcore.disasm.exportASMHeadless`
 - `hexcore.disasm.disassembleAtHeadless`
+- `hexcore.disasm.materializeFunctions`
 - `hexcore.disasm.rttiScanHeadless`
 - `hexcore.disasm.searchBytesHeadless`
 - `hexcore.disasm.extractStrings`
@@ -327,6 +328,11 @@ that produces `semanticStatus:"partial"` and also requires the pipeline step's
 2. If CLR or .NET single-file is detected, route to Revenant.
 3. Produce C# and IL when semantic recovery or compiler transformations need cross-checking.
 4. A Helix managed marker is correct routing evidence, not a decompilation regression.
+5. Preserve both recovered C# and IL. Record Revenant `backendVersion`,
+   `decompilerVersion`, and `toolVersion`; `toolVersion` aliases the decompiler,
+   not the wrapper.
+6. Treat the managed marker as `status:ok` routing evidence. The recovered
+   Revenant C#/IL artifacts, not the marker, carry managed program semantics.
 
 ### Kernel ELF
 

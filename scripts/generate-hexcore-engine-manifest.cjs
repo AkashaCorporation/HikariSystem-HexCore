@@ -154,7 +154,12 @@ function generateManifest({ appRoot, outputPath, platform = process.platform, ar
 			version: packageJson.version,
 			repository: normalizeRepository(packageJson.repository),
 			releaseTag: `v${packageJson.version}`,
-			...(primaryRuntime ? { primaryRuntime: path.relative(resolvedRoot, primaryRuntime).split(path.sep).join('/'), runtimeValidation: 'presence-only' } : {}),
+			...(packageJson.hexcoreRuntime && typeof packageJson.hexcoreRuntime === 'object'
+				? { runtimeContract: packageJson.hexcoreRuntime } : {}),
+			...(primaryRuntime ? {
+				primaryRuntime: path.relative(resolvedRoot, primaryRuntime).split(path.sep).join('/'),
+				runtimeValidation: spec.id === 'hexcore-revenant' ? 'version-probe' : 'presence-only',
+			} : {}),
 			artifacts: artifactPaths.map(artifactPath => {
 				const stat = fs.statSync(artifactPath);
 				return {

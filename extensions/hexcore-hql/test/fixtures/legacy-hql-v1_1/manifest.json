@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "source": "phase01-015000/baseline/snapshot/ide-extensions/hexcore-hql/src",
+  "sourceAuditManifestSha256": "31bdcfe3c293fa4805266489c14f8c56ebdf907d480356f707747950a4bfafc2",
+  "fileCount": 24,
+  "treeSha256": "35f10ecf93aa600d77db1883925122ea99935d6494bada8579269846e0380bbf",
+  "treeHashFraming": "sorted relative path + NUL + lowercase file SHA-256 + LF"
+}

@@ -177,6 +177,33 @@ suite('incremental function materialization closure', () => {
 		assert.strictEqual(materialized?.instructions.length, 1500);
 	});
 
+	test('keeps an explicitly byte-bounded decode partial and retryable', async () => {
+		const fn: Function = {
+			address: 0x420000, name: 'bounded', size: 16, endAddress: 0x420010,
+			instructions: [], callers: [], callees: [],
+		};
+		const engine = Object.create(DisassemblerEngine.prototype) as any;
+		engine.functions = new Map([[fn.address, fn]]);
+		engine.unmaterializedStubs = new Set([fn.address]);
+		engine.analysisGeneration = 3;
+		engine.maxFunctionSize = 0x1000;
+		engine.fileBuffer = Buffer.alloc(16, 0x90);
+		engine.baseAddress = fn.address;
+		let observedSize = 0;
+		engine.disassembleRange = async (_address: number, size: number) => {
+			observedSize = size;
+			return Array.from({ length: size }, (_, index) => instruction(fn.address + index, 'nop'));
+		};
+		engine.sessionStore = { getAnalysisSession: () => ({ generation: 5 }) };
+
+		const result = await engine.materializeFunctionForAnalysis(fn.address, { maxBytes: 4 });
+		assert.strictEqual(observedSize, 4);
+		assert.strictEqual(result.status, 'partial');
+		assert.strictEqual(result.bodyCompleteness?.byteCoverage, 0.25);
+		assert.strictEqual(result.engineGenerationAfter, 3);
+		assert.strictEqual(engine.unmaterializedStubs.has(fn.address), true);
+	});
+
 	test('replays a persisted closure manifest without advancing its session generation', async () => {
 		const source: Function = {
 			address: 0x405000, name: 'persisted', size: 2, endAddress: 0x405002,

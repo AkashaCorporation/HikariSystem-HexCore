@@ -8,6 +8,7 @@ import type { DisassemblerEngine } from './disassemblerEngine';
 import { ingestDebugTypeInfo } from './debugTypeIngestion';
 import { discoverPdbPath } from './pdbLoader';
 import { loadPdbProvider, type PdbProviderOptions, type PdbProviderResult } from './pdbProvider';
+import type { PdbFunctionSymbol } from './pdbProvider';
 import { SemanticCommandService, type SemanticPrototypeParameterInput } from './semanticCommandService';
 import type { CallingConventionId, ParameterLocation } from './semanticModel';
 import { canonicalSerialize, canonicalizeSemanticType, classifyAggregateReturn, getABIModel } from './semanticModel';
@@ -27,6 +28,31 @@ function callingConvention(raw: string, architecture: string): CallingConvention
 
 function undecoratedExportName(name: string): string {
 	return name.replace(/^[@_]/, '').replace(/@@?\d+$/, '');
+}
+
+export function reconcilePdbFunctionAddress(
+	engine: Pick<DisassemblerEngine, 'getExports' | 'getFunctionAt'>,
+	fn: Pick<PdbFunctionSymbol, 'name' | 'address' | 'size'>,
+): { status: 'export' | 'exact'; address: number } | { status: 'unreconciled'; reason: string } {
+	const exported = engine.getExports().find(item => !item.isForwarder && undecoratedExportName(item.name) === fn.name);
+	if (exported) {
+		const exportFunction = engine.getFunctionAt(exported.address);
+		const thunkTarget = exportFunction?.instructions.find(instruction =>
+			instruction.isJump && !instruction.isConditional && instruction.targetAddress !== undefined)?.targetAddress;
+		return { status: 'export', address: thunkTarget ?? exported.address };
+	}
+	const rawAddress = Number.parseInt(fn.address.slice(2), 16);
+	const known = engine.getFunctionAt(rawAddress);
+	if (!known) {
+		return { status: 'unreconciled', reason: 'PDB module-record address is not a known function start' };
+	}
+	if (known.size !== fn.size || known.endAddress !== rawAddress + fn.size) {
+		return {
+			status: 'unreconciled',
+			reason: `PDB extent ${fn.size} does not match known extent ${known.size}`,
+		};
+	}
+	return { status: 'exact', address: rawAddress };
 }
 
 export async function importPdbSemantics(engine: DisassemblerEngine, options: PdbSemanticImportOptions = {}) {
@@ -76,17 +102,26 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 	if (!Number.isSafeInteger(maxFunctions) || maxFunctions < 1) { throw new Error('PDB maxFunctions must be positive.'); }
 	let prototypeCount = 0;
 	let reconciledExportPrototypeCount = 0;
+	let exactAddressPrototypeCount = 0;
+	let unreconciledFunctionCount = 0;
 	let prototypeFailures = 0;
 	const failureDiagnostics: Array<{ functionIdentity: string; message: string }> = [];
 	for (const fn of provider.functions.filter(item => item.prototype).slice(0, maxFunctions)) {
 		const prototype = fn.prototype!;
 		const namedParameters = fn.locals.filter(local => local.parameter);
 		try {
-			const exported = engine.getExports().find(item => !item.isForwarder && undecoratedExportName(item.name) === fn.name);
-			const exportFunction = exported ? engine.getFunctionAt(exported.address) : undefined;
-			const thunkTarget = exportFunction?.instructions.find(instruction => instruction.isJump && !instruction.isConditional && instruction.targetAddress !== undefined)?.targetAddress;
-			const semanticAddress = thunkTarget ?? exported?.address ?? Number.parseInt(fn.address.slice(2), 16);
-			if (exported) { reconciledExportPrototypeCount++; }
+			const reconciliation = reconcilePdbFunctionAddress(engine, fn);
+			if (reconciliation.status === 'unreconciled') {
+				unreconciledFunctionCount++;
+				failureDiagnostics.push({
+					functionIdentity: `function:${fn.address}`,
+					message: `${fn.name}: ${reconciliation.reason}`,
+				});
+				continue;
+			}
+			const semanticAddress = reconciliation.address;
+			if (reconciliation.status === 'export') { reconciledExportPrototypeCount++; }
+			else { exactAddressPrototypeCount++; }
 			const semanticAddressText = `0x${semanticAddress.toString(16)}`;
 			const convention = callingConvention(prototype.callingConvention, engine.getArchitecture());
 			const returnRecordName = /^(?:struct|union)\s+(.+)$/.exec(prototype.returnType)?.[1];
@@ -146,12 +181,14 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 	return {
 		ok: prototypeFailures === 0,
 		command: 'hexcore.pdb.importSemantics',
-		semanticStatus: prototypeFailures === 0 && provider.status === 'ok' ? 'ok' as const : 'partial' as const,
+		semanticStatus: prototypeFailures === 0 && unreconciledFunctionCount === 0 && provider.status === 'ok' ? 'ok' as const : 'partial' as const,
 		provider,
 		types,
 		auxiliaryTypeCount: auxiliaryTypes.length,
 		prototypeCount,
 		reconciledExportPrototypeCount,
+		exactAddressPrototypeCount,
+		unreconciledFunctionCount,
 		prototypeFailures,
 		failureDiagnostics,
 		storeHash: store.exportHash(),

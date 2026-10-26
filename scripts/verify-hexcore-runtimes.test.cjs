@@ -20,9 +20,14 @@ assert.equal(run((_exe, _args, options) => {
 }).length, 1);
 assert.throws(() => verifyRuntimes({ appRoot: __dirname, manifest: { ...manifest, platform: 'unsupported' } }), /platform/);
 assert.equal(verifyRuntimes({ appRoot: __dirname, manifest: { ...manifest, engines: [
-	{ id: 'hexcore-revenant', active: true, version: '0.4.0', primaryRuntime: 'bin/revenant-engine.exe' }
+	{ id: 'hexcore-revenant', active: true, version: '0.5.0', primaryRuntime: 'bin/revenant-engine.exe',
+		runtimeContract: { decompilerVersion: '11.1.0.9782' } }
 ] }, execute: (_exe, args) => {
 	assert.deepEqual(args, ['--version']);
-	return { status: 0, stdout: 'revenant-engine: 0.4.0\nICSharpCode.Decompiler: fixture' };
+	return { status: 0, stdout: 'revenant-engine: 0.5.0\nICSharpCode.Decompiler: 11.1.0.9782' };
 } })[0].ok, true);
+assert.equal(verifyRuntimes({ appRoot: __dirname, manifest: { ...manifest, engines: [
+	{ id: 'hexcore-revenant', active: true, version: '0.5.0', primaryRuntime: 'bin/revenant-engine.exe',
+		runtimeContract: { decompilerVersion: '11.1.0.9782' } }
+] }, execute: () => ({ status: 0, stdout: 'revenant-engine: 0.4.0\nICSharpCode.Decompiler: 10.1.0.8386' }) })[0].ok, false);
 console.log('Runtime smoke controller tests passed.');

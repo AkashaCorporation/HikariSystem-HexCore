@@ -223,6 +223,40 @@ export interface ReferenceQuery {
 	atGeneration?: number;
 }
 
+/** Shared filtering for live storage and immutable semantic query views. */
+export function filterReferenceEdges(candidates: readonly CanonicalReferenceEdge[], query: ReferenceQuery = {}): CanonicalReferenceEdge[] {
+	const direction = query.direction ?? 'both';
+	if (!['incoming', 'outgoing', 'both'].includes(direction)) { throw new Error(`Unknown reference query direction: ${String(direction)}`); }
+	const relations = relationSet(query.relations);
+	const families = familySet(query.families);
+	if (query.targetKind !== undefined && !TARGET_KINDS.has(query.targetKind)) { throw new Error(`Unknown target-kind filter: ${String(query.targetKind)}`); }
+	const address = query.address ? requireAddress(query.address, 'Reference query address') : undefined;
+	const functionIdentity = query.functionIdentity !== undefined ? requireIdentity(query.functionIdentity, 'Reference query function identity') : undefined;
+	const typeId = query.typeId !== undefined ? requireIdentity(query.typeId, 'Reference query type ID') : undefined;
+	const memberIdentity = query.memberIdentity !== undefined ? requireIdentity(query.memberIdentity, 'Reference query member identity') : undefined;
+	const targetIdentity = query.targetIdentity !== undefined ? requireIdentity(query.targetIdentity, 'Reference query target identity') : undefined;
+	return candidates.filter(edge => {
+		if (families && !families.has(edge.family)) { return false; }
+		if (relations && !relations.has(edge.relation)) { return false; }
+		if (!strengthAtLeast(edge, query.minimumEvidenceStrength)) { return false; }
+		if (query.targetKind && edge.target.kind !== query.targetKind) { return false; }
+		if (targetIdentity && edge.target.identity !== targetIdentity) { return false; }
+		if (typeId && edge.target.identity !== typeId && edge.target.typeId !== typeId) { return false; }
+		if (memberIdentity && edge.target.identity !== memberIdentity && edge.target.memberIdentity !== memberIdentity) { return false; }
+		if (address !== undefined) {
+			const outgoing = edge.source.address === address;
+			const incoming = edge.target.address === address;
+			if ((direction === 'outgoing' && !outgoing) || (direction === 'incoming' && !incoming) || (direction === 'both' && !outgoing && !incoming)) { return false; }
+		}
+		if (functionIdentity !== undefined) {
+			const outgoing = edge.source.ownerFunctionIdentity === functionIdentity;
+			const incoming = edge.target.kind === 'function' && edge.target.identity === functionIdentity;
+			if ((direction === 'outgoing' && !outgoing) || (direction === 'incoming' && !incoming) || (direction === 'both' && !outgoing && !incoming)) { return false; }
+		}
+		return true;
+	}).sort(edgeSort);
+}
+
 export interface ExactCallReference {
 	edgeId: string;
 	relation: Extract<ReferenceRelationKind,
@@ -979,15 +1013,7 @@ export class TypedReferenceGraph {
 
 	query(query: ReferenceQuery = {}): CanonicalReferenceEdge[] {
 		this.ensureOpen();
-		const direction = query.direction ?? 'both';
-		if (!['incoming', 'outgoing', 'both'].includes(direction)) {
-			throw new Error(`Unknown reference query direction: ${String(direction)}`);
-		}
-		const relations = relationSet(query.relations);
-		const families = familySet(query.families);
-		if (query.targetKind !== undefined && !TARGET_KINDS.has(query.targetKind)) {
-			throw new Error(`Unknown target-kind filter: ${String(query.targetKind)}`);
-		}
+		filterReferenceEdges([], query); // Validate filters before loading stored candidates.
 		const atGeneration = query.atGeneration;
 		if (atGeneration !== undefined) {
 			requireNonNegativeInteger(atGeneration, 'Reference query generation');
@@ -995,38 +1021,7 @@ export class TypedReferenceGraph {
 		const candidates = atGeneration !== undefined
 			? this.snapshotAtGeneration(atGeneration)
 			: this.listStoredEdges(query.includeInvalidated === true).map(item => item.edge);
-		const normalizedAddress = query.address ? requireAddress(query.address, 'Reference query address') : undefined;
-		const functionIdentity = query.functionIdentity !== undefined
-			? requireIdentity(query.functionIdentity, 'Reference query function identity') : undefined;
-		const typeId = query.typeId !== undefined ? requireIdentity(query.typeId, 'Reference query type ID') : undefined;
-		const memberIdentity = query.memberIdentity !== undefined
-			? requireIdentity(query.memberIdentity, 'Reference query member identity') : undefined;
-		const targetIdentity = query.targetIdentity !== undefined
-			? requireIdentity(query.targetIdentity, 'Reference query target identity') : undefined;
-		return candidates.filter(edge => {
-			if (families && !families.has(edge.family)) { return false; }
-			if (relations && !relations.has(edge.relation)) { return false; }
-			if (!strengthAtLeast(edge, query.minimumEvidenceStrength)) { return false; }
-			if (query.targetKind && edge.target.kind !== query.targetKind) { return false; }
-			if (targetIdentity && edge.target.identity !== targetIdentity) { return false; }
-			if (typeId && edge.target.identity !== typeId && edge.target.typeId !== typeId) { return false; }
-			if (memberIdentity && edge.target.identity !== memberIdentity && edge.target.memberIdentity !== memberIdentity) { return false; }
-			if (normalizedAddress) {
-				const outgoing = edge.source.address === normalizedAddress;
-				const incoming = edge.target.address === normalizedAddress;
-				if (direction === 'outgoing' && !outgoing) { return false; }
-				if (direction === 'incoming' && !incoming) { return false; }
-				if (direction === 'both' && !outgoing && !incoming) { return false; }
-			}
-			if (functionIdentity) {
-				const outgoing = edge.source.ownerFunctionIdentity === functionIdentity;
-				const incoming = edge.target.kind === 'function' && edge.target.identity === functionIdentity;
-				if (direction === 'outgoing' && !outgoing) { return false; }
-				if (direction === 'incoming' && !incoming) { return false; }
-				if (direction === 'both' && !outgoing && !incoming) { return false; }
-			}
-			return true;
-		}).sort(edgeSort);
+		return filterReferenceEdges(candidates, query);
 	}
 
 	getCallers(calleeIdentity: string, includeCandidates = false): ExactCallReference[] {

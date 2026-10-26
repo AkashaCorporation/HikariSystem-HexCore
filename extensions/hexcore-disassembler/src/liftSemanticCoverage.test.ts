@@ -2,6 +2,13 @@ import * as assert from 'assert';
 import { assessLiftSemanticCoverage, countHandleUnsupportedCalls, formatLiftSemanticHeader } from './liftSemanticCoverage';
 
 suite('lift semantic coverage', () => {
+	test('multiline diagnostic text remains inside IR comments', () => {
+		const assessment = assessLiftSemanticCoverage('', { unsupportedInstructions: 1, unsupportedOpcodes: { 'OP\nNAME': 1 } });
+		assessment.reason = 'first\r\nsecond\u2028third';
+		const header = formatLiftSemanticHeader(assessment);
+		assert.ok(header.split('\n').filter(Boolean).every(line => line.startsWith(';')));
+		assert.ok(header.includes('first  second third')); assert.ok(header.includes('OP NAME=1'));
+	});
 	test('does not count the HandleUnsupported declaration', () => {
 		const ir = [
 			'declare ptr @HandleUnsupported(ptr, ptr)',

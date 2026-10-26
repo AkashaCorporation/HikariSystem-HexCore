@@ -80,6 +80,9 @@ export function wantsHelixFunctionStarts(options: Record<string, unknown>): bool
 	if (options.functionStarts === true) {
 		return true;
 	}
+	if (Array.isArray(options.functionStarts) && options.functionStarts.length > 0) {
+		return true;
+	}
 	if (options.functionStarts === false) {
 		return false;
 	}
@@ -175,10 +178,129 @@ export function resolveHelixBaseOptions(options: Record<string, unknown>): {
 		// Explicit false → off; undefined / true / anything else → on.
 		useCastLayer: options.useCastLayer !== false,
 	};
-	if (options.optimizeIR !== undefined) {
-		base.optimizeIR = options.optimizeIR !== false;
+	if (options.optimizeIR !== undefined && typeof options.optimizeIR !== 'boolean') {
+		throw new Error('optimizeIR must be boolean.');
+	}
+	if (options.skipOptimization !== undefined && typeof options.skipOptimization !== 'boolean') {
+		throw new Error('skipOptimization must be boolean.');
+	}
+	if (options.optimizeIR !== undefined && options.skipOptimization !== undefined &&
+		options.optimizeIR !== !options.skipOptimization) {
+		throw new Error('optimizeIR conflicts with skipOptimization.');
+	}
+	if (options.skipOptimization !== undefined) {
+		base.optimizeIR = options.skipOptimization !== true;
+	} else if (options.optimizeIR !== undefined) {
+		base.optimizeIR = options.optimizeIR;
 	}
 	return base;
+}
+
+function exactAddress(value: unknown, label: string): number {
+	const parsed = coercePositiveInt(value);
+	if (parsed === undefined || !Number.isSafeInteger(parsed)) {
+		throw new Error(`${label} must be a positive safe integer or hexadecimal string.`);
+	}
+	return parsed;
+}
+
+export function parseExplicitHelixFunctionStarts(value: unknown): number[] | undefined {
+	if (value === undefined || typeof value === 'boolean') { return undefined; }
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new Error('functionStarts must be true, false, or a non-empty address array.');
+	}
+	const starts = new Set<number>();
+	for (const item of value) { starts.add(exactAddress(item, 'functionStarts entry')); }
+	return [...starts].sort((left, right) => left - right);
+}
+
+export function parseHelixVariableRenames(value: unknown): Array<{ oldName: string; newName: string }> | undefined {
+	if (value === undefined) { return undefined; }
+	if (!Array.isArray(value)) { throw new Error('variableRenames must be an array.'); }
+	const renames = new Map<string, string>();
+	for (const item of value) {
+		if (!item || typeof item !== 'object') { throw new Error('variableRenames entries must be objects.'); }
+		const record = item as Record<string, unknown>;
+		if (typeof record.oldName !== 'string' || record.oldName.trim().length === 0 ||
+			typeof record.newName !== 'string' || record.newName.trim().length === 0) {
+			throw new Error('variableRenames entries require non-empty oldName and newName.');
+		}
+		const oldName = record.oldName.trim();
+		const newName = record.newName.trim();
+		const prior = renames.get(oldName);
+		if (prior !== undefined && prior !== newName) {
+			throw new Error(`Conflicting variable rename for ${oldName}.`);
+		}
+		renames.set(oldName, newName);
+	}
+	return [...renames.entries()].map(([oldName, newName]) => ({ oldName, newName }));
+}
+
+export function parseHelixExactRange(options: Record<string, unknown>): {
+	startAddress: number;
+	endExclusive: number;
+	size: number;
+} | undefined {
+	let rangeStart: unknown;
+	let rangeEnd: unknown;
+	if (options.exactRange !== undefined) {
+		if (!Array.isArray(options.exactRange) || options.exactRange.length !== 2) {
+			throw new Error('exactRange must be [startAddress, endExclusive].');
+		}
+		[rangeStart, rangeEnd] = options.exactRange;
+	}
+	const explicitStart = options.startAddress ?? options.address ?? options.functionAddress;
+	const explicitEnd = options.endExclusive ?? options.endAddress;
+	if (rangeStart === undefined && rangeEnd === undefined && explicitEnd === undefined) { return undefined; }
+	const startAddress = exactAddress(rangeStart ?? explicitStart, 'exactRange startAddress');
+	const endExclusive = exactAddress(rangeEnd ?? explicitEnd, 'exactRange endExclusive');
+	if (endExclusive <= startAddress) { throw new Error('exactRange endExclusive must be greater than startAddress.'); }
+	if (rangeStart !== undefined && explicitStart !== undefined && exactAddress(explicitStart, 'startAddress') !== startAddress) {
+		throw new Error('exactRange start conflicts with startAddress/address/functionAddress.');
+	}
+	if (rangeEnd !== undefined && explicitEnd !== undefined && exactAddress(explicitEnd, 'endExclusive') !== endExclusive) {
+		throw new Error('exactRange end conflicts with endExclusive/endAddress.');
+	}
+	return { startAddress, endExclusive, size: endExclusive - startAddress };
+}
+
+export function resolveExplicitHelixDataSections(
+	eng: Pick<DisassemblerEngine, 'getSections' | 'getBytes'>,
+	value: unknown,
+	activeTargetAllowed: boolean,
+): Array<{ vaStart: bigint; bytes: Buffer }> | undefined {
+	if (value === undefined) { return undefined; }
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new Error('dataSections must be a non-empty array.');
+	}
+	if (!activeTargetAllowed) {
+		throw new Error('Explicit dataSections require the active engine to own sourceTargetFile.');
+	}
+	const sections = eng.getSections();
+	return value.map((item, index) => {
+		if (!item || typeof item !== 'object') { throw new Error(`dataSections[${index}] must be an object.`); }
+		const record = item as Record<string, unknown>;
+		if (Buffer.isBuffer(record.bytes)) {
+			const vaStart = coercePositiveInt(record.vaStart);
+			if (vaStart === undefined || record.bytes.length === 0) {
+				throw new Error(`dataSections[${index}] Buffer requires vaStart and non-empty bytes.`);
+			}
+			return { vaStart: BigInt(vaStart), bytes: Buffer.from(record.bytes) };
+		}
+		const named = typeof record.name === 'string'
+			? sections.find(section => section.name === record.name)
+			: undefined;
+		const vaStart = coercePositiveInt(record.vaStart) ?? named?.virtualAddress;
+		const requestedSize = coercePositiveInt(record.size) ?? named?.rawSize;
+		if (vaStart === undefined || requestedSize === undefined) {
+			throw new Error(`dataSections[${index}] requires a known name or vaStart+size.`);
+		}
+		const bytes = eng.getBytes(vaStart, requestedSize);
+		if (!bytes || bytes.length !== requestedSize) {
+			throw new Error(`dataSections[${index}] range is not fully file-backed.`);
+		}
+		return { vaStart: BigInt(vaStart), bytes: Buffer.from(bytes) };
+	});
 }
 
 /**

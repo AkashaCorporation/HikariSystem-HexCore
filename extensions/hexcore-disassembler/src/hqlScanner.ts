@@ -17,6 +17,9 @@
 
 import * as path from 'path';
 import * as crypto from 'crypto';
+import { openSemanticQueryView, type SemanticQueryIdentity, type SemanticQueryView } from './semanticQueryView';
+import { canonicalSerialize } from './semanticModel';
+import { hqlSemanticExplanationIdentity, propagationEffectIdentity } from './semanticExplanation';
 import type { SessionStore } from './sessionStore';
 
 // ---------------------------------------------------------------------------
@@ -39,6 +42,8 @@ export interface HqlMatchResult {
 		attributes: Record<string, string | number | boolean>;
 		proofStatus: 'signal' | 'candidate' | 'proven';
 		provenance: Array<{ producer: string; source: string; strength: string; generation: number }>;
+		origin?: { targetIdentity: string; snapshotSha256: string; collection: string; recordIdentity: string; recordSha256: string };
+		explainIdentity?: string;
 	}>;
 }
 
@@ -64,6 +69,7 @@ export interface HqlFunctionFindings {
 		semanticEligible: boolean;
 	};
 	signatureSetSha256: string;
+	signatureSetScope: 'active-rule-set';
 	cacheKey: string;
 	status: 'ok' | 'partial';
 	truncated: boolean;
@@ -82,7 +88,11 @@ interface HqlModule {
 		astBuffer: Uint8Array,
 		signatures?: unknown,
 		session?: unknown,
-		options?: { maxFunctions?: number; maxNodesPerFunction?: number; maxFindingsPerFunction?: number; signal?: AbortSignal },
+		options?: {
+			maxFunctions?: number; maxNodesPerFunction?: number; maxFindingsPerFunction?: number; signal?: AbortSignal;
+			upstream?: { architecture?: string; status?: 'ok' | 'partial' | 'error'; semanticEligible?: boolean; qualityIssues?: readonly unknown[]; warning?: string };
+			semanticSnapshotSha256?: string;
+		},
 	): HqlFunctionFindings[];
 }
 
@@ -90,7 +100,8 @@ interface HqlSqliteModule {
 	openDatabase(filename: string, options?: { readonly?: boolean; fileMustExist?: boolean }): unknown;
 }
 
-interface HqlSessionReader {
+export interface HqlSessionReader {
+	getSnapshotIdentity?(): Readonly<SemanticQueryIdentity>;
 	getTargetIdentity(): string | undefined;
 	getFunctionName(address: string): string | undefined;
 	getFunctionReturnType(address: string): string | undefined;
@@ -105,7 +116,7 @@ export interface HqlSessionBinding {
 	expectedTargetIdentity: string;
 }
 
-export type HqlSessionBindingProvider = HqlSessionBinding | (() => HqlSessionBinding | HqlSessionReader | undefined);
+export type HqlSessionBindingProvider = HqlSessionBinding | HqlSessionReader | (() => HqlSessionBinding | HqlSessionReader | undefined);
 
 function isHqlSessionReader(value: HqlSessionBinding | HqlSessionReader): value is HqlSessionReader {
 	return typeof (value as Partial<HqlSessionReader>).getSemanticFacts === 'function';
@@ -171,10 +182,23 @@ function loadHqlSqlite(): HqlSqliteModule {
 	throw new Error(`hexcore-better-sqlite3 not found (looked in: ${candidates.join(', ')})`);
 }
 
-function openBoundHqlSession(hql: HqlModule, provider: HqlSessionBindingProvider | undefined): HqlSessionReader | undefined {
+function openBoundHqlSession(hql: HqlModule, provider: HqlSessionBindingProvider | undefined, producer: HelixDecompileQuietResult | undefined, requiresTargetBinding: boolean): HqlSessionReader | undefined {
 	const binding = typeof provider === 'function' ? provider() : provider;
 	if (!binding) { return undefined; }
 	if (isHqlSessionReader(binding)) {
+		const snapshot = binding.getSnapshotIdentity?.();
+		if (snapshot) {
+			const producerTargetIdentity = producer?.semanticContext?.target?.id;
+			// Standalone IR/HAST scans have no binary target identity. Do not attach
+			// the active binary HXDB to them, but keep structural HQL available.
+			if (!producerTargetIdentity) {
+				if (requiresTargetBinding) { throw new Error('HAST producer target identity is missing'); }
+				return undefined;
+			}
+			if (producerTargetIdentity !== snapshot.targetIdentity) { throw new Error('HXDB snapshot target is not bound to the HAST producer'); }
+			const canonical = (value?: string) => value === 'arm64' ? 'aarch64' : value === 'x64' || value === 'amd64' ? 'x86_64' : value;
+			if (canonical(producer.architecture) !== canonical(snapshot.architecture)) { throw new Error('HXDB snapshot architecture differs from the HAST producer'); }
+		}
 		return binding;
 	}
 	const reader = new hql.SessionDbReader(binding.dbPath, loadHqlSqlite());
@@ -186,7 +210,7 @@ function openBoundHqlSession(hql: HqlModule, provider: HqlSessionBindingProvider
 	return reader;
 }
 
-type HqlSemanticFact = NonNullable<HqlMatchResult['semanticMatches']>[number];
+export type HqlSemanticFact = NonNullable<HqlMatchResult['semanticMatches']>[number];
 
 /**
  * Installed scans already own a target-bound SemanticStore. Read that accepted
@@ -194,8 +218,17 @@ type HqlSemanticFact = NonNullable<HqlMatchResult['semanticMatches']>[number];
  * native SQLite statement wrapper.
  */
 export function createLiveHqlSessionReader(session: SessionStore): HqlSessionReader {
-	const semanticStore = session.getSemanticStore();
+	return createHqlSnapshotReader(openSemanticQueryView(session));
+}
+
+export function createHqlSnapshotReader(view: SemanticQueryView): HqlSessionReader {
 	let semanticReadErrors: string[] = [];
+	const hashes = new WeakMap<object, string>();
+	const origin = (collection: string, recordIdentity: string, record: object): NonNullable<HqlSemanticFact['origin']> => {
+		let recordSha256 = hashes.get(record);
+		if (!recordSha256) { recordSha256 = crypto.createHash('sha256').update(canonicalSerialize(record)).digest('hex'); hashes.set(record, recordSha256); }
+		return { targetIdentity: view.identity.targetIdentity, snapshotSha256: view.identity.snapshotSha256, collection, recordIdentity, recordSha256 };
+	};
 	const proofStatus = (strength: string): HqlSemanticFact['proofStatus'] =>
 		strength === 'definitive' || strength === 'debug' ? 'proven'
 			: strength === 'signature' || strength === 'derived' ? 'candidate' : 'signal';
@@ -213,27 +246,33 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 	const append = (
 		facts: HqlSemanticFact[], kind: string,
 		attributes: Record<string, string | number | boolean>, record: any,
-		fallback: HqlSemanticFact['proofStatus'] = 'candidate',
+		effect?: { category: string; value: object },
 	): void => {
 		const derived = evidence(record);
-		facts.push({ kind, attributes, proofStatus: derived.provenance.length > 0 ? derived.proofStatus : fallback, provenance: derived.provenance });
+		const collection = kind.startsWith('summary-') ? 'summaries' : kind === 'type-binding' ? 'bindings' : kind === 'function-prototype' ? 'prototypes' : 'references';
+		const recordIdentity = record.bindingId ?? record.edgeId ?? record.prototypeId ?? record.functionIdentity ?? 'unknown-record';
+		const recordOrigin = origin(collection, recordIdentity, record);
+		facts.push({ kind, attributes, proofStatus: derived.provenance.length > 0 ? derived.proofStatus : 'signal', provenance: derived.provenance,
+			origin: recordOrigin, explainIdentity: hqlSemanticExplanationIdentity(recordOrigin,
+				effect ? propagationEffectIdentity(record.functionIdentity, record.generation, effect.category, effect.value) : undefined) });
 	};
 	return {
-		getTargetIdentity: () => semanticStore.targetIdentity,
-		getFunctionName: address => session.getFunction(address)?.name ?? undefined,
-		getFunctionReturnType: address => session.getFunction(address)?.return_type ?? undefined,
-		getVariableRenames: address => session.getVariables(address).map(item => ({
+		getSnapshotIdentity: () => view.identity,
+		getTargetIdentity: () => view.identity.targetIdentity,
+		getFunctionName: address => view.getFunction(address)?.name ?? undefined,
+		getFunctionReturnType: address => view.getFunction(address)?.return_type ?? undefined,
+		getVariableRenames: address => view.getVariables(address).map(item => ({
 			original_name: item.original_name,
 			new_name: item.new_name,
 			new_type: item.new_type,
 		})),
 		getSemanticFacts: addressInput => {
-			semanticReadErrors = [];
+			semanticReadErrors = view.getCoverage().errors.map(error => `${error.collection}: ${error.code}`);
 			const address = addressInput.toLowerCase();
 			const functionIdentity = `function:${address}`;
 			const facts: HqlSemanticFact[] = [];
 			try {
-				const prototype = semanticStore.getPrototype(functionIdentity) ?? semanticStore.getPrototypeAtAddress(address);
+				const prototype = view.getPrototype(functionIdentity) ?? view.getPrototypeAtAddress(address);
 				if (prototype) {
 					append(facts, 'function-prototype', {
 						functionIdentity: prototype.functionIdentity,
@@ -247,7 +286,7 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 						generation: prototype.evidence.generation,
 					}, prototype);
 				}
-				for (const binding of semanticStore.findTypeBindings(functionIdentity)) {
+				for (const binding of view.findTypeBindings(functionIdentity)) {
 					append(facts, 'type-binding', {
 						bindingId: binding.bindingId, scope: binding.scope,
 						valueIdentity: binding.valueIdentity, typeId: binding.typeId,
@@ -255,7 +294,7 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 						evidenceStrength: binding.evidence.strength, generation: binding.evidence.generation,
 					}, binding);
 				}
-				for (const edge of semanticStore.getReferenceGraph().query({ direction: 'both', functionIdentity })) {
+				for (const edge of view.queryReferences({ direction: 'both', functionIdentity })) {
 					append(facts, 'xref', {
 						relation: edge.relation, family: edge.family,
 						sourceAddress: edge.source.address, targetKind: edge.target.kind,
@@ -271,35 +310,35 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 							targetIdentity: edge.target.identity, status: resolution.status,
 							resolutionSource: resolution.source, candidateSetId: resolution.candidateSetId,
 							provider: edge.evidence.producer, generation: edge.generation,
-						}, edge, resolution.status === 'resolved' ? 'proven' : 'candidate');
+						}, edge);
 					}
 				}
-				const summary = semanticStore.getWholeProgramPropagationStore().getSummary(functionIdentity);
+				const summary = view.getPropagationSummary(functionIdentity);
 				if (summary) {
 					for (const call of summary.calls) append(facts, 'summary-call', {
 						callsiteIdentity: call.callsiteIdentity, calleeIdentity: call.calleeIdentity,
 						argumentCount: call.arguments.length, indirectCandidateCount: call.indirectCandidates?.length ?? 0,
 						generation: summary.generation,
-					}, summary);
+					}, summary, { category: 'call', value: call });
 					for (const global of summary.globalEffects) append(facts, 'summary-global', {
 						globalIdentity: global.globalIdentity, access: global.access, generation: summary.generation,
-					}, summary);
+					}, summary, { category: 'global', value: global });
 					for (const ownership of summary.ownershipEffects) append(facts, 'summary-ownership', {
 						ownershipKind: ownership.kind, valueIdentity: ownership.value.identity,
 						...(ownership.objectIdentity ? { objectIdentity: ownership.objectIdentity } : {}),
 						generation: summary.generation,
-					}, summary);
+					}, summary, { category: 'ownership', value: ownership });
 					for (const field of summary.fieldAccesses) append(facts, 'summary-field', {
 						fieldIdentity: field.fieldIdentity, baseIdentity: field.base.identity,
 						offsetBytes: field.offsetBytes, access: field.access,
 						...(field.typeId ? { typeId: field.typeId } : {}), generation: summary.generation,
-					}, summary);
+					}, summary, { category: 'field', value: field });
 					for (const barrier of summary.barriers) append(facts, 'summary-barrier', {
 						barrierIdentity: barrier.identity, reason: barrier.reason,
 						lossy: barrier.lossy, generation: summary.generation,
-					}, summary, 'signal');
+					}, summary);
 				}
-				for (const conflict of semanticStore.listConflicts().filter(item => item.factKey === functionIdentity || item.factKey === address)) {
+				for (const conflict of view.listConflicts(functionIdentity)) {
 					facts.push({
 						kind: 'semantic-conflict',
 						attributes: {
@@ -307,6 +346,8 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 							winnerHash: conflict.winnerHash, loserHash: conflict.loserHash,
 						},
 						proofStatus: 'signal', provenance: [],
+						origin: origin('conflicts', conflict.factKey, conflict),
+						explainIdentity: hqlSemanticExplanationIdentity(origin('conflicts', conflict.factKey, conflict)),
 					});
 				}
 			} catch (error) {
@@ -325,13 +366,16 @@ export function createLiveHqlSessionReader(session: SessionStore): HqlSessionRea
 // ---------------------------------------------------------------------------
 
 export interface HelixDecompileQuietResult {
+	semanticContext?: { target?: { id?: string } };
 	success: boolean;
 	status?: 'ok' | 'partial' | 'error';
+	architecture?: string;
+	securityEvidenceUsable?: boolean;
 	code: string;
 	address: string;
 	error: string;
 	confidence?: number;
-	qualityIssues?: string[];
+	qualityIssues?: unknown[];
 	warning?: string;
 	astBuffer?: Buffer | null;
 }
@@ -352,6 +396,7 @@ export interface HqlScanTarget {
 
 /** Per-target HQL scan result included in the headless report. */
 export interface HqlAddressResult {
+	semanticQueryIdentity?: Readonly<SemanticQueryIdentity>;
 	status: 'ok' | 'partial' | 'error';
 	requestedTarget?: string;
 	address: string;
@@ -360,6 +405,7 @@ export interface HqlAddressResult {
 	adapterCoverage?: HqlFunctionFindings['adapterCoverage'];
 	hast?: HqlFunctionFindings['hast'];
 	signatureSetSha256?: string;
+	signatureSetScope?: 'active-rule-set';
 	cacheKey?: string;
 	truncated?: boolean;
 	truncationReasons?: string[];
@@ -391,6 +437,7 @@ function mapHqlFunctionFinding(fn: HqlFunctionFindings, fallbackAddress: string,
 		adapterCoverage: fn.adapterCoverage,
 		hast: fn.hast,
 		signatureSetSha256: fn.signatureSetSha256,
+		signatureSetScope: fn.signatureSetScope,
 		cacheKey: fn.cacheKey,
 		truncated: fn.truncated,
 		truncationReasons: [...fn.truncationReasons],
@@ -447,6 +494,7 @@ export interface HqlHeadlessReport {
 }
 
 export interface HqlBatchOptions {
+	inputPartialReasons?: readonly string[];
 	maxTargets?: number;
 	maxConcurrency?: number;
 	maxFunctionsPerHast?: number;
@@ -568,6 +616,7 @@ export function flattenHqlFunctionFindings(
 			unsupportedNodeCounts,
 		},
 		signatureSetSha256: perFunction[0].signatureSetSha256,
+		signatureSetScope: perFunction[0].signatureSetScope,
 		cacheKey: perFunction[0].cacheKey,
 		truncated: truncationReasons.length > 0,
 		truncationReasons,
@@ -626,13 +675,23 @@ export async function scanTargetFunctions(
 
 	let perFunction: HqlFunctionFindings[];
 	let session: HqlSessionReader | undefined;
+	let queryIdentity: Readonly<SemanticQueryIdentity> | undefined;
 	try {
-		session = openBoundHqlSession(hql, options.session);
+		session = openBoundHqlSession(hql, options.session, dr, target.address !== undefined);
+		queryIdentity = session?.getSnapshotIdentity?.();
 		perFunction = hql.scanHAST(Uint8Array.from(ab), undefined, session, {
+			semanticSnapshotSha256: session?.getSnapshotIdentity?.().snapshotSha256,
 			maxFunctions: options.maxFunctionsPerHast,
 			maxNodesPerFunction: options.maxNodesPerFunction,
 			maxFindingsPerFunction: options.maxFindingsPerFunction,
 			signal: options.signal,
+			upstream: {
+				architecture: dr.architecture,
+				status: options.inputPartialReasons?.length ? 'partial' : dr.status,
+				semanticEligible: dr.securityEvidenceUsable,
+				qualityIssues: [...(dr.qualityIssues ?? []), ...(options.inputPartialReasons ?? [])],
+				warning: dr.warning,
+			},
 		});
 	} catch (err) {
 		const msg = err instanceof Error ? err.message : String(err);
@@ -644,7 +703,8 @@ export async function scanTargetFunctions(
 	if (perFunction.length === 0) {
 		return [{ status: 'error', requestedTarget: addrLabel, address: dr.address || addrLabel, function: '', findings: [], error: 'HAST hydration produced no functions' }];
 	}
-	return preserveHqlFunctionFindings(perFunction, dr!.address || addrLabel, addrLabel);
+	return preserveHqlFunctionFindings(perFunction, dr!.address || addrLabel, addrLabel)
+		.map(result => queryIdentity ? { ...result, semanticQueryIdentity: queryIdentity } : result);
 }
 
 /** Compatibility wrapper for the interactive single-function command. */
@@ -654,7 +714,7 @@ export async function scanOneTarget(
 	options: HqlBatchOptions = {},
 ): Promise<HqlAddressResult> {
 	const functions = await scanTargetFunctions(target, decompile, options);
-	return functions.length === 1
+	const result = functions.length === 1
 		? functions[0]
 		: flattenHqlFunctionFindings(functions.map(result => ({
 			function: result.function,
@@ -663,6 +723,7 @@ export async function scanOneTarget(
 			adapterCoverage: result.adapterCoverage ?? { totalNodes: 0, lossyNodes: 0, coverage: 0, unsupportedNodeCounts: {} },
 			hast: result.hast ?? { schemaMajor: 0, schemaMinor: 0, capabilities: [], semanticEligible: false },
 			signatureSetSha256: result.signatureSetSha256 ?? '',
+			signatureSetScope: result.signatureSetScope ?? 'active-rule-set',
 			cacheKey: result.cacheKey ?? '',
 			status: result.status === 'error' ? 'partial' : result.status,
 			truncated: result.truncated ?? result.status !== 'ok',
@@ -681,6 +742,7 @@ export async function scanOneTarget(
 				...(finding.semanticMatches ? { semanticMatches: finding.semanticMatches } : {}),
 			})),
 		})), functions[0]?.address ?? '<unknown>');
+	return functions[0]?.semanticQueryIdentity ? { ...result, semanticQueryIdentity: functions[0].semanticQueryIdentity } : result;
 }
 
 /**
@@ -722,7 +784,7 @@ export async function runHqlScanBatch(
 	}
 
 	const targetResults = await mapWithConcurrency(targets, budget.maxConcurrency, target =>
-		scanTargetFunctions(target, decompile, { ...budget, signal: options.signal, session: options.session }));
+		scanTargetFunctions(target, decompile, { ...budget, signal: options.signal, session: options.session, inputPartialReasons: options.inputPartialReasons }));
 	const results = targetResults.flat();
 
 	const matchedFunctionCount = results.filter(r => r.findings.length > 0).length;
@@ -784,7 +846,7 @@ export function buildScanTargets(args: {
 	irText?: string;
 }): HqlScanTarget[] {
 	if (args.irText !== undefined || args.irPath !== undefined) {
-		return [{ irPath: args.irPath, irText: args.irText }];
+		return [{ irPath: args.irPath, irText: args.irText, ...(args.file !== undefined ? { file: args.file } : {}) }];
 	}
 	const addrs: Array<string | number> = [];
 	if (args.address !== undefined) { addrs.push(args.address); }

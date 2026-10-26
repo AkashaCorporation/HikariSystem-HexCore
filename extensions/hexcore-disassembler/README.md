@@ -5,9 +5,21 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
 | Field | Value |
 |-------|--------|
 | **Package** | `hexcore-disassembler` |
-| **Version** | **1.4.66** |
+| **Version** | **1.4.70** |
 | **Publisher** | hikarisystem |
-| **Product train** | HexCore **3.8.4 development** |
+| **Product train** | HexCore **3.8.5 development** |
+
+## 1.4.69 highlights (agent workflow soundness)
+
+- Tracks ordinary x86 `xor`, `and`, `or`, `neg`, and shift semantics in
+  `buildFormula`; unsupported math produces a typed partial expression instead
+  of a successful but stale formula.
+- Accepts `address` + instruction `count` as a bounded formula request while
+  retaining `startAddress` + `endAddress` for exact ranges.
+- Serializes changed watcher revisions behind an active run of the same job
+  path and coalesces repeated pending edits to the latest content hash.
+- Carries the producer's recorded error into downstream
+  `upstream-artifact-unavailable` diagnostics.
 
 ## 1.4.66 highlights (release candidate integration)
 
@@ -138,6 +150,10 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
   Startup auto-run also preserves an existing attempt for an unchanged job
   revision across Extension Host reloads; edit the job or run it manually to
   request another attempt.
+- A changed content revision saved while the same job path is running is kept
+  as one serialized follow-up. Further edits coalesce into that pending job, so
+  the latest revision is not lost and two revisions never write the same
+  output directory concurrently.
 
 ## 1.4.35 highlights (bounded automation and deterministic context)
 

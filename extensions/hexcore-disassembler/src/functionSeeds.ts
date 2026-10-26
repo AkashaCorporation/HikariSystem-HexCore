@@ -13,6 +13,9 @@ export type FunctionSeedKind =
 	| 'import-thunk'
 	| 'unwind'
 	| 'symbol'
+	| 'fixed-width-prologue'
+	| 'padding-delimited-leaf'
+	| 'linker-thunk'
 	| 'validated-prologue'
 	| 'prologue'
 	| 'cache';
@@ -34,6 +37,9 @@ const STRONG_SEED_KINDS = new Set<FunctionSeedKind>([
 	'import-thunk',
 	'unwind',
 	'symbol',
+	'fixed-width-prologue',
+	'padding-delimited-leaf',
+	'linker-thunk',
 ]);
 
 /** Tracks why an address is allowed to own a function. */

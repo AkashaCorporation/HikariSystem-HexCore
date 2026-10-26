@@ -8,6 +8,7 @@ import { BasicBlockAnalyzer } from './basicBlockAnalyzer';
 import type { DisassemblerEngine, Function, Instruction } from './disassemblerEngine';
 import type { StructInfoJson } from './elfBtfLoader';
 import type { CanonicalSemanticType } from './semanticModel';
+import { SemanticQueryView, openSemanticQueryView, type SemanticQueryIdentity } from './semanticQueryView';
 
 export const HELIX_ANALYSIS_CONTEXT_VERSION = 1 as const;
 
@@ -51,6 +52,7 @@ export interface HelixContextRelocation {
 export interface HelixAnalysisContext {
 	contextVersion: typeof HELIX_ANALYSIS_CONTEXT_VERSION;
 	contextSha256: string;
+	queryIdentity?: Readonly<SemanticQueryIdentity>;
 	target: {
 		id?: string;
 		binarySha256?: string;
@@ -154,8 +156,54 @@ export async function createHelixAnalysisContext(
 	const selected = selectFunction(functions, requestedAddress);
 	const entry = selected?.address ?? requestedAddress;
 	const instructions = selected ? await engine.getFunctionInstructions(selected.address) : [];
+	return buildHelixAnalysisContext(engine, functions, selected, entry, instructions);
+}
+
+/** No hydration, cache writes, reconciliation or asynchronous engine reads. */
+export function createReadOnlyHelixAnalysisContext(
+	engine: DisassemblerEngine,
+	requestedAddress: number,
+	view: SemanticQueryView,
+): HelixAnalysisContext {
+	if (!(view instanceof SemanticQueryView)) { throw new Error('read-only-helix: a captured SemanticQueryView is required'); }
+	if (!Number.isSafeInteger(requestedAddress) || requestedAddress < 0) { throw new Error('read-only-helix: unsupported address precision'); }
+	const session = engine.getSessionStore();
+	if (!session || session.getAnalysisTarget()?.id !== view.identity.targetIdentity) { throw new Error('read-only-helix: target mismatch'); }
+	if (engine.getAnalysisImageSha256() !== session.getAnalysisTarget()?.binarySha256) { throw new Error('read-only-helix: current image differs from the accepted target'); }
+	if (view.identity.engineGeneration === undefined || view.identity.engineGeneration !== engine.getAnalysisGeneration()) { throw new Error('read-only-helix: engine generation mismatch'); }
+	const revision = session.getSemanticReadRevision();
+	const currentView = openSemanticQueryView(session, { engineGeneration: engine.getAnalysisGeneration() });
+	currentView.assertIdentity(view.identity);
+	if (currentView.identity.sessionId !== view.identity.sessionId || engine.getArchitecture() !== view.identity.architecture) { throw new Error('read-only-helix: session/architecture mismatch'); }
+	const functions = engine.getFunctions();
+	const selected = functions.find(fn => fn.address === requestedAddress);
+	if (!selected) { throw new Error('read-only-helix: exact function entry required'); }
+	const body = engine.peekFunctionBodyCompleteness(requestedAddress);
+	if (!body || body.state !== 'complete' || !body.boundaryReached) { throw new Error(`read-only-helix: function body is ${body?.state ?? 'unavailable'}`); }
+	if (body.authoritativeStart !== selected.address || body.authoritativeEndExclusive !== selected.endAddress || !Number.isSafeInteger(selected.endAddress) || selected.endAddress <= selected.address) { throw new Error('read-only-helix: inconsistent function boundary'); }
+	const byteLength = selected.endAddress - selected.address;
+	if (selected.size !== byteLength) { throw new Error('read-only-helix: inconsistent recorded function size'); }
+	if (byteLength > 4 * 1024 * 1024 || selected.instructions.length > 250000) { throw new Error('read-only-helix: function capture budget exceeded'); }
+	const bytes = engine.getBytes(selected.address, byteLength);
+	if (!bytes || bytes.length !== byteLength) { throw new Error('read-only-helix: accepted function bytes unavailable'); }
+	let end = selected.address;
+	for (const instruction of [...selected.instructions].sort((left, right) => left.address - right.address)) {
+		if (!Number.isSafeInteger(instruction.address) || !Number.isSafeInteger(instruction.size) || instruction.size < 1 || instruction.address !== end || instruction.address + instruction.size > selected.endAddress) { throw new Error('read-only-helix: incomplete or overlapping instruction coverage'); }
+		if (!Buffer.from(instruction.bytes).equals(bytes.subarray(instruction.address - selected.address, instruction.address - selected.address + instruction.size))) { throw new Error('read-only-helix: accepted instructions differ from current bytes'); }
+		end += instruction.size;
+	}
+	if (end !== selected.endAddress) { throw new Error('read-only-helix: incomplete instruction coverage'); }
+	const context = buildHelixAnalysisContext(engine, functions, selected, selected.address, selected.instructions, view);
+	if (revision !== session.getSemanticReadRevision() || engine.getAnalysisGeneration() !== view.identity.engineGeneration) { throw new Error('read-only-helix: context changed during capture'); }
+	return context;
+}
+
+function buildHelixAnalysisContext(
+	engine: DisassemblerEngine, functions: readonly Function[], selected: Function | undefined,
+	entry: number, instructions: readonly Instruction[], view?: SemanticQueryView,
+): HelixAnalysisContext {
 	const end = selected?.endAddress ?? instructionEnd(instructions, entry);
-	const cfg = new BasicBlockAnalyzer().buildCFG(instructions, selected?.name ?? `sub_${entry.toString(16)}`, entry);
+	const cfg = new BasicBlockAnalyzer().buildCFG([...instructions], selected?.name ?? `sub_${entry.toString(16)}`, entry);
 	const blockStartById = new Map<number, number>();
 	const blocks = [...cfg.blocks.values()].map(block => {
 		blockStartById.set(block.id, block.startAddress);
@@ -241,10 +289,11 @@ export async function createHelixAnalysisContext(
 		isCode: section.isCode,
 		isData: section.isData,
 	})).sort((a, b) => Number.parseInt(a.start, 16) - Number.parseInt(b.start, 16));
-	const semanticStore = engine.getSessionStore()?.getSemanticStore();
+	const semanticStore = view ? undefined : engine.getSessionStore()?.getSemanticStore();
 
 	const payload = {
 		contextVersion: HELIX_ANALYSIS_CONTEXT_VERSION,
+		...(view ? { queryIdentity: view.identity } : {}),
 		target: {
 			...(analysisTarget ? { id: analysisTarget.id, binarySha256: analysisTarget.binarySha256 } : {}),
 			...(engine.getFilePath() ? { filePath: engine.getFilePath() } : {}),
@@ -268,10 +317,10 @@ export async function createHelixAnalysisContext(
 		segments,
 		abi: platformAbi(fileInfo?.format ?? 'Raw', architecture),
 		semantic: {
-			storeHash: semanticStore?.exportHash() ?? '',
-			types: semanticStore?.listTypes() ?? [],
-			prototypes: semanticStore?.listPrototypes() ?? [],
-			bindings: semanticStore?.findTypeBindings() ?? [],
+			storeHash: view?.identity.snapshotSha256 ?? semanticStore?.exportHash() ?? '',
+			types: view?.listTypes() ?? semanticStore?.listTypes() ?? [],
+			prototypes: view?.listPrototypes() ?? semanticStore?.listPrototypes() ?? [],
+			bindings: view?.findTypeBindings() ?? semanticStore?.findTypeBindings() ?? [],
 		},
 	};
 	const contextSha256 = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
