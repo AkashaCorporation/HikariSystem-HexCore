@@ -257,6 +257,8 @@ export class HelixWrapper {
 		structInfo?: StructInfoJson;
 		/** Immutable Disassembler evidence captured for this exact function. */
 		semanticContext?: HelixAnalysisContext;
+		/** Exact pre-serialized debug/type envelope from a canonical request. */
+		debugTypeInfoJson?: string;
 		/** Function name for param type resolution against structInfo */
 		functionName?: string;
 		/**
@@ -390,9 +392,9 @@ export class HelixWrapper {
 
 		// FIX-121: seed nominal debug types inside the MLIR pipeline. Always
 		// replace (including empty) because engine instances are reused.
-		const debugTypeInfoJson = options?.semanticContext
+		const debugTypeInfoJson = options?.debugTypeInfoJson ?? (options?.semanticContext
 			? JSON.stringify(createHelixDebugTypeEnvelope(options.semanticContext, options.structInfo))
-			: options?.structInfo ? JSON.stringify(options.structInfo) : '';
+			: options?.structInfo ? JSON.stringify(options.structInfo) : '');
 		try {
 			const engine = this.ensureEngine(mapping.helixArch);
 			if (engine && typeof engine.setDebugTypeInfoJson === 'function') {

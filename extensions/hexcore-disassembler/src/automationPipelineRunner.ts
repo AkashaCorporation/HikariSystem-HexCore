@@ -1467,6 +1467,19 @@ export function extractPipelineRuntimeIdentity(command: string, value: unknown):
 	};
 }
 
+export function extractPipelineCanonicalRequestIdentity(
+	value: unknown,
+	field: 'canonicalRequest' | 'exportedCanonicalRequest',
+): { path: string; requestHash: string } | undefined {
+	if (!isRecord(value) || !isRecord(value[field])) { return undefined; }
+	const identity = value[field];
+	if (typeof identity.path !== 'string' || !path.isAbsolute(identity.path) ||
+		typeof identity.requestHash !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(identity.requestHash)) {
+		return undefined;
+	}
+	return { path: path.resolve(identity.path), requestHash: identity.requestHash };
+}
+
 export async function validatePipelineSideArtifacts(
 	command: string,
 	value: unknown,
@@ -1797,6 +1810,8 @@ async function writeArtifactProvenance(
 	const pairingId = sideArtifacts[0]?.pairingId;
 	const analysisStatus: AnalysisStatus = semanticStatus === 'error' ? 'failed' : semanticStatus;
 	const runtimeIdentity = extractPipelineRuntimeIdentity(resolvedCommand, commandResult);
+	const consumedCanonicalRequest = extractPipelineCanonicalRequestIdentity(commandResult, 'canonicalRequest');
+	const exportedCanonicalRequest = extractPipelineCanonicalRequestIdentity(commandResult, 'exportedCanonicalRequest');
 	if ((runtimeIdentity?.component === 'hexcore-helix' ||
 		runtimeIdentity?.component === 'hexcore-remill') && run.analysisSession) {
 		const engine = runtimeIdentity.component === 'hexcore-helix' ? {
@@ -1844,6 +1859,11 @@ async function writeArtifactProvenance(
 			semanticStatus,
 			artifactKind,
 			...(pairingId ? { artifactRole: 'primary-c' as const, pairingId } : {}),
+			...(consumedCanonicalRequest ? {
+				canonicalRequest: { role: 'consumed' as const, ...consumedCanonicalRequest },
+			} : exportedCanonicalRequest ? {
+				canonicalRequest: { role: 'exported' as const, ...exportedCanonicalRequest },
+			} : {}),
 			configurationSha256: hashCommandConfiguration(commandOptions),
 		},
 		artifact: {

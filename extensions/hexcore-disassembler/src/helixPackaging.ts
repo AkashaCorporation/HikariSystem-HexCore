@@ -28,7 +28,7 @@ const IMAGE_VA_MAX = 0x00007FFFFFFFFFFF;
 /** Inputs that make helix.decompileIR a non-interactive/headless call. */
 export function hasHeadlessHelixIrInput(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object'
-		&& ('file' in value || 'irText' in value || 'irPath' in value);
+		&& ('file' in value || 'irText' in value || 'irPath' in value || 'canonicalRequestPath' in value);
 }
 
 /**

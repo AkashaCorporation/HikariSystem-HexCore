@@ -16,6 +16,10 @@ let AutomationPipelineRunner: new () => {
 };
 let inspectSemanticResult: (value: unknown) => { status: 'ok' | 'partial' | 'failed'; reason?: string };
 let extractPipelineRuntimeIdentity: (command: string, value: unknown) => Record<string, unknown> | undefined;
+let extractPipelineCanonicalRequestIdentity: (
+	value: unknown,
+	field: 'canonicalRequest' | 'exportedCanonicalRequest',
+) => { path: string; requestHash: string } | undefined;
 let validatePipelineSideArtifacts: (
 	command: string,
 	value: unknown,
@@ -114,6 +118,7 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		AutomationPipelineRunner = runner.AutomationPipelineRunner;
 		inspectSemanticResult = runner.inspectSemanticResult;
 		extractPipelineRuntimeIdentity = runner.extractPipelineRuntimeIdentity;
+		extractPipelineCanonicalRequestIdentity = runner.extractPipelineCanonicalRequestIdentity;
 		validatePipelineSideArtifacts = runner.validatePipelineSideArtifacts;
 		jobRequiresExclusiveEngine = runner.jobRequiresExclusiveEngine;
 		inspectBinaryIdentity = runner.inspectBinaryIdentity;
@@ -239,6 +244,23 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(extractPipelineRuntimeIdentity('hexcore.helix.decompileIR', {
 			runtimeIdentity: identity,
 		}), undefined);
+	});
+
+	test('retains only absolute hash-bound canonical request identities', () => {
+		const identity = {
+			path: path.join(tempDir, 'request.json'),
+			requestHash: `sha256:${'c'.repeat(64)}`,
+		};
+		assert.deepStrictEqual(
+			extractPipelineCanonicalRequestIdentity({ canonicalRequest: identity }, 'canonicalRequest'),
+			identity,
+		);
+		assert.strictEqual(extractPipelineCanonicalRequestIdentity({
+			canonicalRequest: { ...identity, requestHash: 'not-a-hash' },
+		}, 'canonicalRequest'), undefined);
+		assert.strictEqual(extractPipelineCanonicalRequestIdentity({
+			exportedCanonicalRequest: { ...identity, path: 'relative.json' },
+		}, 'exportedCanonicalRequest'), undefined);
 	});
 
 	test('persists the Revenant wrapper and decompiler identity in artifact provenance', async () => {

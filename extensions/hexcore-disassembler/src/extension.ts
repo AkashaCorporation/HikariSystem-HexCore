@@ -94,6 +94,7 @@ import {
 } from './pathfinder';
 import { RellicWrapper, buildPseudoCHeader } from './rellicWrapper';
 import { HelixWrapper } from './helixWrapper';
+import type { CleanupOptions } from './helixCleanupPostProcessor';
 import {
 	loadHql,
 	getHqlLoadError,
@@ -152,8 +153,14 @@ import { detectPacker, packerCapabilityTags } from './packerDetect';
 import { isSingleFileBundle } from './managedDotNetDetector';
 import {
 	createHelixAnalysisContext,
+	createHelixDebugTypeEnvelope,
 	type HelixAnalysisContext,
 } from './helixAnalysisContext';
+import {
+	loadCanonicalHelixRequest,
+	writeCanonicalHelixRequest,
+	type LoadedCanonicalHelixRequest,
+} from './helixCanonicalRequest';
 import { buildWindowsFilesystemAudit } from './windowsFilesystemAudit';
 import {
 	decorateSemanticCommandResult,
@@ -5505,17 +5512,51 @@ export function activate(context: vscode.ExtensionContext): void {
 		vscode.commands.registerCommand('hexcore.helix.decompileIR', async (arg?: unknown) => {
 			const isHeadless = !((arg as any) instanceof vscode.Uri)
 				&& hasHeadlessHelixIrInput(arg);
-
-			const options = isHeadless ? arg as Record<string, unknown> : {};
+			const rawOptions = isHeadless ? arg as Record<string, unknown> : {};
+			let canonicalRequest: LoadedCanonicalHelixRequest | undefined;
+			const canonicalRequestPath = typeof rawOptions.canonicalRequestPath === 'string'
+				? rawOptions.canonicalRequestPath : undefined;
+			if (canonicalRequestPath) {
+				try {
+					const resolved = path.isAbsolute(canonicalRequestPath)
+						? canonicalRequestPath
+						: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', canonicalRequestPath);
+					canonicalRequest = loadCanonicalHelixRequest(resolved);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return {
+						success: false, status: 'error', code: '', functionCount: 0, address: '',
+						architecture: 'x64', error: `Canonical Helix request rejected: ${message}`,
+					};
+				}
+			}
+			const options: Record<string, unknown> = canonicalRequest ? {
+				...rawOptions,
+				irText: canonicalRequest.irText,
+				sourceTargetFile: canonicalRequest.targetPath,
+				architecture: canonicalRequest.architecture,
+				startAddress: canonicalRequest.exactRange.startAddress,
+				endExclusive: canonicalRequest.exactRange.endExclusive,
+				functionStarts: canonicalRequest.functionStarts,
+				variableRenames: canonicalRequest.variableRenames,
+				cleanup: false,
+				souper: false,
+				optimizeIR: !canonicalRequest.skipOptimization,
+				useCastLayer: canonicalRequest.useCastLayer,
+				structInfo: false,
+			} : rawOptions;
 			const quiet = options.quiet === true;
 			const exactRange = parseHelixExactRange(options);
 			const sourceTargetFile = typeof options.sourceTargetFile === 'string'
 				? options.sourceTargetFile
 				: typeof options.file === 'string' ? options.file : undefined;
-			const analysisContext = decideAnalysisContextOwnership(
+			const ownershipDecision = decideAnalysisContextOwnership(
 				sourceTargetFile,
 				engine.getFilePath(),
 			);
+			const analysisContext = canonicalRequest
+				? { ...ownershipDecision, activeEngineEvidenceUsed: false }
+				: ownershipDecision;
 			const useActiveEngineContext = analysisContext.activeEngineEvidenceUsed;
 			const requestedArch = typeof options.architecture === 'string'
 				? options.architecture
@@ -5547,6 +5588,13 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (isHeadless && typeof options.irText === 'string') {
 				irText = options.irText;
+				if (canonicalRequest) {
+					consumedIrInput = {
+						path: canonicalRequest.irPath,
+						sha256: canonicalRequest.irSha256,
+						mediaType: 'text/x-llvm',
+					};
+				}
 			} else if (irFilePath) {
 				const resolved = path.isAbsolute(irFilePath)
 					? irFilePath
@@ -5617,7 +5665,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				dataSections?: Array<{ vaStart: bigint; bytes: Buffer }>;
 				functionStarts?: number[];
 				semanticContext?: HelixAnalysisContext;
+				debugTypeInfoJson?: string;
 			} = { ...resolveHelixBaseOptions(options) };
+			if (canonicalRequest) {
+				helixIROptions.debugTypeInfoJson = canonicalRequest.debugTypeInfoJson;
+			}
 			const explicitRenames = parseHelixVariableRenames(options.variableRenames);
 			const explicitFunctionStarts = parseExplicitHelixFunctionStarts(options.functionStarts);
 
@@ -5714,16 +5766,20 @@ export function activate(context: vscode.ExtensionContext): void {
 			// RecoverSwitchTables pass can read jump-table entries.  Without
 			// this the pass auto-skips and every `switch (...)` in the source
 			// binary collapses to `goto default` in the decompiled output.
-			const binaryForSections = isHeadless && typeof options.file === 'string'
-				? options.file : undefined;
-			const explicitDataSections = resolveExplicitHelixDataSections(engine, options.dataSections, useActiveEngineContext);
-			const peSections = explicitDataSections ? undefined : await getDataSectionsFor(binaryForSections);
-			if (explicitDataSections) {
-				helixIROptions.dataSections = explicitDataSections;
-			} else if (peSections && peSections.length > 0) {
-				helixIROptions.dataSections = peSections.map(s => ({
-					vaStart: s.vaStart, bytes: s.bytes
-				}));
+			if (canonicalRequest) {
+				helixIROptions.dataSections = canonicalRequest.dataSections;
+			} else {
+				const binaryForSections = isHeadless && typeof options.file === 'string'
+					? options.file : undefined;
+				const explicitDataSections = resolveExplicitHelixDataSections(engine, options.dataSections, useActiveEngineContext);
+				const peSections = explicitDataSections ? undefined : await getDataSectionsFor(binaryForSections);
+				if (explicitDataSections) {
+					helixIROptions.dataSections = explicitDataSections;
+				} else if (peSections && peSections.length > 0) {
+					helixIROptions.dataSections = peSections.map(s => ({
+						vaStart: s.vaStart, bytes: s.bytes
+					}));
+				}
 			}
 
 			// A completed immutable context owns the function-start table. Older or
@@ -5756,6 +5812,40 @@ export function activate(context: vscode.ExtensionContext): void {
 				console.log('[helix] functionStarts: omitted (default quality path; set functionStarts:true for D2 honesty)');
 			}
 
+			let exportedCanonicalRequest: { path: string; requestHash: string } | undefined;
+			const canonicalRequestOutputPath = typeof options.canonicalRequestOutputPath === 'string'
+				? options.canonicalRequestOutputPath : undefined;
+			if (canonicalRequestOutputPath) {
+				if (canonicalRequest) throw new Error('Cannot export and consume a canonical Helix request in the same invocation');
+				if (!sourceTargetFile) throw new Error('Canonical Helix export requires sourceTargetFile');
+				if (!exactRange) throw new Error('Canonical Helix export requires an exact function range');
+				const resolvedRequestPath = path.isAbsolute(canonicalRequestOutputPath)
+					? canonicalRequestOutputPath
+					: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', canonicalRequestOutputPath);
+				const debugEnvelopeJson = helixIROptions.debugTypeInfoJson || (semanticContext
+					? JSON.stringify(createHelixDebugTypeEnvelope(semanticContext, helixIROptions.structInfo))
+					: helixIROptions.structInfo ? JSON.stringify(helixIROptions.structInfo) : undefined);
+				const envelope = writeCanonicalHelixRequest({
+					requestPath: resolvedRequestPath,
+					irText: irForHelix,
+					targetPath: sourceTargetFile,
+					architecture: arch,
+					imageBase: semanticContext
+						? Number.parseInt(semanticContext.target.imageBase.replace(/^0x/i, ''), 16)
+						: engine.getBaseAddress(),
+					exactRange,
+					functionStarts: helixIROptions.functionStarts,
+					dataSections: helixIROptions.dataSections,
+					debugEnvelopeJson,
+					semanticContext,
+					useCastLayer: helixIROptions.useCastLayer !== false,
+					skipOptimization: helixIROptions.optimizeIR === false,
+					variableRenames: helixIROptions.variableRenames,
+					runtimeIdentity: helixWrapper.getRuntimeIdentity(),
+				});
+				exportedCanonicalRequest = { path: resolvedRequestPath, requestHash: envelope.requestHash };
+			}
+
 			const forceWorker = options.forceWorker === true;
 			const forceProcess = options.forceProcess === true;
 			const workerTimeoutMs = typeof options.workerTimeoutMs === 'number'
@@ -5770,6 +5860,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				// can be killed without terminating the Extension Host.
 				async () => helixWrapper.decompileIr(irForHelix, arch, {
 					...helixIROptions,
+					cleanup: canonicalRequest ? false : options.cleanup as boolean | CleanupOptions | undefined,
 					forceWorker,
 					forceProcess,
 					workerTimeoutMs,
@@ -5808,7 +5899,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			// Helix ignores the IR function name and generates sub_<hex> from the
 			// entry address. We extract the real name from the IR text (define @<name>)
 			// or from the ; Function: header, then replace in C output.
-			{
+			if (!canonicalRequest) {
 				let irFuncName = typeof options.functionName === 'string' ? options.functionName : undefined;
 
 				// Extract name from IR if not in options
@@ -5839,21 +5930,24 @@ export function activate(context: vscode.ExtensionContext): void {
 					}
 				}
 			}
-			if (inputContract.status === 'partial') {
+			if (!canonicalRequest && inputContract.status === 'partial') {
 				fullCode = ['// InputIRStatus: partial', ...inputContract.reasons.map(reason =>
 					`// InputIRWarning: ${reason.replace(/[\r\n]+/g, ' ')}`), fullCode].join('\n');
 			}
 			const irRequestedRange = inputContract.liftEvidence?.requestedByteRange;
 			const irDecodedCoverage = inputContract.liftEvidence?.decodedByteCoverage;
-			fullCode = applyHonestyCap(fullCode, {
-				...(irDecodedCoverage ? {
-					bytesConsumed: irDecodedCoverage.decodedBytes,
-					knownFunctionSize: irDecodedCoverage.requestedBytes,
-				} : {}),
-				semanticCoverage: inputContract.liftEvidence?.semanticInstructionCoverage,
-			});
+			if (!canonicalRequest) {
+				fullCode = applyHonestyCap(fullCode, {
+					...(irDecodedCoverage ? {
+						bytesConsumed: irDecodedCoverage.decodedBytes,
+						knownFunctionSize: irDecodedCoverage.requestedBytes,
+					} : {}),
+					semanticCoverage: inputContract.liftEvidence?.semanticInstructionCoverage,
+				});
+			}
 			const helixInvocation = {
 				mode: 'decompileIR' as const,
+				...(canonicalRequest ? { canonicalRequestHash: canonicalRequest.requestHash } : {}),
 				...(exactRange ? {
 					exactRange: {
 						startAddress: `0x${exactRange.startAddress.toString(16).toUpperCase()}`,
@@ -5872,28 +5966,32 @@ export function activate(context: vscode.ExtensionContext): void {
 				dataSections: helixIROptions.dataSections?.length ?? 0,
 				variableRenames: helixIROptions.variableRenames?.length ?? 0,
 			};
-			const irDiagStart = exactRange?.startAddress ?? irRequestedRange?.startAddress ?? funcAddr ?? parseAddressValue(decompileResult.entryAddress) ?? 0;
-			const irDiagEnd = exactRange?.endExclusive ?? irRequestedRange?.endExclusive;
-			const irConsumed = irDecodedCoverage?.decodedBytes;
-			const irRequested = irDecodedCoverage?.requestedBytes ?? irRequestedRange?.size;
-			const irDiag =
-				`// LiftDiag: addr=0x${irDiagStart.toString(16)} ` +
-				`range=${irDiagEnd !== undefined ? `0x${irDiagStart.toString(16)}-0x${irDiagEnd.toString(16)}` : '?'} ` +
-				`bytesConsumed=${irConsumed !== undefined ? irConsumed : '?'}/${irRequested !== undefined ? irRequested : '?'} ` +
-				`irLines=${irForHelix.split('\n').length} cLines=${fullCode.split('\n').length} ` +
-				`cast=${helixInvocation.useCastLayer} fnStarts=${helixInvocation.functionStarts.count} ` +
-				`dataSections=${helixInvocation.dataSections} skipOpt=${helixInvocation.skipOptimization} ` +
-				`renames=${helixInvocation.variableRenames} ` +
-				`semanticCoverage=${inputContract.liftEvidence?.semanticInstructionCoverage !== undefined
-					? (inputContract.liftEvidence.semanticInstructionCoverage * 100).toFixed(1) + '%' : '?'} ` +
-				`source=decompileIR`;
-			if (/Confidence:\s*[\d.]+%/.test(fullCode)) {
-				fullCode = fullCode.replace(/(Confidence:\s*[\d.]+%[^\n]*\n)/, `$1${irDiag}\n`);
-			} else {
-				fullCode = `${irDiag}\n${fullCode}`;
+			if (!canonicalRequest) {
+				const irDiagStart = exactRange?.startAddress ?? irRequestedRange?.startAddress ?? funcAddr ?? parseAddressValue(decompileResult.entryAddress) ?? 0;
+				const irDiagEnd = exactRange?.endExclusive ?? irRequestedRange?.endExclusive;
+				const irConsumed = irDecodedCoverage?.decodedBytes;
+				const irRequested = irDecodedCoverage?.requestedBytes ?? irRequestedRange?.size;
+				const irDiag =
+					`// LiftDiag: addr=0x${irDiagStart.toString(16)} ` +
+					`range=${irDiagEnd !== undefined ? `0x${irDiagStart.toString(16)}-0x${irDiagEnd.toString(16)}` : '?'} ` +
+					`bytesConsumed=${irConsumed !== undefined ? irConsumed : '?'}/${irRequested !== undefined ? irRequested : '?'} ` +
+					`irLines=${irForHelix.split('\n').length} cLines=${fullCode.split('\n').length} ` +
+					`cast=${helixInvocation.useCastLayer} fnStarts=${helixInvocation.functionStarts.count} ` +
+					`dataSections=${helixInvocation.dataSections} skipOpt=${helixInvocation.skipOptimization} ` +
+					`renames=${helixInvocation.variableRenames} ` +
+					`semanticCoverage=${inputContract.liftEvidence?.semanticInstructionCoverage !== undefined
+						? (inputContract.liftEvidence.semanticInstructionCoverage * 100).toFixed(1) + '%' : '?'} ` +
+					`source=decompileIR`;
+				if (/Confidence:\s*[\d.]+%/.test(fullCode)) {
+					fullCode = fullCode.replace(/(Confidence:\s*[\d.]+%[^\n]*\n)/, `$1${irDiag}\n`);
+				} else {
+					fullCode = `${irDiag}\n${fullCode}`;
+				}
 			}
 			const outputQuality = inspectHelixOutputQuality(fullCode);
-			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
+			if (!canonicalRequest) {
+				fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
+			}
 
 			let sideArtifacts: HelixSideArtifact[] | undefined;
 			let pairingIdentity: { pairingId: string; requestSha256: string; path: string } | undefined;
@@ -5981,6 +6079,10 @@ export function activate(context: vscode.ExtensionContext): void {
 				...(consumedIrInput ? { consumedInputs: [consumedIrInput] } : {}),
 				...(sideArtifacts ? { sideArtifacts } : {}),
 				...(pairingIdentity ? { pairing: pairingIdentity } : {}),
+				...(canonicalRequest ? {
+					canonicalRequest: { path: canonicalRequest.requestPath, requestHash: canonicalRequest.requestHash },
+				} : {}),
+				...(exportedCanonicalRequest ? { exportedCanonicalRequest } : {}),
 				// HQL: expose the raw HAST FlatBuffer so headless callers
 				// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
 				// function. In-process executeCommand returns the literal object so
