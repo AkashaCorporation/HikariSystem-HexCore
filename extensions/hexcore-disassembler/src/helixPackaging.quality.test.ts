@@ -362,6 +362,33 @@ define ptr @lifted_5368865820() {
 		assert.strictEqual(ext.source, 'pdata');
 	});
 
+	test('getAuthoritativeFunctionExtent retains reconciled chained-pdata authority', () => {
+		const eng = {
+			getFunctionAt: () => ({
+				address: 0x14142FEF0,
+				size: 1435,
+				endAddress: 0x14143048B,
+			}),
+			findAuthoritativePdataRangeContaining: () => ({
+				begin: 0x14142FEF0,
+				end: 0x14143048B,
+			}),
+			getPdataEntries: () => [{
+				beginAddress: 0x142FEF0,
+				endAddress: 0x142FF1B,
+			}],
+			getBaseAddress: () => 0x140000000,
+			getRecommendedLiftSize: () => 0,
+		};
+		const ext = getAuthoritativeFunctionExtent(eng as any, 0x14142FEF0);
+		assert.deepStrictEqual(ext, {
+			start: 0x14142FEF0,
+			end: 0x14143048B,
+			size: 1435,
+			source: 'pdata',
+		});
+	});
+
 	test('getAuthoritativeFunctionExtent falls back to function table', () => {
 		const eng = {
 			getFunctionAt: () => ({ address: 0x401000, size: 100, endAddress: 0x401064 }),
