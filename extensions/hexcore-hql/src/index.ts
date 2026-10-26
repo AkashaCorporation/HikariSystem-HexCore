@@ -72,7 +72,13 @@ export type {
 export { HQLMatcher } from './engine/matcher.js';
 
 // HAST FlatBuffer Adapter
-export { hydrateHAST } from './adapter/flatbuf.js';
+export { hydrateHAST, inspectHASTContract } from './adapter/flatbuf.js';
+export type {
+  HASTContractFunctionSummary,
+  HASTContractInspectionLimits,
+  HASTContractSummary,
+  HASTContractVariableSummary,
+} from './adapter/flatbuf.js';
 
 // Built-in signature library + one-call scan API
 export { BUILTIN_SIGNATURES } from './signatures/builtin.js';

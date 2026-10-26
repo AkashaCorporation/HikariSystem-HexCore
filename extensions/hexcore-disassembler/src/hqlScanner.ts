@@ -21,6 +21,7 @@ import { openSemanticQueryView, type SemanticQueryIdentity, type SemanticQueryVi
 import { canonicalSerialize } from './semanticModel';
 import { hqlSemanticExplanationIdentity, propagationEffectIdentity } from './semanticExplanation';
 import type { SessionStore } from './sessionStore';
+import type { HastContractSummary } from './helixArtifactPair';
 
 // ---------------------------------------------------------------------------
 // hexcore-hql module surface (typed locally to avoid coupling the disassembler
@@ -84,6 +85,7 @@ export interface HqlFunctionFindings {
 
 interface HqlModule {
 	SessionDbReader: new (dbPath: string, sqliteModule: HqlSqliteModule) => HqlSessionReader;
+	inspectHASTContract(astBuffer: Uint8Array): HastContractSummary;
 	scanHAST(
 		astBuffer: Uint8Array,
 		signatures?: unknown,
@@ -143,7 +145,9 @@ export function loadHql(): HqlModule | undefined {
 		try {
 			// eslint-disable-next-line @typescript-eslint/no-var-requires
 			const mod = require(candidate) as Partial<HqlModule>;
-			if (mod && typeof mod.scanHAST === 'function' && typeof mod.SessionDbReader === 'function') {
+			if (mod && typeof mod.scanHAST === 'function' &&
+				typeof mod.inspectHASTContract === 'function' &&
+				typeof mod.SessionDbReader === 'function') {
 				cachedHql = mod as HqlModule;
 				return cachedHql;
 			}

@@ -38,6 +38,7 @@ import {
 } from './investigationModel';
 import { createInvestigationJob, sanitizeInvestigationJobName } from './investigationJob';
 import { inspectHelixOutputQuality, stampHelixConfidenceAxes } from './helixOutputQuality';
+import { persistHelixArtifactPair, type HelixSideArtifact } from './helixArtifactPair';
 import { assessLiftSemanticCoverage, formatLiftSemanticHeader } from './liftSemanticCoverage';
 import {
 	assessFunctionMaterialization,
@@ -5837,13 +5838,62 @@ export function activate(context: vscode.ExtensionContext): void {
 			const outputQuality = inspectHelixOutputQuality(fullCode);
 			fullCode = stampHelixConfidenceAxes(fullCode, outputQuality.confidenceAxes);
 
+			let sideArtifacts: HelixSideArtifact[] | undefined;
+			let pairingIdentity: { pairingId: string; requestSha256: string; path: string } | undefined;
 			if (isHeadless && options.output) {
-				const outputPath = typeof options.output === 'string' ? options.output : (options.output as { path: string }).path;
-				// Bug #36/2: ensure the output directory exists before writing so a job
-				// whose reportsDir/outDir was never created does not silently fail the
-				// write and then trip the 'output file was not created' mask.
-				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-				fs.writeFileSync(outputPath, fullCode, 'utf-8');
+				const outputSpec = typeof options.output === 'string'
+					? { path: options.output }
+					: options.output as { path: string; hastPath?: string; pairingPath?: string };
+				const outputPath = outputSpec.path;
+				const wantsPair = outputSpec.hastPath !== undefined || outputSpec.pairingPath !== undefined;
+				if (wantsPair) {
+					if (!outputSpec.hastPath || !outputSpec.pairingPath) {
+						throw new Error('Helix paired output requires both output.hastPath and output.pairingPath');
+					}
+					if (!decompileResult.astBuffer?.length) {
+						throw new Error('Helix returned no HAST buffer for the requested paired output');
+					}
+					const runtimeIdentity = decompileResult.runtimeIdentity ?? helixWrapper.getRuntimeIdentity();
+					if (!runtimeIdentity) throw new Error('Helix runtime identity is unavailable for paired output');
+					const hql = loadHql();
+					if (!hql) throw new Error(getHqlLoadError() ?? 'HQL HAST contract inspector is unavailable');
+					const persisted = persistHelixArtifactPair({
+						paths: {
+							cPath: outputPath,
+							hastPath: outputSpec.hastPath,
+							pairingPath: outputSpec.pairingPath,
+						},
+						cSource: fullCode,
+						hastBuffer: decompileResult.astBuffer,
+						hastContract: hql.inspectHASTContract(decompileResult.astBuffer),
+						runtimeIdentity,
+						input: consumedIrInput ?? {
+							sha256: crypto.createHash('sha256').update(irText, 'utf8').digest('hex'),
+							mediaType: 'text/x-llvm',
+						},
+						architecture: arch,
+						helixInvocation,
+						nativeFunction: {
+							name: decompileResult.functionName,
+							address: decompileResult.entryAddress,
+							instructionCount: decompileResult.instructionCount,
+						},
+						qualityIssues: outputQuality.qualityIssues,
+						cfgBuffer: decompileResult.cfgBuffer,
+					});
+					sideArtifacts = persisted.sideArtifacts;
+					pairingIdentity = {
+						pairingId: persisted.envelope.pairingId,
+						requestSha256: persisted.envelope.request.sha256,
+						path: path.resolve(outputSpec.pairingPath),
+					};
+				} else {
+					// Bug #36/2: ensure the output directory exists before writing so a job
+					// whose reportsDir/outDir was never created does not silently fail the
+					// write and then trip the 'output file was not created' mask.
+					fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+					fs.writeFileSync(outputPath, fullCode, 'utf-8');
+				}
 			}
 
 			const commandResult = {
@@ -5872,6 +5922,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				} : undefined,
 				runtimeIdentity: decompileResult.runtimeIdentity ?? helixWrapper.getRuntimeIdentity(),
 				...(consumedIrInput ? { consumedInputs: [consumedIrInput] } : {}),
+				...(sideArtifacts ? { sideArtifacts } : {}),
+				...(pairingIdentity ? { pairing: pairingIdentity } : {}),
 				// HQL: expose the raw HAST FlatBuffer so headless callers
 				// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
 				// function. In-process executeCommand returns the literal object so

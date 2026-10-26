@@ -41,6 +41,10 @@ export interface OnResultRule {
 export interface PipelineOutputOptions {
 	path?: string;
 	format?: PipelineOutputFormat;
+	/** Raw HAST FlatBuffer emitted by the same Helix invocation as `path`. */
+	hastPath?: string;
+	/** Deterministic envelope binding the C and HAST artifacts. */
+	pairingPath?: string;
 }
 
 export interface PipelineStep {
@@ -78,6 +82,8 @@ export interface PipelineCommandOptions {
 	output?: {
 		path: string;
 		format?: PipelineOutputFormat;
+		hastPath?: string;
+		pairingPath?: string;
 	};
 	quiet?: boolean;
 	[key: string]: unknown;
@@ -110,6 +116,14 @@ export interface PipelineStepStatus {
 	errorCode?: 'unsupported-format';
 	detectedFormat?: UnsupportedNativeFormat;
 	artifactKind?: PipelineArtifactKind;
+	sideArtifacts?: Array<{
+		role: 'hast' | 'pairing';
+		path: string;
+		sha256: string;
+		bytes: number;
+		mediaType: string;
+		pairingId: string;
+	}>;
 }
 
 export interface PipelineRunProvenance {
@@ -276,6 +290,8 @@ interface StepOutputPath {
 	path: string;
 	format: PipelineOutputFormat;
 	captureKind: 'json' | 'text' | 'binary';
+	hastPath?: string;
+	pairingPath?: string;
 }
 
 /**
@@ -1351,6 +1367,15 @@ export interface HelixPipelineRuntimeIdentity {
 
 export type PipelineRuntimeIdentity = RevenantPipelineRuntimeIdentity | HelixPipelineRuntimeIdentity;
 
+export interface PipelineSideArtifactIdentity {
+	role: 'hast' | 'pairing';
+	path: string;
+	sha256: string;
+	bytes: number;
+	mediaType: string;
+	pairingId: string;
+}
+
 /** Retain bounded runtime identity emitted by wrapped engines. */
 export function extractPipelineRuntimeIdentity(command: string, value: unknown): PipelineRuntimeIdentity | undefined {
 	if (!isRecord(value)) { return undefined; }
@@ -1399,6 +1424,83 @@ export function extractPipelineRuntimeIdentity(command: string, value: unknown):
 	};
 }
 
+export async function validatePipelineSideArtifacts(
+	command: string,
+	value: unknown,
+	expected: { hastPath?: string; pairingPath?: string },
+): Promise<PipelineSideArtifactIdentity[]> {
+	const expectsPair = expected.hastPath !== undefined || expected.pairingPath !== undefined;
+	if (!expectsPair) {
+		if (isRecord(value) && Array.isArray(value.sideArtifacts) && value.sideArtifacts.length > 0) {
+			throw new Error(`${command} returned undeclared side artifacts`);
+		}
+		return [];
+	}
+	if (command !== 'hexcore.helix.decompileIR' || !expected.hastPath || !expected.pairingPath) {
+		throw new Error('Paired side artifacts are supported only by hexcore.helix.decompileIR');
+	}
+	if (!isRecord(value) || !Array.isArray(value.sideArtifacts)) {
+		throw new Error('Helix paired output did not return its side-artifact identities');
+	}
+	const expectedPaths = new Map<string, string>([
+		['hast', path.resolve(expected.hastPath)],
+		['pairing', path.resolve(expected.pairingPath)],
+	]);
+	const identities: PipelineSideArtifactIdentity[] = [];
+	const roles = new Set<string>();
+	for (const candidate of value.sideArtifacts) {
+		if (!isRecord(candidate) || (candidate.role !== 'hast' && candidate.role !== 'pairing') ||
+			typeof candidate.path !== 'string' || typeof candidate.sha256 !== 'string' ||
+			typeof candidate.bytes !== 'number' || typeof candidate.mediaType !== 'string' ||
+			typeof candidate.pairingId !== 'string') {
+			throw new Error('Helix returned a malformed side-artifact identity');
+		}
+		const expectedMediaType = candidate.role === 'hast'
+			? 'application/vnd.hexcore.hast+flatbuffers'
+			: 'application/vnd.hexcore.helix-pair+json';
+		if (candidate.mediaType !== expectedMediaType || !/^sha256:[a-f0-9]{64}$/i.test(candidate.pairingId)) {
+			throw new Error(`Helix returned an invalid ${candidate.role} media type or pairing identity`);
+		}
+		if (roles.has(candidate.role)) throw new Error(`Helix returned duplicate ${candidate.role} side artifacts`);
+		roles.add(candidate.role);
+		const resolved = path.resolve(candidate.path);
+		const expectedPath = expectedPaths.get(candidate.role);
+		if (!expectedPath || pathKeyForComparison(resolved) !== pathKeyForComparison(expectedPath)) {
+			throw new Error(`Helix ${candidate.role} side artifact does not match the runner-assigned path`);
+		}
+		if (!/^[a-f0-9]{64}$/i.test(candidate.sha256) ||
+			!Number.isSafeInteger(candidate.bytes) || candidate.bytes <= 0 ||
+			!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+			throw new Error(`Helix ${candidate.role} side artifact is missing or has an invalid identity`);
+		}
+		const actualBytes = fs.statSync(resolved).size;
+		const actualSha256 = await sha256File(resolved);
+		if (actualBytes !== candidate.bytes || actualSha256 !== candidate.sha256.toLowerCase()) {
+			throw new Error(`Helix ${candidate.role} side artifact changed after creation`);
+		}
+		identities.push({
+			role: candidate.role,
+			path: resolved,
+			sha256: actualSha256,
+			bytes: actualBytes,
+			mediaType: candidate.mediaType,
+			pairingId: candidate.pairingId,
+		});
+	}
+	if (!roles.has('hast') || !roles.has('pairing') || identities.length !== 2) {
+		throw new Error('Helix paired output requires exactly one HAST and one pairing envelope');
+	}
+	if (new Set(identities.map(item => item.pairingId)).size !== 1) {
+		throw new Error('Helix side artifacts disagree on pairing identity');
+	}
+	const pairing = identities.find(item => item.role === 'pairing')!;
+	const envelope = JSON.parse(fs.readFileSync(pairing.path, 'utf8')) as { pairingId?: unknown };
+	if (envelope.pairingId !== pairing.pairingId) {
+		throw new Error('Helix pairing envelope identity does not match its side artifacts');
+	}
+	return identities.sort((left, right) => left.role.localeCompare(right.role));
+}
+
 async function sha256File(filePath: string): Promise<string> {
 	return new Promise<string>((resolve, reject) => {
 		const hash = crypto.createHash('sha256');
@@ -1407,6 +1509,11 @@ async function sha256File(filePath: string): Promise<string> {
 		stream.on('data', chunk => hash.update(chunk));
 		stream.on('end', () => resolve(hash.digest('hex')));
 	});
+}
+
+function pathKeyForComparison(candidate: string): string {
+	const resolved = path.resolve(candidate);
+	return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
 export function resolveArtifactMediaType(outputPath: string, format?: PipelineOutputFormat): string {
@@ -1638,6 +1745,13 @@ async function writeArtifactProvenance(
 	if (inputs.some(input => path.resolve(input.path) === path.resolve(artifact.path) || input.id === artifact.id)) {
 		throw new Error(`Artifact provenance must be acyclic: ${artifact.path} cannot depend on itself`);
 	}
+	const resolvedStepOutput = resolveStepOutput(outDir, step, stepIndex);
+	const sideArtifacts = semanticStatus === 'error' ? [] : await validatePipelineSideArtifacts(
+		resolvedCommand,
+		commandResult,
+		{ hastPath: resolvedStepOutput.hastPath, pairingPath: resolvedStepOutput.pairingPath },
+	);
+	const pairingId = sideArtifacts[0]?.pairingId;
 	const analysisStatus: AnalysisStatus = semanticStatus === 'error' ? 'failed' : semanticStatus;
 	const runtimeIdentity = extractPipelineRuntimeIdentity(resolvedCommand, commandResult);
 	if (runtimeIdentity?.component === 'hexcore-helix' && run.analysisSession) {
@@ -1680,6 +1794,7 @@ async function writeArtifactProvenance(
 			resolvedCmd: resolvedCommand,
 			semanticStatus,
 			artifactKind,
+			...(pairingId ? { artifactRole: 'primary-c' as const, pairingId } : {}),
 			configurationSha256: hashCommandConfiguration(commandOptions),
 		},
 		artifact: {
@@ -1692,12 +1807,69 @@ async function writeArtifactProvenance(
 	const manifest = readProvenanceManifest(provenancePath, run);
 	manifest.generatedAt = generatedAt;
 	manifest.execution = run;
-	if (step.id) {
-		const replaced = manifest.artifacts.filter(existing => existing.artifact.path === outputPath && existing.step.stepId);
-		if (replaced.length) { manifest.history = [...(manifest.history ?? []), ...replaced]; }
+	const entries: ProvenanceManifestEntry[] = [entry];
+	const hastIdentity = sideArtifacts.find(item => item.role === 'hast');
+	for (const side of sideArtifacts) {
+		const sideArtifact = {
+			id: `artifact:sha256:${side.sha256}`,
+			path: side.path,
+			sha256: side.sha256,
+			mediaType: side.mediaType,
+		};
+		const sideInputs: AnalysisArtifactReference[] = side.role === 'pairing'
+			? [...inputs, artifact, ...(hastIdentity ? [{
+				id: `artifact:sha256:${hastIdentity.sha256}`,
+				path: hastIdentity.path,
+				sha256: hastIdentity.sha256,
+				mediaType: hastIdentity.mediaType,
+			}] : [])]
+			: [...inputs];
+		if (sideInputs.some(input => input.id === sideArtifact.id ||
+			pathKeyForComparison(input.path) === pathKeyForComparison(sideArtifact.path))) {
+			throw new Error(`Side-artifact provenance must be acyclic: ${sideArtifact.path}`);
+		}
+		entries.push({
+			generatedAt,
+			analysisContract: createAnalysisArtifactProvenance({
+				target: run.analysisTarget,
+				session: run.analysisSession,
+				producer: ownerExtensions,
+				inputs: sideInputs,
+				artifact: sideArtifact,
+				status: analysisStatus,
+				generatedAt,
+			}),
+			...(runtimeIdentity ? { runtimeIdentity } : {}),
+			...(persistedContract?.universe ? { analysisUniverse: {
+				generation: persistedContract.session.generation,
+				universeSha256: persistedContract.universe.universeSha256,
+				materializedFunctions: persistedContract.universe.materializedFunctions.map(item => ({ ...item })),
+			} } : {}),
+			step: {
+				index: stepIndex + 1,
+				...(step.id ? { stepId: step.id, stepIndex, occurrence: Number((commandOptions.pipelineStepIdentity as { occurrence?: number } | undefined)?.occurrence ?? 1) } : {}),
+				cmd: step.cmd,
+				resolvedCmd: resolvedCommand,
+				semanticStatus,
+				artifactKind: side.role === 'hast' ? 'binary' : 'json',
+				artifactRole: side.role,
+				pairingId: side.pairingId,
+				configurationSha256: hashCommandConfiguration(commandOptions),
+			},
+			artifact: { path: side.path, sha256: side.sha256 },
+			inputs: sideInputs,
+			ownerExtensions,
+		});
 	}
-	manifest.artifacts = manifest.artifacts.filter(existing => existing.artifact.path !== outputPath);
-	manifest.artifacts.push(entry);
+	for (const candidate of entries) {
+		if (step.id) {
+			const replaced = manifest.artifacts.filter(existing =>
+				existing.artifact.path === candidate.artifact.path && existing.step.stepId);
+			if (replaced.length) manifest.history = [...(manifest.history ?? []), ...replaced];
+		}
+		manifest.artifacts = manifest.artifacts.filter(existing => existing.artifact.path !== candidate.artifact.path);
+		manifest.artifacts.push(candidate);
+	}
 	writeJson(provenancePath, manifest);
 	return provenancePath;
 }
@@ -1714,11 +1886,19 @@ interface ProvenanceManifestEntry {
 		resolvedCmd: string;
 		semanticStatus: 'ok' | 'partial' | 'error';
 		artifactKind?: PipelineArtifactKind;
+		artifactRole?: 'primary-c' | 'hast' | 'pairing';
+		pairingId?: string;
 		configurationSha256: string;
 	};
 	artifact: { path: string; sha256: string };
 	inputs: AnalysisArtifactReference[];
 	ownerExtensions: Array<{ id: string; version: string }>;
+	runtimeIdentity?: PipelineRuntimeIdentity;
+	analysisUniverse?: {
+		generation: number;
+		universeSha256: string;
+		materializedFunctions: Array<Record<string, unknown>>;
+	};
 }
 
 interface ProvenanceManifest {
@@ -2038,8 +2218,10 @@ export class AutomationPipelineRunner {
 				index++;
 				continue;
 			}
-			if (output?.path && invalidatePriorStepArtifacts(output.path)) {
-				appendLog(logPath, `[Step ${index + 1}] Removed stale output from a prior execution.`);
+			if (output) {
+				const removedStale = stepOutputArtifactPaths(output)
+					.reduce((removed, candidate) => invalidatePriorStepArtifacts(candidate) || removed, false);
+				if (removedStale) appendLog(logPath, `[Step ${index + 1}] Removed stale output from a prior execution.`);
 			}
 			const timeoutMs = resolveStepTimeout(step, capability);
 			const retryCount = resolveRetryCount(step);
@@ -2257,8 +2439,8 @@ export class AutomationPipelineRunner {
 			while (attemptCount < maxAttempts) {
 				attemptCount++;
 				const attemptStartedAt = new Date().toISOString();
-				if (attemptCount > 1 && output?.path) {
-					invalidatePriorStepArtifacts(output.path);
+				if (attemptCount > 1 && output) {
+					for (const candidate of stepOutputArtifactPaths(output)) invalidatePriorStepArtifacts(candidate);
 				}
 				appendLog(logPath, `[Step ${index + 1}] Attempt ${attemptCount}/${maxAttempts}`);
 				commandReturn = undefined;
@@ -2307,6 +2489,11 @@ export class AutomationPipelineRunner {
 						}
 						validateStepOutput(output.path);
 					}
+					const validatedSideArtifacts = await validatePipelineSideArtifacts(
+						resolvedCommand,
+						commandReturn,
+						{ hastPath: output?.hastPath, pairingPath: output?.pairingPath },
+					);
 
 					const stepResultStatus = semantic.status === 'partial' ? 'partial' : 'ok';
 					if (step.id && output?.path && fs.existsSync(output.path)) { completedOutputSha256 = await sha256File(output.path); }
@@ -2320,6 +2507,9 @@ export class AutomationPipelineRunner {
 						stepResultStatus,
 						semantic.status === 'partial' ? semantic.reason : undefined,
 					);
+					if (validatedSideArtifacts.length > 0) {
+						stepStatus.sideArtifacts = validatedSideArtifacts.map(item => ({ ...item }));
+					}
 					stepStatus.artifactProvenancePath = await writeArtifactProvenance(
 						output?.path,
 						job.outDir,
@@ -2934,7 +3124,9 @@ export function normalizeStep(step: unknown, index: number, jobFilePath: string)
 			path: typeof step.output.path === 'string' ? step.output.path : undefined,
 			format: step.output.format === 'md' || step.output.format === 'json'
 				? step.output.format
-				: undefined
+				: undefined,
+			hastPath: typeof step.output.hastPath === 'string' ? step.output.hastPath : undefined,
+			pairingPath: typeof step.output.pairingPath === 'string' ? step.output.pairingPath : undefined,
 		};
 	}
 
@@ -3055,6 +3247,16 @@ function parseRetryDelayMs(
 }
 
 function resolveStepOutput(outDir: string, step: PipelineStep, index: number): StepOutputPath {
+	const root = path.resolve(outDir);
+	const resolveContainedPath = (explicitPath: string, field: string): string => {
+		const resolved = path.resolve(outDir, explicitPath);
+		const contained = !path.isAbsolute(explicitPath) &&
+			resolved !== root && resolved.startsWith(root + path.sep);
+		if (!contained) {
+			throw new Error(`Invalid "${field}" in step ${index} (${step.cmd}): must be a relative file path inside the job output directory (no absolute paths, no ".." escape, and not the directory itself). Got: ${explicitPath}`);
+		}
+		return resolved;
+	};
 	const explicitPath = step.output?.path;
 	let outputPath: string;
 	if (typeof explicitPath === 'string' && explicitPath.length > 0) {
@@ -3062,19 +3264,7 @@ function resolveStepOutput(outDir: string, step: PipelineStep, index: number): S
 		// AUTO-RUN, so an explicit output path MUST resolve INSIDE outDir — reject
 		// absolute paths and any "../" escape (an unconstrained path here is an
 		// arbitrary-file-write primitive).
-		const root = path.resolve(outDir);
-		const resolved = path.resolve(outDir, explicitPath);
-		// Must name a FILE strictly inside outDir: reject absolute paths, ".." escapes,
-		// AND a path that resolves to the outDir directory itself (".", "./", "sub/"),
-		// which would otherwise be handed to the command as a directory and then
-		// mis-recorded as an empty-output failure.
-		const contained = !path.isAbsolute(explicitPath) &&
-			resolved !== root &&
-			resolved.startsWith(root + path.sep);
-		if (!contained) {
-			throw new Error(`Invalid "output.path" in step ${index} (${step.cmd}): must be a relative file path inside the job output directory (no absolute paths, no ".." escape, and not the directory itself). Got: ${explicitPath}`);
-		}
-		outputPath = resolved;
+		outputPath = resolveContainedPath(explicitPath, 'output.path');
 	} else {
 		const safeName = sanitizeFileName(step.cmd);
 		const defaultExtension = BINARY_OUTPUT_COMMANDS.has(resolveCommand(step.cmd)) ? '.bin' : '.json';
@@ -3092,7 +3282,43 @@ function resolveStepOutput(outDir: string, step: PipelineStep, index: number): S
 		: step.output?.format === 'md' || textExtensions.has(extension)
 			? 'text'
 			: 'binary';
-	return { path: outputPath, format, captureKind };
+	const hastPathValue = step.output?.hastPath;
+	const pairingPathValue = step.output?.pairingPath;
+	if ((hastPathValue === undefined) !== (pairingPathValue === undefined)) {
+		throw new Error(`Step ${index} (${step.cmd}) must declare output.hastPath and output.pairingPath together`);
+	}
+	let hastPath: string | undefined;
+	let pairingPath: string | undefined;
+	if (hastPathValue !== undefined && pairingPathValue !== undefined) {
+		if (resolveCommand(step.cmd) !== 'hexcore.helix.decompileIR') {
+			throw new Error(`Step ${index} (${step.cmd}) cannot declare Helix C/HAST side artifacts`);
+		}
+		if (!hastPathValue.toLowerCase().endsWith('.hast.fb')) {
+			throw new Error(`Invalid output.hastPath in step ${index} (${step.cmd}): expected a .hast.fb file`);
+		}
+		if (path.extname(pairingPathValue).toLowerCase() !== '.json') {
+			throw new Error(`Invalid output.pairingPath in step ${index} (${step.cmd}): expected a .json file`);
+		}
+		hastPath = resolveContainedPath(hastPathValue, 'output.hastPath');
+		pairingPath = resolveContainedPath(pairingPathValue, 'output.pairingPath');
+		const keys = [outputPath, hastPath, pairingPath]
+			.map(value => process.platform === 'win32' ? value.toLowerCase() : value);
+		if (new Set(keys).size !== keys.length) {
+			throw new Error(`Step ${index} (${step.cmd}) C, HAST and pairing outputs must use distinct paths`);
+		}
+		const directories = [outputPath, hastPath, pairingPath]
+			.map(value => pathKeyForComparison(path.dirname(value)));
+		if (new Set(directories).size !== 1) {
+			throw new Error(`Step ${index} (${step.cmd}) C, HAST and pairing outputs must share one directory`);
+		}
+	}
+	return {
+		path: outputPath,
+		format,
+		captureKind,
+		...(hastPath ? { hastPath } : {}),
+		...(pairingPath ? { pairingPath } : {}),
+	};
 }
 
 function resolveOutputFormat(outputPath: string, format?: PipelineOutputFormat): PipelineOutputFormat {
@@ -3486,6 +3712,11 @@ function validateStepOutput(outputPath: string): void {
 	if (stat.size === 0) {
 		throw new Error(`Output file was created but is empty: ${outputPath}`);
 	}
+}
+
+function stepOutputArtifactPaths(output: StepOutputPath): string[] {
+	return [output.path, output.hastPath, output.pairingPath]
+		.filter((candidate): candidate is string => typeof candidate === 'string');
 }
 
 function invalidatePriorStepArtifacts(outputPath: string): boolean {

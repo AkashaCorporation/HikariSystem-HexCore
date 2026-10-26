@@ -1909,7 +1909,11 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
   "args": {
     "irPath": "hexcore-reports\\my-output\\bone_pos_calc.ll"
   },
-  "output": { "path": "bone_pos_calc.helix.c" },
+  "output": {
+    "path": "bone_pos_calc.helix.c",
+    "hastPath": "bone_pos_calc.helix.hast.fb",
+    "pairingPath": "bone_pos_calc.helix.pairing.json"
+  },
   "timeoutMs": 180000
 }
 ```
@@ -1926,7 +1930,7 @@ Decompile a pre-lifted LLVM IR file to pseudo-C via the Helix MLIR pipeline. Use
 | `souperTimeout` | `number` | `30000` | Per-candidate Z3 solver timeout (ms) for the Souper pass. **(v3.8.0)** |
 | `souperAutoThreshold` | `number` | `0.25` | Minimum bitwise/rotate signal density used by the automatic gate. |
 | `souperAutoMinOps` | `number` | `8` | Minimum number of signal operations used by the automatic gate. |
-| `output` | `{ path? }` | — | Output file path for pseudo-C code. Relative to `outDir`. |
+| `output` | `{ path?, hastPath?, pairingPath? }` | — | `path` stores pseudo-C. Declaring both `hastPath` (`*.hast.fb`) and `pairingPath` (`*.json`) additionally persists the raw HAST and a deterministic same-invocation envelope. All three files must share one directory inside `outDir`. |
 
 > **Important:** `irPath` must be the **path to the `.ll` file**, not inline IR text. The pipeline runner always sets `options.file` to the binary target, so `irPath` is the dedicated arg for specifying the IR file path.
 
@@ -1938,6 +1942,26 @@ producer header. The resulting pseudo-C records exact consumed/requested bytes
 and distinct byte/semantic coverage axes. An under-lifted retained input is
 `partial` and receives the same honesty cap as the binary route. Unsupported or
 malformed knobs fail instead of being ignored.
+
+When `output.hastPath` and `output.pairingPath` are declared together on
+`hexcore.helix.decompileIR`, the command writes three independently hashed
+artifacts from one native invocation:
+
+- pseudo-C at `output.path`;
+- the unexpanded HAST FlatBuffer at `output.hastPath`;
+- a pairing envelope at `output.pairingPath`.
+
+The envelope binds the exact IR request, loaded Helix runtime, C and HAST
+SHA-256 values, HAST schema/capabilities, function identity, return/parameter
+declarations, and native-quality barriers. The runner recomputes the side-file
+hashes and records separate `primary-c`, `hast`, and `pairing` nodes in
+`.hexcore-meta/provenance.json`. The pairing node depends on the IR, C and HAST;
+the C and HAST nodes each depend on the IR. A missing, changed, escaping, or
+mismatched side artifact fails the step.
+
+This is a bounded C/HAST contract. `cfg.status:"not-emitted"` is recorded when
+`decompileIR` returns no binary CFG buffer; the runner never synthesizes one.
+Omit both side paths to retain the legacy single-C output behavior.
 
 **Two-step pipeline example (recommended):**
 
@@ -1956,7 +1980,11 @@ malformed knobs fail instead of being ignored.
     {
       "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[0].output" },
-      "output": { "path": "bone_pos_calc.helix.c" },
+      "output": {
+        "path": "bone_pos_calc.helix.c",
+        "hastPath": "bone_pos_calc.helix.hast.fb",
+        "pairingPath": "bone_pos_calc.helix.pairing.json"
+      },
       "timeoutMs": 180000
     }
   ]

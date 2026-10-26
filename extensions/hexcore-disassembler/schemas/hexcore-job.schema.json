@@ -82,7 +82,23 @@
 									"md"
 								],
 								"description": "Output file format override."
+							},
+							"hastPath": {
+								"type": "string",
+								"minLength": 9,
+								"pattern": "\\.hast\\.fb$",
+								"description": "Optional raw HAST FlatBuffer side artifact from the same Helix invocation. Must be paired with pairingPath and remain inside outDir."
+							},
+							"pairingPath": {
+								"type": "string",
+								"minLength": 6,
+								"pattern": "\\.json$",
+								"description": "Optional C/HAST pairing envelope. Must be paired with hastPath and remain inside outDir."
 							}
+						},
+						"dependentRequired": {
+							"hastPath": ["pairingPath"],
+							"pairingPath": ["hastPath"]
 						}
 					},
 					"continueOnError": {

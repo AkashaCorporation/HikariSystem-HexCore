@@ -792,6 +792,32 @@ function readVariable(bb: BB, pos: number, hast: HASTModuleMetadata): CVarDecl {
   };
 }
 
+function readNativeQualitySummary(
+  bb: BB,
+  pos: number,
+  hast: HASTModuleMetadata,
+): NonNullable<HASTModuleMetadata['nativeQuality']> {
+  const qualityNegotiated = hast.schemaMajor === 1 && hast.schemaMinor >= 1 &&
+    hast.capabilities.includes('native-function-quality');
+  const qualityFlag = qualityNegotiated ? readU8(bb, pos, F_NATIVE_QUALITY_REPORTED, 0) : 0;
+  if (qualityFlag > 1) throw new Error('Invalid HAST native quality marker');
+  const qualityIds = qualityNegotiated ? readByteVec(bb, pos, F_NATIVE_QUALITY_ISSUES) : null;
+  if (qualityIds && qualityIds.length > 64) throw new Error('HAST native quality issue budget exceeded');
+  if (qualityNegotiated && qualityFlag === 1 && !qualityIds) {
+    throw new Error('Reported HAST native quality lacks its issue vector');
+  }
+  const qualityNames = ['opaque-post-call-register', 'incomplete-abi-arguments',
+    'synthesized-variable', 'damning-defect', 'registry-miss', 'suspicious-self-reference'];
+  const qualityReported = qualityNegotiated && qualityFlag === 1;
+  const issues = qualityReported
+    ? (qualityIds ?? []).map(id => qualityNames[id] ?? `unknown-native-quality-${id}`)
+    : [];
+  return {
+    status: !qualityReported ? 'unreported' : issues.length ? 'known-loss' : 'no-known-loss',
+    issues,
+  };
+}
+
 // ─── DecompiledFunction → CFunctionDecl ───
 
 function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined, hast: HASTModuleMetadata): CFunctionDecl {
@@ -856,21 +882,9 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
 
   const body: CBlockStmt = { kind: 'CBlockStmt', body: bodyStmts };
 
-  const qualityNegotiated = hast.schemaMajor === 1 && hast.schemaMinor >= 1 &&
-    hast.capabilities.includes('native-function-quality');
-  const qualityFlag = qualityNegotiated ? readU8(bb, pos, F_NATIVE_QUALITY_REPORTED, 0) : 0;
-  if (qualityFlag > 1) throw new Error('Invalid HAST native quality marker');
-  const qualityIds = qualityNegotiated ? readByteVec(bb, pos, F_NATIVE_QUALITY_ISSUES) : null;
-  if (qualityIds && qualityIds.length > 64) throw new Error('HAST native quality issue budget exceeded');
-  if (qualityNegotiated && qualityFlag === 1 && !qualityIds) throw new Error('Reported HAST native quality lacks its issue vector');
-  const qualityNames = ['opaque-post-call-register', 'incomplete-abi-arguments',
-    'synthesized-variable', 'damning-defect', 'registry-miss', 'suspicious-self-reference'];
-  const qualityReported = qualityNegotiated && qualityFlag === 1;
-  const qualityIssues = qualityReported ? (qualityIds ?? []).map(id => qualityNames[id] ?? `unknown-native-quality-${id}`) : [];
-  const nativeQuality: NonNullable<HASTModuleMetadata['nativeQuality']> = {
-    status: !qualityReported ? 'unreported' : qualityIssues.length ? 'known-loss' : 'no-known-loss',
-    issues: qualityIssues,
-  };
+  const nativeQuality = readNativeQualitySummary(bb, pos, hast);
+  const qualityReported = nativeQuality.status !== 'unreported';
+  const qualityIssues = nativeQuality.issues;
   const fn: CFunctionDecl = {
     kind: 'CFunctionDecl',
     name,
@@ -1079,6 +1093,143 @@ const hydrationBudgets = new WeakMap<BB, { remaining: number }>();
 function consumeHydrationBudget(bb: BB): void {
 	const budget = hydrationBudgets.get(bb);
 	if (budget && --budget.remaining < 0) throw new HASTHydrationBudgetError('HAST hydration table budget exceeded');
+}
+
+export interface HASTContractVariableSummary {
+  name: string;
+  type: string;
+  storage?: CVarDecl['storage'];
+  parameterIndex?: number;
+  typeEvidence?: HASTTypeEvidence;
+}
+
+export interface HASTContractFunctionSummary {
+  name: string;
+  address: string;
+  returnType: string;
+  returnTypeEvidence?: HASTTypeEvidence;
+  params: HASTContractVariableSummary[];
+  locals: HASTContractVariableSummary[];
+  callingConvention: string;
+  isVariadic: boolean;
+  nativeQuality: NonNullable<HASTModuleMetadata['nativeQuality']>;
+}
+
+export interface HASTContractSummary {
+  fileIdentifier: 'HAST';
+  moduleName: string;
+  schemaMajor: number;
+  schemaMinor: number;
+  capabilities: string[];
+  producer?: string;
+  producerVersion?: string;
+  architecture?: string;
+  pointerBits?: number;
+  semanticEligible: boolean;
+  functionCount: number;
+  functions: HASTContractFunctionSummary[];
+}
+
+export interface HASTContractInspectionLimits {
+  maxFunctions: number;
+  maxDeclarationsPerFunction: number;
+  maxTables: number;
+}
+
+const DEFAULT_CONTRACT_INSPECTION_LIMITS: HASTContractInspectionLimits = Object.freeze({
+  maxFunctions: 1024,
+  maxDeclarationsPerFunction: 65536,
+  maxTables: 250000,
+});
+
+/** Inspect only the HAST contract surface without hydrating statement bodies. */
+export function inspectHASTContract(
+  buffer: Uint8Array,
+  limits: HASTContractInspectionLimits = DEFAULT_CONTRACT_INSPECTION_LIMITS,
+): HASTContractSummary {
+  if (!Number.isSafeInteger(limits.maxFunctions) || limits.maxFunctions < 1 ||
+      !Number.isSafeInteger(limits.maxDeclarationsPerFunction) || limits.maxDeclarationsPerFunction < 1 ||
+      !Number.isSafeInteger(limits.maxTables) || limits.maxTables < 1) {
+    throw new Error('Invalid HAST contract inspection limits');
+  }
+  if (buffer.length < 8) throw new Error('HAST buffer too small (< 8 bytes)');
+  if (buffer[4] !== 0x48 || buffer[5] !== 0x41 || buffer[6] !== 0x53 || buffer[7] !== 0x54) {
+    throw new Error('Invalid HAST file identifier');
+  }
+
+  const bb = new flatbuffers.ByteBuffer(buffer);
+  hydrationBudgets.set(bb, { remaining: limits.maxTables });
+  const rootPos = bb.readInt32(bb.position()) + bb.position();
+  assertValidTable(bb, rootPos, 'AstModule');
+  const moduleMetadata = readModuleMetadata(bb, rootPos);
+  const functionsVector = readVec(bb, rootPos, M_FUNCTIONS);
+  const functionCount = functionsVector?.[1] ?? 0;
+  if (functionCount > limits.maxFunctions) {
+    throw new HASTHydrationBudgetError('HAST contract function budget exceeded');
+  }
+
+  const summarizeVariable = (variable: CVarDecl): HASTContractVariableSummary => ({
+    name: variable.name,
+    type: variable.type,
+    ...(variable.storage ? { storage: variable.storage } : {}),
+    ...(variable.parameterIndex !== undefined ? { parameterIndex: variable.parameterIndex } : {}),
+    ...(variable.typeEvidence ? { typeEvidence: variable.typeEvidence } : {}),
+  });
+  const functions: HASTContractFunctionSummary[] = [];
+  if (functionsVector) {
+    const [start, length] = functionsVector;
+    for (let index = 0; index < length; index++) {
+      const functionPos = bb.__indirect(start + index * 4);
+      consumeHydrationBudget(bb);
+      assertValidTable(bb, functionPos, `DecompiledFunction[${index}]`);
+      validateDeclarationEvidenceContract(bb, functionPos, index, moduleMetadata);
+      const paramsVector = readVec(bb, functionPos, F_PARAMS);
+      const localsVector = readVec(bb, functionPos, F_LOCALS);
+      const declarationCount = (paramsVector?.[1] ?? 0) + (localsVector?.[1] ?? 0);
+      if (declarationCount > limits.maxDeclarationsPerFunction) {
+        throw new HASTHydrationBudgetError(`HAST function[${index}] declaration budget exceeded`);
+      }
+      const readVariables = (vector: [number, number] | null): HASTContractVariableSummary[] => {
+        if (!vector) return [];
+        const [vectorStart, vectorLength] = vector;
+        const result: HASTContractVariableSummary[] = [];
+        for (let variableIndex = 0; variableIndex < vectorLength; variableIndex++) {
+          result.push(summarizeVariable(readVariable(
+            bb, bb.__indirect(vectorStart + variableIndex * 4), moduleMetadata)));
+        }
+        return result;
+      };
+      const returnTypePos = readTable(bb, functionPos, F_RETURN_TYPE);
+      functions.push({
+        name: readStr(bb, functionPos, F_NAME) ?? 'unknown',
+        address: `0x${readU64(bb, functionPos, F_ADDRESS).toString(16)}`,
+        returnType: returnTypePos ? readTypeStr(bb, returnTypePos) : 'void',
+        returnTypeEvidence: moduleMetadata.capabilities.includes('declaration-type-evidence')
+          ? readTypeEvidence(bb, readTable(bb, functionPos, F_RETURN_TYPE_EVIDENCE)!, moduleMetadata)
+          : unreportedTypeEvidence(),
+        params: readVariables(paramsVector),
+        locals: readVariables(localsVector),
+        callingConvention: readStr(bb, functionPos, F_CALLING_CONVENTION) ?? 'unknown',
+        isVariadic: readU8(bb, functionPos, F_IS_VARIADIC, 0) !== 0,
+        nativeQuality: readNativeQualitySummary(bb, functionPos, moduleMetadata),
+      });
+    }
+  }
+  return {
+    fileIdentifier: 'HAST',
+    moduleName: readStr(bb, rootPos, M_NAME) ?? '',
+    schemaMajor: moduleMetadata.schemaMajor,
+    schemaMinor: moduleMetadata.schemaMinor,
+    capabilities: [...moduleMetadata.capabilities],
+    ...(moduleMetadata.producer ? { producer: moduleMetadata.producer } : {}),
+    ...(moduleMetadata.producerVersion ? { producerVersion: moduleMetadata.producerVersion } : {}),
+    ...(moduleMetadata.architecture ? { architecture: moduleMetadata.architecture } : {}),
+    ...(moduleMetadata.pointerBits !== undefined ? { pointerBits: moduleMetadata.pointerBits } : {}),
+    semanticEligible: moduleMetadata.semanticEligible &&
+      functions.every(item => item.nativeQuality.status === 'no-known-loss'),
+    functionCount,
+    functions,
+  };
 }
 
 export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader, limits?: HASTHydrationLimits): CFunctionDecl[] {

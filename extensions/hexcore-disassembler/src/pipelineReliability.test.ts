@@ -16,6 +16,11 @@ let AutomationPipelineRunner: new () => {
 };
 let inspectSemanticResult: (value: unknown) => { status: 'ok' | 'partial' | 'failed'; reason?: string };
 let extractPipelineRuntimeIdentity: (command: string, value: unknown) => Record<string, unknown> | undefined;
+let validatePipelineSideArtifacts: (
+	command: string,
+	value: unknown,
+	expected: { hastPath?: string; pairingPath?: string },
+) => Promise<Array<{ role: string; path: string; sha256: string; pairingId: string }>>;
 let jobRequiresExclusiveEngine: (steps: Array<{ cmd: string }>) => boolean;
 let inspectBinaryIdentity: (filePath: string) => { format: string; architecture?: string; imageBase?: string };
 let checkBinaryFormatGate: (command: string, filePath: string) => { skip: boolean; reason?: string };
@@ -109,6 +114,7 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		AutomationPipelineRunner = runner.AutomationPipelineRunner;
 		inspectSemanticResult = runner.inspectSemanticResult;
 		extractPipelineRuntimeIdentity = runner.extractPipelineRuntimeIdentity;
+		validatePipelineSideArtifacts = runner.validatePipelineSideArtifacts;
 		jobRequiresExclusiveEngine = runner.jobRequiresExclusiveEngine;
 		inspectBinaryIdentity = runner.inspectBinaryIdentity;
 		checkBinaryFormatGate = runner.checkBinaryFormatGate;
@@ -613,6 +619,29 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.ok(validation.issues.some((issue: any) => issue.code === 'OUTPUT_PATH_INVALID'));
 	});
 
+	test('preflight applies the same containment gate to HAST side artifacts', async () => {
+		const target = path.join(tempDir, 'target.bin');
+		fs.writeFileSync(target, 'target', 'utf8');
+		const jobPath = writeJob(tempDir, 'hast-escape', target, {
+			cmd: 'hexcore.helix.decompileIR', args: { irPath: path.join(tempDir, 'input.ll') },
+			output: {
+				path: 'function.c',
+				hastPath: '../escape.hast.fb',
+				pairingPath: 'function.pairing.json',
+			},
+		});
+		let executions = 0;
+		executeCommand = async () => { executions++; return { success: true }; };
+
+		const status = await new AutomationPipelineRunner().runJobFile(jobPath);
+		assert.strictEqual(status.status, 'error');
+		assert.strictEqual(executions, 0);
+		assert.ok(!fs.existsSync(path.join(path.dirname(jobPath), 'escape.hast.fb')));
+		const validation = JSON.parse(fs.readFileSync(
+			path.join(path.dirname(jobPath), 'out', 'hexcore-pipeline.validation.json'), 'utf8'));
+		assert.ok(validation.issues.some((issue: any) => issue.code === 'OUTPUT_PATH_INVALID'));
+	});
+
 	test('preflight accepts the investigation job emitted by the Analysis Center', async () => {
 		const targetPath = path.join(tempDir, 'sample.exe');
 		const pe = Buffer.alloc(512);
@@ -748,6 +777,85 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(entry.analysisContract.session.engines[0].buildSha256, nativeSha256);
 		assert.strictEqual(entry.runtimeIdentity.binaryPath, nativePath);
 		assert.strictEqual(entry.runtimeIdentity.binarySha256, nativeSha256);
+	});
+
+	test('paired Helix output records C, HAST and envelope as distinct provenance artifacts', async () => {
+		const targetPath = path.join(tempDir, 'paired-input.exe');
+		const pe = Buffer.alloc(512);
+		pe.write('MZ', 0, 'ascii'); pe.writeUInt32LE(0x80, 0x3c); pe.write('PE\0\0', 0x80, 'ascii');
+		pe.writeUInt16LE(0x8664, 0x84); pe.writeUInt16LE(0x20b, 0x98); pe.writeBigUInt64LE(0x140000000n, 0xb0);
+		fs.writeFileSync(targetPath, pe);
+		const externalIr = path.join(tempDir, 'paired-input.ll');
+		fs.writeFileSync(externalIr, 'define i64 @paired() { ret i64 0 }\n', 'utf8');
+		const irSha256 = crypto.createHash('sha256').update(fs.readFileSync(externalIr)).digest('hex');
+		const nativePath = path.join(tempDir, 'helix.node');
+		fs.writeFileSync(nativePath, 'native-fixture', 'utf8');
+		const nativeSha256 = crypto.createHash('sha256').update('native-fixture').digest('hex');
+		const job = writeJob(tempDir, 'paired-artifacts', targetPath, {
+			id: 'paired', cmd: 'hexcore.helix.decompileIR', args: { irPath: externalIr },
+			output: {
+				path: 'function.c',
+				hastPath: 'function.hast.fb',
+				pairingPath: 'function.pairing.json',
+			},
+		});
+		executeCommand = async (_command, options) => {
+			const output = options.output as { path: string; hastPath: string; pairingPath: string };
+			const c = Buffer.from('int64_t paired(void) { return 0; }\n');
+			const hast = Buffer.from('HAST-fixture');
+			const pairingId = `sha256:${'c'.repeat(64)}`;
+			fs.writeFileSync(output.path, c);
+			fs.writeFileSync(output.hastPath, hast);
+			fs.writeFileSync(output.pairingPath, JSON.stringify({ pairingId }));
+			const identity = (role: 'hast' | 'pairing', filePath: string, mediaType: string) => ({
+				role, path: filePath,
+				sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'),
+				bytes: fs.statSync(filePath).size, mediaType, pairingId,
+			});
+			return {
+				success: true, status: 'ok',
+				consumedInputs: [{ path: externalIr, sha256: irSha256, mediaType: 'text/x-llvm' }],
+				runtimeIdentity: {
+					component: 'hexcore-helix', wrapperVersion: '0.9.4-rc.2', nativeVersion: '0.9.4-rc.2',
+					platform: 'win32', arch: 'x64', binaryPath: nativePath,
+					binarySha256: nativeSha256, binaryBytes: fs.statSync(nativePath).size,
+					artifactKind: 'native-node',
+				},
+				sideArtifacts: [
+					identity('hast', output.hastPath, 'application/vnd.hexcore.hast+flatbuffers'),
+					identity('pairing', output.pairingPath, 'application/vnd.hexcore.helix-pair+json'),
+				],
+			};
+		};
+		const status = await new AutomationPipelineRunner().runJobFile(job, true);
+		assert.strictEqual(status.status, 'ok');
+		assert.strictEqual(status.steps[0].sideArtifacts.length, 2);
+		const manifest = JSON.parse(fs.readFileSync(
+			path.join(path.dirname(job), 'out', '.hexcore-meta', 'provenance.json'), 'utf8'));
+		assert.strictEqual(manifest.artifacts.length, 3);
+		const byRole = new Map<string, any>(
+			manifest.artifacts.map((entry: any) => [String(entry.step.artifactRole), entry]));
+		assert.ok(byRole.has('primary-c'));
+		assert.ok(byRole.has('hast'));
+		assert.ok(byRole.has('pairing'));
+		assert.strictEqual(byRole.get('hast').inputs[0].sha256, irSha256);
+		assert.strictEqual(byRole.get('pairing').inputs.length, 3);
+		assert.ok(byRole.get('pairing').inputs.some((item: any) => item.sha256 === byRole.get('primary-c').artifact.sha256));
+		assert.ok(byRole.get('pairing').inputs.some((item: any) => item.sha256 === byRole.get('hast').artifact.sha256));
+	});
+
+	test('rejects a paired side artifact whose declared hash does not match disk', async () => {
+		const hastPath = path.join(tempDir, 'bad.hast.fb');
+		const pairingPath = path.join(tempDir, 'bad.pairing.json');
+		const pairingId = `sha256:${'d'.repeat(64)}`;
+		fs.writeFileSync(hastPath, 'HAST');
+		fs.writeFileSync(pairingPath, JSON.stringify({ pairingId }));
+		await assert.rejects(() => validatePipelineSideArtifacts('hexcore.helix.decompileIR', {
+			sideArtifacts: [
+				{ role: 'hast', path: hastPath, sha256: '0'.repeat(64), bytes: 4, mediaType: 'application/vnd.hexcore.hast+flatbuffers', pairingId },
+				{ role: 'pairing', path: pairingPath, sha256: crypto.createHash('sha256').update(fs.readFileSync(pairingPath)).digest('hex'), bytes: fs.statSync(pairingPath).size, mediaType: 'application/vnd.hexcore.helix-pair+json', pairingId },
+			],
+		}, { hastPath, pairingPath }), /changed after creation/);
 	});
 
 	test('stateful jobs cannot exchange active binaries under concurrent stress', async function () {

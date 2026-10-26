@@ -31,7 +31,11 @@ The address is illustrative and must belong to the selected binary.
       "cmd": "hexcore.helix.decompileIR",
       "args": { "irPath": "$step[lift-main].output" },
       "allowPartial": true,
-      "output": { "path": "main.c" }
+      "output": {
+        "path": "main.c",
+        "hastPath": "main.hast.fb",
+        "pairingPath": "main.pairing.json"
+      }
     }
   ]
 }
@@ -48,6 +52,13 @@ check closure/completeness; neither `allowLazy:false` nor a ratio threshold forc
 eager decoding. A lazy body or missing xref is not a negative behavioral result.
 Use `hexcore.disasm.materializeFunctions` with an explicit address list; ad-hoc
 HQL/query commands intentionally never hydrate bodies on their own.
+
+The paired Helix output is optional but recommended when another agent or tool
+will consume the result. `hastPath` and `pairingPath` must be declared together,
+must share the C output directory inside `outDir`, and must end in `.hast.fb` and `.json`. The raw HAST
+is not JSON-expanded. The envelope proves that C and HAST came from one native
+invocation and records `cfg.status:"not-emitted"` rather than fabricating a CFG.
+The provenance manifest contains separate C, HAST, and pairing nodes.
 
 ## Downstream Audit Quality
 
