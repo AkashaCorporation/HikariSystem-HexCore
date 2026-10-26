@@ -7830,9 +7830,11 @@ export class DisassemblerEngine {
 		aligned: boolean;
 		suggestedAddress?: number;
 	}> {
-		if (!this.capstone || !this.capstoneInitialized || !this.fileBuffer) {
+		if (!this.fileBuffer) {
 			return { aligned: true }; // can't verify, assume OK
 		}
+		await this.ensureCapstoneInitialized();
+		if (!this.capstone || !this.capstoneInitialized) return { aligned: true };
 
 		const startAddr = Math.max(this.baseAddress, targetAddress - lookbackBytes);
 		const offset = this.addressToOffset(startAddr);

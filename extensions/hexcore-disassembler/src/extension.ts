@@ -470,6 +470,13 @@ export interface DisassembleAtInstructionEntry {
 export interface DisassembleAtResult {
 	status: 'ok' | 'partial';
 	semanticWarning?: string;
+	scopeMode: 'discovery' | 'exact-range';
+	analysisPreparation: {
+		globalAnalysisInvoked: boolean;
+		engineGenerationBefore: number;
+		engineGenerationAfter: number;
+		nativeExecution?: NativeAnalyzeExecution;
+	};
 	address: string;         // VA requested in hex
 	effectiveAddress?: string;
 	addressMapping?: ReturnType<DisassemblerEngine['getAddressMapping']>;
@@ -525,7 +532,7 @@ export interface DisassembleAtResult {
 		semanticEnd?: string;
 		paddingBytes?: number;
 		size: number;
-		source: 'function-table' | 'pdata' | 'recommended' | 'none';
+		source: 'function-table' | 'pdata' | 'recommended' | 'explicit-range' | 'none';
 		reached: boolean;
 		crossed: boolean;
 		byteCoverage: number;
@@ -722,6 +729,8 @@ export interface ParsedDisassembleAtAddress {
 	countingDomain: 'byte-range' | 'instruction-count';
 	endExclusive?: number;
 	stopAtFunctionBoundary: boolean;
+	scopeMode: 'discovery' | 'exact-range';
+	autoBacktrack: boolean;
 	context: number;
 	file?: string;
 	output?: { path: string };
@@ -756,11 +765,30 @@ export function parseDisassembleAtAddress(args: any): ParsedDisassembleAtAddress
 		throw new Error("disassembleAtHeadless: 'stopAtFunctionBoundary' must be a boolean.");
 	}
 	const stopAtFunctionBoundary = args?.stopAtFunctionBoundary === true;
+	if (args?.autoBacktrack !== undefined && typeof args.autoBacktrack !== 'boolean') {
+		throw new Error("disassembleAtHeadless: 'autoBacktrack' must be a boolean.");
+	}
+	const autoBacktrack = args?.autoBacktrack !== false;
+	if (args?.scopeMode !== undefined && args.scopeMode !== 'discovery' && args.scopeMode !== 'exact-range') {
+		throw new Error("disassembleAtHeadless: 'scopeMode' must be 'discovery' or 'exact-range'.");
+	}
+	const scopeMode = args?.scopeMode === 'exact-range' ? 'exact-range' as const : 'discovery' as const;
 	const endExclusive = args?.endExclusive !== undefined && args?.endExclusive !== null
 		? parseRequiredHexAddress(args.endExclusive, 'endExclusive')
 		: undefined;
 	if (endExclusive !== undefined && endExclusive <= address) {
 		throw new Error("disassembleAtHeadless: 'endExclusive' must be greater than 'address'.");
+	}
+	if (scopeMode === 'exact-range') {
+		if (endExclusive === undefined) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' requires endExclusive.");
+		}
+		if (args?.autoBacktrack !== false) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' requires autoBacktrack:false.");
+		}
+		if (stopAtFunctionBoundary) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' cannot use stopAtFunctionBoundary.");
+		}
 	}
 	const countingDomain = endExclusive !== undefined || stopAtFunctionBoundary
 		? 'byte-range' as const
@@ -791,6 +819,8 @@ export function parseDisassembleAtAddress(args: any): ParsedDisassembleAtAddress
 		countingDomain,
 		...(endExclusive !== undefined ? { endExclusive } : {}),
 		stopAtFunctionBoundary,
+		scopeMode,
+		autoBacktrack,
 		context,
 		file: args?.file,
 		output: args?.output,
@@ -6926,6 +6956,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const params = parseDisassembleAtAddress(arg);
 
 			// 2. Load file if needed (reuse engine if same file)
+			let loadedNewFile = false;
 			if (params.file) {
 				const currentFile = engine.getFilePath();
 				if (currentFile !== params.file) {
@@ -6933,8 +6964,30 @@ export function activate(context: vscode.ExtensionContext): void {
 					if (!loaded) {
 						throw new Error(`Failed to load file: ${params.file}`);
 					}
-					await engine.analyzeAll();
+					loadedNewFile = true;
 				}
+			}
+			const engineGenerationBeforePreparation = engine.getAnalysisGeneration();
+			let globalAnalysisInvoked = false;
+			let preparationNativeExecution: NativeAnalyzeExecution | undefined;
+			if (params.scopeMode === 'discovery' &&
+				(loadedNewFile || engine.getFunctions().length === 0)) {
+				const targetFile = engine.getFilePath();
+				if (!targetFile) throw new Error('disassembleAtHeadless discovery mode requires a loaded file.');
+				globalAnalysisInvoked = true;
+				const pipelineTimeoutMs = typeof arg?.pipelineTimeoutMs === 'number'
+					? arg.pipelineTimeoutMs : 600_000;
+				const analysis = await vscode.commands.executeCommand<{
+					success?: boolean;
+					nativeExecution?: NativeAnalyzeExecution;
+				}>('hexcore.disasm.analyzeAll', {
+					file: targetFile,
+					quiet: true,
+					forceReload: loadedNewFile,
+					pipelineTimeoutMs,
+				});
+				if (!analysis) throw new Error('disassembleAtHeadless discovery analysis returned no result.');
+				preparationNativeExecution = analysis.nativeExecution;
 			}
 
 			// 3. Validate address is within binary range
@@ -6952,7 +7005,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			// 3c. Auto-backtrack: if address is mid-function, find the real start
 			//     Uses native function boundary detection (FEAT-DISASM-004)
 			let effectiveAddress = params.address;
-			const autoBacktrack = (arg as any)?.autoBacktrack !== false; // enabled by default
+			const autoBacktrack = params.autoBacktrack;
 			if (autoBacktrack) {
 				const backtrack = await resolveAutoBacktrack(engine, params.address);
 				if (backtrack) {
@@ -6975,7 +7028,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			// 6. Disassemble main instructions (use effectiveAddress for backtrack).
 			// Clamp the byte window before decoding so a known function end is a
 			// terminal boundary, not metadata reported after a linear sweep crossed it.
-			const extent = getAuthoritativeFunctionExtent(engine, effectiveAddress);
+			const exactRangeMode = params.scopeMode === 'exact-range';
+			const extent = exactRangeMode
+				? {
+					start: effectiveAddress,
+					end: params.endExclusive!,
+					size: params.endExclusive! - effectiveAddress,
+					source: 'explicit-range' as const,
+				}
+				: getAuthoritativeFunctionExtent(engine, effectiveAddress);
 			if (params.stopAtFunctionBoundary && params.endExclusive === undefined && extent.source === 'none') {
 				throw new Error('disassembleAtHeadless: stopAtFunctionBoundary requires a known function extent.');
 			}
@@ -6998,7 +7059,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			const boundedSize = decodeEndExclusive !== undefined
 				? decodeEndExclusive - effectiveAddress
 				: estimatedSize;
-			const extentFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			const extentFunction = !exactRangeMode && extent.source !== 'none'
+				? engine.getFunctionAt(extent.start) : undefined;
 			if (extentFunction && extent.source !== 'pdata' && extent.end > extent.start &&
 				extent.end < extentFunction.endAddress) {
 				extentFunction.endAddress = extent.end;
@@ -7007,7 +7069,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const knownFunctionAddress = extentFunction
 				? extent.start
 				: undefined;
-			const closureResult = knownFunctionAddress !== undefined
+			const closureResult = !exactRangeMode && knownFunctionAddress !== undefined
 				? await engine.materializeFunctionForAnalysis(knownFunctionAddress)
 				: undefined;
 			const rawMainInstructions = await engine.disassembleRange(effectiveAddress, boundedSize, params.effectiveCount);
@@ -7039,15 +7101,17 @@ export function activate(context: vscode.ExtensionContext): void {
 					requestedEndExclusive - effectiveAddress,
 				)
 				: undefined;
-			const owningFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			const owningFunction = !exactRangeMode && extent.source !== 'none'
+				? engine.getFunctionAt(extent.start) : undefined;
 			const semanticAddresses = new Set(
-				(owningFunction?.instructions ?? []).map(instruction => Number(instruction.address)),
+				(exactRangeMode ? mainInstructions : (owningFunction?.instructions ?? []))
+					.map(instruction => Number(instruction.address)),
 			);
 			const boundaryContract = resolveInstructionBoundaryContract({
 				requestedAddress: params.address,
 				effectiveAddress,
 				autoBacktrack,
-				instructions: (owningFunction?.instructions ?? []).map(instruction => ({
+				instructions: (exactRangeMode ? mainInstructions : (owningFunction?.instructions ?? [])).map(instruction => ({
 					address: Number(instruction.address),
 					size: Number(instruction.size),
 				})),
@@ -7062,7 +7126,9 @@ export function activate(context: vscode.ExtensionContext): void {
 						: '; enable autoBacktrack or provide an instruction boundary.')
 				: undefined;
 			const lastSemanticInstruction = owningFunction?.instructions.at(-1);
-			const semanticEnd = lastSemanticInstruction
+			const semanticEnd = exactRangeMode
+				? decodedEndExclusive
+				: lastSemanticInstruction
 				? Number(lastSemanticInstruction.address) + Number(lastSemanticInstruction.size)
 				: undefined;
 			const instructionRole = (instruction: { address: number; mnemonic: string }, isContext: boolean) =>
@@ -7162,12 +7228,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			const semanticInstructionCount = allEntries.filter(entry => entry.role === 'semantic-body').length;
 			const paddingInstructionCount = allEntries.filter(entry => entry.role === 'alignment-padding').length;
 			const unclassifiedInstructionCount = allEntries.filter(entry => entry.role === 'unclassified').length;
-			const bodyStatus = knownFunctionAddress !== undefined
+			const bodyStatus = !exactRangeMode && knownFunctionAddress !== undefined
 				? engine.getFunctionBodyStatus(knownFunctionAddress)
 				: 'decode-empty';
-			const displayOnly = !closureResult || closureResult.status === 'unknown-function' ||
-				closureResult.status === 'decode-empty' || closureResult.status === 'partial';
-			const closureReason = closureResult?.status === 'committed'
+			const displayOnly = !exactRangeMode && (!closureResult || closureResult.status === 'unknown-function' ||
+				closureResult.status === 'decode-empty' || closureResult.status === 'partial');
+			const closureReason = exactRangeMode
+				? 'Exact-range mode is display-only by contract and never mutates the global analysis universe.'
+				: closureResult?.status === 'committed'
 				? 'Function body was classified and committed to the downstream analysis universe.'
 				: closureResult?.status === 'already-current'
 					? 'Function body was already present in the current analysis universe.'
@@ -7191,6 +7259,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number }; junkCount?: number; junkRatio?: number; vmDetection?: typeof vmDetection; prngDetection?: typeof prngDetection } = {
 				status: semanticStatus,
 				...(warnings.length > 0 ? { semanticWarning: warnings.join(' ') } : {}),
+				scopeMode: params.scopeMode,
+				analysisPreparation: {
+					globalAnalysisInvoked,
+					engineGenerationBefore: engineGenerationBeforePreparation,
+					engineGenerationAfter: engine.getAnalysisGeneration(),
+					...(preparationNativeExecution ? { nativeExecution: preparationNativeExecution } : {}),
+				},
 				address: `0x${params.address.toString(16).toUpperCase()}`,
 				effectiveAddress: `0x${effectiveAddress.toString(16).toUpperCase()}`,
 				addressMapping: engine.getAddressMapping(params.address),
