@@ -198,6 +198,24 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		}), undefined);
 	});
 
+	test('accepts only hash-bound Helix runtime identities', () => {
+		const identity = {
+			component: 'hexcore-helix', wrapperVersion: '0.9.4-rc.2', nativeVersion: '0.9.4-rc.2',
+			platform: 'win32', arch: 'x64', binaryPath: path.join(tempDir, 'helix.node'),
+			binarySha256: 'a'.repeat(64), binaryBytes: 1234, artifactKind: 'native-node',
+		};
+		assert.deepStrictEqual(
+			extractPipelineRuntimeIdentity('hexcore.helix.decompileIR', { runtimeIdentity: identity }),
+			identity,
+		);
+		assert.strictEqual(extractPipelineRuntimeIdentity('hexcore.helix.decompileIR', {
+			runtimeIdentity: { ...identity, binarySha256: 'forged' },
+		}), undefined);
+		assert.strictEqual(extractPipelineRuntimeIdentity('hexcore.hashcalc.calculate', {
+			runtimeIdentity: identity,
+		}), undefined);
+	});
+
 	test('persists the Revenant wrapper and decompiler identity in artifact provenance', async () => {
 		const target = path.join(tempDir, 'managed.dll');
 		fs.writeFileSync(target, Buffer.from([0x4d, 0x5a, 0x00, 0x00]));
@@ -683,6 +701,53 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(cEntry.analysisContract.inputs[0].sha256, liftEntry.analysisContract.artifact.sha256);
 		assert.strictEqual(cEntry.analysisContract.inputs[0].path, path.join(outDir, 'function.ll'));
 		assert.ok(!fs.existsSync(`${path.join(outDir, 'function.ll')}.provenance.json`));
+	});
+
+	test('absolute IR consumption binds bytes and loaded Helix engine identity', async () => {
+		const targetPath = path.join(tempDir, 'absolute-input.exe');
+		const pe = Buffer.alloc(512);
+		pe.write('MZ', 0, 'ascii'); pe.writeUInt32LE(0x80, 0x3c); pe.write('PE\0\0', 0x80, 'ascii');
+		pe.writeUInt16LE(0x8664, 0x84); pe.writeUInt16LE(0x20b, 0x98); pe.writeBigUInt64LE(0x140000000n, 0xb0);
+		fs.writeFileSync(targetPath, pe);
+		const externalIr = path.join(tempDir, 'frozen-input.ll');
+		const irText = 'define i64 @sample() { ret i64 0 }\n';
+		fs.writeFileSync(externalIr, irText, 'utf8');
+		const irSha256 = crypto.createHash('sha256').update(irText, 'utf8').digest('hex');
+		const nativePath = path.join(tempDir, 'hexcore-helix.node');
+		fs.writeFileSync(nativePath, 'native-fixture', 'utf8');
+		const nativeSha256 = crypto.createHash('sha256').update('native-fixture').digest('hex');
+		const job = writeJob(tempDir, 'absolute-ir-runtime', targetPath, {
+			cmd: 'hexcore.helix.decompileIR', args: { irPath: externalIr }, output: { path: 'function.c' },
+		});
+		executeCommand = async (_command, options) => {
+			fs.writeFileSync((options.output as { path: string }).path, 'int64_t sample(void) { return 0; }\n', 'utf8');
+			return {
+				success: true, status: 'ok',
+				consumedInputs: [{ path: externalIr, sha256: irSha256, mediaType: 'text/x-llvm' }],
+				runtimeIdentity: {
+					component: 'hexcore-helix', wrapperVersion: '0.9.4-rc.2', nativeVersion: '0.9.4-rc.2',
+					platform: 'win32', arch: 'x64', binaryPath: nativePath,
+					binarySha256: nativeSha256, binaryBytes: fs.statSync(nativePath).size,
+					artifactKind: 'native-node',
+				},
+			};
+		};
+		const status = await new AutomationPipelineRunner().runJobFile(job, true);
+		assert.strictEqual(status.status, 'ok');
+		assert.deepStrictEqual(status.provenance.analysisSession?.engines, [{
+			id: 'hikarisystem.hexcore-helix',
+			version: 'wrapper=0.9.4-rc.2 native=0.9.4-rc.2',
+			buildSha256: nativeSha256,
+		}]);
+		const manifest = JSON.parse(fs.readFileSync(
+			path.join(path.dirname(job), 'out', '.hexcore-meta', 'provenance.json'), 'utf8'));
+		const entry = manifest.artifacts[0];
+		assert.deepStrictEqual(entry.inputs, [{
+			id: `artifact:sha256:${irSha256}`, path: externalIr, sha256: irSha256, mediaType: 'text/x-llvm',
+		}]);
+		assert.strictEqual(entry.analysisContract.session.engines[0].buildSha256, nativeSha256);
+		assert.strictEqual(entry.runtimeIdentity.binaryPath, nativePath);
+		assert.strictEqual(entry.runtimeIdentity.binarySha256, nativeSha256);
 	});
 
 	test('stateful jobs cannot exchange active binaries under concurrent stress', async function () {

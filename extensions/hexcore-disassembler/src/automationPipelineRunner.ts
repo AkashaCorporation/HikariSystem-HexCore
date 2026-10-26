@@ -1329,7 +1329,7 @@ export function inspectSemanticResult(value: unknown): SemanticResultInspection 
 	return { status: 'ok' };
 }
 
-export interface PipelineRuntimeIdentity {
+export interface RevenantPipelineRuntimeIdentity {
 	component: 'hexcore-revenant';
 	backend?: 'override' | 'bundled' | 'ilspycmd';
 	backendVersion?: string;
@@ -1337,9 +1337,49 @@ export interface PipelineRuntimeIdentity {
 	toolVersion?: string;
 }
 
+export interface HelixPipelineRuntimeIdentity {
+	component: 'hexcore-helix';
+	wrapperVersion: string;
+	nativeVersion: string;
+	platform: string;
+	arch: string;
+	binaryPath: string;
+	binarySha256: string;
+	binaryBytes: number;
+	artifactKind: 'native-node' | 'package-entry';
+}
+
+export type PipelineRuntimeIdentity = RevenantPipelineRuntimeIdentity | HelixPipelineRuntimeIdentity;
+
 /** Retain bounded runtime identity emitted by wrapped engines. */
 export function extractPipelineRuntimeIdentity(command: string, value: unknown): PipelineRuntimeIdentity | undefined {
-	if (!command.startsWith('hexcore.revenant.') || !isRecord(value)) { return undefined; }
+	if (!isRecord(value)) { return undefined; }
+	if (command.startsWith('hexcore.helix.') || command.startsWith('hexcore.hql.')) {
+		const identity = isRecord(value.runtimeIdentity) ? value.runtimeIdentity : undefined;
+		if (!identity || identity.component !== 'hexcore-helix' ||
+			typeof identity.wrapperVersion !== 'string' || identity.wrapperVersion.length === 0 ||
+			typeof identity.nativeVersion !== 'string' || identity.nativeVersion.length === 0 ||
+			typeof identity.platform !== 'string' || identity.platform.length === 0 ||
+			typeof identity.arch !== 'string' || identity.arch.length === 0 ||
+			typeof identity.binaryPath !== 'string' || !path.isAbsolute(identity.binaryPath) ||
+			typeof identity.binarySha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(identity.binarySha256) ||
+			typeof identity.binaryBytes !== 'number' || !Number.isSafeInteger(identity.binaryBytes) || identity.binaryBytes <= 0 ||
+			(identity.artifactKind !== 'native-node' && identity.artifactKind !== 'package-entry')) {
+			return undefined;
+		}
+		return {
+			component: 'hexcore-helix',
+			wrapperVersion: identity.wrapperVersion,
+			nativeVersion: identity.nativeVersion,
+			platform: identity.platform,
+			arch: identity.arch,
+			binaryPath: path.resolve(identity.binaryPath),
+			binarySha256: identity.binarySha256.toLowerCase(),
+			binaryBytes: Number(identity.binaryBytes),
+			artifactKind: identity.artifactKind,
+		};
+	}
+	if (!command.startsWith('hexcore.revenant.')) { return undefined; }
 	const version = (field: string): string | undefined => {
 		const candidate = value[field];
 		return typeof candidate === 'string' && /^\d+(?:\.\d+){1,3}$/.test(candidate) ? candidate : undefined;
@@ -1422,13 +1462,16 @@ async function collectInputArtifactReferences(
 			const key = pathKey(resolved);
 			const prior = priorOutputs.get(key);
 			if (prior && key !== outputKey) { referenced.add(prior); }
+			else { addExistingFile(resolved); }
 		} else if (Array.isArray(value)) {
 			for (const item of value) { visit(item); }
 		} else if (isRecord(value)) {
 			for (const item of Object.values(value)) { visit(item); }
 		}
 	};
-	const { pipelineArtifactBindings: _bindings, pipelineAbortSignal: _signal, ...artifactOptions } = commandOptions;
+	const { file: _file, output: _output, quiet: _quiet,
+		pipelineArtifactBindings: _bindings, pipelineAbortSignal: _signal,
+		...artifactOptions } = commandOptions;
 	visit(artifactOptions);
 	if (step && stepIndex !== undefined) {
 		for (const reference of collectStepReferences(step.args ?? {})) {
@@ -1440,17 +1483,36 @@ async function collectInputArtifactReferences(
 
 	// External inputs are not necessarily outputs of an earlier step in this job.
 	// Bind the scan to the bytes it actually read, not a later re-hash of mutable files.
-	const consumed: AnalysisArtifactReference[] = [];
+	const consumedByPath = new Map<string, AnalysisArtifactReference>();
+	const addConsumed = (inputPath: unknown, sha256: unknown, mediaType?: unknown): void => {
+		if (typeof inputPath !== 'string' || !path.isAbsolute(inputPath) ||
+			typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(sha256) || pathKey(inputPath) === outputKey) { return; }
+		const resolved = path.resolve(inputPath);
+		for (const existing of referenced) {
+			if (pathKey(existing) === pathKey(resolved)) { referenced.delete(existing); }
+		}
+		const digest = sha256.toLowerCase();
+		const key = pathKey(resolved);
+		const prior = consumedByPath.get(key);
+		if (prior && prior.sha256 !== digest) {
+			throw new Error(`Conflicting consumed-input identity for ${resolved}`);
+		}
+		consumedByPath.set(key, {
+			id: `artifact:sha256:${digest}`,
+			path: resolved,
+			sha256: digest,
+			mediaType: typeof mediaType === 'string' && mediaType.length > 0
+				? mediaType : resolveArtifactMediaType(resolved),
+		});
+	};
+	if (isRecord(commandResult) && Array.isArray(commandResult.consumedInputs)) {
+		for (const input of commandResult.consumedInputs) {
+			if (!isRecord(input)) { continue; }
+			addConsumed(input.path, input.sha256, input.mediaType);
+		}
+	}
 	if (resolvedCommand === 'hexcore.audit.refcountScan' && isRecord(commandResult)) {
 		const quality = isRecord(commandResult.inputQuality) ? commandResult.inputQuality : undefined;
-		const addConsumed = (inputPath: unknown, sha256: unknown): void => {
-			if (typeof inputPath !== 'string' || !path.isAbsolute(inputPath) ||
-				typeof sha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(sha256) || pathKey(inputPath) === outputKey) return;
-			const resolved = path.resolve(inputPath);
-			for (const existing of referenced) { if (pathKey(existing) === pathKey(resolved)) referenced.delete(existing); }
-			const digest = sha256.toLowerCase();
-			consumed.push({ id: `artifact:sha256:${digest}`, path: resolved, sha256: digest, mediaType: resolveArtifactMediaType(resolved) });
-		};
 		addConsumed(commandResult.inputFile, quality?.inputSha256);
 		if (isRecord(quality?.provenanceSnapshot)) {
 			addConsumed(quality.provenanceSnapshot.path, quality.provenanceSnapshot.sha256);
@@ -1494,7 +1556,7 @@ async function collectInputArtifactReferences(
 			mediaType: resolveArtifactMediaType(inputPath),
 		};
 	}));
-	return [...consumed, ...references];
+	return [...consumedByPath.values(), ...references];
 }
 
 function canonicalizeConfiguration(value: unknown): unknown {
@@ -1578,6 +1640,20 @@ async function writeArtifactProvenance(
 	}
 	const analysisStatus: AnalysisStatus = semanticStatus === 'error' ? 'failed' : semanticStatus;
 	const runtimeIdentity = extractPipelineRuntimeIdentity(resolvedCommand, commandResult);
+	if (runtimeIdentity?.component === 'hexcore-helix' && run.analysisSession) {
+		const engine = {
+			id: 'hikarisystem.hexcore-helix',
+			version: `wrapper=${runtimeIdentity.wrapperVersion} native=${runtimeIdentity.nativeVersion}`,
+			buildSha256: runtimeIdentity.binarySha256,
+		};
+		const engines = run.analysisSession.engines
+			.filter(candidate => candidate.id !== engine.id);
+		engines.push(engine);
+		run.analysisSession = createAnalysisSession({
+			...run.analysisSession,
+			engines,
+		});
+	}
 	const analysisContract = createAnalysisArtifactProvenance({
 		target: run.analysisTarget,
 		session: run.analysisSession,

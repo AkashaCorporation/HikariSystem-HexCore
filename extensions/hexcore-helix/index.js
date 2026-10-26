@@ -9,14 +9,28 @@
  * Supported platforms: win32-x64, linux-x64, darwin-arm64, darwin-x64.
  */
 
-const { existsSync, readFileSync } = require('fs');
+const { existsSync, readFileSync, realpathSync, statSync } = require('fs');
+const { createHash } = require('crypto');
 const { join } = require('path');
+const { version: wrapperVersion } = require('./package.json');
 
 const { platform, arch } = process;
 
 let nativeBinding = null;
+let loadedArtifactPath = null;
 let localFileExisted = false;
 let loadError = null;
+
+function loadLocalArtifact(filename) {
+    const artifactPath = join(__dirname, filename);
+    loadedArtifactPath = artifactPath;
+    return require(artifactPath);
+}
+
+function loadPlatformPackage(packageName) {
+    loadedArtifactPath = require.resolve(packageName);
+    return require(packageName);
+}
 
 function isMusl() {
     // For Node.js >= 15: report.getReport().header.glibcVersionRuntime
@@ -46,9 +60,9 @@ switch (platform) {
                 );
                 try {
                     if (localFileExisted) {
-                        nativeBinding = require('./hexcore-helix.win32-x64-msvc.node');
+                        nativeBinding = loadLocalArtifact('hexcore-helix.win32-x64-msvc.node');
                     } else {
-                        nativeBinding = require('@hexcore/helix-win32-x64-msvc');
+                        nativeBinding = loadPlatformPackage('@hexcore/helix-win32-x64-msvc');
                     }
                 } catch (e) {
                     loadError = e;
@@ -68,9 +82,9 @@ switch (platform) {
                     );
                     try {
                         if (localFileExisted) {
-                            nativeBinding = require('./hexcore-helix.linux-x64-musl.node');
+                            nativeBinding = loadLocalArtifact('hexcore-helix.linux-x64-musl.node');
                         } else {
-                            nativeBinding = require('@hexcore/helix-linux-x64-musl');
+                            nativeBinding = loadPlatformPackage('@hexcore/helix-linux-x64-musl');
                         }
                     } catch (e) {
                         loadError = e;
@@ -81,9 +95,9 @@ switch (platform) {
                     );
                     try {
                         if (localFileExisted) {
-                            nativeBinding = require('./hexcore-helix.linux-x64-gnu.node');
+                            nativeBinding = loadLocalArtifact('hexcore-helix.linux-x64-gnu.node');
                         } else {
-                            nativeBinding = require('@hexcore/helix-linux-x64-gnu');
+                            nativeBinding = loadPlatformPackage('@hexcore/helix-linux-x64-gnu');
                         }
                     } catch (e) {
                         loadError = e;
@@ -103,9 +117,9 @@ switch (platform) {
                 );
                 try {
                     if (localFileExisted) {
-                        nativeBinding = require('./hexcore-helix.darwin-x64.node');
+                        nativeBinding = loadLocalArtifact('hexcore-helix.darwin-x64.node');
                     } else {
-                        nativeBinding = require('@hexcore/helix-darwin-x64');
+                        nativeBinding = loadPlatformPackage('@hexcore/helix-darwin-x64');
                     }
                 } catch (e) {
                     loadError = e;
@@ -117,9 +131,9 @@ switch (platform) {
                 );
                 try {
                     if (localFileExisted) {
-                        nativeBinding = require('./hexcore-helix.darwin-arm64.node');
+                        nativeBinding = loadLocalArtifact('hexcore-helix.darwin-arm64.node');
                     } else {
-                        nativeBinding = require('@hexcore/helix-darwin-arm64');
+                        nativeBinding = loadPlatformPackage('@hexcore/helix-darwin-arm64');
                     }
                 } catch (e) {
                     loadError = e;
@@ -143,6 +157,25 @@ if (!nativeBinding) {
     );
 }
 
+if (!loadedArtifactPath) {
+    throw new Error('Native binding loaded without a resolvable artifact path');
+}
+
+const canonicalArtifactPath = realpathSync.native(loadedArtifactPath);
+const artifactBytes = readFileSync(canonicalArtifactPath);
+const runtimeIdentity = Object.freeze({
+    component: 'hexcore-helix',
+    wrapperVersion,
+    platform,
+    arch,
+    binaryPath: canonicalArtifactPath,
+    binarySha256: createHash('sha256').update(artifactBytes).digest('hex'),
+    binaryBytes: statSync(canonicalArtifactPath).size,
+    artifactKind: canonicalArtifactPath.toLowerCase().endsWith('.node')
+        ? 'native-node'
+        : 'package-entry',
+});
+
 const {
     HelixEngine,
     Architecture,
@@ -156,3 +189,4 @@ module.exports.Architecture = Architecture;
 module.exports.serializeCfg = serializeCfg;
 module.exports.serializeAst = serializeAst;
 module.exports.readCfgFunctionName = readCfgFunctionName;
+module.exports.runtimeIdentity = runtimeIdentity;

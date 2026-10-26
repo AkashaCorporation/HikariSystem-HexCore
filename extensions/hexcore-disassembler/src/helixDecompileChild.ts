@@ -17,6 +17,7 @@ interface DecompileRequest {
 }
 
 interface NativeEngine {
+	version(): string;
 	decompileIr(irText: string): unknown;
 	dispose(): void;
 	setSkipOptimization?(enabled: boolean): void;
@@ -31,9 +32,24 @@ interface NativeEngine {
 
 interface NativeBinding {
 	HelixEngine: new (arch: number) => NativeEngine;
+	runtimeIdentity?: {
+		component: 'hexcore-helix';
+		wrapperVersion: string;
+		platform: string;
+		arch: string;
+		binaryPath: string;
+		binarySha256: string;
+		binaryBytes: number;
+		artifactKind: 'native-node' | 'package-entry';
+	};
 }
 
-function reply(message: { result?: unknown; error?: string }): void {
+function reply(message: {
+	result?: unknown;
+	error?: string;
+	runtimeIdentity?: NativeBinding['runtimeIdentity'];
+	nativeVersion?: string;
+}): void {
 	if (!process.send) { return; }
 	process.send(message, () => process.disconnect());
 }
@@ -81,10 +97,11 @@ process.once('message', (request: DecompileRequest) => {
 			}
 		}
 
+		const nativeVersion = engine.version();
 		const result = engine.decompileIr(request.irText);
 		engine.dispose();
 		engine = undefined;
-		reply({ result });
+		reply({ result, runtimeIdentity: binding.runtimeIdentity, nativeVersion });
 	} catch (error: unknown) {
 		try { engine?.dispose(); } catch { /* process exit is the final cleanup boundary */ }
 		const message = error instanceof Error ? error.message : String(error);

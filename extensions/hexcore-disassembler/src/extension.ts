@@ -5482,6 +5482,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 
 			let irText: string;
+			let consumedIrInput: { path: string; sha256: string; mediaType: string } | undefined;
 
 			// irPath: explicit .ll file path for pipeline use (options.file is always the binary).
 			const irFilePath = typeof options.irPath === 'string' ? options.irPath : undefined;
@@ -5505,6 +5506,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					return undefined;
 				}
 				irText = fs.readFileSync(resolved, 'utf-8');
+				consumedIrInput = {
+					path: resolved,
+					sha256: crypto.createHash('sha256').update(irText, 'utf8').digest('hex'),
+					mediaType: 'text/x-llvm',
+				};
 			} else if (isHeadless && typeof options.file === 'string') {
 				if (!fs.existsSync(options.file)) {
 					const errorMsg = `File not found: ${options.file}`;
@@ -5516,6 +5522,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					return undefined;
 				}
 				irText = fs.readFileSync(options.file, 'utf-8');
+				consumedIrInput = {
+					path: path.resolve(options.file),
+					sha256: crypto.createHash('sha256').update(irText, 'utf8').digest('hex'),
+					mediaType: 'text/x-llvm',
+				};
 			} else {
 				const activeEditor = vscode.window.activeTextEditor;
 				if (!activeEditor) {
@@ -5859,6 +5870,8 @@ export function activate(context: vscode.ExtensionContext): void {
 					function: semanticContext.function,
 					analysis: semanticContext.analysis,
 				} : undefined,
+				runtimeIdentity: decompileResult.runtimeIdentity ?? helixWrapper.getRuntimeIdentity(),
+				...(consumedIrInput ? { consumedInputs: [consumedIrInput] } : {}),
 				// HQL: expose the raw HAST FlatBuffer so headless callers
 				// (hexcore.hql.scanHeadless) can run scanHAST() over the decompiled
 				// function. In-process executeCommand returns the literal object so
@@ -6413,6 +6426,14 @@ export function activate(context: vscode.ExtensionContext): void {
 				return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
 			};
 
+			const resolvedIrPath = irPath
+				? (path.isAbsolute(irPath)
+					? irPath
+					: path.resolve(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? '', irPath))
+				: undefined;
+			const irSha256Before = resolvedIrPath && fs.existsSync(resolvedIrPath)
+				? crypto.createHash('sha256').update(fs.readFileSync(resolvedIrPath)).digest('hex')
+				: undefined;
 			const targets = buildScanTargets({ file, address, addresses, irPath, irText });
 			if (targets.length === 0) {
 				const report = {
@@ -6446,14 +6467,30 @@ export function activate(context: vscode.ExtensionContext): void {
 				maxFindingsPerFunction: positiveIntegerArg('maxFindingsPerFunction'),
 				session: hqlSessionBinding,
 			});
+			if (resolvedIrPath && irSha256Before) {
+				const irSha256After = crypto.createHash('sha256')
+					.update(fs.readFileSync(resolvedIrPath)).digest('hex');
+				if (irSha256After !== irSha256Before) {
+					throw new Error('HQL IR input changed while it was being consumed');
+				}
+			}
+			const enrichedReport = {
+				...report,
+				runtimeIdentity: helixWrapper.getRuntimeIdentity(),
+				...(resolvedIrPath && irSha256Before ? { consumedInputs: [{
+					path: resolvedIrPath,
+					sha256: irSha256Before,
+					mediaType: 'text/x-llvm',
+				}] } : {}),
+			};
 
 			if (outputPath) {
 				// Bug #36/2: create the parent dir so the write never silently fails
 				// and trips the runner's "output file not created" mask.
 				fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-				fs.writeFileSync(outputPath, JSON.stringify(report, null, 2), 'utf-8');
+				fs.writeFileSync(outputPath, JSON.stringify(enrichedReport, null, 2), 'utf-8');
 			}
-			return report;
+			return enrichedReport;
 		})
 	);
 

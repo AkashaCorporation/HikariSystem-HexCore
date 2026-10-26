@@ -160,3 +160,17 @@ export declare function serializeAst(astJson: string): Buffer
  * Takes a JSON string with CFG data and returns a FlatBuffer binary.
  */
 export declare function serializeCfg(cfgJson: string): Buffer
+
+export interface HelixRuntimeIdentity {
+  component: 'hexcore-helix'
+  wrapperVersion: string
+  platform: string
+  arch: string
+  binaryPath: string
+  binarySha256: string
+  binaryBytes: number
+  artifactKind: 'native-node' | 'package-entry'
+}
+
+/** Exact artifact loaded by this wrapper, hashed at module initialization. */
+export declare const runtimeIdentity: Readonly<HelixRuntimeIdentity>

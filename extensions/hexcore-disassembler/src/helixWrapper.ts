@@ -73,6 +73,7 @@ interface HelixEngineInstance {
 interface HelixModule {
 	HelixEngine: new (arch: number) => HelixEngineInstance;
 	Architecture: Record<string, number>;
+	runtimeIdentity?: HelixLoadedArtifactIdentity;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +90,23 @@ export interface HelixResult {
 	instructionCount: number;
 	cfgBuffer: Buffer | null;
 	astBuffer: Buffer | null;
+	runtimeIdentity?: HelixRuntimeIdentity;
 	error: string;
+}
+
+export interface HelixLoadedArtifactIdentity {
+	component: 'hexcore-helix';
+	wrapperVersion: string;
+	platform: string;
+	arch: string;
+	binaryPath: string;
+	binarySha256: string;
+	binaryBytes: number;
+	artifactKind: 'native-node' | 'package-entry';
+}
+
+export interface HelixRuntimeIdentity extends HelixLoadedArtifactIdentity {
+	nativeVersion: string;
 }
 
 /** Pipeline performance metrics */
@@ -112,6 +129,12 @@ const ASYNC_THRESHOLD = 65536; // 64KB
 
 interface ActiveDecompile {
 	cancel(): void;
+}
+
+function normalizeHelixNativeVersion(version: string): string {
+	const trimmed = version.trim();
+	const nativeMatch = /(?:^|\s)native=([^\s]+)/.exec(trimmed);
+	return nativeMatch?.[1] ?? trimmed;
 }
 
 /**
@@ -163,6 +186,12 @@ export class HelixWrapper {
 
 	getVersion(): string | undefined {
 		return this.engine?.version() ?? (this.available ? this.ensureEngine()?.version() : undefined);
+	}
+
+	getRuntimeIdentity(): HelixRuntimeIdentity | undefined {
+		const loaded = this.module?.runtimeIdentity;
+		const nativeVersion = this.getVersion();
+		return this.runtimeIdentityFor(nativeVersion, loaded);
 	}
 
 	getLastError(): string | undefined {
@@ -519,7 +548,7 @@ export class HelixWrapper {
 
 			const [raw, metrics] = engine.decompileIrWithMetrics(irText);
 			return {
-				result: this.wrapResult(raw),
+				result: this.wrapResult(raw, this.runtimeIdentityFor(engine.version())),
 				metrics,
 			};
 		} catch (err: unknown) {
@@ -548,7 +577,7 @@ export class HelixWrapper {
 			}
 
 			const raw = engine.decompile(data, baseAddress, entryAddress);
-			return this.wrapResult(raw);
+			return this.wrapResult(raw, this.runtimeIdentityFor(engine.version()));
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return this.errorResult(`Helix native error: ${msg}`);
@@ -565,7 +594,10 @@ export class HelixWrapper {
 			if (!engine) {
 				return this.errorResult('Failed to create HelixEngine instance');
 			}
-			return this.wrapResult(engine.decompileIr(irText));
+			return this.wrapResult(
+				engine.decompileIr(irText),
+				this.runtimeIdentityFor(engine.version()),
+			);
 		} catch (err: unknown) {
 			const msg = err instanceof Error ? err.message : String(err);
 			return this.errorResult(`Helix native error: ${msg}`);
@@ -641,9 +673,14 @@ export class HelixWrapper {
 							}
 						}
 
+						const nativeVersion = engine.version();
 						const result = engine.decompileIr(workerData.irText);
 						engine.dispose();
-						parentPort.postMessage({ result });
+						parentPort.postMessage({
+							result,
+							runtimeIdentity: binding.runtimeIdentity,
+							nativeVersion,
+						});
 					} catch (err) {
 						parentPort.postMessage({ error: err.message || String(err) });
 					}
@@ -684,11 +721,19 @@ export class HelixWrapper {
 				}, boundedTimeout);
 			}
 
-			worker.on('message', (msg: { result?: HelixDecompileResult; error?: string }) => {
+			worker.on('message', (msg: {
+				result?: HelixDecompileResult;
+				error?: string;
+				runtimeIdentity?: HelixLoadedArtifactIdentity;
+				nativeVersion?: string;
+			}) => {
 				if (msg.error) {
 					settle(this.errorResult(`Helix worker error: ${msg.error}`));
 				} else if (msg.result) {
-					settle(this.wrapResult(msg.result));
+					settle(this.wrapResult(
+						msg.result,
+						this.runtimeIdentityFor(msg.nativeVersion, msg.runtimeIdentity),
+					));
 				} else {
 					settle(this.errorResult('Helix worker returned empty response'));
 				}
@@ -752,11 +797,19 @@ export class HelixWrapper {
 				}, boundedTimeout);
 			}
 
-			child.on('message', (message: { result?: HelixDecompileResult; error?: string }) => {
+			child.on('message', (message: {
+				result?: HelixDecompileResult;
+				error?: string;
+				runtimeIdentity?: HelixLoadedArtifactIdentity;
+				nativeVersion?: string;
+			}) => {
 				if (message.error) {
 					settle(this.errorResult(`Helix process error: ${message.error}`), true);
 				} else if (message.result) {
-					settle(this.wrapResult(message.result), true);
+					settle(this.wrapResult(
+						message.result,
+						this.runtimeIdentityFor(message.nativeVersion, message.runtimeIdentity),
+					), true);
 				} else {
 					settle(this.errorResult('Helix process returned empty response'), true);
 				}
@@ -799,7 +852,20 @@ export class HelixWrapper {
 		return workers.length;
 	}
 
-	private wrapResult(raw: HelixDecompileResult): HelixResult {
+	private runtimeIdentityFor(
+		nativeVersion?: string,
+		loadedIdentity: HelixLoadedArtifactIdentity | undefined = this.module?.runtimeIdentity,
+	): HelixRuntimeIdentity | undefined {
+		if (!loadedIdentity || !nativeVersion) { return undefined; }
+		const normalizedNativeVersion = normalizeHelixNativeVersion(nativeVersion);
+		if (!normalizedNativeVersion) { return undefined; }
+		return { ...loadedIdentity, nativeVersion: normalizedNativeVersion };
+	}
+
+	private wrapResult(
+		raw: HelixDecompileResult,
+		runtimeIdentity?: HelixRuntimeIdentity,
+	): HelixResult {
 		return {
 			success: true,
 			source: raw.source,
@@ -809,6 +875,7 @@ export class HelixWrapper {
 			instructionCount: raw.instructionCount,
 			cfgBuffer: raw.cfgBuffer,
 			astBuffer: raw.astBuffer,
+			...(runtimeIdentity ? { runtimeIdentity } : {}),
 			error: '',
 		};
 	}
