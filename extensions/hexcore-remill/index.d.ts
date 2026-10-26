@@ -62,6 +62,10 @@ export interface LiftResult {
 	address: number;
 	/** Number of input bytes that were successfully consumed */
 	bytesConsumed: number;
+	/** Exact merged half-open address intervals decoded by native recursive descent. */
+	decodedIntervals: Array<{ start: number; endExclusive: number }>;
+	/** Contiguous decoded endpoint beginning at the requested lift address. */
+	semanticEndExclusive?: number;
 	/** Instructions decoded in the requested lift range before LLVM optimization */
 	decodedInstructions: number;
 	/** Instructions with concrete Remill semantics */
@@ -260,5 +264,22 @@ export const upstreamVersion: string;
 
 /** Full Git commit used to build the embedded Remill libraries. */
 export const upstreamCommit: string;
+
+export interface RemillRuntimeIdentity {
+	component: 'hexcore-remill';
+	wrapperVersion: string;
+	nativeVersion: string;
+	upstreamVersion: string;
+	upstreamCommit: string;
+	platform: string;
+	arch: string;
+	binaryPath: string;
+	binarySha256: string;
+	binaryBytes: number;
+	artifactKind: 'native-node';
+}
+
+/** Exact native Remill artifact loaded by this wrapper. */
+export const runtimeIdentity: Readonly<RemillRuntimeIdentity>;
 
 export default RemillLifter;

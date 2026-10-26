@@ -15,6 +15,7 @@ const {
 	version,
 	upstreamVersion,
 	upstreamCommit,
+	runtimeIdentity,
 } = require('../index.js');
 
 let passed = 0;
@@ -60,6 +61,11 @@ test('module exports version string', () => {
 	assert.strictEqual(version, '0.5.4');
 	assert.strictEqual(upstreamVersion, '6.0.1');
 	assert.strictEqual(upstreamCommit, '0e324aee8c67a63ec759ef379dcfafa0b3cb1448');
+	assert.strictEqual(runtimeIdentity.component, 'hexcore-remill');
+	assert.strictEqual(runtimeIdentity.nativeVersion, version);
+	assert.strictEqual(runtimeIdentity.upstreamCommit, upstreamCommit);
+	assert.match(runtimeIdentity.binarySha256, /^[a-f0-9]{64}$/);
+	assert.ok(runtimeIdentity.binaryBytes > 0);
 });
 
 // --- Static methods ---
@@ -130,6 +136,10 @@ test('liftBytes lifts x86-64 push rbp; mov rbp,rsp; ret', () => {
 	assert.strictEqual(result.address, 0x401000);
 	assert.ok(result.bytesConsumed > 0, 'Should consume some bytes');
 	assert.ok(result.bytesConsumed <= code.length);
+	assert.deepStrictEqual(result.decodedIntervals, [
+		{ start: 0x401000, endExclusive: 0x401006 },
+	]);
+	assert.strictEqual(result.semanticEndExclusive, 0x401006);
 	assert.strictEqual(result.decodedInstructions, 4);
 	assert.strictEqual(result.liftedInstructions, 4);
 	assert.strictEqual(result.unsupportedInstructions, 0);

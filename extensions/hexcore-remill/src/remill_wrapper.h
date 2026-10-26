@@ -83,6 +83,10 @@ struct LiftResult {
 	std::string error;       // Error message if !success
 	uint64_t address;        // Start address
 	uint64_t bytesConsumed;  // How many input bytes were consumed
+	// Exact merged half-open intervals decoded by the native recursive descent.
+	std::vector<std::pair<uint64_t, uint64_t>> decodedIntervals;
+	// Contiguous decoded endpoint starting at `address`; zero when unavailable.
+	uint64_t semanticEndExclusive = 0;
 
 	// Semantic coverage metadata. These counts are collected before LLVM
 	// optimization so DCE cannot make an incomplete lift appear complete.

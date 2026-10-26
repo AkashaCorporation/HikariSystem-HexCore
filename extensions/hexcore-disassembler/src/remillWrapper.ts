@@ -19,6 +19,23 @@ interface RemillModule {
 	ARCH: Record<string, string>;
 	OS: Record<string, string>;
 	version: string;
+	upstreamVersion: string;
+	upstreamCommit: string;
+	runtimeIdentity?: RemillRuntimeIdentity;
+}
+
+export interface RemillRuntimeIdentity {
+	component: 'hexcore-remill';
+	wrapperVersion: string;
+	nativeVersion: string;
+	upstreamVersion: string;
+	upstreamCommit: string;
+	platform: string;
+	arch: string;
+	binaryPath: string;
+	binarySha256: string;
+	binaryBytes: number;
+	artifactKind: 'native-node';
 }
 
 interface RemillLifterInstance {
@@ -102,6 +119,8 @@ export interface LiftResult {
 	}>;
 	/** Quantidade de bytes consumidos pelo lifter */
 	bytesConsumed: number;
+	decodedIntervals?: Array<{ start: number; endExclusive: number }>;
+	semanticEndExclusive?: number;
 	decodedInstructions?: number;
 	liftedInstructions?: number;
 	unsupportedInstructions?: number;
@@ -188,6 +207,12 @@ export class RemillWrapper {
 	 */
 	getVersion(): string | undefined {
 		return this.module?.version;
+	}
+
+	getRuntimeIdentity(): RemillRuntimeIdentity | undefined {
+		return this.module?.runtimeIdentity
+			? { ...this.module.runtimeIdentity }
+			: undefined;
 	}
 
 	/**

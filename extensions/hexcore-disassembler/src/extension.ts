@@ -3887,6 +3887,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			// Update size to actual bytes extracted (may be truncated at file boundary)
 			size = bytes.length;
+			// Bind the exact, unpatched source window to the retained IR. Capture it
+			// before relocation preparation mutates a derived byte buffer.
+			const requestedSourceBytesSha256 = crypto.createHash('sha256').update(bytes).digest('hex');
 
 			const fileInfo = engine.getFileInfo();
 			const relocationPreparation = prepareLiftRelocations({
@@ -4335,13 +4338,23 @@ export function activate(context: vscode.ExtensionContext): void {
 			const functionRangeSource = liftWindow?.endExclusive !== undefined
 				? liftWindow.reason
 				: coverageExtent.source;
-			const semanticInstructionEnd = primaryFn?.instructions?.length ? primaryFn.instructions.reduce(
-				(maximum, instruction) => Math.max(
-					maximum,
-					Number(instruction.address) + Number(instruction.size),
-				),
-				startAddress,
-			) : undefined;
+			const nativeDecodedIntervals = Array.isArray(liftResult.decodedIntervals)
+				? liftResult.decodedIntervals.filter(interval =>
+					Number.isSafeInteger(interval.start) && Number.isSafeInteger(interval.endExclusive) &&
+					interval.start >= startAddress && interval.endExclusive > interval.start)
+				: [];
+			const nativeSemanticEnd = Number.isSafeInteger(liftResult.semanticEndExclusive) &&
+				(liftResult.semanticEndExclusive ?? 0) > startAddress
+				? liftResult.semanticEndExclusive
+				: undefined;
+			const semanticInstructionEnd = nativeSemanticEnd ??
+				(primaryFn?.instructions?.length ? primaryFn.instructions.reduce(
+					(maximum, instruction) => Math.max(
+						maximum,
+						Number(instruction.address) + Number(instruction.size),
+					),
+					startAddress,
+				) : undefined);
 			const boundaryCompletion = functionEndExclusive !== undefined
 				? assessLiftRangeCompletion({
 					startAddress,
@@ -4367,6 +4380,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					start: toHexAddress(startAddress),
 					endExclusive: toHexAddress(requestedEndExclusive),
 					size,
+					sourceSha256: requestedSourceBytesSha256,
 					countingDomain: liftWindow?.countingDomain ?? 'byte-range',
 					reason: liftWindow?.reason ?? 'resolved-lift-window',
 				},
@@ -4387,7 +4401,9 @@ export function activate(context: vscode.ExtensionContext): void {
 					boundaryReached: boundaryCompletion?.reached ?? false,
 					boundaryCrossed: boundaryCompletion?.crossed ?? false,
 					byteCoverage: boundaryCompletion?.coverage,
-					source: semanticInstructionEnd !== undefined
+					source: nativeSemanticEnd !== undefined
+						? 'native-decoded-intervals' as const
+						: semanticInstructionEnd !== undefined
 						? 'function-table-instructions' as const
 						: 'unavailable' as const,
 				},
@@ -4397,6 +4413,13 @@ export function activate(context: vscode.ExtensionContext): void {
 						? Math.max(0, Math.min(1, decodedBytes / Math.max(1, functionRangeSize)))
 						: undefined,
 					representation: 'union-of-decoded-intervals' as const,
+					intervals: nativeDecodedIntervals.map(interval => ({
+						start: toHexAddress(interval.start),
+						endExclusive: toHexAddress(interval.endExclusive),
+					})),
+					...(nativeSemanticEnd !== undefined
+						? { semanticEndExclusive: toHexAddress(nativeSemanticEnd) }
+						: {}),
 					nativeTruncated: liftResult.truncated === true,
 					...(liftResult.nextAddress ? { nextAddress: toHexAddress(liftResult.nextAddress) } : {}),
 					...(liftResult.truncationReason ? { truncationReason: liftResult.truncationReason } : {}),
@@ -4404,7 +4427,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 			const coverageHeader =
 				`; RequestedByteRange: [${toHexAddress(startAddress)}, ${toHexAddress(requestedEndExclusive)}) ` +
-				`domain=${rangeContract.requestedByteRange.countingDomain} reason=${rangeContract.requestedByteRange.reason}\n` +
+				`domain=${rangeContract.requestedByteRange.countingDomain} ` +
+				`sourceSha256=${rangeContract.requestedByteRange.sourceSha256} ` +
+				`reason=${rangeContract.requestedByteRange.reason}\n` +
 				(functionEndExclusive !== undefined
 					? `; FunctionByteRange: [${toHexAddress(startAddress)}, ${toHexAddress(functionEndExclusive)}) source=${functionRangeSource}\n`
 					: '; FunctionByteRange: unknown\n') +
@@ -4460,6 +4485,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					bytesConsumed: liftResult.bytesConsumed,
 					architecture: mapping.remillArch,
 					functionName,
+					runtimeIdentity: remillWrapper.getRuntimeIdentity(),
 					backtracked: didBacktrack,
 					requestedAddress: backtrackOriginalAddress,
 					liftTransformations,
@@ -4497,6 +4523,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					bytesConsumed: liftResult.bytesConsumed,
 					architecture: mapping.remillArch,
 					functionName,
+					runtimeIdentity: remillWrapper.getRuntimeIdentity(),
 					backtracked: didBacktrack,
 					requestedAddress: backtrackOriginalAddress,
 					liftTransformations,

@@ -21,9 +21,15 @@
 
 'use strict';
 
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const { version: wrapperVersion } = require('./package.json');
+
 const platformDir = './prebuilds/' + process.platform + '-' + process.arch + '/';
 
 let binding;
+let loadedArtifactPath;
 const errors = [];
 
 // Prefer freshly built local artifacts during development so source changes
@@ -38,7 +44,8 @@ const candidates = [
 
 for (const candidate of candidates) {
 	try {
-		binding = require(candidate.path);
+		loadedArtifactPath = require.resolve(candidate.path);
+		binding = require(loadedArtifactPath);
 		break;
 	} catch (e) {
 		errors.push(`  ${candidate.label}: ${e.message}`);
@@ -52,6 +59,22 @@ if (!binding) {
 	);
 }
 
+const canonicalArtifactPath = fs.realpathSync.native(loadedArtifactPath);
+const artifactBytes = fs.readFileSync(canonicalArtifactPath);
+const runtimeIdentity = Object.freeze({
+	component: 'hexcore-remill',
+	wrapperVersion,
+	nativeVersion: binding.version,
+	upstreamVersion: binding.upstreamVersion,
+	upstreamCommit: binding.upstreamCommit,
+	platform: process.platform,
+	arch: process.arch,
+	binaryPath: canonicalArtifactPath,
+	binarySha256: crypto.createHash('sha256').update(artifactBytes).digest('hex'),
+	binaryBytes: fs.statSync(canonicalArtifactPath).size,
+	artifactKind: 'native-node',
+});
+
 module.exports = binding;
 module.exports.default = binding.RemillLifter;
 module.exports.RemillLifter = binding.RemillLifter;
@@ -60,3 +83,4 @@ module.exports.OS = binding.OS;
 module.exports.version = binding.version;
 module.exports.upstreamVersion = binding.upstreamVersion;
 module.exports.upstreamCommit = binding.upstreamCommit;
+module.exports.runtimeIdentity = runtimeIdentity;

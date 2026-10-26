@@ -1596,20 +1596,25 @@ LiftResult RemillLifter::DoLift(
 	// reports impossible coverage such as 905/342. bytesConsumed is an input
 	// coverage metric, so count the union of decoded intervals, clipped to the
 	// caller-provided buffer.
-	std::vector<std::pair<uint64_t, uint64_t>> decodedIntervals;
-	decodedIntervals.reserve(decoded.size());
+	std::vector<std::pair<uint64_t, uint64_t>> rawDecodedIntervals;
+	rawDecodedIntervals.reserve(decoded.size());
 	for (const auto& di : decoded) {
 		if (di.size == 0) continue;
 		const uint64_t begin = std::max<uint64_t>(di.pc, address);
 		const uint64_t end = std::min<uint64_t>(
 			di.pc + static_cast<uint64_t>(di.size), bufferEndAddress);
-		if (begin < end) decodedIntervals.emplace_back(begin, end);
+		if (begin < end) rawDecodedIntervals.emplace_back(begin, end);
 	}
-	std::sort(decodedIntervals.begin(), decodedIntervals.end());
+	std::sort(rawDecodedIntervals.begin(), rawDecodedIntervals.end());
 	uint64_t uniqueDecodedBytes = 0;
 	uint64_t intervalBegin = 0;
 	uint64_t intervalEnd = 0;
-	for (const auto& [begin, end] : decodedIntervals) {
+	auto commitDecodedInterval = [&]() {
+		if (intervalBegin >= intervalEnd) return;
+		result.decodedIntervals.emplace_back(intervalBegin, intervalEnd);
+		uniqueDecodedBytes += intervalEnd - intervalBegin;
+	};
+	for (const auto& [begin, end] : rawDecodedIntervals) {
 		if (intervalBegin == intervalEnd) {
 			intervalBegin = begin;
 			intervalEnd = end;
@@ -1619,12 +1624,16 @@ LiftResult RemillLifter::DoLift(
 			intervalEnd = std::max(intervalEnd, end);
 			continue;
 		}
-		uniqueDecodedBytes += intervalEnd - intervalBegin;
+		commitDecodedInterval();
 		intervalBegin = begin;
 		intervalEnd = end;
 	}
-	uniqueDecodedBytes += intervalEnd - intervalBegin;
+	commitDecodedInterval();
 	result.bytesConsumed = uniqueDecodedBytes;
+	if (!result.decodedIntervals.empty() &&
+		result.decodedIntervals.front().first == address) {
+		result.semanticEndExclusive = result.decodedIntervals.front().second;
+	}
 
 	// ═══════════════════════════════════════════════════════════════════════
 	// Phase 3.4: Re-wire in-buffer direct jumps whose edge was dropped
@@ -2596,6 +2605,20 @@ Napi::Object RemillLifter::LiftResultToJS(
 		static_cast<double>(result.address)));
 	obj.Set("bytesConsumed", Napi::Number::New(env,
 		static_cast<double>(result.bytesConsumed)));
+	Napi::Array decodedIntervals = Napi::Array::New(env, result.decodedIntervals.size());
+	for (size_t i = 0; i < result.decodedIntervals.size(); i++) {
+		Napi::Object interval = Napi::Object::New(env);
+		interval.Set("start", Napi::Number::New(env,
+			static_cast<double>(result.decodedIntervals[i].first)));
+		interval.Set("endExclusive", Napi::Number::New(env,
+			static_cast<double>(result.decodedIntervals[i].second)));
+		decodedIntervals.Set(static_cast<uint32_t>(i), interval);
+	}
+	obj.Set("decodedIntervals", decodedIntervals);
+	if (result.semanticEndExclusive != 0) {
+		obj.Set("semanticEndExclusive", Napi::Number::New(env,
+			static_cast<double>(result.semanticEndExclusive)));
+	}
 	obj.Set("decodedInstructions", Napi::Number::New(env,
 		static_cast<double>(result.decodedInstructions)));
 	obj.Set("liftedInstructions", Napi::Number::New(env,

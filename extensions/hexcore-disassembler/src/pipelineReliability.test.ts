@@ -222,6 +222,25 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		}), undefined);
 	});
 
+	test('accepts only hash-bound Remill runtime identities on liftToIR', () => {
+		const identity = {
+			component: 'hexcore-remill', wrapperVersion: '0.5.4', nativeVersion: '0.5.4',
+			upstreamVersion: '6.0.1', upstreamCommit: '0e324aee8c67a63ec759ef379dcfafa0b3cb1448',
+			platform: 'win32', arch: 'x64', binaryPath: path.join(tempDir, 'remill.node'),
+			binarySha256: 'b'.repeat(64), binaryBytes: 4321, artifactKind: 'native-node',
+		};
+		assert.deepStrictEqual(
+			extractPipelineRuntimeIdentity('hexcore.disasm.liftToIR', { runtimeIdentity: identity }),
+			identity,
+		);
+		assert.strictEqual(extractPipelineRuntimeIdentity('hexcore.disasm.liftToIR', {
+			runtimeIdentity: { ...identity, upstreamCommit: 'not-a-commit' },
+		}), undefined);
+		assert.strictEqual(extractPipelineRuntimeIdentity('hexcore.helix.decompileIR', {
+			runtimeIdentity: identity,
+		}), undefined);
+	});
+
 	test('persists the Revenant wrapper and decompiler identity in artifact provenance', async () => {
 		const target = path.join(tempDir, 'managed.dll');
 		fs.writeFileSync(target, Buffer.from([0x4d, 0x5a, 0x00, 0x00]));

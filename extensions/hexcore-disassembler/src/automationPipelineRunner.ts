@@ -1365,7 +1365,21 @@ export interface HelixPipelineRuntimeIdentity {
 	artifactKind: 'native-node' | 'package-entry';
 }
 
-export type PipelineRuntimeIdentity = RevenantPipelineRuntimeIdentity | HelixPipelineRuntimeIdentity;
+export interface RemillPipelineRuntimeIdentity {
+	component: 'hexcore-remill';
+	wrapperVersion: string;
+	nativeVersion: string;
+	upstreamVersion: string;
+	upstreamCommit: string;
+	platform: string;
+	arch: string;
+	binaryPath: string;
+	binarySha256: string;
+	binaryBytes: number;
+	artifactKind: 'native-node';
+}
+
+export type PipelineRuntimeIdentity = RevenantPipelineRuntimeIdentity | HelixPipelineRuntimeIdentity | RemillPipelineRuntimeIdentity;
 
 export interface PipelineSideArtifactIdentity {
 	role: 'hast' | 'pairing';
@@ -1379,6 +1393,35 @@ export interface PipelineSideArtifactIdentity {
 /** Retain bounded runtime identity emitted by wrapped engines. */
 export function extractPipelineRuntimeIdentity(command: string, value: unknown): PipelineRuntimeIdentity | undefined {
 	if (!isRecord(value)) { return undefined; }
+	if (command === 'hexcore.disasm.liftToIR') {
+		const identity = isRecord(value.runtimeIdentity) ? value.runtimeIdentity : undefined;
+		if (!identity || identity.component !== 'hexcore-remill' ||
+			typeof identity.wrapperVersion !== 'string' || identity.wrapperVersion.length === 0 ||
+			typeof identity.nativeVersion !== 'string' || identity.nativeVersion.length === 0 ||
+			typeof identity.upstreamVersion !== 'string' || identity.upstreamVersion.length === 0 ||
+			typeof identity.upstreamCommit !== 'string' || !/^[a-f0-9]{40}$/i.test(identity.upstreamCommit) ||
+			typeof identity.platform !== 'string' || identity.platform.length === 0 ||
+			typeof identity.arch !== 'string' || identity.arch.length === 0 ||
+			typeof identity.binaryPath !== 'string' || !path.isAbsolute(identity.binaryPath) ||
+			typeof identity.binarySha256 !== 'string' || !/^[a-f0-9]{64}$/i.test(identity.binarySha256) ||
+			typeof identity.binaryBytes !== 'number' || !Number.isSafeInteger(identity.binaryBytes) || identity.binaryBytes <= 0 ||
+			identity.artifactKind !== 'native-node') {
+			return undefined;
+		}
+		return {
+			component: 'hexcore-remill',
+			wrapperVersion: identity.wrapperVersion,
+			nativeVersion: identity.nativeVersion,
+			upstreamVersion: identity.upstreamVersion,
+			upstreamCommit: identity.upstreamCommit.toLowerCase(),
+			platform: identity.platform,
+			arch: identity.arch,
+			binaryPath: path.resolve(identity.binaryPath),
+			binarySha256: identity.binarySha256.toLowerCase(),
+			binaryBytes: Number(identity.binaryBytes),
+			artifactKind: 'native-node',
+		};
+	}
 	if (command.startsWith('hexcore.helix.') || command.startsWith('hexcore.hql.')) {
 		const identity = isRecord(value.runtimeIdentity) ? value.runtimeIdentity : undefined;
 		if (!identity || identity.component !== 'hexcore-helix' ||
@@ -1754,10 +1797,16 @@ async function writeArtifactProvenance(
 	const pairingId = sideArtifacts[0]?.pairingId;
 	const analysisStatus: AnalysisStatus = semanticStatus === 'error' ? 'failed' : semanticStatus;
 	const runtimeIdentity = extractPipelineRuntimeIdentity(resolvedCommand, commandResult);
-	if (runtimeIdentity?.component === 'hexcore-helix' && run.analysisSession) {
-		const engine = {
+	if ((runtimeIdentity?.component === 'hexcore-helix' ||
+		runtimeIdentity?.component === 'hexcore-remill') && run.analysisSession) {
+		const engine = runtimeIdentity.component === 'hexcore-helix' ? {
 			id: 'hikarisystem.hexcore-helix',
 			version: `wrapper=${runtimeIdentity.wrapperVersion} native=${runtimeIdentity.nativeVersion}`,
+			buildSha256: runtimeIdentity.binarySha256,
+		} : {
+			id: 'hikarisystem.hexcore-remill',
+			version: `wrapper=${runtimeIdentity.wrapperVersion} native=${runtimeIdentity.nativeVersion} ` +
+				`upstream=${runtimeIdentity.upstreamVersion} commit=${runtimeIdentity.upstreamCommit}`,
 			buildSha256: runtimeIdentity.binarySha256,
 		};
 		const engines = run.analysisSession.engines

@@ -18,6 +18,7 @@ export const {
 	version,
 	upstreamVersion,
 	upstreamCommit,
+	runtimeIdentity,
 } = remill;
 
 export default RemillLifter;

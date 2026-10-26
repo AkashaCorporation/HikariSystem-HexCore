@@ -12,6 +12,7 @@
   "currentProducerMigration": {
     "nodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
     "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
+    "remillNodeSha256": "afbccb0aeca7fa3b7423d544a5d6cd7b266fd68b46fce98267cbb20286d503eb",
     "expectedFunctions": 224,
     "eligibleFunctions": 102,
     "withheldFunctions": 122,
