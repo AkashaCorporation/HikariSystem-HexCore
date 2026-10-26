@@ -321,6 +321,7 @@ export function getAuthoritativeFunctionExtent(
 		getFunctionAt(address: number): { address: number; size: number; endAddress: number } | undefined;
 		getFunctions?(): ReadonlyArray<{ address: number }>;
 		getPdataEntries(): ReadonlyArray<{ beginAddress: number; endAddress: number }>;
+		findAuthoritativePdataRangeContaining?(address: number): { begin: number; end: number } | undefined;
 		getBaseAddress(): number;
 		getRecommendedLiftSize(address: number, fallback?: number): number;
 	},
@@ -332,6 +333,13 @@ export function getAuthoritativeFunctionExtent(
 	let end = fn && fn.endAddress > address ? fn.endAddress : 0;
 	let source: 'function-table' | 'pdata' | 'recommended' | 'none' =
 		size > 0 ? 'function-table' : 'none';
+	const reconciledPdata = eng.findAuthoritativePdataRangeContaining?.(address);
+	if (reconciledPdata && reconciledPdata.end > reconciledPdata.begin) {
+		start = reconciledPdata.begin;
+		end = reconciledPdata.end;
+		size = end - start;
+		source = 'pdata';
+	}
 
 	try {
 		const base = eng.getBaseAddress();
