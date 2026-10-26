@@ -84,14 +84,15 @@ for (const filename of fs.readdirSync(resultRoot).filter(name => name.endsWith('
 	check(!/bench_|0x[0-9a-f]+|semantic_benchmark\.dll|[A-Za-z]:\\/i.test(canonical), `${filename} must contain aggregate Atlas metrics, not target-specific facts`);
 }
 
-const regressionRoot = path.join(packageRoot, 'benchmarks', 'function-atlas', 'regressions');
+const functionAtlasRoot = path.join(packageRoot, 'benchmarks', 'function-atlas');
+const regressionRoot = path.join(functionAtlasRoot, 'regressions');
 const x86Metadata = readJson<{
 	status: string;
 	irSha256: string;
 	irBytes: number;
 	originalFailures: string[];
-	expected: { pipeline: string; hastSchema: number; semanticEligible: boolean; nativeQualityStatus: string; adapterCoverage: number };
-	acceptedBy: { functionCount: number; binaryCount: number; functionAtlasArtifactSha256: string };
+	expected: { pipeline: string; hastSchema: number; hastSchemaMinor: number; semanticEligible: boolean; nativeQualityStatus: string; adapterCoverage: number };
+	migrationAssessment: { producerRegression: string; fullCorpusStatus: string; eligibleFunctions: number; withheldFunctions: number; expectedFunctions: number };
 }>(path.join(regressionRoot, 'x86-width-and-unary-regression.json'));
 const x86Ir = fs.readFileSync(path.join(regressionRoot, 'x86-width-and-unary-regression.ll'));
 check(x86Metadata.irSha256 === createHash('sha256').update(x86Ir).digest('hex'), 'x86 Function Atlas regression IR must match its pinned identity');
@@ -100,11 +101,15 @@ check(x86Metadata.status === 'resolved'
 	&& x86Metadata.originalFailures.length === 2
 	&& x86Metadata.expected.pipeline === 'mlir'
 	&& x86Metadata.expected.hastSchema === 1
+	&& x86Metadata.expected.hastSchemaMinor === 2
 	&& !x86Metadata.expected.semanticEligible
 	&& x86Metadata.expected.nativeQualityStatus === 'known-loss'
 	&& x86Metadata.expected.adapterCoverage === 1
-	&& x86Metadata.acceptedBy.functionCount === 224
-	&& x86Metadata.acceptedBy.binaryCount === 16,
+	&& x86Metadata.migrationAssessment.producerRegression === 'pass'
+	&& x86Metadata.migrationAssessment.fullCorpusStatus === 'hold-quality'
+	&& x86Metadata.migrationAssessment.eligibleFunctions === 102
+	&& x86Metadata.migrationAssessment.withheldFunctions === 122
+	&& x86Metadata.migrationAssessment.expectedFunctions === 224,
 'x86 Function Atlas regression must retain the resolved HAST contract');
 const adapterLosses = readJson<{
 	status: string;
@@ -117,5 +122,19 @@ check(adapterLosses.status === 'resolved'
 	&& adapterLosses.acceptedFunctions === 224
 	&& adapterLosses.expectedFunctions === 224,
 'adapter-loss regression gate must remain resolved across the complete corpus');
+
+const functionAtlasStatus = readJson<{
+	status: string;
+	code: string;
+	historicalArtifact: { producerNodeSha256: string };
+	currentProducerMigration: { nodeSha256: string; expectedFunctions: number; eligibleFunctions: number; withheldFunctions: number };
+}>(path.join(functionAtlasRoot, 'migration-status.json'));
+check(functionAtlasStatus.status === 'hold'
+	&& functionAtlasStatus.code === 'HOLD-QUALITY'
+	&& functionAtlasStatus.historicalArtifact.producerNodeSha256 !== functionAtlasStatus.currentProducerMigration.nodeSha256
+	&& functionAtlasStatus.currentProducerMigration.expectedFunctions === 224
+	&& functionAtlasStatus.currentProducerMigration.eligibleFunctions === 102
+	&& functionAtlasStatus.currentProducerMigration.withheldFunctions === 122,
+'Function Atlas canonical similarity artifact must remain held while the current producer has native-quality barriers');
 
 console.log(`Benchmark contract tests: ${assertions} assertions passed`);

@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "status": "resolved",
   "producer": {
-    "helixNodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776",
+    "helixNodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
     "hqlAdapterContract": "hast-v1-unary-compound-v1"
   },
   "failures": [],

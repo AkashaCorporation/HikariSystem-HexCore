@@ -10,8 +10,9 @@
     },
     "helix": {
       "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
-      "nodeSha256": "d2e6594745667122835b293d321622860503256e29dd170bde3a177139493b15",
-      "hastSchema": 1
+      "nodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
+      "hastSchema": 1,
+      "hastSchemaMinor": 2
     }
   },
   "program": "msvc-x86-O2-debug",
@@ -27,13 +28,20 @@
   "expected": {
     "pipeline": "mlir",
     "hastSchema": 1,
+    "hastSchemaMinor": 2,
+    "functionAddress": "0x10001620",
+    "sourceSha256": "f8b7bb52baeb16188d5cfe5af5cbf40633c0d1e52dc5e9e073f50b7f3c388832",
+    "hastSha256": "895a7c7993db4269c5b8166600ffb023f01b502d848a024d6d54518153f6546b",
     "semanticEligible": false,
     "nativeQualityStatus": "known-loss",
     "adapterCoverage": 1
   },
-  "acceptedBy": {
-    "functionAtlasArtifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3",
-    "functionCount": 224,
-    "binaryCount": 16
+  "migrationAssessment": {
+    "producerRegression": "pass",
+    "fullCorpusStatus": "hold-quality",
+    "eligibleFunctions": 102,
+    "withheldFunctions": 122,
+    "expectedFunctions": 224,
+    "previousArtifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3"
   }
 }

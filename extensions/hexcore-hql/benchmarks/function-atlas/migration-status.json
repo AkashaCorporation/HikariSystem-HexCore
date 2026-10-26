@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "runner": "function-atlas",
+  "runnerVersion": "hast-remill-v1",
+  "status": "hold",
+  "code": "HOLD-QUALITY",
+  "historicalArtifact": {
+    "artifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3",
+    "producerNodeSha256": "f4736ed657e4930ddc4b376c714ccf842418d7250122ffc0b878a6a704445776",
+    "producerVersion": "helix-js=0.1.9 native=0.1.9"
+  },
+  "currentProducerMigration": {
+    "nodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
+    "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
+    "expectedFunctions": 224,
+    "eligibleFunctions": 102,
+    "withheldFunctions": 122,
+    "reason": "Native semantic-quality barriers prevent replacing the historical similarity artifact"
+  },
+  "deterministicRuns": 2
+}

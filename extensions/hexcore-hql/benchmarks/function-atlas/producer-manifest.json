@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "component": "hexcore-helix",
+  "runtime": {
+    "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
+    "hastSchema": 1
+  },
+  "artifact": {
+    "fileName": "hexcore-helix.win32-x64-msvc.node",
+    "sha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
+    "bytes": 15285248,
+    "platform": "win32",
+    "arch": "x64"
+  },
+  "resolution": {
+    "explicitPathEnv": "HEXCORE_HELIX_HAST_NODE",
+    "cacheRootEnv": "HEXCORE_PRODUCER_CACHE",
+    "cacheRelativePath": "sha256/5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9/hexcore-helix.win32-x64-msvc.node",
+    "localDevelopmentPath": "../../../hexcore-helix/hexcore-helix.win32-x64-msvc.node"
+  },
+  "releaseAsset": {
+    "status": "local-checkpoint",
+    "repository": "AkashaCorporation/HexCore-Helix",
+    "tag": null,
+    "asset": null
+  }
+}

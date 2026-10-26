@@ -14,8 +14,9 @@
     "benchmark:capa": "tsx benchmarks/capa/run.ts",
     "benchmark:floss": "tsx benchmarks/floss/run.ts",
     "benchmark:function-atlas": "tsx benchmarks/function-atlas/run.ts",
+    "benchmark:function-atlas:producer": "node benchmarks/function-atlas/producerResolver.test.js",
     "benchmark:function-atlas:regression": "node benchmarks/function-atlas/regressions/reproduce.js",
-    "test": "npm run compile && tsx test/smoke.ts && tsx test/signatureLoader.ts && tsx test/antiAnalysisSignatures.ts && tsx test/adapterLoss.ts && tsx test/hastV1Contract.ts && tsx test/hastV12TypeEvidence.ts && tsx test/hastContractInspection.ts && tsx test/nativeQuality.ts && tsx test/upstreamQuality.ts && tsx test/semanticFacts.ts && tsx test/atlasFixtures.ts && tsx test/atlasBuilder.ts && tsx test/functionAtlas.ts && npm run benchmark:test && npm run benchmark:function-atlas:regression && tsx test/adHocQuery.ts"
+    "test": "npm run compile && tsx test/smoke.ts && tsx test/signatureLoader.ts && tsx test/antiAnalysisSignatures.ts && tsx test/adapterLoss.ts && tsx test/hastV1Contract.ts && tsx test/hastV12TypeEvidence.ts && tsx test/hastContractInspection.ts && tsx test/nativeQuality.ts && tsx test/upstreamQuality.ts && tsx test/semanticFacts.ts && tsx test/atlasFixtures.ts && tsx test/atlasBuilder.ts && tsx test/functionAtlas.ts && npm run benchmark:test && npm run benchmark:function-atlas:producer && npm run benchmark:function-atlas:regression && tsx test/adHocQuery.ts"
   },
   "dependencies": {
     "flatbuffers": "^24.3.25",

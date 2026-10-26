@@ -35,7 +35,7 @@ interface CorpusManifest {
 
 interface EngineLock {
 	schemaVersion: number;
-	helix: { version: string; nodeSha256: string; hastSchema: number };
+	helix: { version: string; nodeSha256: string; hastSchema: number; producerManifest?: string };
 	remill: { version: string; upstreamVersion: string; upstreamCommit: string; nodeSha256: string };
 }
 
@@ -90,7 +90,10 @@ interface NativeRemill {
 
 const RUNNER_VERSION = 'hast-remill-v1';
 const packageRoot = path.resolve(__dirname, '..', '..');
-const benchmarkRoot = path.join(packageRoot, 'benchmarks', 'function-atlas');
+const benchmarkSourceRoot = path.join(packageRoot, 'benchmarks', 'function-atlas');
+const benchmarkRoot = process.env.HEXCORE_FUNCTION_ATLAS_OUTPUT_ROOT
+	? path.resolve(process.env.HEXCORE_FUNCTION_ATLAS_OUTPUT_ROOT)
+	: benchmarkSourceRoot;
 const runRoot = path.join(benchmarkRoot, 'runs');
 const queryRoot = path.join(runRoot, 'queries');
 const statusFile = path.join(runRoot, 'status.json');
@@ -115,12 +118,28 @@ function compareAscii(left: string, right: string): number {
 	return left < right ? -1 : left > right ? 1 : 0;
 }
 
+class FunctionAtlasHoldError extends Error {
+	readonly code: 'HOLD-QUALITY';
+	constructor(message: string) {
+		super(message);
+		this.name = 'FunctionAtlasHoldError';
+		this.code = 'HOLD-QUALITY';
+	}
+}
+
 try {
 	run();
 } catch (error) {
 	const message = error instanceof Error ? error.message : String(error);
-	writeJson(path.join(runRoot, 'failure.json'), { schemaVersion: 1, runner: 'function-atlas', code: 'GATE_FAILED', message });
-	writeJson(statusFile, { schemaVersion: 1, runner: 'function-atlas', runnerVersion: RUNNER_VERSION, status: 'error', code: 'GATE_FAILED' });
+	const code = error instanceof FunctionAtlasHoldError ? error.code : 'GATE_FAILED';
+	writeJson(path.join(runRoot, 'failure.json'), { schemaVersion: 1, runner: 'function-atlas', code, message });
+	writeJson(statusFile, {
+		schemaVersion: 1,
+		runner: 'function-atlas',
+		runnerVersion: RUNNER_VERSION,
+		status: error instanceof FunctionAtlasHoldError ? 'hold' : 'error',
+		code,
+	});
 	console.error(`Function Atlas benchmark failed: ${message}`);
 	process.exitCode = 1;
 }
@@ -155,7 +174,10 @@ function run(): void {
 		}
 	}
 
-	const engineLock = readJson<EngineLock>(path.join(benchmarkRoot, 'engine.lock.json'));
+	const engineLockPath = process.env.HEXCORE_FUNCTION_ATLAS_ENGINE_LOCK
+		? path.resolve(process.env.HEXCORE_FUNCTION_ATLAS_ENGINE_LOCK)
+		: path.join(benchmarkSourceRoot, 'engine.lock.json');
+	const engineLock = readJson<EngineLock>(engineLockPath);
 	if (engineLock.schemaVersion !== 1) {
 		throw new Error('Unsupported Function Atlas engine lock');
 	}
@@ -349,8 +371,16 @@ function run(): void {
 			runnerVersion: RUNNER_VERSION,
 			expectedFunctions: 224,
 			acceptedFunctions: allRecords.length,
+			withheldFunctions: failures.length,
 			failures: failures.sort((left, right) => compareAscii(left.program, right.program) || compareAscii(left.function, right.function)),
 		});
+		const qualityHold = allRecords.length + failures.length === 224 && failures.length > 0 &&
+			failures.every(failure => failure.error.includes('HAST v1 semantic eligibility gate failed'));
+		if (qualityHold) {
+			throw new FunctionAtlasHoldError(
+				`Function Atlas producer is available, but ${failures.length}/224 functions are withheld by native semantic-quality barriers; ${allRecords.length}/224 remain eligible`,
+			);
+		}
 		throw new Error(`Function Atlas accepted ${allRecords.length}/224 real HAST functions; ${failures.length} failed semantic gates`);
 	}
 	fs.rmSync(path.join(runRoot, 'acceptance-failures.json'), { force: true });
@@ -428,8 +458,13 @@ function run(): void {
 		functionAtlasArtifactSha256: baseline.artifactSha256,
 	});
 	const resolvedRegressionPath = path.join(regressionRoot, 'x86-width-and-unary-regression.json');
-	if (fs.existsSync(resolvedRegressionPath)) {
-		const resolvedRegression = readJson<Record<string, unknown>>(resolvedRegressionPath);
+	const resolvedRegressionSourcePath = path.join(
+		benchmarkSourceRoot, 'regressions', 'x86-width-and-unary-regression.json');
+	const resolvedRegressionReadPath = fs.existsSync(resolvedRegressionPath)
+		? resolvedRegressionPath : resolvedRegressionSourcePath;
+	if (fs.existsSync(resolvedRegressionReadPath)) {
+		const resolvedRegression = readJson<Record<string, unknown>>(resolvedRegressionReadPath);
+		fs.mkdirSync(regressionRoot, { recursive: true });
 		writeJson(resolvedRegressionPath, {
 			...resolvedRegression,
 			producer: { remill: engineLock.remill, helix: engineLock.helix },
@@ -473,16 +508,31 @@ function run(): void {
 }
 
 function resolveHelixNode(expectedSha256: string): string {
-	const candidates = [
-		process.env.HEXCORE_HELIX_HAST_NODE,
-		path.resolve(packageRoot, '..', 'hexcore-helix', 'hexcore-helix.win32-x64-msvc.node'),
-		path.resolve(packageRoot, '..', '..', '..', 'HexCore-Helix-v2', 'target', 'release', 'hexcore-helix.hast1-r30.node'),
-	].filter((value): value is string => Boolean(value));
-	const match = candidates.find(candidate => fs.existsSync(candidate) && sha256File(candidate) === expectedSha256);
-	if (!match) {
-		throw new Error(`No Helix HAST v1 node matches pinned SHA-256 ${expectedSha256}; set HEXCORE_HELIX_HAST_NODE`);
-	}
-	return match;
+	// eslint-disable-next-line @typescript-eslint/no-var-requires
+	const resolver = require('./producerResolver.js') as {
+		resolveFrozenHelixProducer(options: {
+			benchmarkRoot: string;
+			expectedSha256: string;
+			manifestPath?: string;
+		}): { path: string };
+	};
+	const manifestPath = path.join(
+		benchmarkSourceRoot,
+		engineLockProducerManifest(expectedSha256),
+	);
+	return resolver.resolveFrozenHelixProducer({
+		benchmarkRoot: benchmarkSourceRoot,
+		expectedSha256,
+		manifestPath,
+	}).path;
+}
+
+function engineLockProducerManifest(_expectedSha256: string): string {
+	const lockPath = process.env.HEXCORE_FUNCTION_ATLAS_ENGINE_LOCK
+		? path.resolve(process.env.HEXCORE_FUNCTION_ATLAS_ENGINE_LOCK)
+		: path.join(benchmarkSourceRoot, 'engine.lock.json');
+	const lock = readJson<EngineLock>(lockPath);
+	return lock.helix.producerManifest ?? 'producer-manifest.json';
 }
 
 function resolveRemillNode(root: string, expectedSha256: string): string {

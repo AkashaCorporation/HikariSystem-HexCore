@@ -4,19 +4,14 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
+const { resolveFrozenHelixProducer } = require('../producerResolver.js');
 
 async function main() {
 	const metadata = require('./x86-width-and-unary-regression.json');
-	const candidates = [
-		process.env.HEXCORE_HELIX_HAST_NODE,
-		path.resolve(__dirname, '../../../../hexcore-helix/hexcore-helix.win32-x64-msvc.node'),
-		path.resolve(__dirname, '../../../../../../HexCore-Helix-v2/target/release/hexcore-helix.hast1-r30.node'),
-	].filter(Boolean);
-	const resolvedNode = candidates.find(candidate => fs.existsSync(candidate)
-		&& crypto.createHash('sha256').update(fs.readFileSync(candidate)).digest('hex') === metadata.producer.helix.nodeSha256);
-	if (!resolvedNode) {
-		throw new Error(`No HAST-v1 Helix node matches ${metadata.producer.helix.nodeSha256}`);
-	}
+	const resolvedNode = resolveFrozenHelixProducer({
+		benchmarkRoot: path.resolve(__dirname, '..'),
+		expectedSha256: metadata.producer.helix.nodeSha256,
+	}).path;
 	const nodeSha256 = crypto.createHash('sha256').update(fs.readFileSync(resolvedNode)).digest('hex');
 	if (nodeSha256 !== metadata.producer.helix.nodeSha256) {
 		throw new Error(`Helix node hash drift: ${nodeSha256}`);
@@ -39,10 +34,17 @@ async function main() {
 	if (result.pipeline !== metadata.expected.pipeline || !result.astBuffer?.length) {
 		throw new Error('Resolved x86 regression did not produce an MLIR HAST artifact');
 	}
+	const sourceSha256 = crypto.createHash('sha256').update(result.source).digest('hex');
+	const hastSha256 = crypto.createHash('sha256').update(result.astBuffer).digest('hex');
+	if (sourceSha256 !== metadata.expected.sourceSha256 || hastSha256 !== metadata.expected.hastSha256) {
+		throw new Error(`Resolved x86 regression artifact drift: C=${sourceSha256} HAST=${hastSha256}`);
+	}
 	const hql = await import(pathToFileURL(path.resolve(__dirname, '../../../dist/index.js')).href);
 	const functions = hql.hydrateHAST(result.astBuffer);
 	if (functions.length !== 1
 		|| functions[0].hast?.schemaMajor !== metadata.expected.hastSchema
+		|| functions[0].hast?.schemaMinor !== metadata.expected.hastSchemaMinor
+		|| functions[0].address?.toLowerCase() !== metadata.expected.functionAddress
 		|| functions[0].hast?.nativeQuality?.status !== metadata.expected.nativeQualityStatus
 		|| !functions[0].hast?.nativeQuality?.issues?.includes('damning-defect')
 		|| functions[0].hast?.semanticEligible !== metadata.expected.semanticEligible
