@@ -1613,7 +1613,9 @@ the omitted match is not lost.
 ### `hexcore.disasm.disassembleAtHeadless`
 
 Disassemble either a paged instruction count or an exact half-open byte range.
-Requires prior `analyzeAll` or a loaded binary.
+`scopeMode:"exact-range"` loads only the binary and decodes the declared range;
+it never starts global analysis or commits analysis closure. Discovery mode may
+prepare a function index through the terminable `analyzeAll` child process.
 
 ```json
 {
@@ -1621,7 +1623,8 @@ Requires prior `analyzeAll` or a loaded binary.
   "args": {
     "address": "0x401000",
     "endExclusive": "0x4012A0",
-    "stopAtFunctionBoundary": true,
+    "scopeMode": "exact-range",
+    "autoBacktrack": false,
     "filterJunk": true
   },
   "output": { "path": "disasm-at-result.json" },
@@ -1634,6 +1637,7 @@ Requires prior `analyzeAll` or a loaded binary.
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `30` | Number of instructions to disassemble in legacy pagination mode. |
 | `endExclusive` | `string` | — | Authoritative first byte after the requested range. Takes precedence over instruction-count scope. |
+| `scopeMode` | `"discovery" \| "exact-range"` | `"discovery"` | `exact-range` requires `endExclusive` and `autoBacktrack:false`, performs no `analyzeAll`, and never mutates the audit universe. `discovery` may build the function index in an isolated child process. |
 | `stopAtFunctionBoundary` | `boolean` | `false` | Use the known function extent exactly; fails when no authoritative extent exists. |
 | `filterJunk` | `boolean` | `false` | Filter junk instructions from output. Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
 | `autoBacktrack` | `boolean` | `true` | When `true`, auto-detects function boundaries — if the address lands mid-function, backtracks to the real function start. Set to `false` to disable. **(v3.7.3)** |
@@ -1646,6 +1650,18 @@ coverage. `stopReason` is one of `count-limit`, `requested-end`,
 `function-end`, `decode-failure`, or `binary-boundary`. An exact range that is
 not reached returns `partial`; a full count page is never proof that the
 function ended.
+
+Exact-range results expose `analysisPreparation.globalAnalysisInvoked:false`,
+unchanged engine generations, and `analysisClosure.status:"display-only"` with
+`auditUniverseChanged:false`. Every decoded instruction inside a complete,
+aligned explicit range is classified as `semantic-body`. This mode is intended
+for bounded forensic extraction, not function ownership or closure claims.
+
+Discovery preparation uses the same externally supervised child process as
+`hexcore.disasm.analyzeAll`. `analysisPreparation.nativeExecution` records PID,
+outcome, duration, last phase, heartbeat and snapshot identity. A native timeout
+is killed outside the Extension Host; a JavaScript `AbortSignal` is not treated
+as native cancellation.
 
 `instructionBoundary` reports whether the requested address is an exact
 materialized instruction start, a `mid-instruction` address, or could not be

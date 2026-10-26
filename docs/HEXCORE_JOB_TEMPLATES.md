@@ -326,6 +326,42 @@ Recommended when you want to inspect the raw LLVM IR **and** the final pseudo-C 
 
 ---
 
+## Template: Exact-Range Disassembly Without Global Analysis
+
+Use this when start and end are already frozen evidence. It decodes only the
+half-open byte range and cannot silently fall back to `analyzeAll` or
+auto-backtracking.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "hexcore-reports/exact-range",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "exact-disassembly",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x14142FEF0",
+        "endExclusive": "0x14143048B",
+        "scopeMode": "exact-range",
+        "autoBacktrack": false,
+        "context": 0
+      },
+      "output": { "path": "function.exact-range.json", "format": "json" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+Acceptance requires `globalAnalysisInvoked:false`, unchanged engine generation,
+full byte coverage, `truncated:false`, zero unclassified instructions and
+`auditUniverseChanged:false`. This proves decoding of the requested bytes, not
+independent function ownership.
+
+---
+
 ## Template: Deep Reverse Engineering (Decompile)
 
 Full reverse engineering pipeline: disassemble, lift to LLVM IR, decompile to pseudo-C via Helix, extract strings and Base64. Ideal for understanding complex functions in PE/ELF binaries.
