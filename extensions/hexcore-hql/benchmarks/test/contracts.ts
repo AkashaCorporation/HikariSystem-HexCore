@@ -107,8 +107,8 @@ check(x86Metadata.status === 'resolved'
 	&& x86Metadata.expected.adapterCoverage === 1
 	&& x86Metadata.migrationAssessment.producerRegression === 'pass'
 	&& x86Metadata.migrationAssessment.fullCorpusStatus === 'hold-quality'
-	&& x86Metadata.migrationAssessment.eligibleFunctions === 102
-	&& x86Metadata.migrationAssessment.withheldFunctions === 122
+	&& x86Metadata.migrationAssessment.eligibleFunctions === 110
+	&& x86Metadata.migrationAssessment.withheldFunctions === 114
 	&& x86Metadata.migrationAssessment.expectedFunctions === 224,
 'x86 Function Atlas regression must retain the resolved HAST contract');
 const adapterLosses = readJson<{
@@ -133,8 +133,8 @@ check(functionAtlasStatus.status === 'hold'
 	&& functionAtlasStatus.code === 'HOLD-QUALITY'
 	&& functionAtlasStatus.historicalArtifact.producerNodeSha256 !== functionAtlasStatus.currentProducerMigration.nodeSha256
 	&& functionAtlasStatus.currentProducerMigration.expectedFunctions === 224
-	&& functionAtlasStatus.currentProducerMigration.eligibleFunctions === 102
-	&& functionAtlasStatus.currentProducerMigration.withheldFunctions === 122,
+	&& functionAtlasStatus.currentProducerMigration.eligibleFunctions === 110
+	&& functionAtlasStatus.currentProducerMigration.withheldFunctions === 114,
 'Function Atlas canonical similarity artifact must remain held while the current producer has native-quality barriers');
 
 console.log(`Benchmark contract tests: ${assertions} assertions passed`);

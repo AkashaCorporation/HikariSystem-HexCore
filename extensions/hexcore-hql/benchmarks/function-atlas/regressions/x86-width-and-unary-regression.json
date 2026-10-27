@@ -10,7 +10,7 @@
     },
     "helix": {
       "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
-      "nodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
+      "nodeSha256": "cfce13b7999abd0f3e2feaec90600bb722912b3ae84026084071ea3dff18ca71",
       "hastSchema": 1,
       "hastSchemaMinor": 2
     }
@@ -30,7 +30,7 @@
     "hastSchema": 1,
     "hastSchemaMinor": 2,
     "functionAddress": "0x10001620",
-    "sourceSha256": "f8b7bb52baeb16188d5cfe5af5cbf40633c0d1e52dc5e9e073f50b7f3c388832",
+    "sourceSha256": "ed8a08c05c9585f5e02ae3cd13fe4dce07be14fa22ce67aa7350c77b9edd8a6f",
     "hastSha256": "895a7c7993db4269c5b8166600ffb023f01b502d848a024d6d54518153f6546b",
     "semanticEligible": false,
     "nativeQualityStatus": "known-loss",
@@ -39,8 +39,8 @@
   "migrationAssessment": {
     "producerRegression": "pass",
     "fullCorpusStatus": "hold-quality",
-    "eligibleFunctions": 102,
-    "withheldFunctions": 122,
+    "eligibleFunctions": 110,
+    "withheldFunctions": 114,
     "expectedFunctions": 224,
     "previousArtifactSha256": "181961cdc2a657deeb90ec2c5133c5be7537cd9644b79d70c9c6cdc02e7aaed3"
   }

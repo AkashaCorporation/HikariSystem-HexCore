@@ -41,7 +41,7 @@ try {
 	}), /engine lock and producer manifest disagree/);
 
 	const real = resolveFrozenHelixProducer({ benchmarkRoot: __dirname });
-	assert.equal(real.sha256, '5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9');
+	assert.equal(real.sha256, 'cfce13b7999abd0f3e2feaec90600bb722912b3ae84026084071ea3dff18ca71');
 	assert.ok(fs.existsSync(real.path));
 
 	const unavailableManifest = path.join(root, 'unavailable.json');

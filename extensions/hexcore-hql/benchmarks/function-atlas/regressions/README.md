@@ -23,7 +23,7 @@ or `HEXCORE_PRODUCER_CACHE`. Missing bytes report
 `HOLD-MISSING-FROZEN-PRODUCER`; hash drift is never accepted.
 
 The current producer passes this focused regression and the complete HQL test
-suite. The 16-binary/224-function migration remains `HOLD-QUALITY`: 102
-functions are semantically eligible and 122 are withheld by explicit native
+suite. The 16-binary/224-function migration remains `HOLD-QUALITY`: 110
+functions are semantically eligible and 114 are withheld by explicit native
 quality barriers. Do not replace the previous canonical similarity artifact or
 weaken `semanticEligible` merely to make that corpus green.

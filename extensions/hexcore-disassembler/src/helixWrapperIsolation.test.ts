@@ -14,6 +14,7 @@ interface MutableWrapper {
 	module: {
 		HelixEngine: new () => {
 			isDisposed: boolean;
+			version(): string;
 			decompileIr(): never;
 			dispose(): void;
 		};
@@ -26,6 +27,7 @@ function installHangingEngine(wrapper: HelixWrapper): string {
 	fs.writeFileSync(path.join(fixtureDir, 'index.js'), `
 		class HelixEngine {
 			constructor() { this.isDisposed = false; }
+			version() { return 'helix-js=test native=test'; }
 			decompileIr() { while (true) {} }
 			dispose() { this.isDisposed = true; }
 		}
@@ -33,6 +35,7 @@ function installHangingEngine(wrapper: HelixWrapper): string {
 	`);
 	class MainThreadEngine {
 		isDisposed = false;
+		version(): string { return 'helix-js=test native=test'; }
 		decompileIr(): never { throw new Error('main-thread engine must not run'); }
 		dispose(): void { this.isDisposed = true; }
 	}

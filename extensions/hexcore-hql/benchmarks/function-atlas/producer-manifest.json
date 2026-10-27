@@ -7,15 +7,15 @@
   },
   "artifact": {
     "fileName": "hexcore-helix.win32-x64-msvc.node",
-    "sha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
-    "bytes": 15285248,
+    "sha256": "cfce13b7999abd0f3e2feaec90600bb722912b3ae84026084071ea3dff18ca71",
+    "bytes": 15402496,
     "platform": "win32",
     "arch": "x64"
   },
   "resolution": {
     "explicitPathEnv": "HEXCORE_HELIX_HAST_NODE",
     "cacheRootEnv": "HEXCORE_PRODUCER_CACHE",
-    "cacheRelativePath": "sha256/5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9/hexcore-helix.win32-x64-msvc.node",
+    "cacheRelativePath": "sha256/cfce13b7999abd0f3e2feaec90600bb722912b3ae84026084071ea3dff18ca71/hexcore-helix.win32-x64-msvc.node",
     "localDevelopmentPath": "../../../hexcore-helix/hexcore-helix.win32-x64-msvc.node"
   },
   "releaseAsset": {

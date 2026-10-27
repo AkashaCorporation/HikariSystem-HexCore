@@ -10,13 +10,13 @@
     "producerVersion": "helix-js=0.1.9 native=0.1.9"
   },
   "currentProducerMigration": {
-    "nodeSha256": "5742b1d822fcf41e881da02929ac6d86555ede9c1e946f590a96333538e76bb9",
+    "nodeSha256": "cfce13b7999abd0f3e2feaec90600bb722912b3ae84026084071ea3dff18ca71",
     "version": "helix-js=0.9.4-rc.2 native=0.9.4-rc.2",
     "remillNodeSha256": "afbccb0aeca7fa3b7423d544a5d6cd7b266fd68b46fce98267cbb20286d503eb",
     "expectedFunctions": 224,
-    "eligibleFunctions": 102,
-    "withheldFunctions": 122,
+    "eligibleFunctions": 110,
+    "withheldFunctions": 114,
     "reason": "Native semantic-quality barriers prevent replacing the historical similarity artifact"
   },
-  "deterministicRuns": 2
+  "deterministicRuns": 3
 }
