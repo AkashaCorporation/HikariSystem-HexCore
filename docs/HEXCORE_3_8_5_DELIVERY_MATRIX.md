@@ -43,7 +43,7 @@ must produce and qualify a new artifact with its own manifest and hash.
 | Common | `1.3.1` |
 | PE Analyzer | `1.1.4` |
 | File Type | `1.0.3` |
-| Revenant | `0.4.0` |
+| Revenant | `0.5.0` |
 | Elixir | `1.0.4` |
 | Strings | `1.3.3` |
 | YARA | `2.1.3` |
@@ -63,9 +63,9 @@ changes. They also do not authorize a new release claim without package tests.
 | better-sqlite3 | `2.0.3` | `d630b7f07dfb260b9ff312b68e9c536d22a3bca382db649528d88779820d5a54` |
 | Remill | `0.5.4` | `0b013bf7e31c4e2e5c1249d2c95fb7657f51f70b812d6faf6a07392d8e22b078` |
 | Souper | `0.2.2` | `241a9b5d7a8c7f56c4b443805f52ed7f3e84fbc0bda9c0d4a25bb0265349ec86` |
-| Helix | `0.9.4-rc.2` | `567700180e38774bc234d06a8f0f73e6752d9a54a95004040f0ee62a4ad6c011` |
+| Helix | `0.9.4-rc.3` | `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231` (qualified local build; published asset hash gate pending) |
 | Elixir | `1.0.4` | `51129cb794b946331eec7d4d4df652bcde26a3610221e282d5e91f607afe9b25` |
-| Revenant backend | `0.4.0` | `06b46c0e0ffb2e920d6a90b66ca03bb86900b0dbb8eb3a5311922c92f7bf0bbe` |
+| Revenant backend | `0.5.0` / ILSpy `11.1.0.9782` | `f04334feef9b9fa27689d5b30342fe81a3865821cba0f480127a660663cd58a2` |
 
 Rellic `0.1.0` remains inactive and is not a delivered runtime.
 
@@ -84,33 +84,35 @@ Definitions:
 |---|---|---|---|---|
 | Agent Bridge v1 | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS | accepted |
 | Workspace trust boundary | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS | accepted |
-| Named job IDs/references/goto | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E06 |
+| Named job IDs/references/goto | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
 | Native-worker isolation/cancel | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS | accepted |
-| Artifact ancestry/outcome gates | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E07 |
-| AnalyzeAll reuse/session closure | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E08/E25 |
-| Function ownership/direct range | partial | partial | HOLD-COVERAGE | GOAL-OPEN #30 |
-| SCF/goto/confidence honesty | partial | partial | HOLD-COVERAGE | GOAL-OPEN #31 |
-| Helix RC.2 quality | IMPLEMENTED | SOURCE-PASS | partial smoke | final identity pending |
-| SemanticQueryView | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E14 |
-| HQL ad-hoc query | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E12/E13 |
-| Semantic explain | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E15 |
-| PE overlay/directory coverage | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E16 |
+| Artifact ancestry/outcome gates | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
+| AnalyzeAll reuse/session closure | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
+| Function ownership/direct range | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS (PE); ELF hidden HOLD | accepted scoped #30 |
+| SCF/goto/confidence honesty | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS-WITH-HOLDS | accepted 3.8.5 slice; #31 stays open |
+| Helix final-node honesty | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS-WITH-HOLDS | distinct prerelease identity required |
+| SemanticQueryView | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
+| HQL ad-hoc query | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | positive witness remains partial/signal; absence unknown |
+| Semantic explain | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
+| PE overlay/directory coverage | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | final artifact pending |
 | Exact-range disassembly | IMPLEMENTED | SOURCE-PASS | PACKAGE-PASS | accepted baseline |
 | `.pdata` ownership | IMPLEMENTED | SOURCE-PASS | focused regression | pending E09/E16 |
-| ELF canonical address model | partial | partial | HOLD-COVERAGE | GOAL-OPEN #61 |
-| AArch64 PLT/branch ownership | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | experimental/focused |
-| Native PE/ELF/raw routing | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E19 |
-| Android-container rejection | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | metadata only |
-| YARA advisory scoring | IMPLEMENTED | SOURCE-PASS | HOLD-COVERAGE | pending E20 |
-| Debugger | existing | existing tests | smoke required | no major 3.8.5 claim |
-| Revenant | existing | existing tests | smoke required | no major 3.8.5 claim |
-| Elixir | existing | existing tests | smoke required | no major 3.8.5 claim |
+| ELF canonical address model | original VVV premise refuted | source gaps documented | original corpus PACKAGE-PASS / NO-FIX | future migration requires real red fixtures |
+| AArch64 PLT/branch ownership | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | experimental/focused |
+| Native PE/ELF/raw routing | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PARTIAL | raw package lane remains |
+| Android-container rejection | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | typed DEX rejection |
+| YARA advisory scoring | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | qualified positive and clean negative |
+| Debugger | existing | existing tests | DERIVED-PACKAGE-PASS | no major 3.8.5 claim |
+| Revenant 0.5.0 | IMPLEMENTED | 20/20 SOURCE-PASS | DERIVED-PACKAGE-PASS | ILSpy 11.1 and HX-SH-009 fix |
+| Elixir | existing | existing tests | DERIVED-PACKAGE-PASS | no major 3.8.5 claim |
 
 ## Helix Delta and Boundary
 
-The official Helix `0.9.4-rc.1 -> 0.9.4-rc.2` comparison contains nine commits,
-49 changed files, approximately 6,507 additions and 530 deletions. RC.2 reports
-389 native tests and 192 Rust workspace tests.
+The official-history Helix `0.9.4-rc.3` reconciliation is rooted at RC.2 commit
+`585606d0` and imports 41 code/build/schema files through a named allowlist.
+RC.3 reports 412 native PASS, one optional SKIP and 192 Rust workspace PASS.
+The prepared source-bound dependency bundle has SHA-256
+`bc1b796cd4b4146abab6b8ae490704df214eeb4dd0bff1f1512511f01ced0d70`.
 
 Accepted RC.2 themes include:
 
@@ -138,11 +140,11 @@ The final Helix version remains a release decision after the #30/#31 goal.
 
 | Issue | Current evidence | 3.8.5 disposition |
 |---|---|---|
-| #30 direct valid unregistered function | unresolved correctness gap | mandatory goal |
-| #31 malformed pseudo-C/high confidence | partially mitigated; not closed | mandatory scoped goal |
+| #30 direct valid unregistered function | PE64 acceptance PASS; hidden ELF fixture HOLD-COVERAGE | close only after explicit approval |
+| #31 malformed pseudo-C/high confidence | honesty/SCF slice accepted; matrix holds remain | retain open |
 | #37 historical Remill lifter failures | not recently reproduced | retest, then supersede or retain |
 | #60 AVX-512 fallback | open tracking enhancement | deferred |
-| #61 ELF base/ORG/seeds | unresolved P1 bug | mandatory goal |
+| #61 ELF base/ORG/seeds | original VVV P1 refuted: `.init` is valid RX code at `0x401000` | supersede/close only after explicit approval; future ET_EXEC-zero/ET_DYN/ET_REL work separate |
 | #62 authoritative type propagation | partial foundation only | deferred to 3.8.6 |
 | #63 native batch decompile | not implemented | deferred |
 | #64 no-IDE runner | Agent Bridge intentionally requires IDE | separate architecture |
@@ -182,27 +184,27 @@ The final Helix version remains a release decision after the #30/#31 goal.
 | E03 | Workspace trust | PASS positive/negative |
 | E04 | Agent Bridge | PASS |
 | E05 | Active cancellation | PASS |
-| E06 | Named jobs | pending |
-| E07 | Artifact contracts | pending |
-| E08 | AnalyzeAll/session | pending |
-| E09 | Function ownership | blocked by #30 goal |
-| E10 | SCF/goto honesty | blocked by #31 goal |
-| E11 | Helix quality | partial; final corpus/identity gate pending |
-| E12 | HQL structural | pending |
-| E13 | HQL semantic | pending |
-| E14 | Semantic view | pending |
-| E15 | Semantic explain | pending |
-| E16 | PE evidence | pending |
-| E17 | ELF mapping | blocked by #61 goal |
-| E18 | AArch64 context | pending focused gate |
-| E19 | Native routing | pending |
-| E20 | YARA advisory | pending |
-| E21 | Debugger smoke | pending |
-| E22 | Revenant smoke | pending |
-| E23 | Elixir smoke | pending |
-| E24 | UI smoke | pending |
-| E25 | Determinism | pending |
-| E26 | Shutdown hygiene | PASS on Agent Bridge baseline; full matrix pending |
+| E06 | Named jobs | PASS on derived package |
+| E07 | Artifact contracts | PASS on derived package |
+| E08 | AnalyzeAll/session | PASS on derived package |
+| E09 | Function ownership | PASS-PE / HOLD-ELF-HIDDEN |
+| E10 | SCF/goto honesty | PASS-WITH-HOLDS |
+| E11 | Helix quality | PASS-WITH-HOLDS on accepted final node; prerelease identity pending |
+| E12 | HQL structural | PASS on derived package |
+| E13 | HQL semantic | PASS after bounded positive-witness fix |
+| E14 | Semantic view | PASS on derived package |
+| E15 | Semantic explain | PASS on derived package |
+| E16 | PE evidence | PASS on derived package |
+| E17 | ELF mapping | original VVV PASS/NO-FIX; broader canonical model DEFERRED-REAL-RED-FIXTURES |
+| E18 | AArch64 context | PASS on derived package |
+| E19 | Native routing | PARTIAL; PE/ELF/DEX pass, raw package lane open |
+| E20 | YARA advisory | PASS on derived package |
+| E21 | Debugger smoke | PASS on derived package |
+| E22 | Revenant smoke | PASS on 0.5.0 derived package |
+| E23 | Elixir smoke | PASS on derived package |
+| E24 | UI smoke | HOLD-COVERAGE; Computer Use native pipe unavailable |
+| E25 | Determinism | PASS, issue #30 K=10 |
+| E26 | Shutdown hygiene | PASS on derived package |
 
 ## Documentation State
 
@@ -240,5 +242,65 @@ Phase 0 is accepted only when:
 - the checkpoint receives an allowlisted diff review;
 - no push occurs without explicit approval.
 
-Next implementation phase after acceptance: issue #30/#31 ownership and SCF
-honesty, using its existing standalone goal document.
+Phase 0 advanced to issue #30/#31 ownership and SCF honesty using its standalone
+goal document.
+
+## Phase-1 #30/#31 Checkpoint
+
+Phase 1 completed on 2026-10-30 with `PASS-WITH-HOLDS`.
+
+- deterministic hidden PE64 fixture: 10/10 semantic reruns identical;
+- non-executable and mid-instruction controls: typed/partial as required;
+- HexCore focused tests: 87 PASS;
+- Helix focused tests: 89 PASS;
+- Helix broad current suite: 273 PASS, 1 optional SKIP, 0 FAIL;
+- fresh Kbase large path: 1,399 decoded instructions, 4.466 seconds,
+  intentional partial, no Extension Host hang;
+- final candidate Helix node SHA-256:
+  `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231`
+  (local qualification; replace with the published workflow hash if different).
+
+Adjudication and checksums are recorded in:
+
+- `ISSUE_30_DIRECT_OWNERSHIP_ACCEPTANCE.md`;
+- `ISSUE_31_SCF_GOTO_POLICY.md`;
+- `ISSUES_30_31_FINAL_ADJUDICATION.md`;
+- `ISSUES_30_31_ACCEPTANCE_MANIFEST.json`;
+- `ISSUES_30_31_SHA256SUMS.txt`.
+
+Phase 1 advanced to issue #61 adjudication. The public #31 issue remains open;
+the Phase-1 holds are not release claims.
+
+## Phase-2 #61 Adjudication
+
+Phase 2 completed on 2026-10-30 with `REFUTED-ORIGINAL-CORPUS / NO-FIX`.
+
+The VVV fixture declares:
+
+- minimum `PT_LOAD` at `0x400000`;
+- executable `.init` at `0x401000..0x40101B`;
+- executable `.text` and entry at `0x31337000`.
+
+The routine at `0x401000` has eight instructions, terminates in `ret`, and is
+called from `0x3133BA1C`. Removing it would be a regression. A clean current
+package run completed AnalyzeAll, ASM and session export with 3 ok / 0 partial /
+0 error in 3.041 seconds.
+
+Independent source gaps remain documented for ET_EXEC mapped at zero, guessed
+ET_DYN runtime bias and flat ET_REL section identity. They are not attributed
+to VVV and require dedicated red fixtures before a cross-consumer migration.
+
+Evidence:
+
+- `ISSUE_61_CURRENT_CONSUMER_MAP.md`;
+- `ELF_ADDRESS_MODEL_SPEC.md`;
+- `ISSUE_61_BASELINE_MATRIX.json`;
+- `ISSUE_61_ACCEPTANCE_MATRIX.json`;
+- `ISSUE_61_FINAL_ADJUDICATION.md`.
+
+The derived-package matrix completed with `FIX-BLOCK`: runtime behavior is
+accepted with declared holds, but E01 fails release identity because the
+stored manifest/commit predates the accepted Helix, HQL and Revenant overlays.
+See `HEXCORE_3_8_5_DERIVED_PACKAGE_CHECKPOINT_2026-10-30.md`. The next block is
+allowlisted commits, a distinct Helix prerelease, artifact-only rebuild and
+fresh-package E2E.
