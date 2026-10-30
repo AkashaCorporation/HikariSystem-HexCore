@@ -143,6 +143,8 @@ export {
 	type NativeModuleLoadResult
 } from './nativeModuleLoader';
 
+export { inspectPEOverlay, type PEOverlayInspection } from './peOverlay';
+
 export { getHexCoreBaseCSS } from './webviewStyles';
 
 export {
