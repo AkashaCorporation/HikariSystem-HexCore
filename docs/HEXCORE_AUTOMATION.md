@@ -4,13 +4,15 @@ HexCore supports running analysis pipelines from workspace job files.
 
 This document describes the unreleased `3.8.5` development surface, including the retained `3.8.4` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.69`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.2`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+Relevant integrated versions: disassembler `1.4.74`, HQL `0.3.1`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.2`, Elixir `1.0.4`, and Report Composer `1.0.14`.
 
 ### Agent Bridge v1
 
 The local `hexcore-agent` CLI validates, submits, observes, waits, streams,
 cancels, inspects capabilities and runs doctor against the same queue used by
-commands and the workspace watcher. HexCore must be open with the workspace.
+commands and the workspace watcher. HexCore must be open with the trusted
+workspace; Restricted Mode intentionally does not start the bridge because jobs
+can execute workspace-defined automation.
 The bridge uses a per-workspace authenticated named pipe, preserves revision
 deduplication, and persists bounded/hash-bound terminal step evidence without
 returning raw command results. It does not add a second queue or arbitrary RPC.

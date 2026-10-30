@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.5] - Unreleased
 
+### Agent Bridge and Post-RC Product Gates
+
+- Add Agent Bridge protocol v1 and the packaged `hexcore-agent` CLI over the
+  existing JobQueueManager. Support non-mutating validation, revision-bound
+  submit, status, events, wait, active cancellation, schema, capabilities and
+  doctor without adding a second scheduler or arbitrary command RPC.
+- Preserve Restricted Mode as an explicit boundary: untrusted workspaces create
+  no bridge, while a trusted restart creates discovery through normal extension
+  activation. The CLI never accepts or bypasses the trust prompt.
+- Persist bounded, redacted and canonical hash-bound terminal records with
+  target identity, job revision, execution ID, provenance, partial/unknown
+  status and cancellation evidence.
+- Add `autoRun:false` for explicit edit/validate/submit workflows and unify
+  watcher/bridge revision identity on SHA-256.
+- Add PE overlay evidence, honest PE directory coverage, bounded exact-range
+  disassembly and reconciled `.pdata` ownership without changing the qualified
+  native engine locks.
+- Qualify the artifact-only Windows package at commit `c5ebc6b` with all nine
+  active runtimes loadable, positive/negative workspace-trust controls, a
+  revision-bound hash job, active native-worker cancellation and clean shutdown.
+  This artifact is a development baseline, not a published release.
+
 ### Release Candidate Reconciliation
 
 - Prepare product identity `3.8.5-rc.1` and reconcile canonical Helix

@@ -2,6 +2,24 @@
 
 Safe default job templates for users and AI agents.
 
+## Agent-Controlled Execution
+
+Jobs owned by a user or agent should normally set `"autoRun": false`. This
+keeps the workspace watcher from racing an edit/validate cycle while preserving
+manual execution and Agent Bridge submission.
+
+From an extracted Windows package:
+
+```powershell
+.\bin\hexcore-agent.cmd validate .hexcore_job.json --workspace C:\research\case
+.\bin\hexcore-agent.cmd submit .hexcore_job.json --workspace C:\research\case --wait
+```
+
+The workspace must already be open and explicitly trusted in HexCore. Validation
+is non-mutating and returns the exact job revision SHA-256. See
+[HEXCORE_AGENT_BRIDGE.md](HEXCORE_AGENT_BRIDGE.md) for status, events,
+cancellation, discovery, containment and exit-code contracts.
+
 ## 3.8.5 Development: Named Dependencies
 
 This example uses the same engine commands with stable logical step references.
