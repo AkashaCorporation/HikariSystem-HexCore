@@ -1,6 +1,6 @@
 # Changelog
 
-## [1.4.70] - 2026-10-30
+## [1.4.71] - 2026-10-30
 
 - Activate the Disassembler eagerly in the packaged HexCore product so the
   Agent Bridge is available as soon as a workspace opens. This removes the
