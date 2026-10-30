@@ -112,7 +112,7 @@ The official-history Helix `0.9.4-rc.3` reconciliation is rooted at RC.2 commit
 `585606d0` and imports 41 code/build/schema files through a named allowlist.
 RC.3 reports 412 native PASS, one optional SKIP and 192 Rust workspace PASS.
 The prepared source-bound dependency bundle has SHA-256
-`bc1b796cd4b4146abab6b8ae490704df214eeb4dd0bff1f1512511f01ced0d70`.
+`ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b`.
 
 Accepted RC.2 themes include:
 

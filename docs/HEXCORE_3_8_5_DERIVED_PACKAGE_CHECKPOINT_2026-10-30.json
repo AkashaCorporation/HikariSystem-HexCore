@@ -43,7 +43,7 @@
     "rustTests": { "passed": 192, "failed": 0, "ignoredDocTests": 2 },
     "engineLibrarySha256": "ef7009c945dd00f5afdd610a323266cb7edf3e43f2c3a1455b9df3258de6d425",
     "qualifiedNodeSha256": "e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231",
-    "dependencyBundleSha256": "bc1b796cd4b4146abab6b8ae490704df214eeb4dd0bff1f1512511f01ced0d70",
+    "dependencyBundleSha256": "ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b",
     "versionState": "0.9.4-rc.3 local commits qualified; push/publication pending",
     "report": "HELIX_0_9_4_RC3_OFFICIAL_RECONCILIATION.md"
   },

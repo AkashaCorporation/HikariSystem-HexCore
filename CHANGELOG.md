@@ -20,8 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pointer/scalar operations. These defects cap translation/structuring
   confidence instead of being emitted at 100%.
 - Pin the RC.3 LLVM/MLIR dependency bundle to SHA-256
-  `bc1b796cd4b4146abab6b8ae490704df214eeb4dd0bff1f1512511f01ced0d70`;
-  its provenance binds package `0.9.4-rc.3`, engine tree `af0baa87...` and the
+  `ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b`;
+  its provenance binds package `0.9.4-rc.3`, engine tree `54da92a2...` and the
   exact `helix_engine.lib` hash.
 - Qualify current-package AArch64 PLT binding, YARA advisory scoring,
   target-bound HQL/semantic explanation, active worker cancellation and clean
