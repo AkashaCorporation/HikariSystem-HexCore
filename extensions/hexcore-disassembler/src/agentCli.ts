@@ -2,8 +2,6 @@
  *  Copyright (c) Microsoft Corporation. All rights reserved.
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
-import { spawn } from 'child_process';
-import * as fs from 'fs';
 import * as path from 'path';
 import { AgentBridgeClientError, requestAgentBridge, streamAgentBridgeEvents } from './agentBridgeClient';
 import { isRecord } from './agentBridgeProtocol';
@@ -24,10 +22,6 @@ const defaultIo: CliIo = {
 	stderr: value => process.stderr.write(`${value}\n`),
 };
 
-const PACKAGED_BOOTSTRAP_TIMEOUT_MS = 5000;
-const PACKAGED_BOOTSTRAP_POLL_MS = 100;
-const AGENT_BRIDGE_ACTIVATION_URI = 'vscode://command/hexcore.agentBridge.activate';
-
 export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo): Promise<number> {
 	try {
 		const parsed = parseArguments(argv);
@@ -38,9 +32,9 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 		const workspace = path.resolve(stringFlag(parsed.flags, 'workspace') ?? process.cwd());
 		switch (parsed.command) {
 			case 'validate': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'validate', {
+				const result = await requestAgentBridge(workspace, 'validate', {
 					jobFile: requiredPositional(parsed, 0, 'validate requires a job file path.'),
-				}));
+				});
 				io.stdout(JSON.stringify(result));
 				return isRecord(result) && result.valid === false ? 3 : 0;
 			}
@@ -51,15 +45,15 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 				const sessionId = stringFlag(parsed.flags, 'session');
 				if (priority) { params.priority = priority; }
 				if (sessionId) { params.sessionId = sessionId; }
-				const submitted = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'submit', params));
+				const submitted = await requestAgentBridge(workspace, 'submit', params);
 				if (parsed.flags.get('wait') === true) {
 					if (!isRecord(submitted) || typeof submitted.jobId !== 'string') {
 						throw new AgentBridgeClientError('invalid-submit-response', 'Submit response did not contain jobId.');
 					}
-					const terminal = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'wait', {
+					const terminal = await requestAgentBridge(workspace, 'wait', {
 						jobId: submitted.jobId,
 						...timeoutParam(parsed.flags),
-					}));
+					});
 					io.stdout(JSON.stringify({ submit: submitted, terminal }));
 					return terminalExitCode(terminal);
 				}
@@ -67,15 +61,15 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 				return 0;
 			}
 			case 'status': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'status', { jobId: requiredPositional(parsed, 0, 'status requires a job ID.') }));
+				const result = await requestAgentBridge(workspace, 'status', { jobId: requiredPositional(parsed, 0, 'status requires a job ID.') });
 				io.stdout(JSON.stringify(result));
 				return 0;
 			}
 			case 'wait': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'wait', {
+				const result = await requestAgentBridge(workspace, 'wait', {
 					jobId: requiredPositional(parsed, 0, 'wait requires a job ID.'),
 					...timeoutParam(parsed.flags),
-				}));
+				});
 				io.stdout(JSON.stringify(result));
 				return terminalExitCode(result);
 			}
@@ -83,21 +77,21 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 				const params: Record<string, unknown> = { jobId: requiredPositional(parsed, 0, 'events requires a job ID.') };
 				const since = integerFlag(parsed.flags, 'since-sequence');
 				if (since !== undefined) { params.sinceSequence = since; }
-				const streamed = await requestWithPackagedBootstrap(workspace, () => streamAgentBridgeEvents(workspace, params, message => io.stdout(JSON.stringify(message))));
+				const streamed = await streamAgentBridgeEvents(workspace, params, message => io.stdout(JSON.stringify(message)));
 				return streamed.terminalEvent ? terminalExitCode(streamed.terminalEvent.event.payload) : 0;
 			}
 			case 'cancel': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'cancel', { jobId: requiredPositional(parsed, 0, 'cancel requires a job ID.') }));
+				const result = await requestAgentBridge(workspace, 'cancel', { jobId: requiredPositional(parsed, 0, 'cancel requires a job ID.') });
 				io.stdout(JSON.stringify(result));
 				return 0;
 			}
 			case 'capabilities': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'capabilities'));
+				const result = await requestAgentBridge(workspace, 'capabilities');
 				io.stdout(JSON.stringify(parsed.flags.get('summary') === true ? summarizeCapabilities(result) : result));
 				return 0;
 			}
 			case 'schema': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'capabilities'));
+				const result = await requestAgentBridge(workspace, 'capabilities');
 				if (!isRecord(result) || result.jobSchema === undefined) {
 					throw new AgentBridgeClientError('schema-unavailable', 'The running HexCore bridge did not provide a job schema.');
 				}
@@ -105,7 +99,7 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 				return 0;
 			}
 			case 'doctor': {
-				const result = await requestWithPackagedBootstrap(workspace, () => requestAgentBridge(workspace, 'doctor'));
+				const result = await requestAgentBridge(workspace, 'doctor');
 				io.stdout(JSON.stringify(parsed.flags.get('summary') === true ? summarizeDoctor(result) : result));
 				return 0;
 			}
@@ -119,70 +113,6 @@ export async function main(argv = process.argv.slice(2), io: CliIo = defaultIo):
 		io.stderr(JSON.stringify({ ok: false, error: { code: normalized.code, message: normalized.message, ...(normalized.details === undefined ? {} : { details: normalized.details }) } }));
 		return 1;
 	}
-}
-
-async function requestWithPackagedBootstrap<T>(workspace: string, operation: () => Promise<T>): Promise<T> {
-	try {
-		return await operation();
-	} catch (error) {
-		if (!isBootstrapEligibleError(error) || !await bootstrapPackagedAgentBridge(workspace)) {
-			throw error;
-		}
-		return operation();
-	}
-}
-
-export function packagedBootstrapArguments(workspace: string, userDataDir = process.env.HEXCORE_AGENT_USER_DATA_DIR): string[] {
-	return [
-		...(userDataDir ? ['--user-data-dir', path.resolve(userDataDir)] : []),
-		'--reuse-window',
-		path.resolve(workspace),
-		'--open-url',
-		AGENT_BRIDGE_ACTIVATION_URI,
-	];
-}
-
-function isBootstrapEligibleError(error: unknown): error is AgentBridgeClientError {
-	return error instanceof AgentBridgeClientError
-		&& (error.code === 'bridge-unavailable' || error.code === 'bridge-stale');
-}
-
-async function bootstrapPackagedAgentBridge(workspace: string): Promise<boolean> {
-	if (process.platform !== 'win32') {
-		return false;
-	}
-	const executable = process.env.HEXCORE_AGENT_EXE;
-	if (!executable || !fs.existsSync(executable)) {
-		return false;
-	}
-	const environment = { ...process.env };
-	delete environment.ELECTRON_RUN_AS_NODE;
-	delete environment.VSCODE_DEV;
-	try {
-		const child = spawn(executable, packagedBootstrapArguments(workspace), {
-			detached: true,
-			env: environment,
-			stdio: 'ignore',
-			windowsHide: true,
-		});
-		child.once('error', () => undefined);
-		child.unref();
-	} catch {
-		return false;
-	}
-	const deadline = Date.now() + PACKAGED_BOOTSTRAP_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		await new Promise(resolve => setTimeout(resolve, PACKAGED_BOOTSTRAP_POLL_MS));
-		try {
-			await requestAgentBridge(workspace, 'capabilities');
-			return true;
-		} catch (error) {
-			if (!isBootstrapEligibleError(error)) {
-				return false;
-			}
-		}
-	}
-	return false;
 }
 
 function parseArguments(argv: string[]): ParsedArguments {
@@ -260,7 +190,7 @@ function helpText(): string {
 	return [
 		'HexCore Agent Bridge CLI v1',
 		'',
-		'HexCore must be open with the same workspace before this CLI is used.',
+		'HexCore must be open with the same trusted workspace before this CLI is used.',
 		'',
 		'Usage:',
 		'  hexcore-agent validate <job.hexcore_job.json>',

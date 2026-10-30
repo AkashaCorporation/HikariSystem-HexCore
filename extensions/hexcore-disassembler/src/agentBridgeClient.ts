@@ -48,7 +48,7 @@ export function readAgentBridgeDiscovery(workspaceRoot: string): AgentBridgeDisc
 	} catch {
 		throw new AgentBridgeClientError(
 			'bridge-unavailable',
-			`No active HexCore Agent Bridge was found for ${resolvedWorkspace}. Open this workspace in HexCore first.`,
+			`No active HexCore Agent Bridge was found for ${resolvedWorkspace}. Open and trust this workspace in HexCore first.`,
 			{ discoveryPath },
 		);
 	}

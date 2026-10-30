@@ -3,8 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
-import * as path from 'path';
-import { main, packagedBootstrapArguments } from './agentCli';
+import { main } from './agentCli';
 
 suite('Agent Bridge CLI', () => {
 	test('prints standalone help without requiring a running bridge', async () => {
@@ -18,14 +17,6 @@ suite('Agent Bridge CLI', () => {
 		assert.ok(stdout[0].includes('validate'));
 		assert.ok(stdout[0].includes('schema'));
 		assert.ok(stdout[0].includes('--summary'));
-	});
-
-	test('builds a bounded packaged bootstrap request for the authenticated workspace', () => {
-		const args = packagedBootstrapArguments('C:\\cases\\sample', 'C:\\profiles\\isolated');
-		assert.deepStrictEqual(args, [
-			'--user-data-dir', path.resolve('C:\\profiles\\isolated'),
-			'--reuse-window', path.resolve('C:\\cases\\sample'),
-			'--open-url', 'vscode://command/hexcore.agentBridge.activate',
-		]);
+		assert.ok(stdout[0].includes('trusted workspace'));
 	});
 });

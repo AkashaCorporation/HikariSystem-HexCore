@@ -5,16 +5,15 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
 | Field | Value |
 |-------|--------|
 | **Package** | `hexcore-disassembler` |
-| **Version** | **1.4.72** |
+| **Version** | **1.4.74** |
 | **Publisher** | hikarisystem |
 | **Product train** | HexCore **3.8.5 development** |
 
-## 1.4.72 Agent Bridge v1
+## 1.4.74 Agent Bridge v1
 
-When a running packaged HexCore workspace has not loaded the Disassembler yet,
-the CLI sends one hidden activation command through the product URI handler and
-waits up to five seconds for authenticated discovery. No Analysis Center or
-Command Palette action is required.
+The bridge starts automatically after the workspace is trusted. Restricted Mode
+is intentionally preserved because automation can execute workspace-defined
+jobs; the CLI never accepts or bypasses the trust prompt.
 
 - Exposes the existing automation queue to a local, workspace-authenticated
   `hexcore-agent` Node CLI. It supports submit, status, wait, JSONL lifecycle

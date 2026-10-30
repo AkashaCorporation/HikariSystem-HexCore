@@ -1,20 +1,14 @@
 # Changelog
 
-## [1.4.72] - 2026-10-30
+## [1.4.74] - 2026-10-30
 
-- Let the packaged CLI activate the bridge through a hidden command URI when a
-  running HexCore workspace has not loaded the Disassembler yet. The retry is
-  bounded to one activation attempt and five seconds.
-- Keep source-checkout CLI behavior unchanged when no packaged HexCore
-  executable is present.
-
-## [1.4.71] - 2026-10-30
-
-- Add an eager activation candidate for the packaged Agent Bridge. The official
-  ZIP gate showed that locally packaged extensions enter the registry after the
-  initial eager event, so 1.4.72 replaces this with explicit CLI bootstrap.
-- Keep the existing command, view, editor, workspace-job, and
-  `onStartupFinished` activation events for explicit compatibility.
+- Preserve Restricted Mode as an explicit Agent Bridge boundary. The
+  Disassembler now declares that untrusted workspaces are unsupported because
+  automation can execute workspace-defined jobs.
+- Clarify CLI diagnostics and documentation: open and trust the workspace once;
+  normal `onStartupFinished` activation then creates discovery automatically.
+- Retire internal artifact-only activation candidates 1.4.70 through 1.4.73;
+  none was published as a release.
 
 ## [1.4.69] - 2026-10-29
 
