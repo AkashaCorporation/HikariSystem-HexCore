@@ -2343,6 +2343,10 @@ export function activate(context: vscode.ExtensionContext): void {
 	// bridge delegates validation, deduplication, execution, and cancellation to
 	// the same JobQueueManager used by commands and the file watcher.
 	const agentBridges = new Map<string, AgentBridgeServer>();
+	context.subscriptions.push(vscode.commands.registerCommand('hexcore.agentBridge.activate', () => ({
+		ok: true,
+		protocolVersion: 1,
+	})));
 	const bridgeKey = (folder: vscode.WorkspaceFolder): string => jobPathIdentity(folder.uri.fsPath);
 	const startAgentBridge = (folder: vscode.WorkspaceFolder): void => {
 		const key = bridgeKey(folder);

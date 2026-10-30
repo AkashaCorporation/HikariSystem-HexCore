@@ -1,10 +1,18 @@
 # Changelog
 
+## [1.4.72] - 2026-10-30
+
+- Let the packaged CLI activate the bridge through a hidden command URI when a
+  running HexCore workspace has not loaded the Disassembler yet. The retry is
+  bounded to one activation attempt and five seconds.
+- Keep source-checkout CLI behavior unchanged when no packaged HexCore
+  executable is present.
+
 ## [1.4.71] - 2026-10-30
 
-- Activate the Disassembler eagerly in the packaged HexCore product so the
-  Agent Bridge is available as soon as a workspace opens. This removes the
-  first-run UI command requirement observed in the official Windows ZIP gate.
+- Add an eager activation candidate for the packaged Agent Bridge. The official
+  ZIP gate showed that locally packaged extensions enter the registry after the
+  initial eager event, so 1.4.72 replaces this with explicit CLI bootstrap.
 - Keep the existing command, view, editor, workspace-job, and
   `onStartupFinished` activation events for explicit compatibility.
 

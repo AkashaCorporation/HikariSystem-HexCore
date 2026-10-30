@@ -53,6 +53,13 @@ From an extracted Windows package:
 The packaged wrapper uses `HexCore.exe` with `ELECTRON_RUN_AS_NODE`; a separate
 Node.js installation is not required. The extension also declares
 `hexcore-agent` as its Node CLI entry point.
+If a running packaged workspace has not loaded the Disassembler yet, the first
+CLI request sends the hidden `hexcore.agentBridge.activate` command through the
+product URI handler, waits up to five seconds for authenticated discovery, and
+retries once. This bootstrap is attempted only for `bridge-unavailable` or
+`bridge-stale`; invalid discovery, workspace mismatch, and authentication
+failures are never bypassed. Development-checkout CLI usage does not launch or
+activate a product executable.
 All non-streaming commands emit one JSON value. `events` emits JSONL: one
 subscription response followed by lifecycle events.
 

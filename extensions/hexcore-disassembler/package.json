@@ -2,15 +2,15 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.71",
+	"version": "1.4.72",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
-		"*",
 		"onStartupFinished",
+		"onCommand:hexcore.agentBridge.activate",
 		"onCommand:hexcore.analysis.openCenter",
 		"onCommand:hexcore.disasm.goToFileOffset",
 		"onCommand:hexcore.emulator.switch",
@@ -108,6 +108,11 @@
 			}
 		],
 		"commands": [
+			{
+				"command": "hexcore.agentBridge.activate",
+				"title": "Activate Agent Bridge",
+				"category": "HexCore"
+			},
 			{
 				"command": "hexcore.analysis.openCenter",
 				"title": "Open Analysis Center",
@@ -644,6 +649,10 @@
 		],
 		"menus": {
 			"commandPalette": [
+				{
+					"command": "hexcore.agentBridge.activate",
+					"when": "false"
+				},
 				{
 					"command": "hexcore.hql.scanHeadless",
 					"when": "false"

@@ -154,6 +154,12 @@ function verifyAgentBridgePackaging() {
 	if (packageJson?.bin?.['hexcore-agent'] !== './bin/hexcore-agent.cjs') {
 		errors.push('extensions/hexcore-disassembler/package.json must expose hexcore-agent at ./bin/hexcore-agent.cjs');
 	}
+	if (!packageJson?.activationEvents?.includes('onCommand:hexcore.agentBridge.activate')) {
+		errors.push('extensions/hexcore-disassembler/package.json must activate the packaged bridge bootstrap command');
+	}
+	if (!packageJson?.contributes?.commands?.some(command => command.command === 'hexcore.agentBridge.activate')) {
+		errors.push('extensions/hexcore-disassembler/package.json must contribute the packaged bridge bootstrap command');
+	}
 	if (vscodeIgnore.split(/\r?\n/).some(line => /^\s*bin(?:\/|\*|$)/.test(line))) {
 		errors.push('extensions/hexcore-disassembler/.vscodeignore must not exclude bin/; the Agent Bridge CLI is a packaged product entrypoint');
 	}
@@ -177,6 +183,13 @@ function verifyAgentBridgePackaging() {
 	}
 	assertIncludes(serverSource, "case 'validate'", 'extensions/hexcore-disassembler/src/agentBridgeServer.ts');
 	assertIncludes(cliSource, "case 'schema'", 'extensions/hexcore-disassembler/src/agentCli.ts');
+	for (const required of [
+		'HEXCORE_AGENT_EXE',
+		'vscode://command/hexcore.agentBridge.activate',
+		'PACKAGED_BOOTSTRAP_TIMEOUT_MS',
+	]) {
+		assertIncludes(cliSource, required, 'extensions/hexcore-disassembler/src/agentCli.ts');
+	}
 	for (const required of [
 		'Verify packaged Agent Bridge CLI',
 		'bin/hexcore-agent.cmd',
