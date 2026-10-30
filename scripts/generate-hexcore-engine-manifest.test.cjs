@@ -27,7 +27,10 @@ try {
 		fs.writeFileSync(path.join(extensionRoot, 'package.json'), JSON.stringify({
 			name: spec.id,
 			version: '1.2.3',
-			repository: { url: `https://github.com/AkashaCorporation/${spec.id}.git` }
+			repository: { url: `https://github.com/AkashaCorporation/${spec.id}.git` },
+			...(spec.id === 'hexcore-revenant' ? {
+				hexcoreRuntime: { decompilerVersion: '11.1.0.9782' }
+			} : {})
 		}), 'utf8');
 		if (spec.required !== false) {
 			const runtime = path.join(extensionRoot, runtimeCandidates(spec.id, 'win32', 'x64')[0]);
@@ -52,6 +55,12 @@ try {
 		crypto.createHash('sha256').update('hexcore-helix').digest('hex')
 	);
 	assert.ok(!helix.artifacts[0].path.includes('\\'));
+	const revenant = manifest.engines.find(engine => engine.id === 'hexcore-revenant');
+	assert.equal(revenant.runtimeValidation, 'version-probe');
+	assert.deepEqual(revenant.expectedRuntime, {
+		backendVersion: '1.2.3',
+		decompilerVersion: '11.1.0.9782'
+	});
 
 	const helixRoot = path.join(fixtureRoot, 'extensions', 'hexcore-helix');
 	const primary = path.join(helixRoot, runtimeCandidates('hexcore-helix', 'win32', 'x64')[0]);

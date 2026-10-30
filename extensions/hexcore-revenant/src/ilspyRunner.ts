@@ -47,6 +47,11 @@ export interface RevenantResult {
 	/** Which backend resolved: the bundled self-contained engine (Phase 2),
 	 *  a system ilspycmd (Phase 1 / dev), or an explicit config override. */
 	backend?: 'override' | 'bundled' | 'ilspycmd';
+	/** Wrapper/tool frontend version reported by --version. */
+	backendVersion?: string;
+	/** ICSharpCode.Decompiler engine version reported by --version. */
+	decompilerVersion?: string;
+	/** Backward-compatible alias for decompilerVersion when available. */
 	toolVersion?: string;
 	error?: string;
 	elapsedMs: number;
@@ -216,15 +221,34 @@ function run(cmd: string, args: string[], timeoutMs: number): Promise<{ stdout: 
 	});
 }
 
-/** Best-effort ilspycmd version string (for diagnostics / the report header). */
-export async function getIlspyVersion(cmd: string, timeoutMs = 15000): Promise<string | undefined> {
+export interface RevenantBackendVersions {
+	backendVersion?: string;
+	decompilerVersion?: string;
+}
+
+export function parseBackendVersions(output: string): RevenantBackendVersions {
+	const backend = output.match(/(?:revenant-engine|ilspycmd):\s*([0-9][0-9.]*)/i);
+	const decompiler = output.match(/ICSharpCode\.Decompiler:\s*([0-9][0-9.]*)/i);
+	return {
+		...(backend ? { backendVersion: backend[1] } : {}),
+		...(decompiler ? { decompilerVersion: decompiler[1] } : {}),
+	};
+}
+
+/** Best-effort backend and ICSharpCode.Decompiler versions for provenance. */
+export async function getBackendVersions(cmd: string, timeoutMs = 15000): Promise<RevenantBackendVersions> {
 	const { stdout, error } = await run(cmd, ['--version'], timeoutMs);
-	if (error) { return undefined; }
+	if (error) { return {}; }
 	// Both backends print a "<name>: <ver>" line:
 	//   ilspycmd:        "ilspycmd: 8.2.0.7535\nICSharpCode.Decompiler: 8.2.0.7535"
-	//   bundled engine:  "revenant-engine: 0.4.0\nICSharpCode.Decompiler: 10.1.0.8386"
-	const m = stdout.match(/(?:revenant-engine|ilspycmd|ICSharpCode\.Decompiler):\s*([0-9][0-9.]*)/i);
-	return m ? m[1] : stdout.split(/\r?\n/)[0].trim() || undefined;
+	//   bundled engine:  "revenant-engine: 0.5.0\nICSharpCode.Decompiler: 11.1.0.9782"
+	return parseBackendVersions(stdout);
+}
+
+/** Backward-compatible accessor: returns the decompiler version, not the wrapper version. */
+export async function getIlspyVersion(cmd: string, timeoutMs = 15000): Promise<string | undefined> {
+	const versions = await getBackendVersions(cmd, timeoutMs);
+	return versions.decompilerVersion ?? versions.backendVersion;
 }
 
 /**
@@ -262,7 +286,9 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 	if (options.type && options.type.trim()) { args.push('-t', options.type.trim()); }
 	for (const r of options.referencePaths || []) { if (r) { args.push('-r', r); } }
 
-	const toolVersion = await getIlspyVersion(tool);
+	const versions = await getBackendVersions(tool);
+	const toolVersion = versions.decompilerVersion ?? versions.backendVersion;
+	const versionFields = { ...versions, ...(toolVersion ? { toolVersion } : {}) };
 	const { stdout, stderr, error } = await run(tool, args, timeoutMs);
 	const elapsedMs = Date.now() - startedAt;
 
@@ -270,12 +296,12 @@ export async function decompile(filePath: string, options: RevenantOptions = {})
 		const reason = (error as NodeJS.ErrnoException).code === 'ETIMEDOUT'
 			? `decompile timed out after ${timeoutMs}ms`
 			: (stderr.trim() || error.message);
-		return { ...base, isDotNet: true, tool, backend: backend.kind, toolVersion, error: reason, elapsedMs };
+		return { ...base, isDotNet: true, tool, backend: backend.kind, ...versionFields, error: reason, elapsedMs };
 	}
 	if (!stdout.trim()) {
-		return { ...base, isDotNet: true, tool, backend: backend.kind, toolVersion, error: stderr.trim() || 'decompiler produced no output', elapsedMs };
+		return { ...base, isDotNet: true, tool, backend: backend.kind, ...versionFields, error: stderr.trim() || 'decompiler produced no output', elapsedMs };
 	}
-	return { ok: true, mode, code: stdout, isDotNet: true, tool, backend: backend.kind, toolVersion, elapsedMs };
+	return { ok: true, mode, code: stdout, isDotNet: true, tool, backend: backend.kind, ...versionFields, elapsedMs };
 }
 
 function readFileHeader(filePath: string): Buffer {
