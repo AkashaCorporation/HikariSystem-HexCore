@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -87,8 +91,9 @@ export class AnalyzeAllProcessController {
 		return true;
 	}
 
-	run(request: IsolatedAnalyzeAllRequest): Promise<IsolatedAnalyzeAllResult> {
+	run(request: IsolatedAnalyzeAllRequest, signal?: AbortSignal): Promise<IsolatedAnalyzeAllResult> {
 		if (this.active) { return Promise.reject(new Error('An isolated analyzeAll process is already active')); }
+		if (signal?.aborted) { return Promise.reject(new Error('Isolated analyzeAll cancelled before launch')); }
 		return new Promise<IsolatedAnalyzeAllResult>((resolve, reject) => {
 			const startedAtMs = Date.now();
 			const child = this.launchChild();
@@ -124,15 +129,19 @@ export class AnalyzeAllProcessController {
 				outcome = nextOutcome;
 				clearTimeout(timeout);
 				clearInterval(supervisorTimer);
+				signal?.removeEventListener('abort', abortListener);
 				try { child.kill('SIGKILL'); } catch { /* already dead */ }
 				heartbeat();
 				this.active = undefined;
 				reject(new Error(`${message}; nativeExecution=${JSON.stringify(execution())}`));
 			};
+			const abortListener = () => settleError('cancelled', `Isolated analyzeAll cancelled by abort signal (lastPhase=${lastPhase})`);
 			const timeout = setTimeout(() => {
 				settleError('timeout', `Isolated analyzeAll timed out after ${request.timeoutMs}ms (lastPhase=${lastPhase})`);
 			}, request.timeoutMs);
 			this.active = { child, cancel: () => settleError('cancelled', `Isolated analyzeAll cancelled (lastPhase=${lastPhase})`) };
+			signal?.addEventListener('abort', abortListener, { once: true });
+			if (signal?.aborted) { abortListener(); }
 
 			child.on('message', (raw: WorkerMessage) => {
 				if (!raw || typeof raw !== 'object') { return; }
@@ -159,6 +168,7 @@ export class AnalyzeAllProcessController {
 						lastPhase = 'completed';
 						clearTimeout(timeout);
 						clearInterval(supervisorTimer);
+						signal?.removeEventListener('abort', abortListener);
 						this.active = undefined;
 						const nativeExecution = {
 							...execution(), snapshotSha256: raw.snapshotSha256, snapshotBytes: raw.snapshotBytes,
@@ -188,7 +198,7 @@ export class AnalyzeAllProcessController {
 					}
 				});
 			});
-			child.send(request);
+			if (!settled) { child.send(request); }
 		});
 	}
 }

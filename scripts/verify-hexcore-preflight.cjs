@@ -140,6 +140,56 @@ function verifyRevenantPackaging() {
 	}
 }
 
+function verifyAgentBridgePackaging() {
+	const packageJson = readJson('extensions/hexcore-disassembler/package.json');
+	const vscodeIgnore = readText('extensions/hexcore-disassembler/.vscodeignore');
+	const wrapper = readText('resources/win32/bin/hexcore-agent.cmd');
+	const developmentWrapper = readText('scripts/hexcore-agent.cmd');
+	const gulpSource = readText('build/gulpfile.vscode.ts');
+	const workflow = readText('.github/workflows/hexcore-installer.yml');
+	const protocolSource = readText('extensions/hexcore-disassembler/src/agentBridgeProtocol.ts');
+	const serverSource = readText('extensions/hexcore-disassembler/src/agentBridgeServer.ts');
+	const cliSource = readText('extensions/hexcore-disassembler/src/agentCli.ts');
+
+	if (packageJson?.bin?.['hexcore-agent'] !== './bin/hexcore-agent.cjs') {
+		errors.push('extensions/hexcore-disassembler/package.json must expose hexcore-agent at ./bin/hexcore-agent.cjs');
+	}
+	if (vscodeIgnore.split(/\r?\n/).some(line => /^\s*bin(?:\/|\*|$)/.test(line))) {
+		errors.push('extensions/hexcore-disassembler/.vscodeignore must not exclude bin/; the Agent Bridge CLI is a packaged product entrypoint');
+	}
+	for (const required of [
+		'ELECTRON_RUN_AS_NODE=1',
+		'HEXCORE_AGENT_EXECUTABLE',
+		'hexcore-disassembler\\bin\\hexcore-agent.cjs',
+		'@@NAME@@.exe',
+	]) {
+		assertIncludes(wrapper, required, 'resources/win32/bin/hexcore-agent.cmd');
+	}
+	assertIncludes(gulpSource, `resources/win32/bin/hexcore-agent.cmd`, 'build/gulpfile.vscode.ts');
+	assertIncludes(developmentWrapper, 'extensions\\hexcore-disassembler\\bin\\hexcore-agent.cjs', 'scripts/hexcore-agent.cmd');
+	for (const required of [
+		"| 'validate'",
+		"| 'submit'",
+		"| 'events'",
+		"| 'doctor'",
+	]) {
+		assertIncludes(protocolSource, required, 'extensions/hexcore-disassembler/src/agentBridgeProtocol.ts');
+	}
+	assertIncludes(serverSource, "case 'validate'", 'extensions/hexcore-disassembler/src/agentBridgeServer.ts');
+	assertIncludes(cliSource, "case 'schema'", 'extensions/hexcore-disassembler/src/agentCli.ts');
+	for (const required of [
+		'Verify packaged Agent Bridge CLI',
+		'bin/hexcore-agent.cmd',
+		'hexcore-agent.cjs',
+		'agentBridgeClient.js',
+		'agentBridgeServer.js',
+		'jobAutoRunPolicy.js',
+		'jobRevision.js',
+	]) {
+		assertIncludes(workflow, required, '.github/workflows/hexcore-installer.yml');
+	}
+}
+
 function verifyPortableDistribution() {
 	const updater = readText('src/vs/platform/update/electron-main/updateService.win32.ts');
 	const workflow = readText('.github/workflows/hexcore-installer.yml');
@@ -311,6 +361,7 @@ verifyPipelineCapabilities();
 verifyBuildCoverage();
 verifyDebuggerWorkerPackaging();
 verifyRevenantPackaging();
+verifyAgentBridgePackaging();
 verifyPortableDistribution();
 verifyInterfaceDefaults();
 verifyExtensionCompileCoverage();

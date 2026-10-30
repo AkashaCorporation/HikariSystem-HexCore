@@ -57,6 +57,8 @@ import { describeCanonicalArtifactIdentity } from './artifactNormalization';
 import { describeQueueObservation, type QueueQueryContext } from './queueObservation';
 import { analyzeAllProcessController, type NativeAnalyzeExecution } from './analyzeAllProcess';
 import { findRecordedAutoRunAttempt, recoverStaleAutoRunAttempt } from './autoRunAttempt';
+import { readJobAutoRunPolicy } from './jobAutoRunPolicy';
+import { jobRevisionSha256 } from './jobRevision';
 import {
 	classifyDisassemblyInstructionRole,
 	type DisassemblyInstructionRole,
@@ -82,6 +84,7 @@ import {
 	JOB_LOG_FILENAME
 } from './automationPipelineRunner';
 import { QueuedJob, QueueStats, JobStatusReport, jobPathIdentity } from './jobQueueManager';
+import { AgentBridgeServer } from './agentBridgeServer';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { solveConstraints, type ConstraintSolverOptions } from './constraintSolver';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
@@ -255,6 +258,8 @@ interface AnalyzeAllCommandOptions {
 	minMaterializedRatio?: number;
 	/** Supplied by the pipeline runner; direct callers may set a bounded native deadline. */
 	pipelineTimeoutMs?: number;
+	/** Supplied by the pipeline runner; abort must terminate the isolated worker. */
+	pipelineAbortSignal?: AbortSignal;
 }
 
 interface BuildFormulaCommandOptions {
@@ -1642,7 +1647,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Auto Save flushes the open dirty job buffer on every keystroke window, and
 	// jobs finish sub-second, so the queued/running dedup in JobQueueManager is not
 	// enough — each save re-enqueues. We additionally key on the job file's CONTENT
-	// (sha1) plus a per-path cooldown so an UNCHANGED file inside the cooldown window
+	// (sha256) plus a per-path cooldown so an UNCHANGED file inside the cooldown window
 	// is skipped, while a real edit (changed bytes) still re-runs.
 	const lastWatcherRun = new Map<string, { hash: string; ts: number }>();
 	// Cooldown (ms) after a watcher-triggered run during which onDidChange for the
@@ -1757,6 +1762,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			console.log(`[HexCore][autoRun] skipped (${skipReason}): ${normalizedPath}`);
 			return;
 		}
+		const initialPolicy = readJobAutoRunPolicy(normalizedPath);
+		if (!initialPolicy.autoRun) {
+			console.log(`[HexCore][autoRun] skipped (${initialPolicy.reason}; manual/Agent Bridge submit remains available): ${normalizedPath}`);
+			return;
+		}
 		const staleRunningMs = vscode.workspace.getConfiguration('hexcore.pipeline').get<number>('staleRunningMs', 15 * 60_000);
 		const recordedAttempt = findRecordedAutoRunAttempt(normalizedPath, Date.now(), staleRunningMs);
 		if (recordedAttempt) {
@@ -1785,6 +1795,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		const timeoutHandle = setTimeout(() => {
 			pendingJobRuns.delete(normalizedPath);
 			try {
+				const currentPolicy = readJobAutoRunPolicy(normalizedPath);
+				if (!currentPolicy.autoRun) {
+					console.log(`[HexCore][autoRun] skipped after debounce (${currentPolicy.reason}; manual/Agent Bridge submit remains available): ${normalizedPath}`);
+					return;
+				}
 				// Content-hash + cooldown loop-breaker. Read the (now-stable, post-
 				// debounce) bytes and hash them. If the hash is unchanged AND we are
 				// still inside the cooldown window since the last run for this path,
@@ -1792,7 +1807,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				// Changed bytes (a real edit) always fall through and run.
 				let hash: string | undefined;
 				try {
-					hash = crypto.createHash('sha1').update(fs.readFileSync(normalizedPath)).digest('hex');
+					hash = jobRevisionSha256(fs.readFileSync(normalizedPath));
 				} catch (readErr) {
 					console.warn(`[HexCore][autoRun] could not read job for hashing (will still run): ${normalizedPath}`, readErr);
 				}
@@ -2292,6 +2307,68 @@ export function activate(context: vscode.ExtensionContext): void {
 			disposeJobQueueManagerInstance();
 		}
 	});
+
+	// Agent Bridge v1 is a transport over the existing queue, not a second
+	// scheduler. Each workspace gets an authenticated local endpoint and the
+	// bridge delegates validation, deduplication, execution, and cancellation to
+	// the same JobQueueManager used by commands and the file watcher.
+	const agentBridges = new Map<string, AgentBridgeServer>();
+	const bridgeKey = (folder: vscode.WorkspaceFolder): string => jobPathIdentity(folder.uri.fsPath);
+	const startAgentBridge = (folder: vscode.WorkspaceFolder): void => {
+		const key = bridgeKey(folder);
+		if (agentBridges.has(key)) {
+			return;
+		}
+		const bridge = new AgentBridgeServer({
+			workspaceRoot: folder.uri.fsPath,
+			extensionVersion: String(context.extension.packageJSON?.version ?? 'unknown'),
+			queue: getJobQueueManagerInstance(),
+			validateJob: jobFilePath => pipelineRunner.validateJobFile(jobFilePath, true),
+			listCapabilities,
+			doctor: runPipelineDoctor,
+			jobSchemaPath: path.join(context.extensionPath, 'schemas', 'hexcore-job.schema.json'),
+		});
+		agentBridges.set(key, bridge);
+		void bridge.start().then(discovery => {
+			if (agentBridges.get(key) !== bridge) {
+				bridge.dispose();
+				return;
+			}
+			console.log(
+				`[HexCore][AgentBridge] protocol=${discovery.protocolVersion} ` +
+				`workspace=${folder.uri.fsPath} endpoint=${discovery.endpoint}`
+			);
+		}).catch(error => {
+			if (agentBridges.get(key) === bridge) {
+				agentBridges.delete(key);
+			}
+			bridge.dispose();
+			console.error(`[HexCore][AgentBridge] failed for ${folder.uri.fsPath}:`, error);
+		});
+	};
+	const stopAgentBridge = (folder: vscode.WorkspaceFolder): void => {
+		const key = bridgeKey(folder);
+		const bridge = agentBridges.get(key);
+		if (bridge) {
+			agentBridges.delete(key);
+			bridge.dispose();
+		}
+	};
+	for (const folder of vscode.workspace.workspaceFolders ?? []) {
+		startAgentBridge(folder);
+	}
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeWorkspaceFolders(event => {
+			for (const folder of event.removed) { stopAgentBridge(folder); }
+			for (const folder of event.added) { startAgentBridge(folder); }
+		}),
+		{
+			dispose: () => {
+				for (const bridge of agentBridges.values()) { bridge.dispose(); }
+				agentBridges.clear();
+			}
+		},
+	);
 
 	// Watch for ANY file ending in .hexcore_job.json (not just the dot-prefixed one).
 	// This lets agents create named jobs like sotr-strings.hexcore_job.json and
@@ -4770,8 +4847,10 @@ export function activate(context: vscode.ExtensionContext): void {
 					decompLiftOpts.maxInstructions = Math.min(Math.max(est, 2000), 256_000);
 				}
 				if (decompLiftOpts.maxBasicBlocks === undefined) {
-					const est = Math.max(Math.ceil(leaderCount * 1.5) + 512,
-					                     Math.ceil(bytes.length / 8));
+					const est = Math.max(
+						Math.ceil(leaderCount * 1.5) + 512,
+						Math.ceil(bytes.length / 8)
+					);
 					decompLiftOpts.maxBasicBlocks = Math.min(Math.max(est, 2048), 64_000);
 				}
 			}
@@ -6614,7 +6693,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					snapshotPath,
 					heartbeatPath,
 					timeoutMs: nativeTimeout,
-				});
+				}, options.pipelineAbortSignal);
 				nativeExecution = isolated.nativeExecution;
 				progress?.report({ message: 'Importing isolated analysis snapshot...' });
 				try {
@@ -8879,6 +8958,12 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 			throw new Error('Invalid "pipelineTimeoutMs" option: expected a positive finite number.');
 		}
 		normalized.pipelineTimeoutMs = Math.trunc(raw.pipelineTimeoutMs);
+	}
+	if (raw.pipelineAbortSignal !== undefined) {
+		if (typeof raw.pipelineAbortSignal !== 'object' || typeof raw.pipelineAbortSignal.addEventListener !== 'function') {
+			throw new Error('Invalid "pipelineAbortSignal" option: expected AbortSignal.');
+		}
+		normalized.pipelineAbortSignal = raw.pipelineAbortSignal;
 	}
 
 	// v3.7 options

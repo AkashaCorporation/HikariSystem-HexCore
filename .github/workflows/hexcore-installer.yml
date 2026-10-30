@@ -261,6 +261,33 @@ jobs:
           }
           Get-Content $theme -Raw | ConvertFrom-Json | Out-Null
 
+      - name: Verify packaged Agent Bridge CLI
+        run: |
+          $packageRoot = "../VSCode-win32-x64"
+          $required = @(
+            "$packageRoot/bin/hexcore-agent.cmd",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/bin/hexcore-agent.cjs",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/agentCli.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/agentBridgeClient.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/agentBridgeProtocol.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/agentBridgeResult.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/agentBridgeServer.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/jobAutoRunPolicy.js",
+            "$packageRoot/resources/app/extensions/hexcore-disassembler/out/jobRevision.js"
+          )
+          foreach ($file in $required) {
+            if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+              throw "Required packaged Agent Bridge file is missing: $file"
+            }
+          }
+          $help = & "$packageRoot/bin/hexcore-agent.cmd" help 2>&1 | Out-String
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged Agent Bridge CLI help failed with exit code $LASTEXITCODE`: $help"
+          }
+          if ($help -notmatch 'HexCore Agent Bridge CLI v1' -or $help -notmatch 'validate' -or $help -notmatch 'submit') {
+            throw "Packaged Agent Bridge CLI help contract is incomplete: $help"
+          }
+
       - name: Generate packaged engine manifest
         run: |
           node scripts/generate-hexcore-engine-manifest.cjs `

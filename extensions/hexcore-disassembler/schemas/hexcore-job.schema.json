@@ -1,7 +1,7 @@
 {
 	"$schema": "http://json-schema.org/draft-07/schema#",
 	"title": "HexCore Automation Job",
-	"description": "Schema for .hexcore_job.json pipeline jobs (v3.8.3 RC).",
+	"description": "Schema for .hexcore_job.json pipeline jobs (HexCore 3.8.5 development).",
 	"type": "object",
 	"additionalProperties": false,
 	"required": [
@@ -30,6 +30,11 @@
 			"enum": ["high", "normal", "low"],
 			"default": "normal",
 			"description": "Job execution priority in the queue."
+		},
+		"autoRun": {
+			"type": "boolean",
+			"default": true,
+			"description": "When false, startup/file-watcher execution is disabled. Manual Run Job and Agent Bridge submit remain available."
 		},
 		"continueOnError": {
 			"type": "boolean",
