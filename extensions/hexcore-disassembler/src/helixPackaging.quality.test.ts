@@ -11,6 +11,8 @@ import {
 	resolveLiftByteSize,
 	assessByteRangeCompletion,
 	assessLiftRangeCompletion,
+	assessExplicitRangeTerminal,
+	assessExecutableLiftRange,
 	isBacktrackWithinSection,
 	coercePositiveInt,
 	getAuthoritativeFunctionExtent,
@@ -35,6 +37,50 @@ function makeEngineStub(opts: {
 }
 
 suite('FIX-QUALITY-001 Helix packaging', () => {
+	test('caller-authorized exact range needs contiguous terminal decode evidence', () => {
+		const complete = assessExplicitRangeTerminal(0x140001037, 0x140001046, [
+			{ address: 0x140001037, size: 3 },
+			{ address: 0x14000103a, size: 4 },
+			{ address: 0x14000103e, size: 3 },
+			{ address: 0x140001041, size: 4 },
+			{ address: 0x140001045, size: 1, isRet: true },
+		]);
+		assert.deepStrictEqual(complete, {
+			status: 'complete',
+			source: 'explicit-range-terminal-decode',
+			semanticEndExclusive: 0x140001046,
+		});
+		const nonTerminal = assessExplicitRangeTerminal(0x1000, 0x1003, [
+			{ address: 0x1000, size: 3 },
+		]);
+		assert.strictEqual(nonTerminal.status, 'partial');
+		assert.match(nonTerminal.reason ?? '', /terminal transfer/);
+		const gap = assessExplicitRangeTerminal(0x1000, 0x1004, [
+			{ address: 0x1000, size: 2 },
+			{ address: 0x1003, size: 1, isRet: true },
+		]);
+		assert.strictEqual(gap.status, 'partial');
+		assert.match(gap.reason ?? '', /not contiguous/);
+	});
+
+	test('requires PE/ELF lift ranges to stay inside one executable section', () => {
+		const sections = [
+			{ name: '.text', virtualAddress: 0x140001000, virtualSize: 0x100, rawSize: 0x200, isCode: true, isExecutable: true },
+			{ name: '.rdata', virtualAddress: 0x140002000, virtualSize: 0x100, rawSize: 0x200, isCode: false, isExecutable: false },
+		];
+		assert.deepStrictEqual(assessExecutableLiftRange(sections, 0x140001037, 0x140001046), {
+			status: 'executable', section: '.text',
+		});
+		const data = assessExecutableLiftRange(sections, 0x140002000, 0x140002008);
+		assert.strictEqual(data.status, 'non-executable');
+		assert.strictEqual(data.section, '.rdata');
+		const crossing = assessExecutableLiftRange(sections, 0x1400011f0, 0x140001210);
+		assert.strictEqual(crossing.status, 'non-executable');
+		assert.match(crossing.reason ?? '', /crosses/);
+		assert.strictEqual(assessExecutableLiftRange([], 0x1000, 0x1010).status, 'unassessed');
+	});
+
+
 	test('missing semantic endpoint stays unknown instead of claiming zero decoded bytes', () => {
 		const result = assessLiftRangeCompletion({
 			startAddress: 0x3a29, endExclusive: 0x4269,

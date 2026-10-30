@@ -1,0 +1,40 @@
+{
+  "autoRun": false,
+  "file": ".\\mali_kbase.ko",
+  "outDir": ".\\hexcore-reports\\issue31-current-large",
+  "quiet": true,
+  "priority": "normal",
+  "continueOnError": false,
+  "steps": [
+    {
+      "id": "lift-current-large",
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x77020",
+        "endExclusive": "0x78A9C",
+        "size": 6780,
+        "autoBacktrack": false,
+        "followTrampoline": false
+      },
+      "allowPartial": true,
+      "timeoutMs": 180000,
+      "output": {
+        "path": "00-kbase-current-large.ll"
+      }
+    },
+    {
+      "id": "decompile-current-large",
+      "cmd": "hexcore.helix.decompileIR",
+      "args": {
+        "irPath": "$step[lift-current-large].output",
+        "functionStarts": [487456],
+        "souper": false
+      },
+      "allowPartial": true,
+      "timeoutMs": 300000,
+      "output": {
+        "path": "01-kbase-current-large.helix.c"
+      }
+    }
+  ]
+}

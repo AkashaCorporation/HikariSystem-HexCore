@@ -56,6 +56,16 @@ suite('Helix output quality', () => {
 		});
 	});
 
+	test('parses the compatibility-safe translation axis qualifier', () => {
+		const quality = inspectHelixOutputQuality(
+			'// Confidence: 100.0% (High) [translation/structuring axis only]  |  win64',
+		);
+		assert.strictEqual(quality.confidence, 100);
+		assert.strictEqual(quality.rating, 'High');
+		assert.strictEqual(quality.confidenceAxes.translation, 100);
+		assert.strictEqual(quality.status, 'ok');
+	});
+
 	test('does not present scoped semantic coverage as whole-range lift coverage', () => {
 		const quality = inspectHelixOutputQuality([
 			'// Confidence: 95% (High)  |  win64',

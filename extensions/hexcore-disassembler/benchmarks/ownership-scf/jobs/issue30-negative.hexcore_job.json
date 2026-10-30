@@ -1,0 +1,79 @@
+{
+  "autoRun": false,
+  "file": ".\\issue30-hidden-function.exe",
+  "outDir": ".\\hexcore-reports\\issue30-negative-fix5",
+  "quiet": true,
+  "priority": "normal",
+  "continueOnError": true,
+  "steps": [
+    {
+      "id": "nonexec-disassemble",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x140002000",
+        "endExclusive": "0x140002008",
+        "scopeMode": "exact-range",
+        "autoBacktrack": false,
+        "stopAtFunctionBoundary": false,
+        "count": 8,
+        "context": 0
+      },
+      "allowPartial": true,
+      "output": { "path": "00-nonexec.disassembly.json", "format": "json" }
+    },
+    {
+      "id": "nonexec-lift",
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x140002000",
+        "endExclusive": "0x140002008",
+        "size": 8,
+        "autoBacktrack": false,
+        "followTrampoline": false
+      },
+      "allowPartial": true,
+      "output": { "path": "01-nonexec.ll" }
+    },
+    {
+      "id": "nonexec-decompile",
+      "cmd": "hexcore.helix.decompile",
+      "args": {
+        "address": "0x140002000",
+        "exactRange": ["0x140002000", "0x140002008"],
+        "autoBacktrack": false,
+        "followTrampoline": false,
+        "souper": false
+      },
+      "allowPartial": true,
+      "output": { "path": "02-nonexec.helix.c" }
+    },
+    {
+      "id": "mid-instruction",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x140001038",
+        "endExclusive": "0x140001046",
+        "scopeMode": "exact-range",
+        "autoBacktrack": false,
+        "stopAtFunctionBoundary": false,
+        "count": 16,
+        "context": 0
+      },
+      "allowPartial": true,
+      "output": { "path": "03-mid-instruction.disassembly.json", "format": "json" }
+    },
+    {
+      "id": "unterminated-lift",
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x140001037",
+        "endExclusive": "0x140001045",
+        "size": 14,
+        "autoBacktrack": false,
+        "followTrampoline": false
+      },
+      "allowPartial": true,
+      "output": { "path": "04-unterminated.ll" }
+    }
+  ]
+}

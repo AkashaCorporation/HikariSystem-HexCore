@@ -56,6 +56,7 @@ suite('Agent Bridge server', () => {
 		assert.strictEqual(terminal.pipeline.status, 'partial');
 		assert.strictEqual(terminal.pipeline.executionId, 'execution-agent-test');
 		assert.strictEqual(terminal.pipeline.target.sha256, 'b'.repeat(64));
+		assert.strictEqual(terminal.pipeline.steps[0].errorCode, 'FIXTURE_PARTIAL');
 		assert.ok(fs.existsSync(terminal.resultRecord.path));
 		assert.strictEqual(typeof terminal.resultRecord.sha256, 'string');
 	});
@@ -259,6 +260,7 @@ function sampleRun(fixture: ReturnType<typeof writeJobFixture>, jobId: string, r
 			startedAt: '2026-10-28T00:00:00.000Z', finishedAt: '2026-10-28T00:00:01.000Z',
 			durationMs: 1000, attemptCount: 1, outputPath: fixture.outputPath,
 			outputBytes: fs.statSync(fixture.outputPath).size, artifactProvenancePath: fixture.artifactPath,
+			errorCode: 'FIXTURE_PARTIAL',
 		}],
 		provenance: {
 			analysisContractVersion: 1, executionId: 'execution-agent-test', jobFileSha256: revision,

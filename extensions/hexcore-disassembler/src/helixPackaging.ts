@@ -518,6 +518,110 @@ export interface LiftRangeCompletion extends Omit<ByteRangeCompletion, 'coverage
 	nativeTruncated: boolean;
 }
 
+export interface ExplicitRangeInstruction {
+	address: number;
+	size: number;
+	isRet?: boolean;
+	isJump?: boolean;
+	isConditional?: boolean;
+}
+
+export interface ExplicitRangeTerminalAssessment {
+	status: 'complete' | 'partial';
+	source: 'explicit-range-terminal-decode';
+	semanticEndExclusive?: number;
+	reason?: string;
+}
+
+export interface ExecutableLiftSection {
+	name: string;
+	virtualAddress: number;
+	virtualSize: number;
+	rawSize: number;
+	isCode?: boolean;
+	isExecutable?: boolean;
+}
+
+export interface ExecutableLiftRangeAssessment {
+	status: 'executable' | 'non-executable' | 'unassessed';
+	section?: string;
+	reason?: string;
+}
+
+/** Requires PE/ELF lift windows to remain inside one executable section. */
+export function assessExecutableLiftRange(
+	sections: readonly ExecutableLiftSection[],
+	startAddress: number,
+	endExclusive: number,
+): ExecutableLiftRangeAssessment {
+	if (!Number.isSafeInteger(startAddress) || !Number.isSafeInteger(endExclusive) || endExclusive <= startAddress) {
+		return { status: 'non-executable', reason: 'invalid lift range' };
+	}
+	if (sections.length === 0) {
+		return { status: 'unassessed', reason: 'target has no section model' };
+	}
+	const section = sections.find(candidate => {
+		const span = Math.max(candidate.virtualSize, candidate.rawSize, 0);
+		return startAddress >= candidate.virtualAddress && startAddress < candidate.virtualAddress + span;
+	});
+	if (!section) {
+		return { status: 'non-executable', reason: 'lift start is outside mapped sections' };
+	}
+	if (!section.isCode && !section.isExecutable) {
+		return { status: 'non-executable', section: section.name, reason: `section ${section.name} is not executable` };
+	}
+	const sectionEnd = section.virtualAddress + Math.max(section.virtualSize, section.rawSize, 0);
+	if (endExclusive > sectionEnd) {
+		return { status: 'non-executable', section: section.name, reason: `lift range crosses executable section ${section.name}` };
+	}
+	return { status: 'executable', section: section.name };
+}
+
+/**
+ * Proves a semantic endpoint for a caller-authorized exact range without
+ * promoting it into the global function universe. The decode must be
+ * contiguous, end exactly at endExclusive, and finish in a terminal transfer.
+ */
+export function assessExplicitRangeTerminal(
+	startAddress: number,
+	endExclusive: number,
+	instructions: readonly ExplicitRangeInstruction[],
+): ExplicitRangeTerminalAssessment {
+	if (endExclusive <= startAddress || instructions.length === 0) {
+		return {
+			status: 'partial',
+			source: 'explicit-range-terminal-decode',
+			reason: instructions.length === 0 ? 'exact range decoded no instructions' : 'invalid exact range',
+		};
+	}
+	const ordered = [...instructions].sort((left, right) => left.address - right.address);
+	let cursor = startAddress;
+	for (const instruction of ordered) {
+		if (!Number.isSafeInteger(instruction.address) || !Number.isSafeInteger(instruction.size) || instruction.size <= 0) {
+			return { status: 'partial', source: 'explicit-range-terminal-decode', reason: 'invalid decoded instruction span' };
+		}
+		if (instruction.address !== cursor) {
+			return { status: 'partial', source: 'explicit-range-terminal-decode', reason: 'exact range decode is not contiguous' };
+		}
+		cursor = instruction.address + instruction.size;
+		if (cursor > endExclusive) {
+			return { status: 'partial', source: 'explicit-range-terminal-decode', reason: 'decoded instruction crosses exact range end' };
+		}
+	}
+	if (cursor !== endExclusive) {
+		return { status: 'partial', source: 'explicit-range-terminal-decode', reason: 'exact range endpoint was not decoded' };
+	}
+	const terminal = ordered[ordered.length - 1];
+	if (terminal.isRet !== true && !(terminal.isJump === true && terminal.isConditional !== true)) {
+		return { status: 'partial', source: 'explicit-range-terminal-decode', reason: 'exact range does not end in a terminal transfer' };
+	}
+	return {
+		status: 'complete',
+		source: 'explicit-range-terminal-decode',
+		semanticEndExclusive: endExclusive,
+	};
+}
+
 /** Exact completion gate for a canonical half-open byte range. */
 export function assessByteRangeCompletion(decodedBytes: number, expectedBytes: number): ByteRangeCompletion {
 	const decoded = Math.max(0, Math.trunc(decodedBytes));

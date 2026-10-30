@@ -675,6 +675,8 @@ function summarizePipelineStatus(run: PipelineRunStatus): unknown {
 			...(step.outputBytes !== undefined ? { outputBytes: step.outputBytes } : {}),
 			...(step.artifactProvenancePath ? { artifactProvenancePath: step.artifactProvenancePath } : {}),
 			...(step.error ? { error: truncate(step.error, 4096) } : {}),
+			...(step.errorCode ? { errorCode: step.errorCode } : {}),
+			...(step.detectedFormat ? { detectedFormat: step.detectedFormat } : {}),
 		})),
 		truncatedSteps: Math.max(0, run.steps.length - MAX_STATUS_STEPS),
 	};

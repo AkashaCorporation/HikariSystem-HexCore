@@ -229,6 +229,31 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(fs.existsSync(path.join(tempDir, '.hexcore_session.db')), false);
 	});
 
+	test('preserves typed command failures in pipeline status and error stubs', async () => {
+		const target = path.join(tempDir, 'target.exe');
+		fs.writeFileSync(target, Buffer.from('MZ'));
+		const job = writeJob(tempDir, 'typed-command-failure', target, {
+			cmd: 'hexcore.disasm.liftToIR',
+			output: { path: 'lift.ll' },
+		});
+		const outDir = path.join(path.dirname(job), 'out');
+		executeCommand = async () => ({
+			success: false,
+			status: 'error',
+			errorCode: 'NON_EXECUTABLE_LIFT_RANGE',
+			error: 'requested range is outside an executable section',
+		});
+
+		await new AutomationPipelineRunner().runJobFile(job, true);
+
+		const status = JSON.parse(fs.readFileSync(path.join(outDir, 'hexcore-pipeline.status.json'), 'utf8'));
+		assert.strictEqual(status.steps[0].status, 'error');
+		assert.strictEqual(status.steps[0].errorCode, 'NON_EXECUTABLE_LIFT_RANGE');
+		const stub = JSON.parse(fs.readFileSync(path.join(outDir, 'lift.ll'), 'utf8'));
+		assert.strictEqual(stub.stub, true);
+		assert.strictEqual(stub.code, 'NON_EXECUTABLE_LIFT_RANGE');
+	});
+
 	for (const reference of ['$step[0].output', 'literal']) {
 		test(`blocks an error artifact before downstream dispatch (${reference})`, async () => {
 			const target = path.join(tempDir, 'target.bin'); fs.writeFileSync(target, Buffer.from([0xc3]));

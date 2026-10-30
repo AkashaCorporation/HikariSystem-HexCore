@@ -133,6 +133,8 @@ import {
 	resolveLiftByteSize,
 	assessByteRangeCompletion,
 	assessLiftRangeCompletion,
+	assessExplicitRangeTerminal,
+	assessExecutableLiftRange,
 	coercePositiveInt,
 	getAuthoritativeFunctionExtent,
 	shouldHonorExplicitLiftWindow,
@@ -493,7 +495,7 @@ export interface DisassembleAtResult {
 	unclassifiedInstructionCount: number;
 	instructionBoundary: {
 		status: 'aligned' | 'mid-instruction' | 'unassessed';
-		source: 'materialized-function-body' | 'lookbehind-decoder' | 'none';
+		source: 'materialized-function-body' | 'explicit-range-decoder' | 'lookbehind-decoder' | 'none';
 		recoveredByAutoBacktrack: boolean;
 		suggestedAddress?: string;
 	};
@@ -3909,6 +3911,32 @@ export function activate(context: vscode.ExtensionContext): void {
 				});
 			}
 
+			const requestedLiftEnd = liftWindow?.endExclusive ?? (startAddress + size);
+			const executableRange = assessExecutableLiftRange(
+				engine.getSections(),
+				startAddress,
+				requestedLiftEnd,
+			);
+			if (executableRange.status === 'non-executable') {
+				const errorMsg = `Lift range [0x${startAddress.toString(16)}, 0x${requestedLiftEnd.toString(16)}) ` +
+					`is not executable: ${executableRange.reason ?? 'unknown mapping'}.`;
+				if (quiet || isHeadless) {
+					return {
+						success: false,
+						status: 'error',
+						code: 'NON_EXECUTABLE_LIFT_RANGE',
+						ir: '',
+						address: startAddress,
+						bytesConsumed: 0,
+						architecture: mapping.remillArch,
+						error: errorMsg,
+						executableRange,
+					};
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
 			let bytes = engine.getBytes(startAddress, size); // let: FIX-011 may reassign with patched buffer
 			if (!bytes || bytes.length === 0) {
 				const loadedFile = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
@@ -4391,9 +4419,6 @@ export function activate(context: vscode.ExtensionContext): void {
 			const coverageExtent = { ...extent, size: Math.max(0, extent.end - startAddress) };
 			const decodedBytes = Math.max(0, Number(liftResult.bytesConsumed ?? 0));
 			const requestedWindowCoverage = Math.max(0, Math.min(1, decodedBytes / Math.max(1, size)));
-			const decodedByteCoverage = coverageExtent.size > 0
-				? Math.max(0, Math.min(1, decodedBytes / coverageExtent.size))
-				: undefined;
 			const requestedEndExclusive = startAddress + size;
 			const functionEndExclusive = liftWindow?.endExclusive
 				?? (coverageExtent.source !== 'none' ? coverageExtent.end : undefined);
@@ -4403,13 +4428,27 @@ export function activate(context: vscode.ExtensionContext): void {
 			const functionRangeSource = liftWindow?.endExclusive !== undefined
 				? liftWindow.reason
 				: coverageExtent.source;
+			const coverageSize = functionRangeSize ?? coverageExtent.size;
+			const decodedByteCoverage = coverageSize > 0
+				? Math.max(0, Math.min(1, decodedBytes / coverageSize))
+				: undefined;
+			const explicitRangeTerminal = !primaryFn?.instructions?.length &&
+				liftWindow?.reason === 'explicit-endExclusive' && functionEndExclusive !== undefined
+				? assessExplicitRangeTerminal(
+					startAddress,
+					functionEndExclusive,
+					await engine.disassembleRange(startAddress, size, Math.min(Math.max(size, 1), 100_000)),
+				)
+				: undefined;
 			const semanticInstructionEnd = primaryFn?.instructions?.length ? primaryFn.instructions.reduce(
 				(maximum, instruction) => Math.max(
 					maximum,
 					Number(instruction.address) + Number(instruction.size),
 				),
 				startAddress,
-			) : undefined;
+			) : explicitRangeTerminal?.status === 'complete'
+				? explicitRangeTerminal.semanticEndExclusive
+				: undefined;
 			const boundaryCompletion = functionEndExclusive !== undefined
 				? assessLiftRangeCompletion({
 					startAddress,
@@ -4455,9 +4494,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					boundaryReached: boundaryCompletion?.reached ?? false,
 					boundaryCrossed: boundaryCompletion?.crossed ?? false,
 					byteCoverage: boundaryCompletion?.coverage,
-					source: semanticInstructionEnd !== undefined
+					source: primaryFn?.instructions?.length
 						? 'function-table-instructions' as const
-						: 'unavailable' as const,
+						: explicitRangeTerminal?.status === 'complete'
+							? explicitRangeTerminal.source
+							: 'unavailable' as const,
 				},
 				remillDecodedByteSet: {
 					bytes: decodedBytes,
@@ -4485,7 +4526,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				`nativeTruncated=${liftResult.truncated === true}\n` +
 				`; DecodedByteCoverage: ${decodedByteCoverage === undefined
 					? 'unknown (function boundary unavailable)'
-					: `${(decodedByteCoverage * 100).toFixed(2)}% (${decodedBytes}/${coverageExtent.size} bytes, ${coverageExtent.source})`}\n\n`;
+					: `${(decodedByteCoverage * 100).toFixed(2)}% (${decodedBytes}/${coverageSize} bytes, ${functionRangeSource})`}\n\n`;
 			const fullIR = header + formatLiftSemanticHeader(liftSemantics) + coverageHeader + processedIR;
 			if (liftSemantics.status === 'partial') {
 				console.warn(
@@ -4551,7 +4592,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					...liftSemantics,
 					requestedWindowCoverage,
 					decodedByteCoverage,
-					functionBoundaryKnown: coverageExtent.source !== 'none',
+					functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 					semanticWarning: liftSemantics.reason ?? '',
 					...rangeContract,
 				};
@@ -4587,7 +4628,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					...liftSemantics,
 					requestedWindowCoverage,
 					decodedByteCoverage,
-					functionBoundaryKnown: coverageExtent.source !== 'none',
+					functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 					semanticWarning: liftSemantics.reason ?? '',
 					...rangeContract,
 				};
@@ -4628,7 +4669,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				...liftSemantics,
 				requestedWindowCoverage,
 				decodedByteCoverage,
-				functionBoundaryKnown: coverageExtent.source !== 'none',
+				functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 				semanticWarning: liftSemantics.reason ?? '',
 				...rangeContract,
 				...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
@@ -6079,10 +6120,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!liftResult || !liftResult.success) {
 				const errorMsg = liftResult?.error ?? 'Lift failed.';
+				const liftFailure = liftResult as (LiftResult & { code?: unknown; errorCode?: unknown }) | undefined;
+				const errorCode = typeof liftFailure?.errorCode === 'string'
+					? liftFailure.errorCode
+					: (typeof liftFailure?.code === 'string' ? liftFailure.code : undefined);
 				// Bug #36/2: a failed lift (no function/code at address) must propagate as
 				// a structured error in headless/pipeline runs, not undefined + modal.
 				if (quiet || isHeadless) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
+					return {
+						success: false,
+						code: '',
+						...(errorCode ? { errorCode } : {}),
+						functionCount: 0,
+						address: '',
+						architecture: arch,
+						error: errorMsg,
+					};
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -7117,6 +7170,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				})),
 				lookbehindAligned: alignmentCheck.aligned,
 				lookbehindSuggestedAddress: alignmentCheck.suggestedAddress,
+				instructionSource: exactRangeMode ? 'explicit-range-decoder' : 'materialized-function-body',
 			});
 			const unresolvedMidInstruction = boundaryContract.requiresPartial;
 			const boundaryWarning = unresolvedMidInstruction

@@ -107,7 +107,7 @@ export interface PipelineStepStatus {
 	/** Manifest that binds this artifact to its binary and execution context. */
 	artifactProvenancePath?: string;
 	error?: string;
-	errorCode?: 'unsupported-format';
+	errorCode?: string;
 	detectedFormat?: UnsupportedNativeFormat;
 	artifactKind?: PipelineArtifactKind;
 }
@@ -2247,6 +2247,7 @@ export class AutomationPipelineRunner {
 				} catch (error: unknown) {
 					executionError = error;
 					let errorMessage = normalizeExecutionError(error, resolvedCommand);
+					const errorCode = extractCommandErrorCode(commandReturn);
 					if (error instanceof TimeoutError) {
 						const cancelled = await tryCancelOnTimeout(capability, logPath, index);
 						// Be honest in the recorded status: a timed-out step is
@@ -2276,7 +2277,8 @@ export class AutomationPipelineRunner {
 						attemptCount,
 						output?.path,
 						'error',
-						errorMessage
+						errorMessage,
+						errorCode,
 					);
 					try {
 						stepStatus.artifactProvenancePath = await writeArtifactProvenance(
@@ -3419,7 +3421,8 @@ function createStepStatus(
 	attemptCount: number,
 	outputPath: string | undefined,
 	status: 'ok' | 'partial' | 'error' | 'skipped',
-	error?: string
+	error?: string,
+	errorCode?: string,
 ): PipelineStepStatus {
 	const finishedAt = new Date();
 	// When a step errors and the command never wrote its output file,
@@ -3431,6 +3434,7 @@ function createStepStatus(
 			fs.writeFileSync(outputPath, JSON.stringify({
 				ok: false,
 				error: error ?? 'Step failed',
+				...(errorCode ? { code: errorCode } : {}),
 				cmd: step.cmd,
 				resolvedCmd,
 				attemptCount,
@@ -3461,8 +3465,25 @@ function createStepStatus(
 		attemptCount,
 		outputPath,
 		outputBytes,
-		error
+		error,
+		errorCode,
 	};
+}
+
+function extractCommandErrorCode(commandReturn: unknown): string | undefined {
+	if (!isRecord(commandReturn)) {
+		return undefined;
+	}
+	const rawCode = typeof commandReturn.errorCode === 'string'
+		? commandReturn.errorCode
+		: commandReturn.code;
+	if (typeof rawCode !== 'string') {
+		return undefined;
+	}
+	const code = rawCode.trim();
+	return code.length > 0 && code.length <= 128 && /^[A-Za-z0-9._-]+$/.test(code)
+		? code
+		: undefined;
 }
 
 function normalizeExecutionError(error: unknown, resolvedCommand: string): string {
