@@ -2,13 +2,14 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.69",
+	"version": "1.4.70",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.75.0"
 	},
 	"activationEvents": [
+		"*",
 		"onStartupFinished",
 		"onCommand:hexcore.analysis.openCenter",
 		"onCommand:hexcore.disasm.goToFileOffset",

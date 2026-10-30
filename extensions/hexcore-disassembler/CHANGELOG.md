@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.4.70] - 2026-10-30
+
+- Activate the Disassembler eagerly in the packaged HexCore product so the
+  Agent Bridge is available as soon as a workspace opens. This removes the
+  first-run UI command requirement observed in the official Windows ZIP gate.
+- Keep the existing command, view, editor, workspace-job, and
+  `onStartupFinished` activation events for explicit compatibility.
+
 ## [1.4.69] - 2026-10-29
 
 - Add Agent Bridge protocol v1 and the `hexcore-agent` Node CLI over the existing
