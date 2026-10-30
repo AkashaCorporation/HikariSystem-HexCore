@@ -65,6 +65,26 @@ suite('HQL pinned query bridge', () => {
 		assert.strictEqual(result.evaluations[0].state, 'unknown');
 		assert.ok(result.evaluations[0].semanticReadErrors.length > 0);
 	});
+	test('a readable prototype survives a stale unrelated summary without proving absence', async () => {
+		const targetIdentity = session.getSemanticStore().targetIdentity;
+		(session as any).db.prepare(
+			'INSERT INTO propagation_dirty (analysis_target_identity,function_identity,generation,reason) VALUES (?,?,?,?)'
+		).run(targetIdentity, 'function:0x1000', 1, 'fixture-stale-summary');
+		const view = openSemanticQueryView(session);
+		const positive: any = await runHqlSnapshotQuery(
+			view, [{ address: '0x1000' }], { condition });
+		assert.strictEqual(positive.evaluations[0].state, 'matched');
+		assert.strictEqual(positive.status, 'partial');
+		assert.strictEqual(positive.rows.length, 1);
+		assert.strictEqual(positive.rows[0].proofStatus, 'signal');
+		assert.ok(positive.evaluations[0].semanticReadErrors.some(
+			(error: string) => error.includes('semantic-query-stale-summary')));
+		const absent: any = await runHqlSnapshotQuery(
+			view, [{ address: '0x1000' }],
+			{ condition: { fact: { fact: 'summary-barrier' } } });
+		assert.strictEqual(absent.evaluations[0].state, 'unknown');
+		assert.strictEqual(absent.rows.length, 0);
+	});
 	test('summary locations are explicit without fabricated producer provenance', () => {
 		const targetIdentity = session.getSemanticStore().targetIdentity;
 		const summary = { schemaVersion: 1, analysisTargetIdentity: targetIdentity, functionIdentity: 'function:0x1000', functionBodySha256: 'a'.repeat(64), generation: 0,

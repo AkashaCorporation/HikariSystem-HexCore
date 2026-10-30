@@ -73,6 +73,11 @@ async function main() {
 	});
 	await check('read failure and adapter loss do not become negative findings', async () => {
 		const fn = unit(); fn.semanticReadErrors = ['summary unavailable']; fn.ast!.adapterCoverage!.coverage = 0.5;
+		fn.semanticComplete = false;
+		const positive = await runAdHocQuery(input(fn), { condition: own });
+		assert.strictEqual(positive.evaluations[0].state, 'matched');
+		assert.strictEqual(positive.status, 'partial');
+		assert.strictEqual(positive.rows[0].proofStatus, 'signal');
 		assert.strictEqual((await runAdHocQuery(input(fn), { condition: { not: absent } })).evaluations[0].state, 'unknown');
 		assert.strictEqual((await runAdHocQuery(input(fn), { condition: { not: { query: { target: 'CForStmt' } } } })).evaluations[0].state, 'unknown');
 	});
