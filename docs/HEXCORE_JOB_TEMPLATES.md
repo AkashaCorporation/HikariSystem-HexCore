@@ -2,6 +2,24 @@
 
 Safe default job templates for users and AI agents.
 
+## Agent-Controlled Execution
+
+Jobs owned by a user or agent should normally set `"autoRun": false`. This
+keeps the workspace watcher from racing an edit/validate cycle while preserving
+manual execution and Agent Bridge submission.
+
+From an extracted Windows package:
+
+```powershell
+.\bin\hexcore-agent.cmd validate .hexcore_job.json --workspace C:\research\case
+.\bin\hexcore-agent.cmd submit .hexcore_job.json --workspace C:\research\case --wait
+```
+
+The workspace must already be open and explicitly trusted in HexCore. Validation
+is non-mutating and returns the exact job revision SHA-256. See
+[HEXCORE_AGENT_BRIDGE.md](HEXCORE_AGENT_BRIDGE.md) for status, events,
+cancellation, discovery, containment and exit-code contracts.
+
 ## 3.8.5 Development: Named Dependencies
 
 This example uses the same engine commands with stable logical step references.
@@ -312,6 +330,42 @@ Recommended when you want to inspect the raw LLVM IR **and** the final pseudo-C 
 - **Use `"irPath": "$step[0].output"`** (the 0-based index of the `liftToIR` step) instead of a hardcoded path — the runner resolves it to the exact file step 0 wrote, so it never drifts. A hardcoded absolute `irPath` is a footgun: it must match `outDir` + the lift step's `output.path` exactly (drive casing, separators, every subfolder) or `decompileIR` reports `IR file not found` and the step surfaces only the generic `Expected output file was not created` (the real cause is logged to the Extension Host console: Help > Toggle Developer Tools > Console).
 - If `liftToIR` fails, `decompileIR` will also fail (the `.ll` file won't exist). `continueOnError: true` lets you see both statuses in `hexcore-pipeline.status.json`.
 - Only supports x86/x64 binaries.
+
+---
+
+## Template: Exact-Range Disassembly Without Global Analysis
+
+Use this when start and end are already frozen evidence. It decodes only the
+half-open byte range and cannot silently fall back to `analyzeAll` or
+auto-backtracking.
+
+```json
+{
+  "file": "C:\\path\\to\\target.exe",
+  "outDir": "hexcore-reports/exact-range",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "exact-disassembly",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x14142FEF0",
+        "endExclusive": "0x14143048B",
+        "scopeMode": "exact-range",
+        "autoBacktrack": false,
+        "context": 0
+      },
+      "output": { "path": "function.exact-range.json", "format": "json" },
+      "timeoutMs": 60000
+    }
+  ]
+}
+```
+
+Acceptance requires `globalAnalysisInvoked:false`, unchanged engine generation,
+full byte coverage, `truncated:false`, zero unclassified instructions and
+`auditUniverseChanged:false`. This proves decoding of the requested bytes, not
+independent function ownership.
 
 ---
 

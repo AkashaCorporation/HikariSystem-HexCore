@@ -7,15 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [3.8.5] - Unreleased
 
+### Final Candidate Qualification
+
+- Keep readable target-bound HQL facts usable when an unrelated semantic
+  collection is stale: positive witnesses remain `matched/partial/signal`,
+  while absence and negation remain `unknown`.
+- Upgrade Revenant to `0.5.0` with ILSpy `11.1.0.9782`, separate wrapper and
+  decompiler provenance, and the native same-name dependency collision fix.
+  The package manifest/runtime smoke now validates both version identities.
+- Expand Helix final-AST honesty gates for scalar subscripts, ordered
+  zero-derived memory access, invalid constant shift widths and forbidden
+  pointer/scalar operations. These defects cap translation/structuring
+  confidence instead of being emitted at 100%.
+- Pin the RC.3 LLVM/MLIR dependency bundle to SHA-256
+  `ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b`;
+  its provenance binds package `0.9.4-rc.3`, engine tree `54da92a2...` and the
+  exact `helix_engine.lib` hash.
+- Qualify current-package AArch64 PLT binding, YARA advisory scoring,
+  target-bound HQL/semantic explanation, active worker cancellation and clean
+  Agent Bridge shutdown. Final artifact identity remains a separate gate.
+
+### Agent Bridge and Post-RC Product Gates
+
+- Add Agent Bridge protocol v1 and the packaged `hexcore-agent` CLI over the
+  existing JobQueueManager. Support non-mutating validation, revision-bound
+  submit, status, events, wait, active cancellation, schema, capabilities and
+  doctor without adding a second scheduler or arbitrary command RPC.
+- Preserve Restricted Mode as an explicit boundary: untrusted workspaces create
+  no bridge, while a trusted restart creates discovery through normal extension
+  activation. The CLI never accepts or bypasses the trust prompt.
+- Persist bounded, redacted and canonical hash-bound terminal records with
+  target identity, job revision, execution ID, provenance, partial/unknown
+  status and cancellation evidence.
+- Add `autoRun:false` for explicit edit/validate/submit workflows and unify
+  watcher/bridge revision identity on SHA-256.
+- Add PE overlay evidence, honest PE directory coverage, bounded exact-range
+  disassembly and reconciled `.pdata` ownership without changing the qualified
+  native engine locks.
+- Qualify the artifact-only Windows package at commit `c5ebc6b` with all nine
+  active runtimes loadable, positive/negative workspace-trust controls, a
+  revision-bound hash job, active native-worker cancellation and clean shutdown.
+  This artifact is a development baseline, not a published release.
+
+### Direct Ownership and SCF Honesty
+
+- Accept bounded exact-range analysis for executable functions that are absent
+  from the global function index without materializing them into the session.
+- Reject non-executable lift ranges with `NON_EXECUTABLE_LIFT_RANGE`, preserve
+  typed errors through Job System and Agent Bridge, and diagnose padding-anchored
+  mid-instruction starts.
+- Prove exact terminal range completion separately from global function
+  ownership; incomplete endpoints remain retryable partial results.
+- Stop classifying meaningful one-statement leaf functions as stubs while
+  retaining the hard cap for empty bodies and bare returns.
+- Remove the generic confidence penalty for faithful residual `goto`; a dropped
+  dangling goto remains a named CFG-integrity defect capped at 50%.
+- Label native confidence as a translation/structuring axis and retain separate
+  lift, instruction and semantic-type axes in HexCore output.
+- Qualify a fresh 1,399-instruction Kbase lift/decompile and deterministic K=10
+  PE64 direct-range fixture. The hidden ELF fixture and broader #31 matrix remain
+  explicit coverage holds.
+
+### ELF #61 Adjudication
+
+- Refute the historical VVV claim that `0x400000` and `sub_401000` are outside
+  the target: the ELF declares a load mapping at `0x400000`, an executable
+  27-byte `.init` routine at `0x401000`, and a real caller at `0x3133BA1C`.
+- Make no release code change for the refuted corpus. Preserve separate future
+  work for ET_EXEC mapped at zero, explicit ET_DYN runtime bias and section-aware
+  ET_REL identity; these require dedicated red fixtures before migration.
+
 ### Release Candidate Reconciliation
 
 - Prepare product identity `3.8.5-rc.1` and reconcile canonical Helix
-  `0.9.4-rc.2` from the validated development source without carrying local
+  `0.9.4-rc.3` from the validated development source without carrying local
   addons, dependency caches, dumps, private corpora, or generated reports.
 - Align Helix wrapper/native identity, require the exact source-tree-bound C++
   dependency bundle, and make the prebuild wrapper honor
   `HELIX_ENGINE_LIB_DIR` instead of silently selecting an older fallback lib.
-- Qualify the canonical Helix source with 389 native tests, 192 Rust workspace
+- Qualify the canonical Helix source with 412 native PASS, one optional SKIP, 192 Rust workspace
   tests, Clippy with warnings denied, deterministic pseudo-C/HAST smoke, and an
   out-of-tree Windows N-API load. GitHub artifact and extracted-HexCore gates
   remain pending.
@@ -222,7 +292,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   This does not add Android semantic support or a JADX wrapper.
 - Local validation covers routing, runner contracts, raw loading and incremental
   closure. Packaged 3.8.5 acceptance is still pending; routing itself requires
-  no native-addon change, while Helix 0.9.4-rc.2 is qualified separately above.
+  no native-addon change, while Helix 0.9.4-rc.3 is qualified separately above.
 
 ## [3.8.4] - 2026-09-06
 

@@ -60,8 +60,13 @@ export function createHqlQueryInput(view: SemanticQueryView, selections: readonl
 		try { name = reader.getFunctionName(at) ?? name; returnType = reader.getFunctionReturnType(at); variables = reader.getVariableRenames(at); }
 		catch (error) { semanticReadErrors.push(`annotations: ${error instanceof Error ? error.message : String(error)}`); }
 		const partialReasons = [...inputPartialReasons, ...(selection.partialReasons ?? [])];
+		// A readable positive witness remains usable when another semantic
+		// collection is stale/unavailable. The errors keep the domain open, so
+		// absence and negation still evaluate to unknown rather than negative.
+		const semanticAvailable = inputPartialReasons.length === 0 &&
+			(semanticFacts.length > 0 || semanticReadErrors.length === 0);
 		const fn: HqlQueryFunctionInput = { function: name, address: at, snapshotSha256: view.identity.snapshotSha256, astAvailable: false, astComplete: false,
-			semanticFacts, semanticReadErrors, semanticAvailable: semanticReadErrors.length === 0 && inputPartialReasons.length === 0, semanticComplete: false, partialReasons,
+			semanticFacts, semanticReadErrors, semanticAvailable, semanticComplete: false, partialReasons,
 			...(source ? { hastSource: { ...source, qualityIssues: [...source.qualityIssues, ...inputPartialReasons], annotations: { returnType, variables } } } : {}),
 		};
 		return fn;

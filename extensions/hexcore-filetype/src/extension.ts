@@ -7,7 +7,7 @@
 import * as vscode from 'vscode';
 import * as fs from 'fs';
 import * as path from 'path';
-import { assertWithinWorkspaceOrHome } from 'hexcore-common';
+import { assertWithinWorkspaceOrHome, inspectPEOverlay, type PEOverlayInspection } from 'hexcore-common';
 
 type OutputFormat = 'json' | 'md';
 
@@ -47,6 +47,8 @@ interface FileTypeDetectionResult {
 	currentExtension: string;
 	magicBytesHex: string;
 	matches: DetectionMatch[];
+	embeddedMatches: DetectionMatch[];
+	overlay?: PEOverlayInspection;
 	extensionMatch: boolean;
 	suggestedExtension?: string;
 	reportMarkdown: string;
@@ -200,6 +202,15 @@ async function detectFileType(uri: vscode.Uri, options: DetectFileTypeCommandOpt
 	}
 
 	const matches = findMatchingSignatures(buffer);
+	const overlay = inspectPEOverlay(filePath);
+	const embeddedMatches: DetectionMatch[] = overlay?.container === 'nsis' ? [{
+		name: 'NSIS Installer',
+		extension: 'exe',
+		category: 'Installer',
+		description: 'PE overlay contains the NSIS first-header signature',
+		magicHex: 'EF BE AD DE 4E 75 6C 6C 73 6F 66 74 49 6E 73 74',
+		offset: overlay.nsis?.signatureOffset ?? overlay.offset,
+	}] : [];
 	let extensionMatch = true;
 	let suggestedExtension: string | undefined;
 
@@ -211,7 +222,7 @@ async function detectFileType(uri: vscode.Uri, options: DetectFileTypeCommandOpt
 		}
 	}
 
-	const report = generateReport(fileName, filePath, stats.size, fileExtension, buffer, matches, extensionMatch, suggestedExtension ?? '');
+	const report = generateReport(fileName, filePath, stats.size, fileExtension, buffer, matches, embeddedMatches, overlay, extensionMatch, suggestedExtension ?? '');
 	const result: FileTypeDetectionResult = {
 		fileName,
 		filePath,
@@ -226,6 +237,8 @@ async function detectFileType(uri: vscode.Uri, options: DetectFileTypeCommandOpt
 			magicHex: match.magic.map(byte => byte.toString(16).toUpperCase().padStart(2, '0')).join(' '),
 			offset: match.offset ?? 0
 		})),
+		embeddedMatches,
+		...(overlay ? { overlay } : {}),
 		extensionMatch,
 		suggestedExtension,
 		reportMarkdown: report
@@ -277,6 +290,8 @@ function writeOutput(result: FileTypeDetectionResult, output: CommandOutputOptio
 				currentExtension: result.currentExtension,
 				magicBytesHex: result.magicBytesHex,
 				matches: result.matches,
+				embeddedMatches: result.embeddedMatches,
+				overlay: result.overlay,
 				extensionMatch: result.extensionMatch,
 				suggestedExtension: result.suggestedExtension,
 				generatedAt: new Date().toISOString()
@@ -327,6 +342,8 @@ function generateReport(
 	currentExtension: string,
 	buffer: Buffer,
 	matches: FileSignature[],
+	embeddedMatches: DetectionMatch[],
+	overlay: PEOverlayInspection | undefined,
 	extensionMatch: boolean,
 	suggestedExtension: string
 ): string {
@@ -413,6 +430,27 @@ This could be:
 - Encrypted or obfuscated data
 
 `;
+	}
+
+	if (overlay) {
+		report += `### PE Overlay / Embedded Container
+
+| Property | Value |
+|----------|-------|
+| **Offset** | 0x${overlay.offset.toString(16).toUpperCase()} |
+| **Size** | ${formatBytes(overlay.size)} |
+| **Payload excluding certificate** | ${formatBytes(overlay.payloadSizeExcludingCertificate)} |
+| **Container** | ${overlay.container} |
+| **Format hints** | ${overlay.formatHints.join(', ') || 'none'} |
+${overlay.certificateTable ? `| **Certificate table** | 0x${overlay.certificateTable.offset.toString(16).toUpperCase()} (${formatBytes(overlay.certificateTable.size)}) |\n` : ''}
+`;
+		if (embeddedMatches.length > 0) {
+			report += `| Embedded format | Evidence offset |
+|-----------------|-----------------|
+${embeddedMatches.map(match => `| ${match.name} | 0x${match.offset.toString(16).toUpperCase()} |`).join('\n')}
+
+`;
+		}
 	}
 
 	report += `---

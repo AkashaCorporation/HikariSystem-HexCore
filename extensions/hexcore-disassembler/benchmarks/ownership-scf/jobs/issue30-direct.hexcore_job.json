@@ -1,0 +1,99 @@
+{
+  "autoRun": false,
+  "file": ".\\issue30-hidden-function.exe",
+  "outDir": ".\\hexcore-reports\\issue30-direct-fix2",
+  "quiet": true,
+  "priority": "normal",
+  "continueOnError": true,
+  "steps": [
+    {
+      "id": "materialize",
+      "cmd": "hexcore.disasm.materializeFunctions",
+      "args": {
+        "addresses": ["0x140001037"]
+      },
+      "allowPartial": true,
+      "output": {
+        "path": "00-materialize.json",
+        "format": "json"
+      },
+      "timeoutMs": 60000
+    },
+    {
+      "id": "disassemble",
+      "cmd": "hexcore.disasm.disassembleAtHeadless",
+      "args": {
+        "address": "0x140001037",
+        "endExclusive": "0x140001046",
+        "scopeMode": "exact-range",
+        "autoBacktrack": false,
+        "stopAtFunctionBoundary": false,
+        "count": 16,
+        "context": 0
+      },
+      "output": {
+        "path": "01-hidden.disassembly.json",
+        "format": "json"
+      },
+      "timeoutMs": 60000
+    },
+    {
+      "id": "lift",
+      "cmd": "hexcore.disasm.liftToIR",
+      "args": {
+        "address": "0x140001037",
+        "endExclusive": "0x140001046",
+        "size": 15,
+        "autoBacktrack": false,
+        "followTrampoline": false,
+        "optimizeIR": true,
+        "inlineSemantics": true,
+        "splitAtCalls": true
+      },
+      "allowPartial": true,
+      "output": {
+        "path": "02-hidden.ll"
+      },
+      "timeoutMs": 120000
+    },
+    {
+      "id": "decompile-ir",
+      "cmd": "hexcore.helix.decompileIR",
+      "args": {
+        "irPath": "$step[lift].output",
+        "exactRange": ["0x140001037", "0x140001046"],
+        "souper": false
+      },
+      "allowPartial": true,
+      "output": {
+        "path": "03-hidden.from-ir.helix.c"
+      },
+      "timeoutMs": 120000
+    },
+    {
+      "id": "decompile-direct",
+      "cmd": "hexcore.helix.decompile",
+      "args": {
+        "address": "0x140001037",
+        "exactRange": ["0x140001037", "0x140001046"],
+        "autoBacktrack": false,
+        "followTrampoline": false,
+        "souper": false
+      },
+      "allowPartial": true,
+      "output": {
+        "path": "04-hidden.direct.helix.c"
+      },
+      "timeoutMs": 120000
+    },
+    {
+      "id": "session-after",
+      "cmd": "hexcore.session.export",
+      "output": {
+        "path": "05-session-after.json",
+        "format": "json"
+      },
+      "timeoutMs": 60000
+    }
+  ]
+}

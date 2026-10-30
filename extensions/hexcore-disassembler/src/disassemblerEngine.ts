@@ -25,7 +25,7 @@ import {
 	validateAddressTakenFunctionExtent,
 } from './addressTakenFunctionDiscovery';
 import { assessStringEvidence, findCrc32LookupRanges, type ByteRange } from './stringEvidence';
-import { assessInstructionBoundary } from './disassemblyBoundary';
+import { assessInstructionBoundary, findPaddingAnchoredDecodeStart } from './disassemblyBoundary';
 
 // Types
 export interface Instruction {
@@ -7830,8 +7830,44 @@ export class DisassemblerEngine {
 		aligned: boolean;
 		suggestedAddress?: number;
 	}> {
-		if (!this.capstone || !this.capstoneInitialized || !this.fileBuffer) {
+		if (!this.fileBuffer) {
 			return { aligned: true }; // can't verify, assume OK
+		}
+		await this.ensureCapstoneInitialized();
+		if (!this.capstone || !this.capstoneInitialized) return { aligned: true };
+
+		for (const fn of this.functions.values()) {
+			if (targetAddress < fn.address || targetAddress >= fn.endAddress || fn.instructions.length === 0) {
+				continue;
+			}
+			const known = assessInstructionBoundary(targetAddress, fn.instructions);
+			if (known.status === 'aligned') { return { aligned: true, suggestedAddress: targetAddress }; }
+			if (known.status === 'mid-instruction') {
+				return { aligned: false, suggestedAddress: known.suggestedAddress };
+			}
+		}
+
+		const targetOffset = this.addressToOffset(targetAddress);
+		if (targetOffset >= 0) {
+			const anchorOffset = findPaddingAnchoredDecodeStart(this.fileBuffer, targetOffset, lookbackBytes);
+			if (anchorOffset !== undefined && anchorOffset <= targetOffset) {
+				const anchorAddress = this.offsetToAddress(anchorOffset);
+				const endOffset = Math.min(this.fileBuffer.length, targetOffset + 16);
+				try {
+					const insns = await this.capstone.disassemble(
+						this.fileBuffer.subarray(anchorOffset, endOffset),
+						anchorAddress,
+						1000,
+					);
+					const anchored = assessInstructionBoundary(targetAddress, insns);
+					if (anchored.status === 'aligned') { return { aligned: true, suggestedAddress: targetAddress }; }
+					if (anchored.status === 'mid-instruction') {
+						return { aligned: false, suggestedAddress: anchored.suggestedAddress };
+					}
+				} catch {
+					return { aligned: true };
+				}
+			}
 		}
 
 		const startAddr = Math.max(this.baseAddress, targetAddress - lookbackBytes);

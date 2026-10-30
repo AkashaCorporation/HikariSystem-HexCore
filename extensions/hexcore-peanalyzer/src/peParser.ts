@@ -11,6 +11,7 @@ import {
 	type WindowsSecuritySummary,
 } from './windowsSecuritySummary';
 import { assessPEAnalysisCoverage, type PEAnalysisCoverageEntry } from './peAnalysisCoverage';
+import { inspectPEOverlay, type PEOverlayInspection } from 'hexcore-common';
 
 // ============================================================================
 // TYPE DEFINITIONS
@@ -31,6 +32,7 @@ export interface PEAnalysis {
 
 	// Sections
 	sections: SectionHeader[];
+	overlay?: PEOverlayInspection;
 
 	// Imports/Exports
 	imports: ImportEntry[];
@@ -670,6 +672,7 @@ export async function analyzePEFile(filePath: string): Promise<PEAnalysis> {
 		// Parse Section Headers
 		const sectionOffset = optionalHeaderOffset + peHeader.sizeOfOptionalHeader;
 		analysis.sections = parseSectionHeaders(buffer, sectionOffset, peHeader.numberOfSections, fd);
+		analysis.overlay = inspectPEOverlay(filePath);
 		analysis.executionManifest = extractExecutionManifest(filePath, analysis.sections);
 
 		// Parse Imports

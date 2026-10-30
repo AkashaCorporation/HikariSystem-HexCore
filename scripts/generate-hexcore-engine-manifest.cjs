@@ -132,6 +132,11 @@ function generateManifest({ appRoot, outputPath, platform = process.platform, ar
 		}
 
 		const packageJson = readJson(packagePath);
+		if (spec.id === 'hexcore-revenant' &&
+			(typeof packageJson.hexcoreRuntime?.decompilerVersion !== 'string' ||
+			 !packageJson.hexcoreRuntime.decompilerVersion)) {
+			throw new Error('Revenant package must declare hexcoreRuntime.decompilerVersion');
+		}
 		const artifactPaths = listNativeArtifacts(extensionRoot);
 		let primaryRuntime;
 		if (spec.required !== false) {
@@ -154,7 +159,14 @@ function generateManifest({ appRoot, outputPath, platform = process.platform, ar
 			version: packageJson.version,
 			repository: normalizeRepository(packageJson.repository),
 			releaseTag: `v${packageJson.version}`,
-			...(primaryRuntime ? { primaryRuntime: path.relative(resolvedRoot, primaryRuntime).split(path.sep).join('/'), runtimeValidation: 'presence-only' } : {}),
+			...(primaryRuntime ? {
+				primaryRuntime: path.relative(resolvedRoot, primaryRuntime).split(path.sep).join('/'),
+				runtimeValidation: spec.id === 'hexcore-revenant' ? 'version-probe' : 'presence-only',
+				...(spec.id === 'hexcore-revenant' ? { expectedRuntime: {
+					backendVersion: packageJson.version,
+					decompilerVersion: packageJson.hexcoreRuntime.decompilerVersion,
+				} } : {}),
+			} : {}),
 			artifacts: artifactPaths.map(artifactPath => {
 				const stat = fs.statSync(artifactPath);
 				return {

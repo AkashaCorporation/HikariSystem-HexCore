@@ -17,6 +17,19 @@ export function processFileInChunks(
 	onProgress?: (bytesProcessed: number, totalBytes: number) => void
 ): Promise<void>;
 
+export interface PEOverlayInspection {
+	offset: number;
+	size: number;
+	payloadSizeExcludingCertificate: number;
+	container: 'nsis' | 'unknown-overlay';
+	formatHints: string[];
+	evidence: string[];
+	certificateTable?: { offset: number; size: number };
+	nsis?: { signatureOffset: number; headerLength?: number; followingDataLength?: number };
+}
+
+export function inspectPEOverlay(filePath: string): PEOverlayInspection | undefined;
+
 export function isWithinDir(parent: string, child: string): boolean;
 export function resolvePathWithinRoots(candidatePath: string, roots: readonly string[]): string | undefined;
 export function assertWithinWorkspaceOrHome(

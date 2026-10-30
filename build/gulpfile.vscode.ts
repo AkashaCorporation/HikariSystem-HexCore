@@ -392,6 +392,8 @@ function packageTask(platform: string, arch: string, sourceFolderName: string, d
 
 		if (platform === 'win32') {
 			result = es.merge(result, gulp.src('resources/win32/bin/code.js', { base: 'resources/win32', allowEmpty: true }));
+			result = es.merge(result, gulp.src('resources/win32/bin/hexcore-agent.cmd', { base: 'resources/win32' })
+				.pipe(replace('@@NAME@@', product.nameShort)));
 
 			if (quality && quality === 'insider') {
 				result = es.merge(result, gulp.src('resources/win32/insider/bin/code.cmd', { base: 'resources/win32/insider' })

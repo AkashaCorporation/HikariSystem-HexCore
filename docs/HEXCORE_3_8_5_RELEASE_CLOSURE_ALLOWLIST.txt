@@ -1,0 +1,63 @@
+# HexCore 3.8.5 release-closure commit allowlist
+
+# Commit 1: function ownership / direct-range typed failure
+extensions/hexcore-disassembler/src/agentBridgeServer.test.ts
+extensions/hexcore-disassembler/src/agentBridgeServer.ts
+extensions/hexcore-disassembler/src/automationPipelineRunner.ts
+extensions/hexcore-disassembler/src/disassemblerEngine.ts
+extensions/hexcore-disassembler/src/disassemblyBoundary.test.ts
+extensions/hexcore-disassembler/src/disassemblyBoundary.ts
+extensions/hexcore-disassembler/src/extension.ts
+extensions/hexcore-disassembler/src/helixOutputQuality.test.ts
+extensions/hexcore-disassembler/src/helixPackaging.quality.test.ts
+extensions/hexcore-disassembler/src/helixPackaging.ts
+extensions/hexcore-disassembler/src/pipelineReliability.test.ts
+extensions/hexcore-disassembler/benchmarks/ownership-scf/build-issue30-fixture.ps1
+extensions/hexcore-disassembler/benchmarks/ownership-scf/fixtures/issue30-hidden-function.asm
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-direct.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-discovery.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-negative.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue31-current-large.hexcore_job.json
+
+# Commit 2: HQL positive witness under partial semantic coverage
+extensions/hexcore-disassembler/src/hqlQueryBridge.test.ts
+extensions/hexcore-disassembler/src/hqlQueryBridge.ts
+extensions/hexcore-hql/src/query/evaluate.ts
+extensions/hexcore-hql/test/adHocQuery.ts
+
+# Commit 3: Revenant 0.5.0 and runtime identity
+extensions/hexcore-revenant/package.json
+extensions/hexcore-revenant/src/ilspyRunner.ts
+extensions/hexcore-revenant/test/revenant.test.cjs
+scripts/generate-hexcore-engine-manifest.cjs
+scripts/generate-hexcore-engine-manifest.test.cjs
+scripts/verify-hexcore-runtimes.cjs
+scripts/verify-hexcore-runtimes.test.cjs
+
+# Commit 4: release documentation and reproducible smoke harness
+.github/workflows/hexcore-native-prebuilds.yml
+CHANGELOG.md
+docs/HEXCORE_3_8_5_DELIVERY_MATRIX.md
+docs/HEXCORE_AUTOMATION.md
+docs/HEXCORE_3_8_5_DERIVED_PACKAGE_CHECKPOINT_2026-10-30.json
+docs/HEXCORE_3_8_5_DERIVED_PACKAGE_CHECKPOINT_2026-10-30.md
+docs/HELIX_0_9_4_RC3_OFFICIAL_RECONCILIATION.md
+docs/HEXCORE_3_8_5_PHASE1_ALLOWLIST.txt
+docs/HEXCORE_3_8_5_RELEASE_CLOSURE_ALLOWLIST.txt
+extensions/hexcore-helix/package.json
+extensions/hexcore-hql/benchmarks/function-atlas/engine.lock.json
+extensions/hexcore-hql/benchmarks/function-atlas/regressions/x86-width-and-unary-regression.json
+extensions/hexcore-disassembler/benchmarks/release-385/prepare-internal-smoke.cjs
+extensions/hexcore-disassembler/benchmarks/release-385/prepare-extended-smoke.cjs
+
+# Explicit exclusions
+node_modules/
+extensions/*/node_modules/
+extensions/*/out/
+extensions/hexcore-revenant/bin/
+*.node
+*.dll
+*.exe
+*.db
+hexcore-reports/
+E:/HexCore-3.8.5-Closure/

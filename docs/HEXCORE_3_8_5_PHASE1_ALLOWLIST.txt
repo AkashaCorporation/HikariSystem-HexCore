@@ -1,0 +1,27 @@
+# HexCore 3.8.5 Phase-1 #30/#31 checkpoint allowlist
+CHANGELOG.md
+docs/HEXCORE_3_8_5_DELIVERY_MATRIX.md
+docs/HEXCORE_3_8_5_PHASE1_ALLOWLIST.txt
+extensions/hexcore-disassembler/benchmarks/ownership-scf/build-issue30-fixture.ps1
+extensions/hexcore-disassembler/benchmarks/ownership-scf/fixtures/issue30-hidden-function.asm
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-direct.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-discovery.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue30-negative.hexcore_job.json
+extensions/hexcore-disassembler/benchmarks/ownership-scf/jobs/issue31-current-large.hexcore_job.json
+extensions/hexcore-disassembler/src/agentBridgeServer.test.ts
+extensions/hexcore-disassembler/src/agentBridgeServer.ts
+extensions/hexcore-disassembler/src/automationPipelineRunner.ts
+extensions/hexcore-disassembler/src/disassemblerEngine.ts
+extensions/hexcore-disassembler/src/disassemblyBoundary.test.ts
+extensions/hexcore-disassembler/src/disassemblyBoundary.ts
+extensions/hexcore-disassembler/src/extension.ts
+extensions/hexcore-disassembler/src/helixOutputQuality.test.ts
+extensions/hexcore-disassembler/src/helixPackaging.quality.test.ts
+extensions/hexcore-disassembler/src/helixPackaging.ts
+extensions/hexcore-disassembler/src/pipelineReliability.test.ts
+
+# Explicitly excluded generated/private evidence
+ISSUES_30_31_HEXCORE.patch
+node_modules/
+extensions/hexcore-disassembler/node_modules/
+E:/HexCore-3.8.5-Closure/phase1-issues-30-31-20261030/

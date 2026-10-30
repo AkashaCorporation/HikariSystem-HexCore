@@ -53,7 +53,7 @@ function evaluate(condition: AdHocCondition, fn: QueryFunctionInput, matcher: HQ
 	}
 	const leaf = 'count' in condition ? condition.count : condition;
 	const structural = 'query' in leaf;
-	if (structural ? !fn.astAvailable || !fn.ast : !fn.semanticAvailable || fn.semanticReadErrors.length > 0) return empty('unknown');
+	if (structural ? !fn.astAvailable || !fn.ast : !fn.semanticAvailable) return empty('unknown');
 	const complete = structural ? fn.astComplete && fn.ast?.hast?.semanticEligible === true && fn.ast?.adapterCoverage?.coverage === 1 && !fn.ast.adapterCoverage.errors?.length : fn.semanticComplete;
 	const nodes = structural ? matcher.scan(fn.ast!, leaf.query) : [];
 	const facts = !structural ? matcher.evaluateSemanticCondition(fn.semanticFacts, { fact: leaf.fact }).matches : [];

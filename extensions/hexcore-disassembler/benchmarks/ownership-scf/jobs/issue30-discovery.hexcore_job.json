@@ -1,0 +1,35 @@
+{
+  "autoRun": false,
+  "file": ".\\issue30-hidden-function.exe",
+  "outDir": ".\\hexcore-reports\\issue30-discovery",
+  "quiet": true,
+  "priority": "normal",
+  "steps": [
+    {
+      "id": "analyze",
+      "cmd": "hexcore.disasm.analyzeAll",
+      "args": {
+        "forceReload": true,
+        "filterJunk": false,
+        "detectVM": false,
+        "detectPRNG": false,
+        "maxFunctions": 4096,
+        "maxFunctionSize": 65536
+      },
+      "output": {
+        "path": "00-analysis.json",
+        "format": "json"
+      },
+      "timeoutMs": 180000
+    },
+    {
+      "id": "session",
+      "cmd": "hexcore.session.export",
+      "output": {
+        "path": "01-session.json",
+        "format": "json"
+      },
+      "timeoutMs": 60000
+    }
+  ]
+}

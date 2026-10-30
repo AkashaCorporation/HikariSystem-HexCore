@@ -1,3 +1,7 @@
+/*---------------------------------------------------------------------------------------------
+ *  Copyright (c) Microsoft Corporation. All rights reserved.
+ *  Licensed under the MIT License. See License.txt in the project root for license information.
+ *--------------------------------------------------------------------------------------------*/
 import * as assert from 'assert';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
@@ -91,6 +95,27 @@ suite('isolated analyzeAll process controller', () => {
 		assert.strictEqual(controller.cancelActive(), true);
 		await assert.rejects(running, /cancelled/);
 		assert.strictEqual(child.killed, true);
+	});
+
+	test('propagates an AbortSignal into a terminal cancelled worker', async () => {
+		const child = new FakeChild();
+		const controller = new AnalyzeAllProcessController(() => child as unknown as ChildProcess);
+		const abort = new AbortController();
+		const running = controller.run(request, abort.signal);
+		abort.abort();
+		await assert.rejects(running, /cancelled by abort signal/);
+		assert.strictEqual(child.killed, true);
+		assert.strictEqual(controller.isActive(), false);
+		assert.strictEqual(JSON.parse(fs.readFileSync(request.heartbeatPath, 'utf8')).state, 'cancelled');
+	});
+
+	test('does not launch a worker for an already-aborted signal', async () => {
+		let launches = 0;
+		const controller = new AnalyzeAllProcessController(() => { launches++; return new FakeChild() as unknown as ChildProcess; });
+		const abort = new AbortController();
+		abort.abort();
+		await assert.rejects(controller.run(request, abort.signal), /cancelled before launch/);
+		assert.strictEqual(launches, 0);
 	});
 
 	test('turns a child crash into a terminal error', async () => {

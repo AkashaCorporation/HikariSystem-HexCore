@@ -1,0 +1,107 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-10-30T15:33:00-03:00",
+  "verdict": "FIX-BLOCK",
+  "releaseEligible": false,
+  "package": {
+    "root": "E:\\HexCore-3.8.5-Closure\\phase1-issues-30-31-20261030\\hexcore-fix2-derived",
+    "hexCoreExeSha256": "9237350caa1873098a698f9df74ef674573074386cd4e7029b54c4f44960b65a",
+    "declaredProductVersion": "3.8.5-rc.1",
+    "declaredCommit": "c5ebc6b6052ef32c9aa4a8fa1fec708bf59e5e56",
+    "storedEngineManifestSha256": "5d74a1b48d6ff2663e5adba81c1a050504783a84a8ceef376f665ff92b78fe07",
+    "actualEngineManifestSha256": "280d2b30c2f59f6525081e41f5e8b8445d6bb3827021b2323f1b44b2592d8971",
+    "runtimeSmokeSha256": "cc57624ad30a4b5d12a6d0f6a9e05f76b792d0735fac9c1b1cec9eef33791ac8",
+    "runtimeSmoke": { "active": 9, "passed": 9, "failed": 0 }
+  },
+  "identityBlockers": [
+    {
+      "engine": "hexcore-helix",
+      "declaredVersion": "0.9.4-rc.2",
+      "declaredSha256": "567700180e38774bc234d06a8f0f73e6752d9a54a95004040f0ee62a4ad6c011",
+      "actualVersion": "0.9.4-rc.3",
+      "actualSha256": "e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231",
+      "resolution": "local official-history commits and dependency bundle ready; push/publication pending"
+    },
+    {
+      "engine": "hexcore-revenant",
+      "declaredVersion": "0.4.0",
+      "declaredSha256": "06b46c0e0ffb2e920d6a90b66ca03bb86900b0dbb8eb3a5311922c92f7bf0bbe",
+      "actualVersion": "0.5.0",
+      "actualSha256": "f04334feef9b9fa27689d5b30342fe81a3865821cba0f480127a660663cd58a2",
+      "decompilerVersion": "11.1.0.9782",
+      "resolution": "commit the accepted 0.5.0 checkpoint and rebuild the package manifest"
+    }
+  ],
+  "officialHelixReconciliation": {
+    "officialBase": "585606d0609062ab705f495e733399c747109551",
+    "engineCommit": "0a60fb72140a82fcf666bc79c97e29c3d44ca583",
+    "documentationCommit": "e4a38c6f9c92edf8f764744a0ac36a334a948102",
+    "engineSourceTree": "af0baa87475f492366c41ea135555720defa88a8",
+    "method": "41-file source/build/schema allowlist onto official main history",
+    "nativeBuildTargets": 112,
+    "nativeTests": { "passed": 412, "failed": 0, "skipped": 1 },
+    "rustTests": { "passed": 192, "failed": 0, "ignoredDocTests": 2 },
+    "engineLibrarySha256": "ef7009c945dd00f5afdd610a323266cb7edf3e43f2c3a1455b9df3258de6d425",
+    "qualifiedNodeSha256": "e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231",
+    "dependencyBundleSha256": "ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b",
+    "versionState": "0.9.4-rc.3 local commits qualified; push/publication pending",
+    "report": "HELIX_0_9_4_RC3_OFFICIAL_RECONCILIATION.md"
+  },
+  "fixedDuringMatrix": [
+    {
+      "id": "P1-HQL-POSITIVE-WITNESS",
+      "before": "persisted definitive prototype became unknown when an unrelated propagation summary was stale",
+      "after": "positive fact is matched/partial/signal; absent fact remains unknown",
+      "packageJobRevision": "b5b2dd73d531465f69fd16f52353880f6d678e900725339b0544e039e3c501ab",
+      "agentExecutionId": "adff6be7-47c8-4a0f-9a6a-502f3061e41e"
+    },
+    {
+      "id": "P1-HELIX-FALSE-HIGH",
+      "before": "invalid calculator C reported 100 percent confidence",
+      "after": "final-AST proven defects cap translation/structuring confidence at 50 percent",
+      "helixNodeSha256": "ff37d00e180ca6ae8cba395f08b6385f73b1f30e07b5ee9eabc5a3489bfc6c5e"
+    }
+  ],
+  "matrix": [
+    { "id": "E01", "status": "FAIL", "note": "derived overlay package does not match its stored manifest/commit" },
+    { "id": "E02", "status": "PASS", "note": "9/9 active runtimes loaded; Revenant version probe exact" },
+    { "id": "E03", "status": "PARTIAL", "note": "trusted current package positive; Restricted Mode negative retained from accepted baseline" },
+    { "id": "E04", "status": "PASS", "note": "validate/submit/status/wait/cancel plus containment escape rejection" },
+    { "id": "E05", "status": "PASS", "note": "running job cancelled; worker PID 13024 dead before terminal" },
+    { "id": "E06", "status": "PASS", "note": "named references execute; duplicate step ID rejected without artifacts" },
+    { "id": "E07", "status": "PASS", "note": "partial Kbase ancestry retained; source negative gates pass" },
+    { "id": "E08", "status": "PASS", "note": "multiple target/session switches without foreign functions or target hashes" },
+    { "id": "E09", "status": "PARTIAL", "note": "PE direct ownership PASS; hidden ELF fixture HOLD-COVERAGE" },
+    { "id": "E10", "status": "PARTIAL", "note": "scoped SCF/goto honesty PASS-WITH-HOLDS" },
+    { "id": "E11", "status": "PARTIAL", "note": "final node honest; broader output-quality holds remain" },
+    { "id": "E12", "status": "PASS", "note": "XOR structural positive and constant negative, HAST coverage 1" },
+    { "id": "E13", "status": "PASS", "note": "target-bound prototype matched as partial/signal; missing address unknown" },
+    { "id": "E14", "status": "PASS", "note": "HXDB reopen preserved type/reference content hashes" },
+    { "id": "E15", "status": "PASS", "note": "explanation ok; wrong snapshot failed closed" },
+    { "id": "E16", "status": "PASS", "note": "PE exception directory parsed; absent directories remain not-present; exact ranges bounded" },
+    { "id": "E17", "status": "HOLD-COVERAGE", "note": "original VVV claim refuted; broader ET_EXEC-zero/PIE/ET_REL fixtures deferred" },
+    { "id": "E18", "status": "PASS", "note": "AArch64 PLT bindings exact; non-JUMP_SLOT did not acquire a stub" },
+    { "id": "E19", "status": "PARTIAL", "note": "PE/ELF positive and DEX typed rejection pass; package raw lane not exercised" },
+    { "id": "E20", "status": "PASS", "note": "qualified custom YARA positive scored 50; negative scored 0" },
+    { "id": "E21", "status": "PASS", "note": "step/snapshot/restore/breakpoint/dispose 9/9" },
+    { "id": "E22", "status": "PASS", "note": "Revenant 0.5.0 C#/IL and native System.dll neighbor 2/2" },
+    { "id": "E23", "status": "PASS", "note": "Elixir smoke/snapshot/emulation 3/3" },
+    { "id": "E24", "status": "HOLD-COVERAGE", "note": "Computer Use native pipe unavailable for current package render inspection" },
+    { "id": "E25", "status": "PASS", "note": "issue #30 K=10 one normalized semantic hash per artifact" },
+    { "id": "E26", "status": "PASS", "note": "queue zero, cancelled worker dead, discovery removed after shutdown" }
+  ],
+  "publication": {
+    "committed": true,
+    "localCommits": [
+      "0a60fb72140a82fcf666bc79c97e29c3d44ca583",
+      "e4a38c6f9c92edf8f764744a0ac36a334a948102",
+      "abe4695",
+      "2af0e75",
+      "ccaeb14"
+    ],
+    "pushed": false,
+    "tagged": false,
+    "releaseCreated": false,
+    "zipCreated": false
+  }
+}

@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.4.74] - 2026-10-30
+
+- Preserve Restricted Mode as an explicit Agent Bridge boundary. The
+  Disassembler now declares that untrusted workspaces are unsupported because
+  automation can execute workspace-defined jobs.
+- Clarify CLI diagnostics and documentation: open and trust the workspace once;
+  normal `onStartupFinished` activation then creates discovery automatically.
+- Retire internal artifact-only activation candidates 1.4.70 through 1.4.73;
+  none was published as a release.
+
+## [1.4.69] - 2026-10-29
+
+- Add Agent Bridge protocol v1 and the `hexcore-agent` Node CLI over the existing
+  JobQueueManager. Support submit, status, wait, JSONL events, cancel,
+  capabilities with schemas, and doctor without adding a second scheduler.
+- Authenticate a per-workspace local endpoint, enforce physical path
+  containment, retain revision deduplication, and never log or return the token.
+- Persist bounded, redacted, canonical SHA-256-bound terminal records with
+  per-step status, output provenance, target identity, and explicit truncation.
+- Add protocol, result, server, containment, authentication, streaming, and CLI
+  regression tests. Fine-grained live step progress remains an explicit P2.
+- Add non-mutating job validation, schema-only and compact summary CLI modes,
+  plus `autoRun:false` so editing a manual job cannot race the watcher.
+- Unify watcher and bridge revision identity on SHA-256.
+- Keep running cancellation non-terminal until the executor and isolated native
+  worker settle; persist the resulting cancelled/error evidence.
+- Package `bin\hexcore-agent.cmd` using the bundled HexCore Electron runtime, so
+  the extracted Windows product does not require a separate Node installation.
+
 ## [1.4.68] - 2026-09-05
 
 - Bind new HXDB sessions to an explicit empty replay universe before semantic

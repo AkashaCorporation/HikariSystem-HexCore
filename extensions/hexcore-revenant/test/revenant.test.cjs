@@ -7,7 +7,7 @@ const assert = require('assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { decompile, detectDotNet, detectSingleFileBundle, isDotNetFile, isSingleFileBundle, locateIlspy, locateBundledEngine } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
+const { decompile, detectDotNet, detectSingleFileBundle, isDotNetFile, isSingleFileBundle, locateIlspy, locateBundledEngine, parseBackendVersions } = require(path.join(__dirname, '..', 'out', 'ilspyRunner.js'));
 
 const MANAGED = String.raw`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\Accessibility.dll`;
 const BYPASS = String.raw`C:\Users\Mazum\Desktop\New-Star\Easy\rev_bypass\Bypass.exe`;
@@ -30,6 +30,7 @@ async function test(name, fn) {
 	const garbage = path.join(tmp, 'garbage.bin');
 	const empty = path.join(tmp, 'empty.dll');
 	const bundleMarker = path.join(tmp, 'bundle-marker.exe');
+	const nativeCollisionDir = path.join(tmp, 'native-system-collision');
 	fs.writeFileSync(truncated, fs.readFileSync(MANAGED).subarray(0, 2048)); // valid header, body cut
 	fs.writeFileSync(garbage, Buffer.from('this is not a PE file at all, just text.'.repeat(20)));
 	fs.writeFileSync(empty, Buffer.alloc(0));
@@ -38,9 +39,22 @@ async function test(name, fn) {
 	markerFixture.writeBigInt64LE(64n, 192);
 	Buffer.from('8b1202b96a612038727b930214d7a03213f5b9e6efae3318ee3b2dce24b36aae', 'hex').copy(markerFixture, 200);
 	fs.writeFileSync(bundleMarker, markerFixture);
+	fs.mkdirSync(nativeCollisionDir);
+	const collisionTarget = path.join(nativeCollisionDir, 'Accessibility.dll');
+	fs.copyFileSync(MANAGED, collisionTarget);
+	fs.copyFileSync(NATIVE, path.join(nativeCollisionDir, 'mscorlib.dll'));
 
 	await test('a backend is locatable (bundled engine or ilspycmd)', () => {
 		assert.ok(locateBundledEngine() || locateIlspy(), 'neither the bundled revenant-engine nor ilspycmd was found');
+	});
+
+	await test('version provenance separates wrapper and decompiler identities', () => {
+		assert.deepStrictEqual(parseBackendVersions(
+			'revenant-engine: 0.5.0\nICSharpCode.Decompiler: 11.1.0.9782\n'
+		), {
+			backendVersion: '0.5.0',
+			decompilerVersion: '11.1.0.9782',
+		});
 	});
 
 	await test('Phase 2: bundled engine is preferred + used as the backend', async () => {
@@ -48,6 +62,9 @@ async function test(name, fn) {
 		const r = await decompile(MANAGED, { mode: 'csharp' });
 		assert.ok(r.ok, `expected ok, got: ${r.error}`);
 		assert.strictEqual(r.backend, 'bundled', 'should use the bundled self-contained engine, not ilspycmd');
+		assert.strictEqual(r.backendVersion, '0.5.0');
+		assert.strictEqual(r.decompilerVersion, '11.1.0.9782');
+		assert.strictEqual(r.toolVersion, r.decompilerVersion);
 	});
 
 	await test('detectDotNet: native buffer => false', () => {
@@ -92,6 +109,13 @@ async function test(name, fn) {
 		const r = await decompile(MANAGED, { mode: 'csharp' });
 		assert.ok(r.ok, `expected ok, got: ${r.error}`);
 		assert.strictEqual(r.isDotNet, true);
+		assert.match(r.code, /\b(class|interface|struct|enum)\b/);
+	});
+
+	await test('native same-name dependency does not shadow managed framework assembly', async () => {
+		if (!locateBundledEngine()) { return; }
+		const r = await decompile(collisionTarget, { mode: 'csharp' });
+		assert.ok(r.ok, `expected native collision fallback to succeed, got: ${r.error}`);
 		assert.match(r.code, /\b(class|interface|struct|enum)\b/);
 	});
 

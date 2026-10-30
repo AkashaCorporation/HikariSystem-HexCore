@@ -2,11 +2,17 @@
 	"name": "hexcore-disassembler",
 	"displayName": "HexCore Disassembler",
 	"description": "Professional disassembler with Capstone engine for x86/x64/ARM analysis",
-	"version": "1.4.68",
+	"version": "1.4.74",
 	"publisher": "hikarisystem",
 	"license": "MIT",
 	"engines": {
 		"vscode": "^1.75.0"
+	},
+	"capabilities": {
+		"untrustedWorkspaces": {
+			"supported": false,
+			"description": "HexCore automation can execute workspace-defined jobs; explicit workspace trust is required."
+		}
 	},
 	"activationEvents": [
 		"onStartupFinished",
@@ -84,6 +90,9 @@
 		"binary analysis"
 	],
 	"main": "./out/extension.js",
+	"bin": {
+		"hexcore-agent": "./bin/hexcore-agent.cjs"
+	},
 	"contributes": {
 		"customEditors": [
 			{

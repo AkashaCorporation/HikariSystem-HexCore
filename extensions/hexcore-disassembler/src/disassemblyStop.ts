@@ -4,7 +4,7 @@ export interface DisassemblyExtent {
 	start: number;
 	end: number;
 	size: number;
-	source: 'function-table' | 'pdata' | 'recommended' | 'none';
+	source: 'function-table' | 'pdata' | 'recommended' | 'explicit-range' | 'none';
 }
 
 export interface DisassemblyStopInput {

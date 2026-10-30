@@ -57,6 +57,8 @@ import { describeCanonicalArtifactIdentity } from './artifactNormalization';
 import { describeQueueObservation, type QueueQueryContext } from './queueObservation';
 import { analyzeAllProcessController, type NativeAnalyzeExecution } from './analyzeAllProcess';
 import { findRecordedAutoRunAttempt, recoverStaleAutoRunAttempt } from './autoRunAttempt';
+import { readJobAutoRunPolicy } from './jobAutoRunPolicy';
+import { jobRevisionSha256 } from './jobRevision';
 import {
 	classifyDisassemblyInstructionRole,
 	type DisassemblyInstructionRole,
@@ -82,6 +84,7 @@ import {
 	JOB_LOG_FILENAME
 } from './automationPipelineRunner';
 import { QueuedJob, QueueStats, JobStatusReport, jobPathIdentity } from './jobQueueManager';
+import { AgentBridgeServer } from './agentBridgeServer';
 import { buildInstructionFormula, FormulaBuildResult } from './formulaBuilder';
 import { solveConstraints, type ConstraintSolverOptions } from './constraintSolver';
 import { analyzeConstantSanity, ConstantSanityAnalysis } from './constantSanityChecker';
@@ -130,6 +133,8 @@ import {
 	resolveLiftByteSize,
 	assessByteRangeCompletion,
 	assessLiftRangeCompletion,
+	assessExplicitRangeTerminal,
+	assessExecutableLiftRange,
 	coercePositiveInt,
 	getAuthoritativeFunctionExtent,
 	shouldHonorExplicitLiftWindow,
@@ -255,6 +260,8 @@ interface AnalyzeAllCommandOptions {
 	minMaterializedRatio?: number;
 	/** Supplied by the pipeline runner; direct callers may set a bounded native deadline. */
 	pipelineTimeoutMs?: number;
+	/** Supplied by the pipeline runner; abort must terminate the isolated worker. */
+	pipelineAbortSignal?: AbortSignal;
 }
 
 interface BuildFormulaCommandOptions {
@@ -465,6 +472,13 @@ export interface DisassembleAtInstructionEntry {
 export interface DisassembleAtResult {
 	status: 'ok' | 'partial';
 	semanticWarning?: string;
+	scopeMode: 'discovery' | 'exact-range';
+	analysisPreparation: {
+		globalAnalysisInvoked: boolean;
+		engineGenerationBefore: number;
+		engineGenerationAfter: number;
+		nativeExecution?: NativeAnalyzeExecution;
+	};
 	address: string;         // VA requested in hex
 	effectiveAddress?: string;
 	addressMapping?: ReturnType<DisassemblerEngine['getAddressMapping']>;
@@ -481,7 +495,7 @@ export interface DisassembleAtResult {
 	unclassifiedInstructionCount: number;
 	instructionBoundary: {
 		status: 'aligned' | 'mid-instruction' | 'unassessed';
-		source: 'materialized-function-body' | 'lookbehind-decoder' | 'none';
+		source: 'materialized-function-body' | 'explicit-range-decoder' | 'lookbehind-decoder' | 'none';
 		recoveredByAutoBacktrack: boolean;
 		suggestedAddress?: string;
 	};
@@ -520,7 +534,7 @@ export interface DisassembleAtResult {
 		semanticEnd?: string;
 		paddingBytes?: number;
 		size: number;
-		source: 'function-table' | 'pdata' | 'recommended' | 'none';
+		source: 'function-table' | 'pdata' | 'recommended' | 'explicit-range' | 'none';
 		reached: boolean;
 		crossed: boolean;
 		byteCoverage: number;
@@ -717,6 +731,8 @@ export interface ParsedDisassembleAtAddress {
 	countingDomain: 'byte-range' | 'instruction-count';
 	endExclusive?: number;
 	stopAtFunctionBoundary: boolean;
+	scopeMode: 'discovery' | 'exact-range';
+	autoBacktrack: boolean;
 	context: number;
 	file?: string;
 	output?: { path: string };
@@ -751,11 +767,30 @@ export function parseDisassembleAtAddress(args: any): ParsedDisassembleAtAddress
 		throw new Error("disassembleAtHeadless: 'stopAtFunctionBoundary' must be a boolean.");
 	}
 	const stopAtFunctionBoundary = args?.stopAtFunctionBoundary === true;
+	if (args?.autoBacktrack !== undefined && typeof args.autoBacktrack !== 'boolean') {
+		throw new Error("disassembleAtHeadless: 'autoBacktrack' must be a boolean.");
+	}
+	const autoBacktrack = args?.autoBacktrack !== false;
+	if (args?.scopeMode !== undefined && args.scopeMode !== 'discovery' && args.scopeMode !== 'exact-range') {
+		throw new Error("disassembleAtHeadless: 'scopeMode' must be 'discovery' or 'exact-range'.");
+	}
+	const scopeMode = args?.scopeMode === 'exact-range' ? 'exact-range' as const : 'discovery' as const;
 	const endExclusive = args?.endExclusive !== undefined && args?.endExclusive !== null
 		? parseRequiredHexAddress(args.endExclusive, 'endExclusive')
 		: undefined;
 	if (endExclusive !== undefined && endExclusive <= address) {
 		throw new Error("disassembleAtHeadless: 'endExclusive' must be greater than 'address'.");
+	}
+	if (scopeMode === 'exact-range') {
+		if (endExclusive === undefined) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' requires endExclusive.");
+		}
+		if (args?.autoBacktrack !== false) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' requires autoBacktrack:false.");
+		}
+		if (stopAtFunctionBoundary) {
+			throw new Error("disassembleAtHeadless: scopeMode 'exact-range' cannot use stopAtFunctionBoundary.");
+		}
 	}
 	const countingDomain = endExclusive !== undefined || stopAtFunctionBoundary
 		? 'byte-range' as const
@@ -786,6 +821,8 @@ export function parseDisassembleAtAddress(args: any): ParsedDisassembleAtAddress
 		countingDomain,
 		...(endExclusive !== undefined ? { endExclusive } : {}),
 		stopAtFunctionBoundary,
+		scopeMode,
+		autoBacktrack,
 		context,
 		file: args?.file,
 		output: args?.output,
@@ -1642,7 +1679,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// Auto Save flushes the open dirty job buffer on every keystroke window, and
 	// jobs finish sub-second, so the queued/running dedup in JobQueueManager is not
 	// enough — each save re-enqueues. We additionally key on the job file's CONTENT
-	// (sha1) plus a per-path cooldown so an UNCHANGED file inside the cooldown window
+	// (sha256) plus a per-path cooldown so an UNCHANGED file inside the cooldown window
 	// is skipped, while a real edit (changed bytes) still re-runs.
 	const lastWatcherRun = new Map<string, { hash: string; ts: number }>();
 	// Cooldown (ms) after a watcher-triggered run during which onDidChange for the
@@ -1757,6 +1794,11 @@ export function activate(context: vscode.ExtensionContext): void {
 			console.log(`[HexCore][autoRun] skipped (${skipReason}): ${normalizedPath}`);
 			return;
 		}
+		const initialPolicy = readJobAutoRunPolicy(normalizedPath);
+		if (!initialPolicy.autoRun) {
+			console.log(`[HexCore][autoRun] skipped (${initialPolicy.reason}; manual/Agent Bridge submit remains available): ${normalizedPath}`);
+			return;
+		}
 		const staleRunningMs = vscode.workspace.getConfiguration('hexcore.pipeline').get<number>('staleRunningMs', 15 * 60_000);
 		const recordedAttempt = findRecordedAutoRunAttempt(normalizedPath, Date.now(), staleRunningMs);
 		if (recordedAttempt) {
@@ -1785,6 +1827,11 @@ export function activate(context: vscode.ExtensionContext): void {
 		const timeoutHandle = setTimeout(() => {
 			pendingJobRuns.delete(normalizedPath);
 			try {
+				const currentPolicy = readJobAutoRunPolicy(normalizedPath);
+				if (!currentPolicy.autoRun) {
+					console.log(`[HexCore][autoRun] skipped after debounce (${currentPolicy.reason}; manual/Agent Bridge submit remains available): ${normalizedPath}`);
+					return;
+				}
 				// Content-hash + cooldown loop-breaker. Read the (now-stable, post-
 				// debounce) bytes and hash them. If the hash is unchanged AND we are
 				// still inside the cooldown window since the last run for this path,
@@ -1792,7 +1839,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				// Changed bytes (a real edit) always fall through and run.
 				let hash: string | undefined;
 				try {
-					hash = crypto.createHash('sha1').update(fs.readFileSync(normalizedPath)).digest('hex');
+					hash = jobRevisionSha256(fs.readFileSync(normalizedPath));
 				} catch (readErr) {
 					console.warn(`[HexCore][autoRun] could not read job for hashing (will still run): ${normalizedPath}`, readErr);
 				}
@@ -2292,6 +2339,68 @@ export function activate(context: vscode.ExtensionContext): void {
 			disposeJobQueueManagerInstance();
 		}
 	});
+
+	// Agent Bridge v1 is a transport over the existing queue, not a second
+	// scheduler. Each workspace gets an authenticated local endpoint and the
+	// bridge delegates validation, deduplication, execution, and cancellation to
+	// the same JobQueueManager used by commands and the file watcher.
+	const agentBridges = new Map<string, AgentBridgeServer>();
+	const bridgeKey = (folder: vscode.WorkspaceFolder): string => jobPathIdentity(folder.uri.fsPath);
+	const startAgentBridge = (folder: vscode.WorkspaceFolder): void => {
+		const key = bridgeKey(folder);
+		if (agentBridges.has(key)) {
+			return;
+		}
+		const bridge = new AgentBridgeServer({
+			workspaceRoot: folder.uri.fsPath,
+			extensionVersion: String(context.extension.packageJSON?.version ?? 'unknown'),
+			queue: getJobQueueManagerInstance(),
+			validateJob: jobFilePath => pipelineRunner.validateJobFile(jobFilePath, true),
+			listCapabilities,
+			doctor: runPipelineDoctor,
+			jobSchemaPath: path.join(context.extensionPath, 'schemas', 'hexcore-job.schema.json'),
+		});
+		agentBridges.set(key, bridge);
+		void bridge.start().then(discovery => {
+			if (agentBridges.get(key) !== bridge) {
+				bridge.dispose();
+				return;
+			}
+			console.log(
+				`[HexCore][AgentBridge] protocol=${discovery.protocolVersion} ` +
+				`workspace=${folder.uri.fsPath} endpoint=${discovery.endpoint}`
+			);
+		}).catch(error => {
+			if (agentBridges.get(key) === bridge) {
+				agentBridges.delete(key);
+			}
+			bridge.dispose();
+			console.error(`[HexCore][AgentBridge] failed for ${folder.uri.fsPath}:`, error);
+		});
+	};
+	const stopAgentBridge = (folder: vscode.WorkspaceFolder): void => {
+		const key = bridgeKey(folder);
+		const bridge = agentBridges.get(key);
+		if (bridge) {
+			agentBridges.delete(key);
+			bridge.dispose();
+		}
+	};
+	for (const folder of vscode.workspace.workspaceFolders ?? []) {
+		startAgentBridge(folder);
+	}
+	context.subscriptions.push(
+		vscode.workspace.onDidChangeWorkspaceFolders(event => {
+			for (const folder of event.removed) { stopAgentBridge(folder); }
+			for (const folder of event.added) { startAgentBridge(folder); }
+		}),
+		{
+			dispose: () => {
+				for (const bridge of agentBridges.values()) { bridge.dispose(); }
+				agentBridges.clear();
+			}
+		},
+	);
 
 	// Watch for ANY file ending in .hexcore_job.json (not just the dot-prefixed one).
 	// This lets agents create named jobs like sotr-strings.hexcore_job.json and
@@ -3802,6 +3911,32 @@ export function activate(context: vscode.ExtensionContext): void {
 				});
 			}
 
+			const requestedLiftEnd = liftWindow?.endExclusive ?? (startAddress + size);
+			const executableRange = assessExecutableLiftRange(
+				engine.getSections(),
+				startAddress,
+				requestedLiftEnd,
+			);
+			if (executableRange.status === 'non-executable') {
+				const errorMsg = `Lift range [0x${startAddress.toString(16)}, 0x${requestedLiftEnd.toString(16)}) ` +
+					`is not executable: ${executableRange.reason ?? 'unknown mapping'}.`;
+				if (quiet || isHeadless) {
+					return {
+						success: false,
+						status: 'error',
+						code: 'NON_EXECUTABLE_LIFT_RANGE',
+						ir: '',
+						address: startAddress,
+						bytesConsumed: 0,
+						architecture: mapping.remillArch,
+						error: errorMsg,
+						executableRange,
+					};
+				}
+				vscode.window.showErrorMessage(errorMsg);
+				return undefined;
+			}
+
 			let bytes = engine.getBytes(startAddress, size); // let: FIX-011 may reassign with patched buffer
 			if (!bytes || bytes.length === 0) {
 				const loadedFile = engine.getFilePath() ? path.basename(engine.getFilePath()!) : 'unknown';
@@ -4284,9 +4419,6 @@ export function activate(context: vscode.ExtensionContext): void {
 			const coverageExtent = { ...extent, size: Math.max(0, extent.end - startAddress) };
 			const decodedBytes = Math.max(0, Number(liftResult.bytesConsumed ?? 0));
 			const requestedWindowCoverage = Math.max(0, Math.min(1, decodedBytes / Math.max(1, size)));
-			const decodedByteCoverage = coverageExtent.size > 0
-				? Math.max(0, Math.min(1, decodedBytes / coverageExtent.size))
-				: undefined;
 			const requestedEndExclusive = startAddress + size;
 			const functionEndExclusive = liftWindow?.endExclusive
 				?? (coverageExtent.source !== 'none' ? coverageExtent.end : undefined);
@@ -4296,13 +4428,27 @@ export function activate(context: vscode.ExtensionContext): void {
 			const functionRangeSource = liftWindow?.endExclusive !== undefined
 				? liftWindow.reason
 				: coverageExtent.source;
+			const coverageSize = functionRangeSize ?? coverageExtent.size;
+			const decodedByteCoverage = coverageSize > 0
+				? Math.max(0, Math.min(1, decodedBytes / coverageSize))
+				: undefined;
+			const explicitRangeTerminal = !primaryFn?.instructions?.length &&
+				liftWindow?.reason === 'explicit-endExclusive' && functionEndExclusive !== undefined
+				? assessExplicitRangeTerminal(
+					startAddress,
+					functionEndExclusive,
+					await engine.disassembleRange(startAddress, size, Math.min(Math.max(size, 1), 100_000)),
+				)
+				: undefined;
 			const semanticInstructionEnd = primaryFn?.instructions?.length ? primaryFn.instructions.reduce(
 				(maximum, instruction) => Math.max(
 					maximum,
 					Number(instruction.address) + Number(instruction.size),
 				),
 				startAddress,
-			) : undefined;
+			) : explicitRangeTerminal?.status === 'complete'
+				? explicitRangeTerminal.semanticEndExclusive
+				: undefined;
 			const boundaryCompletion = functionEndExclusive !== undefined
 				? assessLiftRangeCompletion({
 					startAddress,
@@ -4348,9 +4494,11 @@ export function activate(context: vscode.ExtensionContext): void {
 					boundaryReached: boundaryCompletion?.reached ?? false,
 					boundaryCrossed: boundaryCompletion?.crossed ?? false,
 					byteCoverage: boundaryCompletion?.coverage,
-					source: semanticInstructionEnd !== undefined
+					source: primaryFn?.instructions?.length
 						? 'function-table-instructions' as const
-						: 'unavailable' as const,
+						: explicitRangeTerminal?.status === 'complete'
+							? explicitRangeTerminal.source
+							: 'unavailable' as const,
 				},
 				remillDecodedByteSet: {
 					bytes: decodedBytes,
@@ -4378,7 +4526,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				`nativeTruncated=${liftResult.truncated === true}\n` +
 				`; DecodedByteCoverage: ${decodedByteCoverage === undefined
 					? 'unknown (function boundary unavailable)'
-					: `${(decodedByteCoverage * 100).toFixed(2)}% (${decodedBytes}/${coverageExtent.size} bytes, ${coverageExtent.source})`}\n\n`;
+					: `${(decodedByteCoverage * 100).toFixed(2)}% (${decodedBytes}/${coverageSize} bytes, ${functionRangeSource})`}\n\n`;
 			const fullIR = header + formatLiftSemanticHeader(liftSemantics) + coverageHeader + processedIR;
 			if (liftSemantics.status === 'partial') {
 				console.warn(
@@ -4444,7 +4592,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					...liftSemantics,
 					requestedWindowCoverage,
 					decodedByteCoverage,
-					functionBoundaryKnown: coverageExtent.source !== 'none',
+					functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 					semanticWarning: liftSemantics.reason ?? '',
 					...rangeContract,
 				};
@@ -4480,7 +4628,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					...liftSemantics,
 					requestedWindowCoverage,
 					decodedByteCoverage,
-					functionBoundaryKnown: coverageExtent.source !== 'none',
+					functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 					semanticWarning: liftSemantics.reason ?? '',
 					...rangeContract,
 				};
@@ -4521,7 +4669,7 @@ export function activate(context: vscode.ExtensionContext): void {
 				...liftSemantics,
 				requestedWindowCoverage,
 				decodedByteCoverage,
-				functionBoundaryKnown: coverageExtent.source !== 'none',
+				functionBoundaryKnown: coverageExtent.source !== 'none' || boundaryCompletion?.status === 'ok',
 				semanticWarning: liftSemantics.reason ?? '',
 				...rangeContract,
 				...(didBacktrack ? { originalAddress: backtrackOriginalAddress } : {}),
@@ -4770,8 +4918,10 @@ export function activate(context: vscode.ExtensionContext): void {
 					decompLiftOpts.maxInstructions = Math.min(Math.max(est, 2000), 256_000);
 				}
 				if (decompLiftOpts.maxBasicBlocks === undefined) {
-					const est = Math.max(Math.ceil(leaderCount * 1.5) + 512,
-					                     Math.ceil(bytes.length / 8));
+					const est = Math.max(
+						Math.ceil(leaderCount * 1.5) + 512,
+						Math.ceil(bytes.length / 8)
+					);
 					decompLiftOpts.maxBasicBlocks = Math.min(Math.max(est, 2048), 64_000);
 				}
 			}
@@ -5970,10 +6120,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			if (!liftResult || !liftResult.success) {
 				const errorMsg = liftResult?.error ?? 'Lift failed.';
+				const liftFailure = liftResult as (LiftResult & { code?: unknown; errorCode?: unknown }) | undefined;
+				const errorCode = typeof liftFailure?.errorCode === 'string'
+					? liftFailure.errorCode
+					: (typeof liftFailure?.code === 'string' ? liftFailure.code : undefined);
 				// Bug #36/2: a failed lift (no function/code at address) must propagate as
 				// a structured error in headless/pipeline runs, not undefined + modal.
 				if (quiet || isHeadless) {
-					return { success: false, code: '', functionCount: 0, address: '', architecture: arch, error: errorMsg };
+					return {
+						success: false,
+						code: '',
+						...(errorCode ? { errorCode } : {}),
+						functionCount: 0,
+						address: '',
+						architecture: arch,
+						error: errorMsg,
+					};
 				}
 				vscode.window.showErrorMessage(errorMsg);
 				return undefined;
@@ -6614,7 +6776,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					snapshotPath,
 					heartbeatPath,
 					timeoutMs: nativeTimeout,
-				});
+				}, options.pipelineAbortSignal);
 				nativeExecution = isolated.nativeExecution;
 				progress?.report({ message: 'Importing isolated analysis snapshot...' });
 				try {
@@ -6847,6 +7009,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const params = parseDisassembleAtAddress(arg);
 
 			// 2. Load file if needed (reuse engine if same file)
+			let loadedNewFile = false;
 			if (params.file) {
 				const currentFile = engine.getFilePath();
 				if (currentFile !== params.file) {
@@ -6854,8 +7017,30 @@ export function activate(context: vscode.ExtensionContext): void {
 					if (!loaded) {
 						throw new Error(`Failed to load file: ${params.file}`);
 					}
-					await engine.analyzeAll();
+					loadedNewFile = true;
 				}
+			}
+			const engineGenerationBeforePreparation = engine.getAnalysisGeneration();
+			let globalAnalysisInvoked = false;
+			let preparationNativeExecution: NativeAnalyzeExecution | undefined;
+			if (params.scopeMode === 'discovery' &&
+				(loadedNewFile || engine.getFunctions().length === 0)) {
+				const targetFile = engine.getFilePath();
+				if (!targetFile) throw new Error('disassembleAtHeadless discovery mode requires a loaded file.');
+				globalAnalysisInvoked = true;
+				const pipelineTimeoutMs = typeof arg?.pipelineTimeoutMs === 'number'
+					? arg.pipelineTimeoutMs : 600_000;
+				const analysis = await vscode.commands.executeCommand<{
+					success?: boolean;
+					nativeExecution?: NativeAnalyzeExecution;
+				}>('hexcore.disasm.analyzeAll', {
+					file: targetFile,
+					quiet: true,
+					forceReload: loadedNewFile,
+					pipelineTimeoutMs,
+				});
+				if (!analysis) throw new Error('disassembleAtHeadless discovery analysis returned no result.');
+				preparationNativeExecution = analysis.nativeExecution;
 			}
 
 			// 3. Validate address is within binary range
@@ -6873,7 +7058,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			// 3c. Auto-backtrack: if address is mid-function, find the real start
 			//     Uses native function boundary detection (FEAT-DISASM-004)
 			let effectiveAddress = params.address;
-			const autoBacktrack = (arg as any)?.autoBacktrack !== false; // enabled by default
+			const autoBacktrack = params.autoBacktrack;
 			if (autoBacktrack) {
 				const backtrack = await resolveAutoBacktrack(engine, params.address);
 				if (backtrack) {
@@ -6896,7 +7081,15 @@ export function activate(context: vscode.ExtensionContext): void {
 			// 6. Disassemble main instructions (use effectiveAddress for backtrack).
 			// Clamp the byte window before decoding so a known function end is a
 			// terminal boundary, not metadata reported after a linear sweep crossed it.
-			const extent = getAuthoritativeFunctionExtent(engine, effectiveAddress);
+			const exactRangeMode = params.scopeMode === 'exact-range';
+			const extent = exactRangeMode
+				? {
+					start: effectiveAddress,
+					end: params.endExclusive!,
+					size: params.endExclusive! - effectiveAddress,
+					source: 'explicit-range' as const,
+				}
+				: getAuthoritativeFunctionExtent(engine, effectiveAddress);
 			if (params.stopAtFunctionBoundary && params.endExclusive === undefined && extent.source === 'none') {
 				throw new Error('disassembleAtHeadless: stopAtFunctionBoundary requires a known function extent.');
 			}
@@ -6919,7 +7112,8 @@ export function activate(context: vscode.ExtensionContext): void {
 			const boundedSize = decodeEndExclusive !== undefined
 				? decodeEndExclusive - effectiveAddress
 				: estimatedSize;
-			const extentFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			const extentFunction = !exactRangeMode && extent.source !== 'none'
+				? engine.getFunctionAt(extent.start) : undefined;
 			if (extentFunction && extent.source !== 'pdata' && extent.end > extent.start &&
 				extent.end < extentFunction.endAddress) {
 				extentFunction.endAddress = extent.end;
@@ -6928,7 +7122,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const knownFunctionAddress = extentFunction
 				? extent.start
 				: undefined;
-			const closureResult = knownFunctionAddress !== undefined
+			const closureResult = !exactRangeMode && knownFunctionAddress !== undefined
 				? await engine.materializeFunctionForAnalysis(knownFunctionAddress)
 				: undefined;
 			const rawMainInstructions = await engine.disassembleRange(effectiveAddress, boundedSize, params.effectiveCount);
@@ -6960,20 +7154,23 @@ export function activate(context: vscode.ExtensionContext): void {
 					requestedEndExclusive - effectiveAddress,
 				)
 				: undefined;
-			const owningFunction = extent.source !== 'none' ? engine.getFunctionAt(extent.start) : undefined;
+			const owningFunction = !exactRangeMode && extent.source !== 'none'
+				? engine.getFunctionAt(extent.start) : undefined;
 			const semanticAddresses = new Set(
-				(owningFunction?.instructions ?? []).map(instruction => Number(instruction.address)),
+				(exactRangeMode ? mainInstructions : (owningFunction?.instructions ?? []))
+					.map(instruction => Number(instruction.address)),
 			);
 			const boundaryContract = resolveInstructionBoundaryContract({
 				requestedAddress: params.address,
 				effectiveAddress,
 				autoBacktrack,
-				instructions: (owningFunction?.instructions ?? []).map(instruction => ({
+				instructions: (exactRangeMode ? mainInstructions : (owningFunction?.instructions ?? [])).map(instruction => ({
 					address: Number(instruction.address),
 					size: Number(instruction.size),
 				})),
 				lookbehindAligned: alignmentCheck.aligned,
 				lookbehindSuggestedAddress: alignmentCheck.suggestedAddress,
+				instructionSource: exactRangeMode ? 'explicit-range-decoder' : 'materialized-function-body',
 			});
 			const unresolvedMidInstruction = boundaryContract.requiresPartial;
 			const boundaryWarning = unresolvedMidInstruction
@@ -6983,7 +7180,9 @@ export function activate(context: vscode.ExtensionContext): void {
 						: '; enable autoBacktrack or provide an instruction boundary.')
 				: undefined;
 			const lastSemanticInstruction = owningFunction?.instructions.at(-1);
-			const semanticEnd = lastSemanticInstruction
+			const semanticEnd = exactRangeMode
+				? decodedEndExclusive
+				: lastSemanticInstruction
 				? Number(lastSemanticInstruction.address) + Number(lastSemanticInstruction.size)
 				: undefined;
 			const instructionRole = (instruction: { address: number; mnemonic: string }, isContext: boolean) =>
@@ -7083,12 +7282,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			const semanticInstructionCount = allEntries.filter(entry => entry.role === 'semantic-body').length;
 			const paddingInstructionCount = allEntries.filter(entry => entry.role === 'alignment-padding').length;
 			const unclassifiedInstructionCount = allEntries.filter(entry => entry.role === 'unclassified').length;
-			const bodyStatus = knownFunctionAddress !== undefined
+			const bodyStatus = !exactRangeMode && knownFunctionAddress !== undefined
 				? engine.getFunctionBodyStatus(knownFunctionAddress)
 				: 'decode-empty';
-			const displayOnly = !closureResult || closureResult.status === 'unknown-function' ||
-				closureResult.status === 'decode-empty' || closureResult.status === 'partial';
-			const closureReason = closureResult?.status === 'committed'
+			const displayOnly = !exactRangeMode && (!closureResult || closureResult.status === 'unknown-function' ||
+				closureResult.status === 'decode-empty' || closureResult.status === 'partial');
+			const closureReason = exactRangeMode
+				? 'Exact-range mode is display-only by contract and never mutates the global analysis universe.'
+				: closureResult?.status === 'committed'
 				? 'Function body was classified and committed to the downstream analysis universe.'
 				: closureResult?.status === 'already-current'
 					? 'Function body was already present in the current analysis universe.'
@@ -7112,6 +7313,13 @@ export function activate(context: vscode.ExtensionContext): void {
 			const result: DisassembleAtResult & { filteredInstructions?: DisassembleAtInstructionEntry[]; junkAnalysis?: { junkCount: number; junkRatio: number }; junkCount?: number; junkRatio?: number; vmDetection?: typeof vmDetection; prngDetection?: typeof prngDetection } = {
 				status: semanticStatus,
 				...(warnings.length > 0 ? { semanticWarning: warnings.join(' ') } : {}),
+				scopeMode: params.scopeMode,
+				analysisPreparation: {
+					globalAnalysisInvoked,
+					engineGenerationBefore: engineGenerationBeforePreparation,
+					engineGenerationAfter: engine.getAnalysisGeneration(),
+					...(preparationNativeExecution ? { nativeExecution: preparationNativeExecution } : {}),
+				},
 				address: `0x${params.address.toString(16).toUpperCase()}`,
 				effectiveAddress: `0x${effectiveAddress.toString(16).toUpperCase()}`,
 				addressMapping: engine.getAddressMapping(params.address),
@@ -8879,6 +9087,12 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 			throw new Error('Invalid "pipelineTimeoutMs" option: expected a positive finite number.');
 		}
 		normalized.pipelineTimeoutMs = Math.trunc(raw.pipelineTimeoutMs);
+	}
+	if (raw.pipelineAbortSignal !== undefined) {
+		if (typeof raw.pipelineAbortSignal !== 'object' || typeof raw.pipelineAbortSignal.addEventListener !== 'function') {
+			throw new Error('Invalid "pipelineAbortSignal" option: expected AbortSignal.');
+		}
+		normalized.pipelineAbortSignal = raw.pipelineAbortSignal;
 	}
 
 	// v3.7 options

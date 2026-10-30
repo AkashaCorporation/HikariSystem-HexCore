@@ -75,6 +75,24 @@ suite('JobQueueManager manual/autorun convergence', () => {
 		await assert.rejects(manager.waitForJob('missing'), /Unknown job/);
 		manager.dispose();
 	});
+
+	test('running cancellation becomes terminal only after the executor settles', async () => {
+		const manager = new JobQueueManager(1);
+		manager.setJobExecutor((_file, signal) => new Promise(resolve => {
+			signal.addEventListener('abort', () => setTimeout(() => resolve({ status: 'error', cancelled: true }), 20), { once: true });
+		}));
+		manager.start();
+		try {
+			const jobId = manager.queueJob('active-cancel.hexcore_job.json');
+			while (manager.getJobStatusReport(jobId)?.status !== 'running') { await sleep(5); }
+			const observer = manager.waitForJob(jobId);
+			assert.strictEqual(manager.cancelJob(jobId), true);
+			assert.strictEqual(manager.getJobStatusReport(jobId)?.status, 'running');
+			assert.deepStrictEqual(await observer, { status: 'error', cancelled: true });
+			assert.strictEqual(manager.getJobStatusReport(jobId)?.status, 'cancelled');
+			assert.strictEqual(manager.getQueueStats().running, 0);
+		} finally { manager.dispose(); }
+	});
 });
 
 suite('JobQueueManager #24 — queue position', () => {
@@ -369,6 +387,50 @@ suite('JobQueueManager — watcher path deduplication', () => {
 		const second = m.queueJobIfAbsent('c:\\work\\SAME.hexcore_job.json', 'low');
 		assert.strictEqual(second.deduped, true);
 		assert.strictEqual(second.jobId, first.jobId);
+		m.dispose();
+	});
+
+	test('queues a changed watcher revision behind the active revision without concurrent execution', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		const first = m.queueJobIfAbsent('revisioned.hexcore_job.json', 'low', undefined, 'sha-a');
+		await sleep(40);
+		const second = m.queueJobIfAbsent('revisioned.hexcore_job.json', 'low', undefined, 'sha-b');
+		assert.strictEqual(second.deduped, false);
+		assert.notStrictEqual(second.jobId, first.jobId);
+		assert.strictEqual(m.getJobStatus(second.jobId)?.status, 'queued');
+		assert.deepStrictEqual(
+			{ running: m.getQueueStats().running, queued: m.getQueueStats().queued },
+			{ running: 1, queued: 1 },
+		);
+		ctl.release('revisioned.hexcore_job.json');
+		for (let i = 0; i < 40 && m.getJobStatus(second.jobId)?.status !== 'running'; i++) {
+			await sleep(5);
+		}
+		assert.strictEqual(m.getJobStatus(second.jobId)?.status, 'running');
+		ctl.releaseAll();
+		await m.stop();
+		m.dispose();
+	});
+
+	test('coalesces repeated edits into the latest queued watcher revision', async () => {
+		const ctl = makeControllable();
+		const m = new JobQueueManager(2);
+		m.setJobExecutor(ctl.exec);
+		m.start();
+		m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-a');
+		await sleep(40);
+		const pending = m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-b');
+		const updated = m.queueJobIfAbsent('coalesced.hexcore_job.json', 'low', undefined, 'sha-c');
+		assert.strictEqual(updated.deduped, true);
+		assert.strictEqual(updated.revisionUpdated, true);
+		assert.strictEqual(updated.jobId, pending.jobId);
+		assert.strictEqual(m.getJobStatus(pending.jobId)?.revision, 'sha-c');
+		assert.strictEqual(m.getQueueStats().queued, 1);
+		ctl.releaseAll();
+		await m.stop();
 		m.dispose();
 	});
 });

@@ -5,9 +5,35 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
 | Field | Value |
 |-------|--------|
 | **Package** | `hexcore-disassembler` |
-| **Version** | **1.4.66** |
+| **Version** | **1.4.74** |
 | **Publisher** | hikarisystem |
-| **Product train** | HexCore **3.8.4 development** |
+| **Product train** | HexCore **3.8.5 development** |
+
+## 1.4.74 Agent Bridge v1
+
+The bridge starts automatically after the workspace is trusted. Restricted Mode
+is intentionally preserved because automation can execute workspace-defined
+jobs; the CLI never accepts or bypasses the trust prompt.
+
+- Exposes the existing automation queue to a local, workspace-authenticated
+  `hexcore-agent` Node CLI. It supports submit, status, wait, JSONL lifecycle
+  events, cancel, capabilities with schemas, and doctor.
+- Preserves revision deduplication, target SHA-256, execution identity,
+  provenance, `partial`, and explicit `UNKNOWN` values. Raw command results are
+  not returned directly.
+- Writes bounded and canonical hash-bound per-step terminal records under each
+  report's `.hexcore-meta/agent-results` directory. Secret-like JSON fields are
+  redacted and large outputs remain provenance references.
+- Uses the same JobQueueManager and AutomationPipelineRunner as commands and the
+  watcher; there is no second queue or arbitrary command RPC.
+- Adds non-mutating `validate`, schema-only output, compact doctor/capability
+  summaries and `autoRun:false` for explicit edit/validate/submit workflows.
+- The Windows package exposes `bin\hexcore-agent.cmd`, backed by the bundled
+  `HexCore.exe` Node runtime; source checkouts use `scripts\hexcore-agent.cmd`.
+- Active cancellation remains `running` until the native child actually exits,
+  then publishes terminal `cancelled` state and a bounded result record.
+
+See [HexCore Agent Bridge v1](../../docs/HEXCORE_AGENT_BRIDGE.md).
 
 ## 1.4.66 highlights (release candidate integration)
 

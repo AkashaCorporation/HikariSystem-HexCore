@@ -327,6 +327,13 @@ function buildMarkdownReport(analysis: PEAnalysis): string {
 	lines.push('## Summary');
 	lines.push('');
 	lines.push(`- Sections: ${analysis.sections.length}`);
+	if (analysis.overlay) {
+		lines.push(`- PE Overlay: ${analysis.overlay.size} bytes at 0x${analysis.overlay.offset.toString(16).toUpperCase()}`);
+		lines.push(`- Embedded Container: ${analysis.overlay.container}`);
+		if (analysis.overlay.formatHints.length > 0) {
+			lines.push(`- Overlay Format Hints: ${analysis.overlay.formatHints.join(', ')}`);
+		}
+	}
 	lines.push(`- Import DLLs: ${analysis.imports.length}`);
 	lines.push(`- Exported Symbols: ${analysis.exports.length}`);
 	lines.push(`- Entropy: ${analysis.entropy.toFixed(2)}`);

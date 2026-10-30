@@ -9,6 +9,8 @@ let parseDisassembleAtAddress: (args: unknown) => {
 	countingDomain: 'byte-range' | 'instruction-count';
 	endExclusive?: number;
 	stopAtFunctionBoundary: boolean;
+	scopeMode: 'discovery' | 'exact-range';
+	autoBacktrack: boolean;
 };
 let computeContextRecovery: (engine: any, targetAddress: number, contextCount: number, maxInstructionSize: number) => Promise<any>;
 
@@ -70,6 +72,32 @@ suite('disassembleAtHeadless pagination', () => {
 		assert.strictEqual(parsed.endExclusive! - parsed.address, 2090);
 		assert.strictEqual(parsed.countingDomain, 'byte-range');
 		assert.strictEqual(parsed.count, maxCount);
+		assert.strictEqual(parsed.scopeMode, 'discovery');
+	});
+
+	test('accepts an exact range only with an explicit endpoint and disabled backtrack', () => {
+		const parsed = parseDisassembleAtAddress({
+			address: '0x14142FEF0',
+			endExclusive: '0x14143048B',
+			autoBacktrack: false,
+			scopeMode: 'exact-range',
+		});
+		assert.strictEqual(parsed.scopeMode, 'exact-range');
+		assert.strictEqual(parsed.autoBacktrack, false);
+		assert.strictEqual(parsed.endExclusive! - parsed.address, 1435);
+	});
+
+	test('rejects incomplete or discovery-dependent exact-range contracts', () => {
+		assert.throws(() => parseDisassembleAtAddress({
+			address: '0x401000', scopeMode: 'exact-range', autoBacktrack: false,
+		}), /requires endExclusive/);
+		assert.throws(() => parseDisassembleAtAddress({
+			address: '0x401000', endExclusive: '0x401100', scopeMode: 'exact-range',
+		}), /requires autoBacktrack:false/);
+		assert.throws(() => parseDisassembleAtAddress({
+			address: '0x401000', endExclusive: '0x401100', scopeMode: 'exact-range',
+			autoBacktrack: false, stopAtFunctionBoundary: true,
+		}), /cannot use stopAtFunctionBoundary/);
 	});
 
 	test('marks function-boundary mode as a byte-range contract', () => {

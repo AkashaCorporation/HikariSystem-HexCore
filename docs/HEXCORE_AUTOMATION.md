@@ -4,7 +4,27 @@ HexCore supports running analysis pipelines from workspace job files.
 
 This document describes the unreleased `3.8.5` development surface, including the retained `3.8.4` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.68`, HQL `0.3.1`, PE Analyzer `1.1.3`, common `1.3.0`, debugger `2.1.22`, Revenant `0.4.0`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.1`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+Relevant integrated versions: disassembler `1.4.74`, HQL `0.3.1`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.22`, Revenant `0.5.0` (ILSpy `11.1.0.9782`), Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.3`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+
+### Agent Bridge v1
+
+The local `hexcore-agent` CLI validates, submits, observes, waits, streams,
+cancels, inspects capabilities and runs doctor against the same queue used by
+commands and the workspace watcher. HexCore must be open with the trusted
+workspace; Restricted Mode intentionally does not start the bridge because jobs
+can execute workspace-defined automation.
+The bridge uses a per-workspace authenticated named pipe, preserves revision
+deduplication, and persists bounded/hash-bound terminal step evidence without
+returning raw command results. It does not add a second queue or arbitrary RPC.
+
+For agent-owned/manual jobs, set `"autoRun": false`. The watcher then leaves
+the file untouched while `hexcore-agent validate` checks the live runner
+contract and `hexcore-agent submit --wait` executes the accepted SHA-256
+revision. The packaged entrypoint is `bin\hexcore-agent.cmd`; the source-checkout
+entrypoint is `scripts\hexcore-agent.cmd`.
+
+See [HEXCORE_AGENT_BRIDGE.md](HEXCORE_AGENT_BRIDGE.md) for protocol, containment,
+result records and v1 boundaries.
 
 ### RC.2 scheduling and session continuity
 
@@ -1595,7 +1615,9 @@ the omitted match is not lost.
 ### `hexcore.disasm.disassembleAtHeadless`
 
 Disassemble either a paged instruction count or an exact half-open byte range.
-Requires prior `analyzeAll` or a loaded binary.
+`scopeMode:"exact-range"` loads only the binary and decodes the declared range;
+it never starts global analysis or commits analysis closure. Discovery mode may
+prepare a function index through the terminable `analyzeAll` child process.
 
 ```json
 {
@@ -1603,7 +1625,8 @@ Requires prior `analyzeAll` or a loaded binary.
   "args": {
     "address": "0x401000",
     "endExclusive": "0x4012A0",
-    "stopAtFunctionBoundary": true,
+    "scopeMode": "exact-range",
+    "autoBacktrack": false,
     "filterJunk": true
   },
   "output": { "path": "disasm-at-result.json" },
@@ -1616,6 +1639,7 @@ Requires prior `analyzeAll` or a loaded binary.
 | `address` | `string` | *(required)* | Start virtual address as `0x`-prefixed hex string. |
 | `count` | `number` | `30` | Number of instructions to disassemble in legacy pagination mode. |
 | `endExclusive` | `string` | — | Authoritative first byte after the requested range. Takes precedence over instruction-count scope. |
+| `scopeMode` | `"discovery" \| "exact-range"` | `"discovery"` | `exact-range` requires `endExclusive` and `autoBacktrack:false`, performs no `analyzeAll`, and never mutates the audit universe. `discovery` may build the function index in an isolated child process. |
 | `stopAtFunctionBoundary` | `boolean` | `false` | Use the known function extent exactly; fails when no authoritative extent exists. |
 | `filterJunk` | `boolean` | `false` | Filter junk instructions from output. Reports `junkCount` and `junkRatio`. **(v3.7.1)** |
 | `autoBacktrack` | `boolean` | `true` | When `true`, auto-detects function boundaries — if the address lands mid-function, backtracks to the real function start. Set to `false` to disable. **(v3.7.3)** |
@@ -1628,6 +1652,18 @@ coverage. `stopReason` is one of `count-limit`, `requested-end`,
 `function-end`, `decode-failure`, or `binary-boundary`. An exact range that is
 not reached returns `partial`; a full count page is never proof that the
 function ended.
+
+Exact-range results expose `analysisPreparation.globalAnalysisInvoked:false`,
+unchanged engine generations, and `analysisClosure.status:"display-only"` with
+`auditUniverseChanged:false`. Every decoded instruction inside a complete,
+aligned explicit range is classified as `semantic-body`. This mode is intended
+for bounded forensic extraction, not function ownership or closure claims.
+
+Discovery preparation uses the same externally supervised child process as
+`hexcore.disasm.analyzeAll`. `analysisPreparation.nativeExecution` records PID,
+outcome, duration, last phase, heartbeat and snapshot identity. A native timeout
+is killed outside the Extension Host; a JavaScript `AbortSignal` is not treated
+as native cancellation.
 
 `instructionBoundary` reports whether the requested address is an exact
 materialized instruction start, a `mid-instruction` address, or could not be

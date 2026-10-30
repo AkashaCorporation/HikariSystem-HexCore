@@ -22,10 +22,20 @@ function verifyRuntimes({ appRoot, manifest, execute = spawnSync }) {
 			args = ['-e', 'require(process.argv[1]); console.log("HEXCORE_RUNTIME_LOADED");', entry];
 		}
 		const child = execute(executable, args, { cwd: extensionRoot, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true });
-		const loaded = engine.id === 'hexcore-revenant' ? /^revenant-engine:\s*\S+/m.test(String(child.stdout)) : String(child.stdout).includes('HEXCORE_RUNTIME_LOADED');
+		const stdout = String(child.stdout ?? '');
+		const backendVersion = stdout.match(/^revenant-engine:\s*(\S+)/m)?.[1];
+		const decompilerVersion = stdout.match(/^ICSharpCode\.Decompiler:\s*(\S+)/m)?.[1];
+		const loaded = engine.id === 'hexcore-revenant'
+			? !!backendVersion && (engine.runtimeValidation !== 'version-probe' ||
+				(backendVersion === engine.expectedRuntime?.backendVersion &&
+				 decompilerVersion === engine.expectedRuntime?.decompilerVersion))
+			: stdout.includes('HEXCORE_RUNTIME_LOADED');
 		return {
 			id: engine.id, packageVersion: engine.version, primaryRuntime: engine.primaryRuntime,
 			ok: child.status === 0 && !child.error && loaded,
+			...(engine.id === 'hexcore-revenant' ? {
+				reportedRuntime: { backendVersion: backendVersion ?? null, decompilerVersion: decompilerVersion ?? null }
+			} : {}),
 			exitCode: child.status, timedOut: child.error?.code === 'ETIMEDOUT',
 			...(child.error ? { error: child.error.message } : {}),
 			stderrTail: String(child.stderr ?? '').slice(-3000),
