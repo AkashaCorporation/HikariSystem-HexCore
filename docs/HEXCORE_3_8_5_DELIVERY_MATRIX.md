@@ -63,7 +63,7 @@ changes. They also do not authorize a new release claim without package tests.
 | better-sqlite3 | `2.0.3` | `d630b7f07dfb260b9ff312b68e9c536d22a3bca382db649528d88779820d5a54` |
 | Remill | `0.5.4` | `0b013bf7e31c4e2e5c1249d2c95fb7657f51f70b812d6faf6a07392d8e22b078` |
 | Souper | `0.2.2` | `241a9b5d7a8c7f56c4b443805f52ed7f3e84fbc0bda9c0d4a25bb0265349ec86` |
-| Helix | `0.9.4-rc.3` | `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231` (qualified local build; published asset hash gate pending) |
+| Helix | `0.9.4-rc.3` | `032b54bca161faa757f35776192490fd278445bfe146e20119601995c6ce6d35` (official Windows prebuild; identity verified) |
 | Elixir | `1.0.4` | `51129cb794b946331eec7d4d4df652bcde26a3610221e282d5e91f607afe9b25` |
 | Revenant backend | `0.5.0` / ILSpy `11.1.0.9782` | `f04334feef9b9fa27689d5b30342fe81a3865821cba0f480127a660663cd58a2` |
 
@@ -256,9 +256,10 @@ Phase 1 completed on 2026-10-30 with `PASS-WITH-HOLDS`.
 - Helix broad current suite: 273 PASS, 1 optional SKIP, 0 FAIL;
 - fresh Kbase large path: 1,399 decoded instructions, 4.466 seconds,
   intentional partial, no Extension Host hang;
-- final candidate Helix node SHA-256:
-  `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231`
-  (local qualification; replace with the published workflow hash if different).
+- official candidate Helix node SHA-256:
+  `032b54bca161faa757f35776192490fd278445bfe146e20119601995c6ce6d35`.
+- local qualification node SHA-256, retained as historical evidence:
+  `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231`.
 
 Adjudication and checksums are recorded in:
 

@@ -39,9 +39,14 @@ Status: SOURCE-QUALIFIED / LOCAL-COMMITS-READY
   `e4cf25f9bd3dc99555fad7abbaa89de03b8de4f7f70d6e0e1058009138053231`.
 - Addon size: 15,417,856 bytes.
 
-The addon reports `helix-js=0.9.4-rc.3 native=0.9.4-rc.3`. Its local hash is
-qualification evidence; the published workflow asset receives its own recorded
-hash before HexCore updates the Function Atlas lock.
+The official GitHub Actions Windows prebuild published after merge reports:
+
+- SHA-256: `032b54bca161faa757f35776192490fd278445bfe146e20119601995c6ce6d35`;
+- size: 15,426,560 bytes;
+- identity: `helix-js=0.9.4-rc.3 native=0.9.4-rc.3`.
+
+The local addon hash remains qualification evidence. The distinct official
+workflow hash above is the active Function Atlas producer identity.
 
 ## Semantic controls
 
