@@ -25,7 +25,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact `helix_engine.lib` hash.
 - Qualify current-package AArch64 PLT binding, YARA advisory scoring,
   target-bound HQL/semantic explanation, active worker cancellation and clean
-  Agent Bridge shutdown. Final artifact identity remains a separate gate.
+  Agent Bridge shutdown.
+- Build and freeze the final Windows artifact-only candidate at commit
+  `3d217f81` with ZIP SHA-256 `b1751729...dcb27`; all nine active runtime
+  load/version gates pass. Publication remains blocked pending the human-only
+  trusted-workspace E2E transition.
+- Record the Helix packaging transform explicitly: the packaged node gains a
+  1,024-byte `.rsrc` section while all common code/data section hashes remain
+  identical to the official `0.9.4-rc.3` prebuild.
 
 ### Agent Bridge and Post-RC Product Gates
 

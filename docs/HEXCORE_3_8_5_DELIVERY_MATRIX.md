@@ -1,6 +1,6 @@
 # HexCore 3.8.5 Delivery Matrix
 
-Status: PHASE-0 BASELINE FROZEN
+Status: FINAL ARTIFACT FROZEN / FIX-BLOCK
 
 Date: 2026-10-30
 
@@ -29,6 +29,9 @@ It is not a claim that every engine received a major feature generation.
 | Accepted baseline ZIP SHA-256 | `997f63aaadef214bcc30716792dbaf1b610287e82bc9bc8759b9db2106290c0b` |
 | Product identity | `3.8.5-rc.1` |
 | Supported packaged host | Windows 10/11 x64 portable ZIP |
+| Final source commit | `3d217f81dbcdf706d8ace165e7c25ca0d7c726df` |
+| Final artifact-only workflow | `41130405904` |
+| Final artifact ZIP SHA-256 | `b17517296a641e7dbdd352434b8d21654fbeb474ac9adc4c00cc7baae09dcb27` |
 
 The accepted ZIP is evidence for the starting commit only. A later merge/tag
 must produce and qualify a new artifact with its own manifest and hash.
@@ -244,6 +247,32 @@ Phase 0 is accepted only when:
 
 Phase 0 advanced to issue #30/#31 ownership and SCF honesty using its standalone
 goal document.
+
+## Final Artifact Decision
+
+The Windows artifact-only build at source commit `3d217f81` passed after the
+standalone Revenant `0.5.0` Windows backend was published. Release upload and
+stable publication were disabled. The extracted package reports:
+
+- product `3.8.5-rc.1` and exact source commit `3d217f81...`;
+- 10 manifest engine entries and 9 active runtime load/version gates passing;
+- exact Helix wrapper/native identity `0.9.4-rc.3`;
+- exact Revenant backend `0.5.0` / ILSpy `11.1.0.9782` identity.
+
+Internal and independent E2E both reached the same environment boundary. The
+Restricted Mode negative passed, but the required trusted-workspace transition
+was not accepted by a human and the Computer Use native pipe was unavailable.
+No profile/state edit was used to bypass trust.
+
+Terminal decision: `FIX-BLOCK / BLOCKED-ENVIRONMENT`. This is not a product
+P0/P1 finding and is not GO-RC evidence. Re-run the trust-enabled E2E against
+the same ZIP before publishing any HexCore release.
+
+The Windows packager adds a 1,024-byte `.rsrc` section to the Helix node. The
+packaged full-file hash is `96d62b11...f12c`, while the official prebuild is
+`032b54bc...e6d35`; hashes for `.text`, `.rdata`, `.data`, `.pdata` and
+`.reloc` remain byte-identical. A later provenance contract should represent
+this packaging transform explicitly.
 
 ## Phase-1 #30/#31 Checkpoint
 
