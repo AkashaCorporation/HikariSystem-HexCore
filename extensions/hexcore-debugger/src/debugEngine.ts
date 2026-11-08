@@ -105,6 +105,21 @@ export interface SideChannelData {
 	distinctAddresses?: number;
 }
 
+export type EmulationSessionLifecycle = 'idle' | 'initializing' | 'ready' | 'failed' | 'disposed';
+
+export class EmulationNotReadyError extends Error {
+	readonly code = 'HEXCORE_DEBUGGER_NOT_READY';
+
+	constructor(
+		readonly operation: string,
+		readonly lifecycle: EmulationSessionLifecycle,
+		readonly initializationError?: string,
+	) {
+		super(`[HEXCORE_DEBUGGER_NOT_READY] ${operation} requires a ready emulation session (lifecycle=${lifecycle})${initializationError ? `: ${initializationError}` : ''}`);
+		this.name = 'EmulationNotReadyError';
+	}
+}
+
 export class DebugEngine {
 	private targetPath?: string;
 	private stdinSha256?: string;
@@ -145,6 +160,7 @@ export class DebugEngine {
 	private apiHooks?: WinApiHooks;
 	private linuxApiHooks?: LinuxApiHooks;
 	private emulationInitError?: string;
+	private emulationLifecycle: EmulationSessionLifecycle = 'idle';
 	private architecture: ArchitectureType = 'x64';
 	private baseAddress: bigint = 0x400000n;
 	private fileBuffer?: Buffer;
@@ -193,7 +209,10 @@ export class DebugEngine {
 		if (this.emulator || this.memoryManager || this.apiHooks || this.linuxApiHooks || this.isRunning) {
 			this.disposeEmulation();
 		}
+		this.emulationLifecycle = 'initializing';
+		this.emulationInitError = undefined;
 
+		try {
 		this.targetPath = filePath;
 		this.emulationOptions = options ?? {};
 		this._traceManager.configure(this.emulationOptions.trace);
@@ -260,6 +279,7 @@ export class DebugEngine {
 		}
 
 		this.isRunning = true;
+		this.emulationLifecycle = 'ready';
 		this.emit('emulation-started', {
 			entryPoint: this.baseAddress,
 			architecture: this.architecture,
@@ -267,6 +287,11 @@ export class DebugEngine {
 		});
 
 		console.log(`Emulation ready: ${this.architecture}, type=${this.fileType}`);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.failEmulationInitialization(message);
+			throw new EmulationNotReadyError('startEmulation', 'failed', message);
+		}
 	}
 
 	/**
@@ -1457,11 +1482,9 @@ export class DebugEngine {
 	 * Step one instruction in emulation mode
 	 */
 	async emulationStep(): Promise<void> {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
+		this.assertEmulationReady('emulationStep');
 
-		await this.emulator.step();
+		await this.emulator!.step();
 		await this.updateEmulationRegisters();
 		await this.captureBreakpointArtifacts();
 		this.emit('step');
@@ -1471,16 +1494,14 @@ export class DebugEngine {
 	 * Continue emulation until breakpoint or end
 	 */
 	async emulationContinue(): Promise<void> {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
+		this.assertEmulationReady('emulationContinue');
 
 		// Unicorn async continue can desync callback address vs register snapshot on
 		// some ELF flows. For ELF targets we use deterministic stepped continue.
 		if (this.fileType === 'elf') {
 			await this.continueElfSafely();
 		} else {
-			await this.emulator.continue();
+			await this.emulator!.continue();
 		}
 		await this.updateEmulationRegisters();
 		await this.captureBreakpointArtifacts();
@@ -1610,20 +1631,16 @@ export class DebugEngine {
 	 * Set breakpoint
 	 */
 	emulationSetBreakpoint(address: bigint): void {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
-		this.emulator.addBreakpoint(address);
+		this.assertEmulationReady('emulationSetBreakpoint');
+		this.emulator!.addBreakpoint(address);
 	}
 
 	/**
 	 * Remove breakpoint
 	 */
 	emulationRemoveBreakpoint(address: bigint): void {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
-		this.emulator.removeBreakpoint(address);
+		this.assertEmulationReady('emulationRemoveBreakpoint');
+		this.emulator!.removeBreakpoint(address);
 	}
 
 	/**
@@ -1728,8 +1745,21 @@ export class DebugEngine {
 		return this.emulator.getState();
 	}
 
+	getEmulationLifecycle(): { status: EmulationSessionLifecycle; error?: string } {
+		return {
+			status: this.emulationLifecycle,
+			...(this.emulationInitError ? { error: this.emulationInitError } : {}),
+		};
+	}
+
+	assertEmulationReady(operation: string): void {
+		if (this.emulationLifecycle !== 'ready' || !this.isRunning || !this.emulator) {
+			throw new EmulationNotReadyError(operation, this.emulationLifecycle, this.emulationInitError);
+		}
+	}
+
 	isEmulationSessionActive(): boolean {
-		return this.isRunning && this.emulator !== undefined;
+		return this.emulationLifecycle === 'ready' && this.isRunning && this.emulator !== undefined;
 	}
 
 	getEmulationBreakpoints(): bigint[] {
@@ -1808,10 +1838,8 @@ export class DebugEngine {
 	 * Save emulation snapshot
 	 */
 	async saveSnapshot(): Promise<void> {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
-		await this.emulator.saveState();
+		this.assertEmulationReady('saveSnapshot');
+		await this.emulator!.saveState();
 		this.emit('snapshot-saved');
 	}
 
@@ -1819,10 +1847,8 @@ export class DebugEngine {
 	 * Restore emulation snapshot
 	 */
 	async restoreSnapshot(): Promise<void> {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
-		await this.emulator.restoreState();
+		this.assertEmulationReady('restoreSnapshot');
+		await this.emulator!.restoreState();
 		await this.updateEmulationRegisters();
 		this.emit('snapshot-restored');
 	}
@@ -1870,12 +1896,10 @@ export class DebugEngine {
 	 * For PE/raw targets, uses emuStartAsync with count=N for performance.
 	 */
 	async emulationRunCounted(count: number, timeout: number = 0): Promise<void> {
-		if (!this.emulator) {
-			throw new Error('Emulator not initialized');
-		}
+		this.assertEmulationReady('emulationRunCounted');
 
-		const currentAddr = this.emulator.getState().currentAddress;
-		await this.emulator.runSync(currentAddr, count, timeout);
+		const currentAddr = this.emulator!.getState().currentAddress;
+		await this.emulator!.runSync(currentAddr, count, timeout);
 		await this.updateEmulationRegisters();
 		await this.captureBreakpointArtifacts();
 		this.emit('continue');
@@ -2320,9 +2344,10 @@ export class DebugEngine {
 	}
 
 	/**
-	 * Dispose emulator resources
+	 * Release native and per-session resources without choosing the terminal
+	 * lifecycle. Startup failure and explicit disposal have different meaning.
 	 */
-	disposeEmulation(): void {
+	private releaseEmulationResources(): void {
 		this.isRunning = false;
 		if (this.memoryManager) {
 			this.memoryManager.dispose();
@@ -2338,5 +2363,20 @@ export class DebugEngine {
 		this.linuxApiHooks = undefined;
 		// Clear session buffers so post-dispose getters don't report stale data.
 		this.resetSessionState();
+	}
+
+	private failEmulationInitialization(message: string): void {
+		this.releaseEmulationResources();
+		this.emulationLifecycle = 'failed';
+		this.emulationInitError = message;
+	}
+
+	/**
+	 * Dispose emulator resources.
+	 */
+	disposeEmulation(): void {
+		this.releaseEmulationResources();
+		this.emulationLifecycle = 'disposed';
+		this.emulationInitError = undefined;
 	}
 }

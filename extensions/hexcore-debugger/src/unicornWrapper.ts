@@ -30,6 +30,14 @@ if (!SAB_AVAILABLE) {
  */
 export const HEXCORE_SAB_HOOKS_SUPPORTED: boolean = SAB_AVAILABLE;
 
+/**
+ * Native N-API builds accept a TypedArray view over shared storage reliably,
+ * while a raw SharedArrayBuffer is not reported as an ArrayBuffer by N-API.
+ */
+export function createNativeSabHookView(buffer: SharedArrayBuffer): Uint8Array {
+	return new Uint8Array(buffer);
+}
+
 // Types from hexcore-unicorn
 export interface UnicornModule {
 	Unicorn: new (arch: number, mode: number) => UnicornInstance;
@@ -64,7 +72,7 @@ export interface UnicornInstance {
 	// .node prebuilds may not have it; runtime check via `typeof === 'function'`.
 	hookAddSAB?(
 		type: number,
-		sabRef: SharedArrayBuffer | Uint8Array,
+		sabRef: Uint8Array,
 		slotSize: number,
 		slotCount: number,
 		watchAddresses: bigint[],
@@ -339,6 +347,7 @@ export class UnicornWrapper {
 	// _sabDrainScheduled prevents the setImmediate drain loop from re-arming
 	// itself on every event — only one drain tick is in flight at a time.
 	private _sabRing?: SharedRingBuffer;
+	private _sabNativeView?: Uint8Array;
 	private _sabDrainScheduled: boolean = false;
 
 	/**
@@ -740,6 +749,9 @@ export class UnicornWrapper {
 				this._pe32Worker = undefined;
 			}
 			this.lastError = `PE32 worker startup failed: ${message}`;
+			this.state.lastError = this.lastError;
+			this.state.isReady = false;
+			this.initialized = false;
 			throw new Error(this.lastError);
 		}
 
@@ -1715,6 +1727,7 @@ export class UnicornWrapper {
 			const SLOT_SIZE = 32;
 			const SLOT_COUNT = 4096;
 			this._sabRing = new SharedRingBuffer({ slotSize: SLOT_SIZE, slotCount: SLOT_COUNT });
+			this._sabNativeView = createNativeSabHookView(this._sabRing.buffer);
 
 			// Watch set: addresses that have a JS code hook registered (API stubs,
 			// breakpoints) must route through the legacy callback so emuStop()
@@ -1735,7 +1748,7 @@ export class UnicornWrapper {
 
 			hookHandle = this.uc!.hookAddSAB!(
 				HOOK.CODE,
-				this._sabRing.buffer,
+				this._sabNativeView,
 				SLOT_SIZE,
 				SLOT_COUNT,
 				watchAddresses,
@@ -3997,6 +4010,7 @@ export class UnicornWrapper {
 		this._pe32StubRangeEnd = 0n;
 		// v4.0.0 — Tear down SAB ring on dispose.
 		this._sabRing = undefined;
+		this._sabNativeView = undefined;
 		this._sabDrainScheduled = false;
 	}
 

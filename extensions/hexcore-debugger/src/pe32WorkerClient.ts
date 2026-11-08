@@ -99,6 +99,25 @@ export interface X86Registers {
 	eip: bigint; eflags: bigint;
 }
 
+export interface Pe32WorkerDiagnostics {
+	runtime: 'unstarted' | 'system-node' | 'electron-fallback';
+	execPath: string | null;
+	nodeVersion: string | null;
+	workerPath: string | null;
+	pid: number | null;
+	addonResolution: string;
+	stdoutTail: string;
+	stderrTail: string;
+	exitCode: number | null;
+	signal: NodeJS.Signals | null;
+}
+
+export interface Pe32WorkerClientOptions {
+	startTimeoutMs?: number;
+	fork?: typeof child_process.fork;
+	findSystemNode?: () => string | null;
+}
+
 export class Pe32WorkerClient {
 	private worker: child_process.ChildProcess | null = null;
 	private nextId = 1;
@@ -107,8 +126,17 @@ export class Pe32WorkerClient {
 	private readyPromise: Promise<void> | null = null;
 	private pageSize = 0x1000;
 	private lastStartError: string | null = null;
+	private startCancel: ((error: Error) => void) | null = null;
+	private diagnostics: Pe32WorkerDiagnostics = {
+		runtime: 'unstarted', execPath: null, nodeVersion: null, workerPath: null,
+		pid: null, addonResolution: 'not-attempted', stdoutTail: '', stderrTail: '',
+		exitCode: null, signal: null,
+	};
 
 	private static readonly START_TIMEOUT_MS = 15000;
+	private static readonly DIAGNOSTIC_TAIL_BYTES = 4096;
+
+	constructor(private readonly options: Pe32WorkerClientOptions = {}) { }
 
 	/**
 	 * Spawn the worker process.
@@ -134,13 +162,31 @@ export class Pe32WorkerClient {
 		// Solution: prefer a system Node.js binary (which does NOT have ACG
 		// in its PE header) over the Electron binary.  Fall back to
 		// Electron + ELECTRON_RUN_AS_NODE=1 if no system Node.js is found.
-		const systemNode = this.findSystemNode();
+		const systemNode = this.options.findSystemNode
+			? this.options.findSystemNode()
+			: this.findSystemNode();
 		const env = { ...process.env };
+		const fork = this.options.fork ?? child_process.fork;
+		const runtime = systemNode ? 'system-node' : 'electron-fallback';
+		const execPath = systemNode ?? process.execPath;
+		this.diagnostics = {
+			runtime,
+			execPath,
+			nodeVersion: systemNode ? this.readNodeVersion(systemNode) : process.version,
+			workerPath,
+			pid: null,
+			addonResolution: 'not-attempted',
+			stdoutTail: '',
+			stderrTail: '',
+			exitCode: null,
+			signal: null,
+		};
 
+		try {
 		if (systemNode) {
 			// Use system Node.js — no ACG restrictions on RWX allocations
 			console.log(`[pe32Worker] Using system Node.js: ${systemNode}`);
-			this.worker = child_process.fork(workerPath, [], {
+			this.worker = fork(workerPath, [], {
 				stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 				execPath: systemNode,
 				env,
@@ -150,12 +196,21 @@ export class Pe32WorkerClient {
 			// Fallback: Electron binary with ELECTRON_RUN_AS_NODE=1
 			console.warn('[pe32Worker] System Node.js not found, falling back to Electron binary');
 			env.ELECTRON_RUN_AS_NODE = '1';
-			this.worker = child_process.fork(workerPath, [], {
+			this.worker = fork(workerPath, [], {
 				stdio: ['pipe', 'pipe', 'pipe', 'ipc'],
 				env,
 				execArgv: []
 			});
 		}
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : String(error);
+			const failure = new Error(`PE32 worker spawn failed: ${message}; ${this.formatDiagnostics()}`);
+			this.lastStartError = failure.message;
+			throw failure;
+		}
+		this.diagnostics.pid = this.worker!.pid ?? null;
+		console.log(`[pe32Worker] bootstrap: runtime=${runtime}, execPath=${execPath}, node=${this.diagnostics.nodeVersion ?? 'unknown'}, pid=${this.worker!.pid ?? 'unknown'}, worker=${workerPath}`);
+		const worker = this.worker!;
 
 		this.ready = false;
 		this.lastStartError = null;
@@ -169,6 +224,7 @@ export class Pe32WorkerClient {
 				settled = true;
 				clearTimeout(timeoutHandle);
 				this.readyPromise = null;
+				this.startCancel = null;
 				if (error) {
 					this.lastStartError = error.message;
 					reject(error);
@@ -178,12 +234,16 @@ export class Pe32WorkerClient {
 				}
 			};
 
+			const startTimeoutMs = this.options.startTimeoutMs ?? Pe32WorkerClient.START_TIMEOUT_MS;
 			const timeoutHandle = setTimeout(() => {
-				finish(new Error(`PE32 worker failed to become ready within ${Pe32WorkerClient.START_TIMEOUT_MS}ms`));
-			}, Pe32WorkerClient.START_TIMEOUT_MS);
+				finish(new Error(`PE32 worker failed to become ready within ${startTimeoutMs}ms; ${this.formatDiagnostics()}`));
+				this.terminateWorker(worker);
+			}, startTimeoutMs);
+			this.startCancel = finish;
 
-			this.worker!.on('message', (msg: Record<string, unknown>) => {
+			worker.on('message', (msg: Record<string, unknown>) => {
 				if (msg.type === 'ready') {
+					this.applyReadyDiagnostics(msg.diagnostics);
 					this.ready = true;
 					finish();
 					return;
@@ -206,34 +266,44 @@ export class Pe32WorkerClient {
 				}
 			});
 
-			if (this.worker!.stdout) {
-				this.worker!.stdout.on('data', (chunk: Buffer) => {
+			if (worker.stdout) {
+				worker.stdout.on('data', (chunk: Buffer) => {
+					this.diagnostics.stdoutTail = this.appendDiagnosticTail(this.diagnostics.stdoutTail, chunk);
 					process.stdout.write(`[pe32Worker:stdout] ${chunk}`);
 				});
 			}
-			if (this.worker!.stderr) {
-				this.worker!.stderr.on('data', (chunk: Buffer) => {
+			if (worker.stderr) {
+				worker.stderr.on('data', (chunk: Buffer) => {
+					this.diagnostics.stderrTail = this.appendDiagnosticTail(this.diagnostics.stderrTail, chunk);
 					process.stderr.write(`[pe32Worker:stderr] ${chunk}`);
 				});
 			}
 
-			this.worker!.on('exit', (code, signal) => {
-				console.log(`[pe32Worker] exited: code=${code}, signal=${signal}`);
-				this.worker = null;
-				this.ready = false;
+			worker.on('exit', (code, signal) => {
+				this.diagnostics.exitCode = code;
+				this.diagnostics.signal = signal;
+				console.log(`[pe32Worker] exited: code=${code}, signal=${signal}; ${this.formatDiagnostics()}`);
+				const wasCurrentWorker = this.worker === worker;
+				if (wasCurrentWorker) {
+					this.worker = null;
+					this.ready = false;
+				}
 				if (!settled) {
-					finish(new Error(`PE32 worker exited before ready (code=${code}, signal=${signal})`));
+					finish(new Error(`PE32 worker exited before ready (code=${code}, signal=${signal}); ${this.formatDiagnostics()}`));
 				}
-				for (const [, p] of this.pending) {
-					p.reject(new Error(`PE32 worker exited with code ${code}`));
+				if (wasCurrentWorker) {
+					for (const [, p] of this.pending) {
+						p.reject(new Error(`PE32 worker exited with code ${code}`));
+					}
+					this.pending.clear();
 				}
-				this.pending.clear();
 			});
 
-			this.worker!.on('error', (err) => {
-				console.error(`[pe32Worker] error: ${err.message}`);
+			worker.on('error', (err) => {
+				this.diagnostics.stderrTail = this.appendDiagnosticTail(this.diagnostics.stderrTail, err.message);
+				console.error(`[pe32Worker] error: ${err.message}; ${this.formatDiagnostics()}`);
 				if (!settled) {
-					finish(new Error(`PE32 worker process error: ${err.message}`));
+					finish(new Error(`PE32 worker process error: ${err.message}; ${this.formatDiagnostics()}`));
 				}
 			});
 		});
@@ -268,13 +338,17 @@ export class Pe32WorkerClient {
 	/**
 	 * Initialize the Unicorn engine in the worker.
 	 */
-	async initialize(arch: number, mode: number): Promise<{ handle: bigint; pageSize: number; version: string }> {
+	async initialize(arch: number, mode: number): Promise<{ handle: bigint; pageSize: number; version: string; modulePath?: string }> {
 		const result = await this.call('initialize', arch, mode) as Record<string, unknown>;
 		this.pageSize = result.pageSize as number;
+		const modulePath = typeof result.modulePath === 'string' ? result.modulePath : undefined;
+		this.diagnostics.addonResolution = modulePath ?? 'resolved-without-path';
+		console.log(`[pe32Worker] addon resolution: ${this.diagnostics.addonResolution}`);
 		return {
 			handle: result.handle as bigint,
 			pageSize: result.pageSize as number,
-			version: result.version as string
+			version: result.version as string,
+			...(modulePath ? { modulePath } : {})
 		};
 	}
 
@@ -416,13 +490,88 @@ export class Pe32WorkerClient {
 		return this.pageSize;
 	}
 
+	getDiagnostics(): Pe32WorkerDiagnostics {
+		return { ...this.diagnostics };
+	}
+
+	private applyReadyDiagnostics(value: unknown): void {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) {
+			return;
+		}
+		const diagnostics = value as Record<string, unknown>;
+		if (typeof diagnostics.execPath === 'string') {
+			this.diagnostics.execPath = diagnostics.execPath;
+		}
+		if (typeof diagnostics.nodeVersion === 'string') {
+			this.diagnostics.nodeVersion = diagnostics.nodeVersion;
+		}
+		if (typeof diagnostics.workerPath === 'string') {
+			this.diagnostics.workerPath = diagnostics.workerPath;
+		}
+		if (typeof diagnostics.pid === 'number') {
+			this.diagnostics.pid = diagnostics.pid;
+		}
+		if (typeof diagnostics.addonResolution === 'string') {
+			this.diagnostics.addonResolution = diagnostics.addonResolution;
+		}
+	}
+
+	private appendDiagnosticTail(current: string, value: Buffer | string): string {
+		const appended = current + (Buffer.isBuffer(value) ? value.toString('utf8') : value);
+		return appended.slice(-Pe32WorkerClient.DIAGNOSTIC_TAIL_BYTES);
+	}
+
+	private formatDiagnostics(): string {
+		const value = this.diagnostics;
+		const stdout = value.stdoutTail.trim() || '<empty>';
+		const stderr = value.stderrTail.trim() || '<empty>';
+		return `runtime=${value.runtime}, execPath=${value.execPath ?? '<unknown>'}, node=${value.nodeVersion ?? '<unknown>'}, pid=${value.pid ?? '<unknown>'}, worker=${value.workerPath ?? '<unknown>'}, addon=${value.addonResolution}, exit=${value.exitCode ?? '<none>'}, signal=${value.signal ?? '<none>'}, stdout=${JSON.stringify(stdout)}, stderr=${JSON.stringify(stderr)}`;
+	}
+
+	private readNodeVersion(execPath: string): string | null {
+		try {
+			return child_process.execFileSync(execPath, ['--version'], {
+				encoding: 'utf8', timeout: 2000, windowsHide: true, maxBuffer: 1024,
+			}).trim() || null;
+		} catch {
+			return null;
+		}
+	}
+
+	private terminateWorker(worker: child_process.ChildProcess | null): void {
+		if (!worker) {
+			return;
+		}
+		try {
+			worker.kill();
+		} catch (error: unknown) {
+			this.diagnostics.stderrTail = this.appendDiagnosticTail(
+				this.diagnostics.stderrTail,
+				`worker kill failed: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (this.worker === worker) {
+			this.worker = null;
+		}
+		this.ready = false;
+	}
+
 	/**
 	 * Locate a system Node.js binary that does NOT have ACG/CFG mitigations.
 	 * Checks common locations and the PATH environment variable.
 	 */
 	private findSystemNode(): string | null {
 		// Common Node.js install paths on Windows
-		const candidates: string[] = [];
+		const candidates: string[] = [
+			'C:\\Program Files\\nodejs\\node.exe',
+			'C:\\Program Files (x86)\\nodejs\\node.exe',
+		];
+
+		// nvm symlink (current active version) comes before historical installs.
+		const nvmSymlink = process.env.NVM_SYMLINK;
+		if (nvmSymlink) {
+			candidates.push(path.join(nvmSymlink, 'node.exe'));
+		}
 
 		// nvm-windows managed installs
 		const nvmHome = process.env.NVM_HOME;
@@ -436,16 +585,6 @@ export class Pe32WorkerClient {
 				}
 			} catch { /* ignore */ }
 		}
-
-		// nvm symlink (current active version)
-		const nvmSymlink = process.env.NVM_SYMLINK;
-		if (nvmSymlink) {
-			candidates.push(path.join(nvmSymlink, 'node.exe'));
-		}
-
-		// Standard install locations
-		candidates.push('C:\\Program Files\\nodejs\\node.exe');
-		candidates.push('C:\\Program Files (x86)\\nodejs\\node.exe');
 
 		// PATH-based lookup
 		const pathDirs = (process.env.PATH || '').split(path.delimiter);
@@ -462,9 +601,16 @@ export class Pe32WorkerClient {
 		for (const candidate of candidates) {
 			try {
 				if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
-					// Verify it's not the Electron binary by checking it's not process.execPath
-					if (path.resolve(candidate) !== path.resolve(process.execPath)) {
-						return candidate;
+					const sameAsCurrentRuntime = path.resolve(candidate) === path.resolve(process.execPath);
+					const currentRuntimeIsNode = /^node(?:\.exe)?$/i.test(path.basename(process.execPath));
+					// Reuse the current runtime when it is genuine Node. Only reject
+					// process.execPath when it is the Electron/HexCore executable.
+					if (!sameAsCurrentRuntime || currentRuntimeIsNode) {
+						const version = this.readNodeVersion(candidate);
+						if (version) {
+							return candidate;
+						}
+						console.warn(`[pe32Worker] Rejecting Node candidate that failed the version probe: ${candidate}`);
 					}
 				}
 			} catch { /* ignore */ }
@@ -477,10 +623,14 @@ export class Pe32WorkerClient {
 	 * Kill the worker process.
 	 */
 	dispose(): void {
+		const pendingStart = this.startCancel;
+		this.startCancel = null;
+		if (pendingStart) {
+			pendingStart(new Error(`PE32 worker disposed before ready; ${this.formatDiagnostics()}`));
+		}
 		if (this.worker) {
 			console.log('[pe32Worker] Disposing worker process...');
-			this.worker.kill();
-			this.worker = null;
+			this.terminateWorker(this.worker);
 			console.log('[pe32Worker] Worker process disposed.');
 		}
 		this.ready = false;
