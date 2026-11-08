@@ -1,8 +1,8 @@
 # HexCore 3.8.5 Delivery Matrix
 
-Status: FINAL ARTIFACT FROZEN / FIX-BLOCK
+Status: SOURCE GO-RC / NEW WINDOWS ARTIFACT PENDING
 
-Date: 2026-10-30
+Date: 2026-11-08
 
 This matrix is the source of truth for what HexCore 3.8.5 intends to deliver.
 Implementation, source qualification, package qualification and release claims
@@ -23,15 +23,15 @@ It is not a claim that every engine received a major feature generation.
 |---|---|
 | Released baseline | HexCore 3.8.4 |
 | Released source commit | `148e0870267ef6275aa27edf201924d82c38c76c` |
-| Closure branch | `release/3.8.5-closure` |
+| Closure branch | `release/3.8.5-rc.1-final` |
 | Closure starting commit | `c5ebc6b6052ef32c9aa4a8fa1fec708bf59e5e56` |
 | Accepted baseline workflow | `41015593557` |
 | Accepted baseline ZIP SHA-256 | `997f63aaadef214bcc30716792dbaf1b610287e82bc9bc8759b9db2106290c0b` |
 | Product identity | `3.8.5-rc.1` |
 | Supported packaged host | Windows 10/11 x64 portable ZIP |
-| Final source commit | `3d217f81dbcdf706d8ace165e7c25ca0d7c726df` |
-| Final artifact-only workflow | `41130405904` |
-| Final artifact ZIP SHA-256 | `b17517296a641e7dbdd352434b8d21654fbeb474ac9adc4c00cc7baae09dcb27` |
+| Release-candidate source commit | pending final allowlisted commit |
+| Release-candidate workflow | pending GitHub Actions |
+| Release-candidate ZIP SHA-256 | pending artifact generation and acceptance |
 
 The accepted ZIP is evidence for the starting commit only. A later merge/tag
 must produce and qualify a new artifact with its own manifest and hash.
@@ -40,8 +40,8 @@ must produce and qualify a new artifact with its own manifest and hash.
 
 | Component | 3.8.5 baseline |
 |---|---|
-| Disassembler | `1.4.74` |
-| Debugger | `2.1.22` |
+| Disassembler | `1.4.77` |
+| Debugger | `2.1.23` |
 | HQL | `0.3.1` |
 | Common | `1.3.1` |
 | PE Analyzer | `1.1.4` |
@@ -105,7 +105,7 @@ Definitions:
 | Native PE/ELF/raw routing | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PARTIAL | raw package lane remains |
 | Android-container rejection | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | typed DEX rejection |
 | YARA advisory scoring | IMPLEMENTED | SOURCE-PASS | DERIVED-PACKAGE-PASS | qualified positive and clean negative |
-| Debugger | existing | existing tests | DERIVED-PACKAGE-PASS | no major 3.8.5 claim |
+| Debugger | IMPLEMENTED | 115 SOURCE-PASS | prior derived-package PASS; fresh RC pending | retained SAB hook and diagnosed PE32 bootstrap |
 | Revenant 0.5.0 | IMPLEMENTED | 20/20 SOURCE-PASS | DERIVED-PACKAGE-PASS | ILSpy 11.1 and HX-SH-009 fix |
 | Elixir | existing | existing tests | DERIVED-PACKAGE-PASS | no major 3.8.5 claim |
 
@@ -213,15 +213,17 @@ The final Helix version remains a release decision after the #30/#31 goal.
 
 Phase-0 reconciliation updates:
 
-- Automation integrated versions updated to Disassembler 1.4.74, Common 1.3.1
-  and PE Analyzer 1.1.4;
+- Automation baseline updated to Disassembler 1.4.77, Debugger 2.1.23,
+  Common 1.3.1 and PE Analyzer 1.1.4;
+- Automation states that artifact provenance and live capabilities/doctor
+  override its informative version baseline;
 - Automation now states the workspace trust boundary;
 - Job Templates now document `autoRun:false` and Agent Bridge validation/submit;
 - root changelog now includes Agent Bridge and post-RC product gates.
 
-The root README intentionally continues to describe stable 3.8.4 until the
-release decision. Its candidate version table and release narrative must be
-updated only after the final artifact/Helix identity is frozen.
+The root README keeps 3.8.4 as stable and publishes 3.8.5-rc.1 separately as a
+candidate. Promotion to stable/latest requires acceptance of the newly generated
+Windows ZIP.
 
 ## Pre-Reconciliation Documentation Hashes
 
@@ -334,3 +336,25 @@ stored manifest/commit predates the accepted Helix, HQL and Revenant overlays.
 See `HEXCORE_3_8_5_DERIVED_PACKAGE_CHECKPOINT_2026-10-30.md`. The next block is
 allowlisted commits, a distinct Helix prerelease, artifact-only rebuild and
 fresh-package E2E.
+
+## 2026-11-08 Final Source Fix Block
+
+The prior artifact decision remains historical evidence for its exact ZIP. It
+is superseded for source-release planning by the bounded Debugger, large-image
+and Khimera fixes on `release/3.8.5-rc.1-final`:
+
+- Debugger `2.1.23` retains the SAB backing lifetime, passes a typed view to
+  native hooks and diagnoses PE32 worker bootstrap without extending deadlines;
+- Disassembler `1.4.76` bounds large-image discovery, string scanning, output
+  previews and snapshot hydration instead of increasing the V8 heap ceiling;
+- Disassembler `1.4.77` fixes assembly-export partial diagnostics and the
+  false confidence cap on clustered signed 32-bit immediates;
+- the Khimera terminal `int3` remains honest `partial`: current evidence labels
+  it semantic-body, and no release fix may discard it without a proven
+  noreturn/trap-suffix contract;
+- Helix SCF temporaries, cast/type quality, VM heuristic reachability, command
+  preflight ergonomics and solver scaling remain declared post-3.8.5 work.
+
+Source qualification can authorize a prerelease tag. It cannot promote the
+candidate to stable/latest before the new GitHub Actions ZIP is extracted and
+accepted.
