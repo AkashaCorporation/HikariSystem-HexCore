@@ -17,6 +17,10 @@ function installVscodeShim(): void {
 }
 
 let phase = 'waiting-request';
+const memorySnapshot = () => {
+	const usage = process.memoryUsage();
+	return { rss: usage.rss, heapUsed: usage.heapUsed, heapTotal: usage.heapTotal, external: usage.external };
+};
 const send = (message: unknown) => { try { if (process.connected) { process.send?.(message, () => undefined); } } catch { /* parent exited */ } };
 const sendTerminal = (message: unknown): Promise<boolean> => new Promise(resolve => {
 	try {
@@ -42,9 +46,9 @@ const sendTerminalAndHold = async (message: unknown): Promise<boolean> => {
 };
 const setPhase = (next: string) => {
 	phase = next;
-	send({ type: 'phase', phase, at: new Date().toISOString(), pid: process.pid });
+	send({ type: 'phase', phase, at: new Date().toISOString(), pid: process.pid, memory: memorySnapshot() });
 };
-const heartbeat = setInterval(() => send({ type: 'heartbeat', phase, at: new Date().toISOString(), pid: process.pid }), 1000);
+const heartbeat = setInterval(() => send({ type: 'heartbeat', phase, at: new Date().toISOString(), pid: process.pid, memory: memorySnapshot() }), 1000);
 
 process.once('message', async (request: IsolatedAnalyzeAllRequest) => {
 	let engine: any;
@@ -56,10 +60,11 @@ process.once('message', async (request: IsolatedAnalyzeAllRequest) => {
 		const loaded = await engine.loadFile(request.filePath, {
 			architecture: request.raw?.architecture,
 			baseAddress: request.raw?.baseAddress,
+			analysisLimits: request.limits,
 		});
 		if (!loaded) { throw new Error(`Failed to load target: ${request.filePath}`); }
-		// loadFile reloads configuration defaults; apply the request afterwards so
-		// the isolated lane honors the same per-job limits as the in-process lane.
+		// loadFile applies these limits before entry/export discovery. Reapply them
+		// defensively after loading so later phases retain the exact request.
 		engine.setAnalysisLimits(request.limits.maxFunctions, request.limits.maxFunctionSize);
 		setPhase('analyze-all');
 		const functionNetChange = await engine.analyzeAll({

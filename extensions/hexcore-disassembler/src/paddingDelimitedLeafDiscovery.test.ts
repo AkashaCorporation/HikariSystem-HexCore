@@ -34,6 +34,8 @@ suite('Padding-delimited PE64 leaf discovery', () => {
 			assert.ok(engine.getFunctionAt(base + 0x20));
 			assert.strictEqual(engine.getFunctionAt(base + 0x2c), undefined);
 			assert.strictEqual(engine.functionSeeds.isStrong(base + 0x10), true);
+			assert.strictEqual(engine.getFunctionBodyStatus(base + 0x10), 'lazy');
+			assert.strictEqual(engine.instructions.size, 0);
 		} finally { engine.dispose(); }
 	});
 
@@ -51,6 +53,48 @@ suite('Padding-delimited PE64 leaf discovery', () => {
 			await engine.ensureCapstoneInitialized();
 			await engine.discoverPaddingDelimitedLeafFunctions();
 			assert.strictEqual(engine.getFunctionAt(base + 0x10), undefined);
+		} finally { engine.dispose(); }
+	});
+
+	test('large executable images release heuristic prolog bodies as lazy stubs', async () => {
+		const bytes = Buffer.from('554889e590c3cccccc', 'hex');
+		const engine = new Engine();
+		engine.loadBuffer(bytes, base, 'x64');
+		engine.fileInfo = { format: 'PE64', architecture: 'x64', entryPoint: base, baseAddress: base, imageSize: bytes.length };
+		engine.sections = [{ name: '.trace', virtualAddress: base, virtualSize: bytes.length, rawAddress: 0, rawSize: 64 * 1024 * 1024 + 1,
+			isCode: true, isExecutable: true, isReadable: true, isWritable: true, isData: false, characteristics: 7, permissions: 'rwx' }];
+		try {
+			await engine.ensureCapstoneInitialized();
+			const diagnostic = await engine.scanForFunctionPrologs();
+			assert.strictEqual(diagnostic.largeImageLazyMode, true);
+			assert.strictEqual(diagnostic.lazyBodiesReleased, 1);
+			assert.strictEqual(engine.getFunctionBodyStatus(base), 'lazy');
+			assert.strictEqual(engine.getFunctionAt(base).instructions.length, 0);
+			assert.strictEqual(engine.instructions.size, 0);
+			const materialized = await engine.materializeFunction(base);
+			assert.ok(materialized.instructions.length > 0);
+		} finally { engine.dispose(); }
+	});
+
+	test('padding discovery reports a deterministic function budget instead of overcommitting', async () => {
+		const bytes = Buffer.concat([
+			Buffer.alloc(16, 0xcc), Buffer.from('f20f58c1c3', 'hex'), Buffer.alloc(11, 0xcc),
+			Buffer.from('f20f59c1c3', 'hex'), Buffer.alloc(3, 0xcc),
+		]);
+		const engine = new Engine();
+		engine.loadBuffer(bytes, base, 'x64');
+		engine.maxFunctions = 1;
+		engine.fileInfo = { format: 'PE64', architecture: 'x64', entryPoint: base, baseAddress: base, imageSize: bytes.length };
+		engine.sections = [{ name: '.text', virtualAddress: base, virtualSize: bytes.length, rawAddress: 0, rawSize: bytes.length,
+			isCode: true, isExecutable: true, isReadable: true, isWritable: false, isData: false, characteristics: 6, permissions: 'r-x' }];
+		try {
+			await engine.ensureCapstoneInitialized();
+			const diagnostic = await engine.discoverPaddingDelimitedLeafFunctions();
+			assert.strictEqual(diagnostic.status, 'partial');
+			assert.strictEqual(diagnostic.reason, 'function-limit');
+			assert.strictEqual(diagnostic.candidatesAccepted, 1);
+			assert.strictEqual(engine.getFunctions().length, 1);
+			assert.strictEqual(engine.getFunctionBodyStatus(base + 0x10), 'lazy');
 		} finally { engine.dispose(); }
 	});
 });

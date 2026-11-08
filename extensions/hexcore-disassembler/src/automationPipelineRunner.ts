@@ -115,6 +115,8 @@ export interface PipelineStepStatus {
 export interface PipelineRunProvenance {
 	analysisContractVersion: typeof ANALYSIS_CONTRACT_VERSION;
 	executionId: string;
+	extensionHostInstanceId?: string;
+	extensionHostPid?: number;
 	jobFileSha256: string;
 	jobId?: string;
 	workerId?: number;
@@ -360,10 +362,13 @@ interface CommandCapability {
 	validateOutput: boolean;
 	reason?: string;
 	cancelCommand?: string;
+	analysisMode?: string;
+	nextCommands?: string[];
 }
 
 export const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
 export const JOB_LOG_FILENAME = 'hexcore-pipeline.log';
+export const EXTENSION_HOST_INSTANCE_ID = crypto.randomUUID();
 const DEFAULT_TIMEOUT_MS = 60000;
 const DEFAULT_RETRY_COUNT = 0;
 const DEFAULT_RETRY_DELAY_MS = 1000;
@@ -698,6 +703,13 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	['hexcore.disasm.analyzeAll', {
 		headless: true, defaultTimeoutMs: 180000, validateOutput: true,
 		cancelCommand: 'hexcore.disasm.cancelAnalyzeAll',
+		analysisMode: 'index-all-materialize-on-demand',
+		nextCommands: [
+			'hexcore.disasm.materializeFunctions',
+			'hexcore.disasm.disassembleAtHeadless',
+			'hexcore.references.query',
+			'hexcore.hql.queryHeadless',
+		],
 	}],
 	['hexcore.disasm.materializeFunctions', { headless: true, defaultTimeoutMs: 300000, validateOutput: true }],
 	['hexcore.session.export', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
@@ -1095,6 +1107,8 @@ export interface PipelineCapabilityEntry {
 	reason?: string;
 	requiredExtension: string[];
 	supportedTargets?: string[];
+	analysisMode?: string;
+	nextCommands?: string[];
 }
 
 export function listCapabilities(): PipelineCapabilityEntry[] {
@@ -1115,7 +1129,9 @@ export function listCapabilities(): PipelineCapabilityEntry[] {
 			cancelCommand: cap.cancelCommand,
 			reason: cap.reason,
 			requiredExtension: [...(COMMAND_OWNERS.get(cmd) ?? [])],
-			supportedTargets: ELIXIR_PE64_ONLY_COMMANDS.has(cmd) ? ['PE32+ x86_64'] : undefined
+			supportedTargets: ELIXIR_PE64_ONLY_COMMANDS.has(cmd) ? ['PE32+ x86_64'] : undefined,
+			analysisMode: cap.analysisMode,
+			nextCommands: cap.nextCommands ? [...cap.nextCommands] : undefined,
 		});
 	}
 	return entries;
@@ -1555,6 +1571,26 @@ async function writeArtifactProvenance(
 		status: analysisStatus,
 		generatedAt,
 	});
+	const auxiliaryArtifacts: Array<{ path: string; sha256: string; mediaType: string; records?: number }> = [];
+	if (resolvedCommand === 'hexcore.disasm.analyzeAll' && isRecord(commandResult) && isRecord(commandResult.functionIndex)) {
+		const functionIndex = commandResult.functionIndex;
+		if (typeof functionIndex.path === 'string' && fs.existsSync(functionIndex.path) && fs.statSync(functionIndex.path).isFile()) {
+			const resolvedSidePath = path.resolve(functionIndex.path);
+			if (path.dirname(resolvedSidePath) !== path.dirname(path.resolve(outputPath))) {
+				throw new Error(`AnalyzeAll function index must stay beside the primary artifact: ${resolvedSidePath}`);
+			}
+			const sideSha256 = await sha256File(resolvedSidePath);
+			if (typeof functionIndex.sha256 === 'string' && functionIndex.sha256.toLowerCase() !== sideSha256) {
+				throw new Error(`AnalyzeAll function index hash mismatch: ${resolvedSidePath}`);
+			}
+			auxiliaryArtifacts.push({
+				path: resolvedSidePath,
+				sha256: sideSha256,
+				mediaType: 'application/x-ndjson',
+				...(typeof functionIndex.records === 'number' ? { records: functionIndex.records } : {}),
+			});
+		}
+	}
 	const provenancePath = getProvenanceManifestPath(outDir);
 	const entry = {
 		generatedAt,
@@ -1577,6 +1613,7 @@ async function writeArtifactProvenance(
 			path: outputPath,
 			sha256: artifactSha256,
 		},
+		...(auxiliaryArtifacts.length > 0 ? { auxiliaryArtifacts } : {}),
 		inputs,
 		ownerExtensions,
 	};
@@ -1608,6 +1645,7 @@ interface ProvenanceManifestEntry {
 		configurationSha256: string;
 	};
 	artifact: { path: string; sha256: string };
+	auxiliaryArtifacts?: Array<{ path: string; sha256: string; mediaType: string; records?: number }>;
 	inputs: AnalysisArtifactReference[];
 	ownerExtensions: Array<{ id: string; version: string }>;
 }
@@ -1702,6 +1740,8 @@ export class AutomationPipelineRunner {
 		const provenance: PipelineRunProvenance = {
 			analysisContractVersion: ANALYSIS_CONTRACT_VERSION,
 			executionId,
+			extensionHostInstanceId: EXTENSION_HOST_INSTANCE_ID,
+			extensionHostPid: process.pid,
 			jobFileSha256,
 			...(runContext.jobId ? { jobId: runContext.jobId } : {}),
 			...(runContext.workerId !== undefined ? { workerId: runContext.workerId } : {}),
@@ -3382,7 +3422,9 @@ function validateStepOutput(outputPath: string): void {
 
 function invalidatePriorStepArtifacts(outputPath: string): boolean {
 	let removed = false;
-	for (const candidate of [outputPath, `${outputPath}.provenance.json`]) {
+	const parsed = path.parse(outputPath);
+	const functionIndexPath = path.join(parsed.dir, `${parsed.name}.functions.ndjson`);
+	for (const candidate of [outputPath, `${outputPath}.provenance.json`, functionIndexPath]) {
 		try {
 			if (!fs.lstatSync(candidate).isDirectory()) {
 				fs.unlinkSync(candidate);

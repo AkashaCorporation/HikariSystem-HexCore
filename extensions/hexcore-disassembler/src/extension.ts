@@ -20,6 +20,7 @@ import { SectionTreeProvider } from './sectionTree';
 import { ImportTreeProvider } from './importTree';
 import { ExportTreeProvider } from './exportTree';
 import { DisassemblerEngine, ImportLibrary, Instruction, TypedImportLibrary, TypedImportFunction, ImportCategorySummary, PEDataDirectories, ELFAnalysis, ELFExecutableSection, decodeIatOperandVA, type AssemblyExportResult, type FunctionBodyStatus, type FunctionAnalysisMaterialization } from './disassemblerEngine';
+import { formatAssemblyExportSemanticWarning } from './assemblyExportResult';
 import { formatApiSignatureCompact, CATEGORY_LABELS } from './peApiDatabase';
 import { DisassemblerFactory } from './disassemblerFactory';
 import { GraphViewProvider } from './graphViewProvider';
@@ -81,7 +82,8 @@ import {
 	disposeJobQueueManagerInstance,
 	JobPriority,
 	JOB_STATUS_FILENAME,
-	JOB_LOG_FILENAME
+	JOB_LOG_FILENAME,
+	EXTENSION_HOST_INSTANCE_ID,
 } from './automationPipelineRunner';
 import { QueuedJob, QueueStats, JobStatusReport, jobPathIdentity } from './jobQueueManager';
 import { AgentBridgeServer } from './agentBridgeServer';
@@ -244,6 +246,10 @@ interface AnalyzeAllCommandOptions {
 	maxFunctionSize?: number;
 	forceReload?: boolean;
 	includeInstructions?: boolean;
+	/** Maximum function summaries retained in the primary result. Defaults to 10,000. */
+	functionSummaryLimit?: number;
+	/** Emit a complete streamed NDJSON function index when the primary result is truncated. */
+	emitFunctionIndex?: boolean;
 	/** Architecture override for headerless raw binaries only. */
 	arch?: 'x86' | 'x64' | 'arm' | 'arm64' | 'mips' | 'mips64';
 	/** Virtual load base for headerless raw binaries only. */
@@ -318,6 +324,13 @@ interface AnalyzeAllStringEntry {
 
 interface AnalyzeAllResult {
 	status: 'ok' | 'partial';
+	analysisMode: 'index-all-materialize-on-demand';
+	lazySemantics: {
+		automatic: true;
+		allowLazyControlsAcceptanceOnly: true;
+		materializeCommand: 'hexcore.disasm.materializeFunctions';
+	};
+	recommendedNextCommands: string[];
 	analysisDepth: ReturnType<typeof assessFunctionMaterialization>['analysisDepth'];
 	negativeEvidenceUsable: false;
 	functionsMaterialized: number;
@@ -340,6 +353,8 @@ interface AnalyzeAllResult {
 		minMaterializedRatio: number;
 	};
 	closureRestoration: ReturnType<DisassemblerEngine['getAnalysisClosureRestoration']>;
+	discoveryDiagnostics: ReturnType<DisassemblerEngine['getAnalysisDiscoveryDiagnostics']>;
+	stringScan?: ReturnType<DisassemblerEngine['getStringScanDiagnostic']>;
 	nativeExecution?: NativeAnalyzeExecution;
 	analysisReuse?: {
 		reused: boolean;
@@ -371,6 +386,22 @@ interface AnalyzeAllResult {
 	// ...) instead of having to hand-read the import table. Best-effort, import/section based.
 	capabilities?: string[];
 	functions: AnalyzeAllFunctionSummary[];
+	functionSummary: {
+		totalAvailable: number;
+		returned: number;
+		limit: number;
+		truncated: boolean;
+		ordering: 'address-ascending';
+		emitFullIndex: boolean;
+	};
+	functionIndex?: {
+		path: string;
+		mediaType: 'application/x-ndjson';
+		records: number;
+		bytes: number;
+		sha256: string;
+		ordering: 'address-ascending';
+	};
 	strings?: AnalyzeAllStringEntry[];
 	reportMarkdown: string;
 	// v3.7 analysis data
@@ -1800,7 +1831,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			return;
 		}
 		const staleRunningMs = vscode.workspace.getConfiguration('hexcore.pipeline').get<number>('staleRunningMs', 15 * 60_000);
-		const recordedAttempt = findRecordedAutoRunAttempt(normalizedPath, Date.now(), staleRunningMs);
+		const recordedAttempt = findRecordedAutoRunAttempt(normalizedPath, Date.now(), staleRunningMs, EXTENSION_HOST_INSTANCE_ID);
 		if (recordedAttempt) {
 			if (recordedAttempt.stale) {
 				const recovery = recoverStaleAutoRunAttempt(recordedAttempt);
@@ -6813,6 +6844,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				allowLazy: options.allowLazy,
 				allowDecodeEmpty: options.allowDecodeEmpty,
 				minMaterializedRatio: options.minMaterializedRatio,
+				functionSummaryLimit: options.functionSummaryLimit,
+				emitFunctionIndex: options.emitFunctionIndex,
 			});
 			if (reused) {
 				result.newFunctions = 0;
@@ -6828,7 +6861,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			};
 			if (nativeExecution) { result.nativeExecution = nativeExecution; }
 			if (options.output) {
-				writeAnalyzeAllOutput(result, options.output);
+				writeAnalyzeAllOutput(result, options.output, engine);
 			}
 
 			if (!options.quiet) {
@@ -7760,13 +7793,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				vscode.window.showInformationMessage(`Assembly exported (${label}) to ${outputPath}`);
 			}
 
+			const semanticWarning = formatAssemblyExportSemanticWarning(exportResult);
 			return {
 				outputPath,
 				generatedAt: new Date().toISOString(),
 				...exportResult,
-				...(exportResult.status === 'partial' ? {
-					semanticWarning: `${exportResult.functionsWithoutInstructions}/${exportResult.totalFunctions} function body or bodies decoded no instructions`
-				} : {})
+				...(semanticWarning ? { semanticWarning } : {})
 			};
 		})
 	);
@@ -9072,6 +9104,18 @@ function normalizeAnalyzeAllCommandOptions(arg?: vscode.Uri | AnalyzeAllCommandO
 	if (raw.includeInstructions !== undefined) {
 		normalized.includeInstructions = raw.includeInstructions === true;
 	}
+	if (raw.functionSummaryLimit !== undefined) {
+		if (!Number.isSafeInteger(raw.functionSummaryLimit) || raw.functionSummaryLimit <= 0 || raw.functionSummaryLimit > 1_000_000) {
+			throw new Error('Invalid "functionSummaryLimit" option: expected an integer between 1 and 1000000.');
+		}
+		normalized.functionSummaryLimit = raw.functionSummaryLimit;
+	}
+	if (raw.emitFunctionIndex !== undefined) {
+		if (typeof raw.emitFunctionIndex !== 'boolean') {
+			throw new Error('Invalid "emitFunctionIndex" option: expected boolean.');
+		}
+		normalized.emitFunctionIndex = raw.emitFunctionIndex;
+	}
 	if (raw.arch !== undefined) {
 		if (!['x86', 'x64', 'arm', 'arm64', 'mips', 'mips64'].includes(raw.arch)) {
 			throw new Error(`Invalid "arch" option: ${String(raw.arch)}`);
@@ -9732,19 +9776,38 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 	allowLazy?: boolean;
 	allowDecodeEmpty?: boolean;
 	minMaterializedRatio?: number;
+	functionSummaryLimit?: number;
+	emitFunctionIndex?: boolean;
 }): AnalyzeAllResult {
 	const functions = engine.getFunctions();
 	const analysisDelta = engine.getLastAnalysisDelta();
 	const MAX_INSTRUCTIONS_PER_FUNCTION = 200;
+	const functionSummaryLimit = v37Options?.functionSummaryLimit ?? 10_000;
+	const functionSummaries: AnalyzeAllFunctionSummary[] = [];
+	let functionsWithInstructions = 0;
+	let functionsMaterialized = 0;
+	let partialFunctions = 0;
+	let lazyFunctions = 0;
+	let decodeEmptyFunctions = 0;
+	let totalFunctionInstructions = 0;
 
-	const functionSummaries: AnalyzeAllFunctionSummary[] = functions.map(func => {
+	for (const func of functions) {
 		const bodyStatus = engine.getFunctionBodyStatus(func.address);
+		const instructionCount = func.instructions.length;
+		if (instructionCount > 0) { functionsWithInstructions++; }
+		if (bodyStatus === 'materialized') { functionsMaterialized++; }
+		else if (bodyStatus === 'partial') { partialFunctions++; }
+		else if (bodyStatus === 'lazy') { lazyFunctions++; }
+		else if (bodyStatus === 'decode-empty') { decodeEmptyFunctions++; }
+		totalFunctionInstructions += instructionCount;
+		if (functionSummaries.length >= functionSummaryLimit) { continue; }
+
 		const discoveryEvidence = engine.getFunctionDiscoveryEvidence(func.address);
 		const summary: AnalyzeAllFunctionSummary = {
 			address: toHexAddress(func.address),
 			name: func.name,
 			size: func.size,
-			instructionCount: func.instructions.length,
+			instructionCount,
 			bodyStatus,
 			...(bodyStatus === 'lazy'
 				? { bodyReason: 'deferred-until-requested' as const }
@@ -9778,14 +9841,8 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 			summary.xrefsFrom = func.callees.map(addr => toHexAddress(addr));
 		}
 
-		return summary;
-	});
-	const functionsWithInstructions = functionSummaries.filter(func => func.instructionCount > 0).length;
-	const functionsMaterialized = functionSummaries.filter(func => func.bodyStatus === 'materialized').length;
-	const partialFunctions = functionSummaries.filter(func => func.bodyStatus === 'partial').length;
-	const lazyFunctions = functionSummaries.filter(func => func.bodyStatus === 'lazy').length;
-	const decodeEmptyFunctions = functionSummaries.filter(func => func.bodyStatus === 'decode-empty').length;
-	const totalFunctionInstructions = functionSummaries.reduce((total, func) => total + func.instructionCount, 0);
+		functionSummaries.push(summary);
+	}
 	const materialization = assessFunctionMaterialization({
 		totalFunctions: functions.length,
 		materializedFunctions: functionsMaterialized,
@@ -9797,13 +9854,39 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		minMaterializedRatio: v37Options?.minMaterializedRatio,
 	});
 	const closureRestoration = engine.getAnalysisClosureRestoration();
+	const discoveryDiagnostics = engine.getAnalysisDiscoveryDiagnostics();
+	const stringScan = engine.getStringScanDiagnostic();
+	const partialDiscovery = discoveryDiagnostics.filter(diagnostic => diagnostic.status === 'partial');
+	const discoveryWarning = partialDiscovery.length > 0
+		? `Function discovery partial: ${partialDiscovery.map(diagnostic => `${diagnostic.stage}:${diagnostic.reason ?? 'budget-exhausted'}`).join(', ')}.`
+		: undefined;
+	const stringScanWarning = stringScan?.status === 'partial'
+		? `String scan partial: ${stringScan.reason ?? 'bounded coverage'} (${stringScan.scannedBytes}/${stringScan.totalFileBytes} bytes).`
+		: undefined;
 	const restorationWarning = closureRestoration.status === 'partial' || closureRestoration.status === 'reset'
 		? `Persisted closure restoration incomplete: ${closureRestoration.restored}/${closureRestoration.requested}; ${closureRestoration.failed[0] ?? 'unknown failure'}`
 		: undefined;
 
 	const result: AnalyzeAllResult = {
-		status: closureRestoration.status === 'partial' || closureRestoration.status === 'reset' ? 'partial' : materialization.status,
-		...(materialization.reason || restorationWarning ? { warning: [materialization.reason, restorationWarning].filter(Boolean).join(' ') } : {}),
+		analysisMode: 'index-all-materialize-on-demand',
+		lazySemantics: {
+			automatic: true,
+			allowLazyControlsAcceptanceOnly: true,
+			materializeCommand: 'hexcore.disasm.materializeFunctions',
+		},
+		recommendedNextCommands: [
+			'hexcore.disasm.materializeFunctions',
+			'hexcore.disasm.disassembleAtHeadless',
+			'hexcore.references.query',
+			'hexcore.hql.queryHeadless',
+		],
+		status: closureRestoration.status === 'partial' || closureRestoration.status === 'reset' ||
+			partialDiscovery.length > 0 || stringScan?.status === 'partial'
+			? 'partial'
+			: materialization.status,
+		...(materialization.reason || restorationWarning || discoveryWarning || stringScanWarning
+			? { warning: [materialization.reason, restorationWarning, discoveryWarning, stringScanWarning].filter(Boolean).join(' ') }
+			: {}),
 		filePath: targetFilePath,
 		fileName: path.basename(targetFilePath),
 		newFunctions: analysisDelta.added,
@@ -9821,6 +9904,8 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		partialFunctions,
 		materializationPolicy: materialization.policy,
 		closureRestoration,
+		discoveryDiagnostics,
+		...(stringScan ? { stringScan } : {}),
 		totalFunctionInstructions,
 		totalStrings: engine.getStrings().length,
 		architecture: engine.getArchitecture(),
@@ -9849,6 +9934,14 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 			isForwarder: e.isForwarder
 		})),
 		capabilities: computeAnalyzeAllCapabilities(engine),
+		functionSummary: {
+			totalAvailable: functions.length,
+			returned: functionSummaries.length,
+			limit: functionSummaryLimit,
+			truncated: functionSummaries.length < functions.length,
+			ordering: 'address-ascending',
+			emitFullIndex: v37Options?.emitFunctionIndex !== false,
+		},
 		functions: functionSummaries,
 		reportMarkdown: ''
 	};
@@ -9968,9 +10061,62 @@ zero known references does not establish that a function has no callers or calle
 	return report;
 }
 
-function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutputOptions): void {
+function writeAnalyzeAllFunctionIndex(
+	engine: DisassemblerEngine,
+	outputPath: string,
+): NonNullable<AnalyzeAllResult['functionIndex']> {
+	const parsed = path.parse(outputPath);
+	const indexPath = path.join(parsed.dir, `${parsed.name}.functions.ndjson`);
+	const temporary = `${indexPath}.tmp-${process.pid}-${crypto.randomUUID()}`;
+	const handle = fs.openSync(temporary, 'w');
+	const hash = crypto.createHash('sha256');
+	let bytes = 0;
+	let records = 0;
+	let chunk = '';
+	const flush = () => {
+		if (!chunk) { return; }
+		const data = Buffer.from(chunk, 'utf8');
+		fs.writeSync(handle, data);
+		hash.update(data);
+		bytes += data.length;
+		chunk = '';
+	};
+	try {
+		for (const fn of engine.getFunctions()) {
+			chunk += JSON.stringify({
+				address: toHexAddress(fn.address),
+				name: fn.name,
+				size: fn.size,
+				instructionCount: fn.instructions.length,
+				bodyStatus: engine.getFunctionBodyStatus(fn.address),
+				callers: fn.callers.length,
+				callees: fn.callees.length,
+			}) + '\n';
+			records++;
+			if (chunk.length >= 1024 * 1024) { flush(); }
+		}
+		flush();
+	} finally {
+		fs.closeSync(handle);
+	}
+	try { fs.unlinkSync(indexPath); } catch { /* first write */ }
+	fs.renameSync(temporary, indexPath);
+	return {
+		path: indexPath,
+		mediaType: 'application/x-ndjson',
+		records,
+		bytes,
+		sha256: hash.digest('hex'),
+		ordering: 'address-ascending',
+	};
+}
+
+function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutputOptions, engine: DisassemblerEngine): void {
 	const format = normalizeOutputFormat(output.path, output.format);
 	fs.mkdirSync(path.dirname(output.path), { recursive: true });
+	if (result.functionSummary.truncated && result.functionSummary.emitFullIndex) {
+		result.functionIndex = writeAnalyzeAllFunctionIndex(engine, output.path);
+	}
 
 	if (format === 'md') {
 		fs.writeFileSync(output.path, result.reportMarkdown, 'utf8');
@@ -9984,6 +10130,9 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 	// previously dropped here even when populated — callfuscation/VM/PRNG
 	// telemetry never reached pipeline consumers. Include them when present.
 	const payload: Record<string, unknown> = {
+		analysisMode: result.analysisMode,
+		lazySemantics: result.lazySemantics,
+		recommendedNextCommands: result.recommendedNextCommands,
 		filePath: result.filePath,
 		fileName: result.fileName,
 		newFunctions: result.newFunctions,
@@ -10001,6 +10150,10 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		partialFunctions: result.partialFunctions,
 		materializationPolicy: result.materializationPolicy,
 		closureRestoration: result.closureRestoration,
+		discoveryDiagnostics: result.discoveryDiagnostics,
+		stringScan: result.stringScan,
+		functionSummary: result.functionSummary,
+		functionIndex: result.functionIndex,
 		nativeExecution: result.nativeExecution,
 		analysisReuse: result.analysisReuse,
 		status: result.status,

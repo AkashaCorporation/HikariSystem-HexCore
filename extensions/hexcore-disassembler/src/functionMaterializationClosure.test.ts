@@ -353,4 +353,34 @@ suite('incremental function materialization closure', () => {
 			wrongTarget.importAnalysisSnapshot(snapshot);
 		}, /target identity/);
 	});
+
+	test('adopts a trusted isolated snapshot without cloning its large collections', () => {
+		const source = new DisassemblerEngine() as any;
+		const bytes = Buffer.from([0x90, 0xc3]);
+		source.fileBuffer = bytes;
+		source.baseAddress = 0x401000;
+		source.architecture = 'x64';
+		source.fileInfo = { format: 'PE64', architecture: 'x64', entryPoint: 0x401000, baseAddress: 0x400000, imageSize: bytes.length };
+		const fn: Function = {
+			address: 0x401000, name: 'entry', size: 2, endAddress: 0x401002,
+			instructions: [instruction(0x401000, 'ret')], callers: [], callees: [],
+		};
+		source.functions = new Map([[fn.address, fn]]);
+		source.instructions = new Map([[fn.address, fn.instructions[0]]]);
+		source.strings = new Map();
+		source.comments = new Map();
+		source.xrefs = new Map();
+		const snapshot = source.exportAnalysisSnapshot();
+		const adoptedFunction = snapshot.functions[0];
+		const restored = new DisassemblerEngine() as any;
+		restored.fileBuffer = Buffer.from(bytes);
+
+		restored.importAnalysisSnapshot(snapshot, { adopt: true });
+
+		assert.strictEqual(restored.getFunctionAt(fn.address), adoptedFunction);
+		assert.strictEqual(snapshot.functions.length, 0);
+		assert.strictEqual(snapshot.strings.length, 0);
+		assert.strictEqual(snapshot.xrefs.length, 0);
+		assert.strictEqual(restored.getFunctions().length, 1);
+	});
 });
