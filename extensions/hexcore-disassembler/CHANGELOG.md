@@ -1,5 +1,55 @@
 # Changelog
 
+## [1.4.77] - 2026-11-08
+
+- Make `exportASMHeadless` partial diagnostics distinguish decode-empty bodies
+  from bodies that stopped after a partial decode. Include bounded address,
+  byte-coverage and stop-reason samples instead of reporting the contradictory
+  `0/N ... decoded no instructions` message.
+- Restrict the Helix packaging safety net for bare code-address assignments to
+  actual variable assignments in emitted pseudo-C. Ignore comments and raw
+  address-valued call arguments, while retaining the confidence cap for real
+  clusters of image-like values assigned into locals.
+- Clarify that Automation's integrated version table is a documentation
+  baseline. Hash-bound artifact provenance and live capabilities/doctor output
+  are authoritative for an installed build.
+
+## [1.4.76] - 2026-11-07
+
+- Bound `analyzeAll` on very large executable images without raising the V8
+  heap ceiling. Apply per-job limits before entry/export discovery, avoid
+  recursive eager traversal during large-image load, and release heuristic
+  prolog bodies as exact lazy boundaries.
+- Replace padding-leaf linear `.pdata` searches and per-candidate array copies
+  with a merged interval index and binary search. Validate candidates without
+  polluting the global instruction cache, persist accepted leaves as lazy
+  stubs, and stop at deterministic function/candidate/decoded-byte budgets.
+- Bound Disassembler string extraction on large images to readable,
+  non-executable sections and publish the reduced coverage as `partial` rather
+  than treating missing strings as negative evidence.
+- Add discovery and string-scan diagnostics to engine snapshots and analyzeAll
+  output. Worker heartbeats now include RSS/heap/external memory and peak heap.
+- Bound the primary `analyzeAll` function preview to 10,000 entries by default
+  and stream the complete address-ordered table to a hash-bound NDJSON sidecar.
+  Record the sidecar in artifact provenance; explicit options can change the
+  preview limit or suppress the full index.
+- Hydrate trusted isolated snapshots by adopting their deserialized collections
+  instead of cloning functions, instructions, strings and xrefs a second time.
+- Declare `analysisMode:index-all-materialize-on-demand`, automatic lazy
+  semantics and recommended next commands in both analyzeAll results and Agent
+  Bridge capabilities so agents do not search for a nonexistent eager variant.
+- Real-target regression: the 458,466,816-byte Hogwarts executable completes
+  isolated analysis in 114.95 seconds with a 1.61 GiB peak heap, replacing the
+  prior 25-minute 3.9 GiB OOM.
+
+## [1.4.75] - 2026-11-07
+
+- Bind each running pipeline status to the owning Extension Host instance and
+  PID. A restarted host can now archive and terminalize the prior status
+  immediately instead of waiting for the age threshold.
+- Recover the paired provenance manifest alongside `status.json`, retaining
+  both pre-recovery records under `.hexcore-meta`.
+
 ## [1.4.74] - 2026-10-30
 
 - Preserve Restricted Mode as an explicit Agent Bridge boundary. The

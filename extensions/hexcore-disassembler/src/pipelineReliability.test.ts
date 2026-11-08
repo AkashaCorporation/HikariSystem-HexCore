@@ -600,6 +600,41 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(resolveArtifactMediaType('references.json'), 'application/json');
 	});
 
+	test('analyzeAll provenance binds the streamed full function index sidecar', async () => {
+		const target = path.join(tempDir, 'target.bin');
+		fs.writeFileSync(target, 'test');
+		const job = writeJob(tempDir, 'analyze-function-index', target, {
+			cmd: 'hexcore.disasm.analyzeAll', output: { path: 'analysis.json' },
+		});
+		executeCommand = async (_command, options) => {
+			const outputPath = (options.output as { path: string }).path;
+			const parsed = path.parse(outputPath);
+			const indexPath = path.join(parsed.dir, `${parsed.name}.functions.ndjson`);
+			const index = '{"address":"0x401000","name":"entry"}\n';
+			fs.writeFileSync(indexPath, index, 'utf8');
+			const result = {
+				status: 'ok',
+				functionIndex: {
+					path: indexPath,
+					sha256: crypto.createHash('sha256').update(index).digest('hex'),
+					records: 1,
+				},
+			};
+			fs.writeFileSync(outputPath, JSON.stringify(result), 'utf8');
+			return result;
+		};
+
+		const terminal = await new AutomationPipelineRunner().runJobFile(job, true);
+		assert.strictEqual(terminal.status, 'ok', JSON.stringify(terminal.steps));
+		const manifest = JSON.parse(fs.readFileSync(path.join(terminal.outDir, '.hexcore-meta', 'provenance.json'), 'utf8'));
+		assert.deepStrictEqual(manifest.artifacts[0].auxiliaryArtifacts, [{
+			path: path.join(terminal.outDir, 'analysis.functions.ndjson'),
+			sha256: crypto.createHash('sha256').update('{"address":"0x401000","name":"entry"}\n').digest('hex'),
+			mediaType: 'application/x-ndjson',
+			records: 1,
+		}]);
+	});
+
 	test('decompile provenance binds the retained IR input artifact', async () => {
 		const targetPath = path.join(tempDir, 'sample.exe');
 		const pe = Buffer.alloc(512);

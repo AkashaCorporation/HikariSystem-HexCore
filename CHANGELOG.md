@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Final Candidate Qualification
 
+- Update the Disassembler to `1.4.77`. Assembly exports now identify partial
+  decode bodies separately from decode-empty bodies, and the Helix packaging
+  safety net no longer mistakes comments or address-valued call arguments for
+  leaked local assignments.
+- Make runtime identity precedence explicit in Automation documentation:
+  hash-bound provenance and live capabilities/doctor output override the
+  informative version baseline.
+- Bound large-image `analyzeAll` discovery and string scanning. The 458 MB
+  Hogwarts corpus now completes in under two minutes with explicit partial
+  coverage instead of exhausting the isolated worker near the V8 heap limit.
+
+- Fix the packaged Debugger SAB boundary by passing a retained typed view,
+  instrument PE32 worker bootstrap without relaxing its 15-second deadline,
+  and make partial initialization fail closed with a typed not-ready result.
+- Bind pipeline ownership to the Extension Host instance so a restart archives
+  and terminalizes both stale status and provenance rather than leaving a
+  misleading `running` execution on disk.
+
 - Keep readable target-bound HQL facts usable when an unrelated semantic
   collection is stale: positive witnesses remain `matched/partial/signal`,
   while absence and negation remain `unknown`.

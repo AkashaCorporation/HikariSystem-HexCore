@@ -29,6 +29,8 @@ export interface NativeAnalyzeExecution {
 	snapshotSha256?: string;
 	snapshotBytes?: number;
 	snapshotUncompressedBytes?: number;
+	lastMemory?: { rss: number; heapUsed: number; heapTotal: number; external: number };
+	peakHeapUsed?: number;
 }
 
 export interface IsolatedAnalyzeAllResult {
@@ -41,7 +43,7 @@ export interface IsolatedAnalyzeAllResult {
 }
 
 type WorkerMessage =
-	| { type: 'phase' | 'heartbeat'; phase: string; at: string; pid: number }
+	| { type: 'phase' | 'heartbeat'; phase: string; at: string; pid: number; memory?: { rss: number; heapUsed: number; heapTotal: number; external: number } }
 	| { type: 'result'; functionNetChange: number; snapshotPath: string; snapshotSha256: string; snapshotBytes: number; snapshotUncompressedBytes?: number }
 	| { type: 'error'; error: string; phase: string };
 
@@ -101,6 +103,8 @@ export class AnalyzeAllProcessController {
 			let stderr = '';
 			let lastPhase = 'launch';
 			let lastWorkerHeartbeatAt: string | undefined;
+			let lastMemory: NativeAnalyzeExecution['lastMemory'];
+			let peakHeapUsed = 0;
 			let outcome: NativeAnalyzeExecution['outcome'] = 'error';
 			child.stderr?.on('data', chunk => { stderr = (stderr + String(chunk)).slice(-16_384); });
 
@@ -111,6 +115,8 @@ export class AnalyzeAllProcessController {
 				startedAt: new Date(startedAtMs).toISOString(),
 				supervisorHeartbeatAt: new Date().toISOString(),
 				lastWorkerHeartbeatAt,
+				lastMemory,
+				peakHeapUsed,
 				lastPhase,
 				target: request.filePath,
 			});
@@ -121,6 +127,7 @@ export class AnalyzeAllProcessController {
 				isolation: 'child-process', outcome, workerPid: child.pid,
 				durationMs: Date.now() - startedAtMs,
 				lastPhase, ...(lastWorkerHeartbeatAt ? { lastWorkerHeartbeatAt } : {}),
+				...(lastMemory ? { lastMemory, peakHeapUsed } : {}),
 				supervisorHeartbeatAt: new Date().toISOString(), heartbeatPath: request.heartbeatPath,
 			});
 			const settleError = (nextOutcome: NativeAnalyzeExecution['outcome'], message: string) => {
@@ -148,6 +155,10 @@ export class AnalyzeAllProcessController {
 				if (raw.type === 'phase' || raw.type === 'heartbeat') {
 					lastPhase = raw.phase;
 					lastWorkerHeartbeatAt = raw.at;
+					if (raw.memory) {
+						lastMemory = raw.memory;
+						peakHeapUsed = Math.max(peakHeapUsed, raw.memory.heapUsed);
+					}
 					heartbeat();
 					return;
 				}

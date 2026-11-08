@@ -2389,7 +2389,7 @@ universe. Audit repeat equality should use the artifact's declared
     {
       "id": "index",
       "cmd": "hexcore.disasm.analyzeAll",
-      "args": { "allowLazy": true, "includeInstructions": false },
+      "args": { "allowLazy": true, "includeInstructions": false, "functionSummaryLimit": 10000, "emitFunctionIndex": true },
       "output": { "path": "00-function-index.json" },
       "allowPartial": true,
       "timeoutMs": 600000
@@ -2424,6 +2424,15 @@ universe. Audit repeat equality should use the artifact's declared
   ]
 }
 ```
+
+The primary JSON is a bounded preview. If the discovered population exceeds
+`functionSummaryLimit`, the complete address-ordered table is streamed to
+`00-function-index.functions.ndjson`; use the `functionIndex` hash/path metadata
+instead of assuming that the preview array is complete.
+
+`analyzeAll` is the index/discovery command, not an eager whole-binary body
+decoder. Lazy mode is automatic; `allowLazy` accepts reconnaissance output but
+does not enable it. Materialize only the selected addresses in the next step.
 
 Replace the addresses with starts emitted by the index. Acceptance requires
 `truncated:false`, zero `partial`/`decodeEmpty`/`unknownFunctions`, complete

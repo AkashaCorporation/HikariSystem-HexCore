@@ -112,6 +112,53 @@ suite('honestyConfidenceCap (#31)', () => {
 		assert.strictEqual(r.capped, false);
 	});
 
+	test('does not treat comments or address-valued call arguments as assignments', () => {
+		const src = [
+			'// Confidence: 100% (High)',
+			'// sub_140001870 (0x140001870)',
+			'int64_t sub_140001870(void) {',
+			'  sub_140001260(0x140018540);',
+			'  sub_140001260(0x140018560);',
+			'  return sub_140001260(0x140018578);',
+			'}',
+		].join('\n');
+		const r = applyHonestyConfidenceCap(src);
+		assert.strictEqual(r.capped, false);
+		assert.deepStrictEqual(r.reasons, []);
+	});
+
+	test('still caps a PE64 cluster assigned into locals', () => {
+		const src = [
+			'// Confidence: 100% (High)',
+			'int64_t f(void) {',
+			'  v1 = 0x140001870;',
+			'  v2 = 0x1400018A0;',
+			'  v3 = 0x1400018D0;',
+			'  return v1 + v2 + v3;',
+			'}',
+		].join('\n');
+		const r = applyHonestyConfidenceCap(src);
+		assert.strictEqual(r.capped, true);
+		assert.ok(r.reasons.some(reason => reason.includes('bare code-address')));
+	});
+
+	test('does not classify clustered signed 32-bit immediates as addresses', () => {
+		const src = [
+			'// Confidence: 100% (High)',
+			'int64_t f(void) {',
+			'  v1 = 0xFFFFFFB4;',
+			'  v2 = 0xFFFFFFB7;',
+			'  v3 = 0xFFFFFF84;',
+			'  v4 = 0xFFFFFF8C;',
+			'  v5 = 0xFFFFFFFFFFFFFFCF;',
+			'  return v1 + v2 + v3 + v4 + v5;',
+			'}',
+		].join('\n');
+		const r = applyHonestyConfidenceCap(src);
+		assert.strictEqual(r.capped, false);
+		assert.deepStrictEqual(r.reasons, []);
+	});
+
 	test('#56 caps a bare-return empty stub', () => {
 		const src = '// Confidence: 85% (High)\nvoid entry_point(void) {\n  return;\n}\n';
 		const r = applyHonestyConfidenceCap(src);

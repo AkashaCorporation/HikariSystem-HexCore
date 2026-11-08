@@ -45,6 +45,8 @@ interface PipelineCapabilityEntry {
 	validateOutput: boolean;
 	reason?: string;
 	requiredExtension: string[];
+	analysisMode?: string;
+	nextCommands?: string[];
 }
 
 suite('Unit tests: listCapabilities', () => {
@@ -161,6 +163,14 @@ suite('Unit tests: listCapabilities', () => {
 			assert.strictEqual(entry!.validateOutput, true);
 			assert.deepStrictEqual(entry!.requiredExtension, ['hikarisystem.hexcore-disassembler']);
 		}
+	});
+
+	test('analyzeAll tells agents that lazy indexing is automatic and names the materialization command', () => {
+		const entry = allEntries.find(candidate => candidate.command === 'hexcore.disasm.analyzeAll');
+		assert.ok(entry);
+		assert.strictEqual(entry!.analysisMode, 'index-all-materialize-on-demand');
+		assert.ok(entry!.nextCommands?.includes('hexcore.disasm.materializeFunctions'));
+		assert.ok(entry!.nextCommands?.includes('hexcore.disasm.disassembleAtHeadless'));
 	});
 
 	/**

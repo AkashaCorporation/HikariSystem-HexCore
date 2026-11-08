@@ -80,6 +80,7 @@ function deserialize(value) {
 
 let uc = null;     // The hexcore-unicorn module
 let engine = null; // The Unicorn instance
+let loadedModulePath = null;
 let currentArch = null; // Architecture from initialize() — used for register heuristics
 let currentMode = null; // Architecture mode from initialize() — used for register heuristics
 const hookCallbacks = new Map(); // hookHandle → native hook handle
@@ -193,7 +194,11 @@ function loadModule() {
 
 	for (const p of possiblePaths) {
 		try {
-			uc = require(p);
+			const packageEntryPath = require.resolve(p);
+			uc = require(packageEntryPath);
+			loadedModulePath = Object.keys(require.cache).find(candidate =>
+				candidate.endsWith('.node') && /hexcore[-_]unicorn/i.test(candidate)
+			) || packageEntryPath;
 			return;
 		} catch { /* try next */ }
 	}
@@ -216,7 +221,8 @@ const handlers = {
 		return {
 			handle: engine.handle,
 			pageSize: engine.pageSize,
-			version: uc.version().string
+			version: uc.version().string,
+			modulePath: loadedModulePath
 		};
 	},
 
@@ -615,5 +621,15 @@ process.on('message', (msg) => {
 	}
 });
 
-// Signal ready
-process.send({ type: 'ready' });
+// Signal ready before loading the native addon. This distinguishes process/IPC
+// bootstrap failures from addon-resolution failures during initialize().
+process.send({
+	type: 'ready',
+	diagnostics: {
+		execPath: process.execPath,
+		nodeVersion: process.version,
+		pid: process.pid,
+		workerPath: __filename,
+		addonResolution: 'not-attempted'
+	}
+});

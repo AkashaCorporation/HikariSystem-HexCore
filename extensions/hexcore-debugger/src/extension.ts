@@ -11,7 +11,7 @@ import { assertWithinWorkspaceOrHome } from 'hexcore-common';
 import { DebuggerViewProvider } from './debuggerView';
 import { RegisterTreeProvider } from './registerTree';
 import { MemoryTreeProvider } from './memoryTree';
-import { DebugEngine } from './debugEngine';
+import { DebugEngine, EmulationNotReadyError } from './debugEngine';
 import { TraceTreeProvider } from './traceView';
 import { SessionLock, type SessionLockHandle } from './sessionLock';
 import type { ArchitectureType } from './unicornWrapper';
@@ -658,10 +658,8 @@ export function activate(context: vscode.ExtensionContext): void {
 				? arg.terminalKind.trim().slice(0, 64)
 				: undefined;
 
-			const stateBefore = engine.getEmulationState();
-			if (!stateBefore) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('continueHeadless');
+			const stateBefore = engine.getEmulationState()!;
 
 			const instrBefore = stateBefore.instructionsExecuted;
 			let crashed = false;
@@ -790,10 +788,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('stepHeadless');
 			if (!Number.isSafeInteger(count) || count <= 0 || count > 1_000_000) {
 				throw new Error('stepHeadless requires "count" to be an integer between 1 and 1000000.');
 			}
@@ -849,10 +844,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('getRegistersHeadless');
 
 			const registers = await engine.getFullRegistersAsync();
 
@@ -882,10 +874,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('setBreakpointHeadless');
 
 			// Accept single address or array
 			const rawAddr = arg?.address;
@@ -993,10 +982,7 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('snapshotHeadless');
 
 			await engine.saveSnapshot();
 
@@ -1024,14 +1010,14 @@ export function activate(context: vscode.ExtensionContext): void {
 			const quietMode = arg?.quiet === true;
 			const outputOptions = arg?.output as { path?: string } | undefined;
 
-			const state = engine.getEmulationState();
-			if (!state) {
-				throw new Error('No active emulation session. Call emulateHeadless first.');
-			}
+			engine.assertEmulationReady('restoreSnapshotHeadless');
 
 			try {
 				await engine.restoreSnapshot();
-			} catch {
+			} catch (error: unknown) {
+				if (error instanceof EmulationNotReadyError) {
+					throw error;
+				}
 				throw new Error('No snapshot available. Call snapshotHeadless first.');
 			}
 

@@ -65,6 +65,56 @@ suite('persistent watcher attempt deduplication', () => {
 		}
 	});
 
+	test('archives a running status immediately after Extension Host restart', () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-autorun-'));
+		try {
+			const jobPath = path.join(root, '.hexcore_job.json');
+			const outDir = path.join(root, 'reports');
+			fs.mkdirSync(outDir);
+			fs.writeFileSync(jobPath, JSON.stringify({ file: 'target.exe', outDir: './reports', steps: [{}] }));
+			const jobTime = new Date('2026-08-09T12:00:00.000Z');
+			fs.utimesSync(jobPath, jobTime, jobTime);
+			const statusPath = path.join(outDir, 'hexcore-pipeline.status.json');
+			const metaDir = path.join(outDir, '.hexcore-meta');
+			fs.mkdirSync(metaDir);
+			const provenanceManifestPath = path.join(metaDir, 'provenance.json');
+			fs.writeFileSync(provenanceManifestPath, JSON.stringify({
+				schemaVersion: 1,
+				status: 'running',
+				execution: { executionId: 'stale-execution', extensionHostInstanceId: 'old-host' },
+				artifacts: [],
+			}));
+			fs.writeFileSync(statusPath, JSON.stringify({
+				jobFile: jobPath,
+				status: 'running',
+				startedAt: '2026-08-09T12:00:01.000Z',
+				provenance: { extensionHostInstanceId: 'old-host' },
+				provenanceManifestPath,
+			}));
+
+			const attempt = findRecordedAutoRunAttempt(
+				jobPath,
+				Date.parse('2026-08-09T12:00:02.000Z'),
+				15 * 60_000,
+				'new-host',
+			);
+			assert.strictEqual(attempt?.stale, true);
+			assert.strictEqual(attempt?.staleReason, 'owner-restarted');
+			const recovered = recoverStaleAutoRunAttempt(attempt!);
+			assert.strictEqual(recovered.recovered, true);
+			const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+			assert.strictEqual(status.status, 'error');
+			assert.match(status.error, /prior Extension Host instance/);
+			assert.ok(status.recovery.archivedProvenancePath);
+			const manifest = JSON.parse(fs.readFileSync(provenanceManifestPath, 'utf8'));
+			assert.strictEqual(manifest.status, 'error');
+			assert.strictEqual(manifest.recovery.kind, 'stale-running');
+			assert.ok(fs.existsSync(manifest.recovery.archivedManifestPath));
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test('allows auto-run after the job file is edited', () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-autorun-'));
 		try {

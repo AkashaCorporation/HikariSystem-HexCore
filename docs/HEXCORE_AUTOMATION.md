@@ -4,7 +4,14 @@ HexCore supports running analysis pipelines from workspace job files.
 
 This document describes the unreleased `3.8.5` development surface, including the retained `3.8.4` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Relevant integrated versions: disassembler `1.4.74`, HQL `0.3.1`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.22`, Revenant `0.5.0` (ILSpy `11.1.0.9782`), Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.3`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+Documentation baseline for the `3.8.5` release candidate: disassembler `1.4.77`, HQL `0.3.1`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.23`, Revenant `0.5.0` (ILSpy `11.1.0.9782`), File Type `1.0.3`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.3`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+
+This version list is informative, not runtime identity evidence. For an installed
+build, use this precedence: artifact `.hexcore-meta/provenance.json`, then
+`hexcore.pipeline.listCapabilities` / `hexcore.pipeline.doctor`, then the
+generated engine manifest. When those sources disagree with this document,
+report both the documented baseline and observed runtime; the observed,
+hash-bound runtime identity is authoritative.
 
 ### Agent Bridge v1
 
@@ -48,12 +55,20 @@ a developer's Desktop. Missing tools are not proof that a PDB has no symbols.
 
 ### Lazy discovery contract (1.4.65)
 
-`analyzeAll` JSON includes every function in the discovered index, including
-`bodyStatus:lazy`; this is not a guarantee that discovery found every real function.
-Its Markdown table is only the first 100 entries by address, not a ranking or a
-complete index. Prefer JSON for agent enumeration and check the reported counts.
+`analyzeAll` JSON includes an address-ordered preview of the discovered index,
+including `bodyStatus:lazy`; this is not a guarantee that discovery found every
+real function. The default preview ceiling is 10,000 functions. Inspect
+`functionSummary` for total/returned/truncated counts. When an output file is
+requested and the preview is truncated, HexCore writes the complete index beside
+it as `<output-name>.functions.ndjson` and records its SHA-256 in `functionIndex`
+and provenance. Its Markdown table remains a first-100 preview, not a ranking.
 
 Lazy means a known boundary with deferred body decoding, not an absent function.
+There is no separate `analyzeAllLazy` or eager/full-body `analyzeAll` command.
+`hexcore.disasm.analyzeAll` always uses `analysisMode:index-all-materialize-on-demand`;
+`allowLazy:true` changes only pipeline acceptance policy and never forces or
+disables lazy discovery. Use `hexcore.disasm.materializeFunctions` for selected
+bodies after indexing.
 Select the indexed address for a bounded `disassembleAtHeadless` investigation,
 then inspect `analysisClosure` and body completeness. Do not infer absence from
 zero known callers/callees or no matches over unmaterialized bodies. `allowLazy`
@@ -1234,7 +1249,9 @@ does not close the broader experimental AArch64 Helix lowering limitations.
     "detectVM": true,
     "detectPRNG": true,
     "allowLazy": true,
-    "allowDecodeEmpty": false
+    "allowDecodeEmpty": false,
+    "functionSummaryLimit": 10000,
+    "emitFunctionIndex": true
   }
 }
 ```
@@ -1252,6 +1269,8 @@ does not close the broader experimental AArch64 Helix lowering limitations.
 | `allowLazy` | `boolean` | `false` | Explicitly accept discovered functions whose bodies remain lazy. Without this opt-in, any lazy population makes the result `partial`. |
 | `allowDecodeEmpty` | `boolean` | `false` | Accept a materialized function whose body decoded empty. Keep `false` for correctness gates. |
 | `minMaterializedRatio` | `number` | `1` (`0` with `allowLazy`) | Required materialized/total ratio in the inclusive range 0..1. |
+| `functionSummaryLimit` | `integer` | `10000` | Address-ordered function summaries retained in the primary JSON/command result. Does not change discovery. |
+| `emitFunctionIndex` | `boolean` | `true` | When the primary preview is truncated and an output path exists, stream the complete function table to `<output-name>.functions.ndjson`. |
 
 The result exposes `materializedFunctionRatio`, `functionsWithInstructions`,
 `lazyFunctions`, `decodeEmptyFunctions`, and the effective
@@ -1261,7 +1280,8 @@ report still foregrounds the unanalyzed population.
 `analyzeAll` executes native discovery in a child process. The Extension Host
 owns the external deadline and can terminate the worker even when native code
 is synchronously blocked. Successful runs return a digest-verified gzip/V8
-engine snapshot, hydrate the parent without repeating whole-binary analysis,
+engine snapshot, hydrate the parent by adopting the trusted deserialized
+collections without cloning them, without repeating whole-binary analysis,
 and delete the transient snapshot. `nativeExecution` records outcome, worker
 PID, duration, final phase, heartbeat path, and compressed/raw snapshot sizes.
 The child keeps IPC referenced after queuing its terminal result; the parent

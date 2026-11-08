@@ -156,7 +156,10 @@ export function detectTextDamningDefects(
 }
 
 /**
- * Bare hex immediates that look like leaked code addresses (not small masks).
+ * Bare hex immediates assigned to local variables that look like leaked code
+ * addresses (not small masks). Comments and call arguments are deliberately
+ * excluded: a diagnostic address or a data-pointer argument is not evidence
+ * that Helix leaked a basic-block address into a variable.
  * Returns count of unique values + one sample for the reason string.
  *
  * Conservative gates (avoid false-high→false-low on magic numbers):
@@ -170,13 +173,20 @@ export function countBareCodeAddrAssigns(source: string): { count: number; sampl
 	const empty = { count: 0, sample: 0 };
 	if (!source) { return empty; }
 
-	const re = /(?:=\s*|\(\s*)0x([0-9a-fA-F]{6,16})\b/g;
+	const bodyText = source
+		.replace(/\/\*[\s\S]*?\*\//g, '')
+		.replace(/\/\/.*$/gm, '');
+	const re = /\b[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:\([^;\r\n]*?\)\s*)*0x([0-9a-fA-F]{6,16})\b/g;
 	const values: number[] = [];
 	let m: RegExpExecArray | null;
-	while ((m = re.exec(source)) !== null) {
+	while ((m = re.exec(bodyText)) !== null) {
 		const hex = m[1];
 		// all-F masks / small nibble patterns
 		if (/^f+$/i.test(hex) || /^0+$/i.test(hex)) { continue; }
+		// Signed 32-bit immediates are commonly printed as 0xFFFFFFxx while
+		// reconstructing bytes or errno-style values. They are data, not image
+		// addresses. Cover both the 8-digit and sign-extended 16-digit forms.
+		if (/^[89a-f][0-9a-f]{7}$/i.test(hex) || /^f{8}[89a-f][0-9a-f]{7}$/i.test(hex)) { continue; }
 		const n = Number.parseInt(hex, 16);
 		if (!Number.isFinite(n) || n < 0x10000) { continue; }
 		// Skip tiny power-of-two-ish page sizes that are often real data
@@ -186,10 +196,11 @@ export function countBareCodeAddrAssigns(source: string): { count: number; sampl
 	if (values.length === 0) { return empty; }
 
 	const unique = [...new Set(values)];
-	// Group by high 16 bits (region family)
+	// Group by high 16 bits (region family). Avoid bitwise operators because
+	// JavaScript truncates them to 32 bits and PE64 addresses exceed that range.
 	const byHi = new Map<number, number[]>();
 	for (const v of unique) {
-		const hi = (v >>> 16) & 0xffff;
+		const hi = Math.floor(v / 0x10000);
 		const arr = byHi.get(hi) ?? [];
 		arr.push(v);
 		byHi.set(hi, arr);

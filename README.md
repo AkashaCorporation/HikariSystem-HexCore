@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4"><img alt="Stable release v3.8.4" src="https://img.shields.io/badge/stable-v3.8.4-2ea44f"></a>
+  <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.1"><img alt="Release candidate v3.8.5-rc.1" src="https://img.shields.io/badge/candidate-v3.8.5--rc.1-f59e0b"></a>
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml"><img alt="HexCore build" src="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml/badge.svg?branch=main"></a>
   <img alt="Platform Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-0078d4">
   <a href="LICENSE.txt"><img alt="License MIT" src="https://img.shields.io/badge/workbench%20license-MIT-blue"></a>
@@ -38,6 +39,8 @@
 HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It brings static analysis, IR lifting, MLIR-based decompilation, controlled CPU emulation, semantic queries, and reproducible automation into one workspace.
 
 **Stable release:** [`v3.8.4`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4).
+
+**Release candidate:** [`v3.8.5-rc.1`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.1). It adds Agent Bridge v1, bounded large-image analysis, Helix `0.9.4-rc.3`, Revenant `0.5.0`, and the packaged Debugger reliability fixes. The candidate remains a prerelease until its generated Windows ZIP completes the published acceptance jobs.
 
 This release brings HXDB v2, typed references, bounded whole-program propagation,
 Semantic Explorer, HQL `0.3.1`, Function Atlas, and killable native analysis.
@@ -112,15 +115,15 @@ result as complete.
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.22 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, and binary/input/trace-bound runtime corroboration |
-| **Disassembler** | 1.4.68 | Multi-arch disassembly, killable native analysis, HXDB v2, typed references, whole-program propagation, partial-body quarantine, Semantic Explorer, Helix/HQL integration, and automation |
-| **Revenant** | 0.4.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 10 backend |
+| **Debugger** | 2.1.23 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, retained SAB hooks, and diagnosed PE32 worker bootstrap |
+| **Disassembler** | 1.4.77 | Multi-arch disassembly, killable bounded analysis, automatic lazy indexing, HXDB v2, typed references, whole-program propagation, Semantic Explorer, Helix/HQL integration, Agent Bridge, and automation |
+| **Revenant** | 0.5.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 11.1 backend |
 | **Hex Viewer** | 1.2.4 | Chunk-backed binary viewer with scaled large-file scrolling, data inspection, editing, templates, and offset sync |
-| **PE Analyzer** | 1.1.3 | Comprehensive PE analysis with binary transforms, Windows security summaries, and headless mode |
+| **PE Analyzer** | 1.1.4 | Comprehensive PE analysis with binary transforms, Windows security summaries, overlay/directory evidence, and headless mode |
 | **Strings Extractor** | 1.3.3 | Memory-efficient ASCII/UTF-16 extraction, bounded deobfuscation, provenance-bound transform chains, and stack strings |
 | **Hash Calculator** | 1.1.2 | Fast file hashing with VirusTotal integration |
 | **Entropy Analyzer** | 1.1.2 | Streaming entropy analysis with adaptive block sizing and modular report pipeline |
-| **File Type Detector** | 1.0.2 | Magic bytes signature detection |
+| **File Type Detector** | 1.0.3 | Magic bytes signature detection |
 | **Base64 Decoder** | 2.0.2 | Detect and decode Base64 strings |
 | **YARA Scanner** | 2.1.3 | YARA scanning with qualified condition/ISA evidence and headless pipeline support |
 | **IOC Extractor** | 1.1.2 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
@@ -142,12 +145,12 @@ distribution are qualified separately from the HexCore ZIP.
 | **hexcore-llvm-mc** | 1.0.2 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.3 | SQLite N-API wrapper with safe prepared-statement lifecycle for persistent sessions |
 | **hexcore-remill** | 0.5.4 | Patched Remill N-API lifter — machine code to LLVM IR with logical-entry/reachable-only CFG recovery plus current call, relocation, preamble, and fallback hardening |
-| **hexcore-helix** | 0.9.4-rc.1 | Canonical Helix MLIR decompiler candidate with structured control flow, debug-info-guided type recovery, deterministic HAST, and evidence-gated confidence |
+| **hexcore-helix** | 0.9.4-rc.3 | Canonical Helix MLIR decompiler candidate with structured control flow, debug-info-guided type recovery, deterministic HAST, and evidence-gated confidence |
 | **hexcore-souper** | 0.2.2 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |
 | **hexcore-elixir** *(Azoth)* | 1.0.4 | Project Azoth clean-room dynamic analysis framework for PE32+ x86_64 — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
-> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The extension/package version (`0.9.4-rc.1`), native engine API, and HAST producer version are separate provenance identities and are reported separately. The `.node` binary is pre-built and ships with HexCore; building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build.
+> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The extension/package version (`0.9.4-rc.3`), native engine API, and HAST producer version are separate provenance identities and are reported separately. The `.node` binary is pre-built and ships with HexCore; building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build.
 
 > **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and Remill. End users receive the pre-built `.node` binary via CI; source builds require the documented native toolchain.
 
