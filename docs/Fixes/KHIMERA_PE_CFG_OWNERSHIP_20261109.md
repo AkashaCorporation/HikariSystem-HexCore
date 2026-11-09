@@ -50,6 +50,11 @@ Verdict: **SOURCE-PASS / PACKAGE-PENDING** for Disassembler `1.4.78`.
 All seven newly indexed starts exist in the IDA database and every one has the
 same end. The six challenge-central ranges remain unchanged.
 
+The retained exact-range view for `ct_equal` displays 33 decoded instructions
+across the requested bytes while reporting 31 reachable semantic instructions
+and two internal NOP alignment instructions (15 bytes). No instruction is
+unclassified.
+
 Two independent fresh runs produced 533 functions and the same address/end
 table SHA-256:
 
@@ -65,10 +70,12 @@ Discovery diagnostics for the fixture are complete:
 ## Source Gates
 
 - TypeScript compile: PASS.
-- PE leaf ownership/direct-call gates: 6 PASS.
-- Pdata, padding, closure, process, ownership and ghost regressions: 70 PASS.
+- Ownership, closure, process, honesty and related regressions: 97 PASS.
 - Pipeline reliability: 29 PASS.
+- Exact-range role and pagination controls: 14 additional PASS.
 - Real target: deterministic A/B, no added overlap, no removed start.
+- Agent Bridge E2E: 3/3 steps `ok`, zero partial/error, provenance owner
+  `hikarisystem.hexcore-disassembler@1.4.78`.
 
 ## Explicit Holds
 

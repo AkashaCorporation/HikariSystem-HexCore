@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direct-call leaf discovery. The Khimera source oracle improves exact IDA end
   agreement from 466/495 to 497/502 without overlaps or eager materialization
   of unwind-backed callers; large images retain an explicit partial budget.
+  Exact-range output now distinguishes reachable semantic instructions from
+  internal NOP alignment while preserving the raw display range.
 - Update the Disassembler to `1.4.77`. Assembly exports now identify partial
   decode bodies separately from decode-empty bodies, and the Helix packaging
   safety net no longer mistakes comments or address-valued call arguments for
