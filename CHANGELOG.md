@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Final Candidate Qualification
 
+#### RC.2 Packaging
+
+- Advance the prerelease identity to `3.8.5-rc.2` after the Khimera
+  source-oracle closure. Disassembler `1.4.78` is included; the residual
+  noreturn, signature and Helix-quality gaps remain explicitly documented and
+  are not represented as fixed.
+
 - Post-RC.1 Disassembler `1.4.78` fixes PE leaf CFG ownership and bounded
   direct-call leaf discovery. The Khimera source oracle improves exact IDA end
   agreement from 466/495 to 497/502 without overlaps or eager materialization

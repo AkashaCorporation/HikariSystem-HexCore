@@ -10,7 +10,7 @@
 
 <p align="center">
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4"><img alt="Stable release v3.8.4" src="https://img.shields.io/badge/stable-v3.8.4-2ea44f"></a>
-  <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.1"><img alt="Release candidate v3.8.5-rc.1" src="https://img.shields.io/badge/candidate-v3.8.5--rc.1-f59e0b"></a>
+  <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.2"><img alt="Release candidate v3.8.5-rc.2" src="https://img.shields.io/badge/candidate-v3.8.5--rc.2-f59e0b"></a>
   <a href="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml"><img alt="HexCore build" src="https://github.com/AkashaCorporation/HikariSystem-HexCore/actions/workflows/hexcore-build.yml/badge.svg?branch=main"></a>
   <img alt="Platform Windows x64" src="https://img.shields.io/badge/platform-Windows%20x64-0078d4">
   <a href="LICENSE.txt"><img alt="License MIT" src="https://img.shields.io/badge/workbench%20license-MIT-blue"></a>
@@ -40,7 +40,7 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 **Stable release:** [`v3.8.4`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.4).
 
-**Release candidate:** [`v3.8.5-rc.1`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.1). It adds Agent Bridge v1, bounded large-image analysis, Helix `0.9.4-rc.3`, Revenant `0.5.0`, and the packaged Debugger reliability fixes. The candidate remains a prerelease until its generated Windows ZIP completes the published acceptance jobs.
+**Release candidate:** [`v3.8.5-rc.2`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5-rc.2). It adds Agent Bridge v1, bounded large-image analysis, Helix `0.9.4-rc.3`, Revenant `0.5.0`, the packaged Debugger reliability fixes, and Disassembler `1.4.78` PE leaf/CFG ownership corrections. The candidate remains a prerelease until its generated Windows ZIP completes the published acceptance jobs.
 
 This release brings HXDB v2, typed references, bounded whole-program propagation,
 Semantic Explorer, HQL `0.3.1`, Function Atlas, and killable native analysis.
