@@ -12,6 +12,9 @@
 - Publish `discover-direct-call-leaves` coverage. Large images skip the extra
   transient scan as `partial/large-image-budget`, preserving the bounded
   AnalyzeAll contract rather than silently weakening negative evidence.
+- When an exact range matches an already materialized function owner, classify
+  raw display instructions against that reachable CFG. Internal NOP gaps stay
+  visible but are counted as alignment padding with an exact byte total.
 - Khimera source-oracle acceptance: 533 deterministic functions, 502 starts in
   common with IDA, 497 exact common ends, zero overlaps, and unchanged lazy
   materialization policy. The previously false-complete `ct_equal` owner grows
