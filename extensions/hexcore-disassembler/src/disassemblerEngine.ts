@@ -571,9 +571,9 @@ export interface AnalysisClosureRestoration {
 }
 
 export interface AnalysisDiscoveryDiagnostic {
-	stage: 'scan-function-prologs' | 'discover-padding-leaves';
+	stage: 'scan-function-prologs' | 'discover-direct-call-leaves' | 'discover-padding-leaves';
 	status: 'complete' | 'partial';
-	reason?: 'function-limit' | 'candidate-limit' | 'decoded-byte-limit';
+	reason?: 'function-limit' | 'candidate-limit' | 'decoded-byte-limit' | 'large-image-budget';
 	largeImageLazyMode: boolean;
 	executableBytes: number;
 	sectionsVisited: number;
@@ -1211,6 +1211,11 @@ export class DisassemblerEngine {
 		const prologDiagnostic = await this.scanForFunctionPrologs();
 		if (prologDiagnostic) { this.discoveryDiagnostics.push(prologDiagnostic); }
 
+		// A lazy pdata index does not materialize caller bodies, so optimized leaf
+		// callees without unwind metadata can otherwise depend on prolog-scan order.
+		phase('discover-direct-call-leaves');
+		this.discoveryDiagnostics.push(await this.discoverPeDirectCallLeafTargets());
+
 		// Recover optimized MSVC leaf functions that deliberately have neither an
 		// unwind entry nor a conventional integer-register prologue.
 		phase('discover-padding-leaves');
@@ -1263,6 +1268,13 @@ export class DisassemblerEngine {
 		// even if a prior lift already ran the one-shot hot-path barrier.
 		phase('reconcile-pdata');
 		await this.reconcileFunctionsWithPdata();
+
+		// Optimized PE leaf functions may be omitted from .pdata and place a forward
+		// conditional block after an early return. A pdata-covered function may also
+		// branch to a small shared leaf block beyond its unwind range. Discovery stays
+		// population-only; reconcile semantic CFG ownership after starts/pdata are frozen.
+		phase('reconcile-pe-leaf-cfg');
+		await this.reconcilePeLeafReachableOwnership();
 
 		// PE32/raw have no unwind table to stop an over-wide linear decode. Clamp
 		// owners at independently confirmed starts before ghost cleanup so a real
@@ -5459,6 +5471,211 @@ export class DisassemblerEngine {
 		return func;
 	}
 
+	private async reconcilePeLeafReachableOwnership(): Promise<number> {
+		if (!this.fileInfo?.format.startsWith('PE') ||
+			(this.architecture !== 'x86' && this.architecture !== 'x64') ||
+			this.fileInfo.isRelocatable === true) {
+			return 0;
+		}
+
+		const executableBytes = this.sections
+			.filter(section => section.isCode || section.isExecutable)
+			.reduce((total, section) => total + Math.max(0, section.rawSize), 0);
+		if (executableBytes >= DisassemblerEngine.LARGE_IMAGE_LAZY_DISCOVERY_BYTES) {
+			return 0;
+		}
+
+		const starts = [...this.functions.keys()].sort((left, right) => left - right);
+		let decodedBytes = 0;
+		let changed = 0;
+		for (let index = 0; index < starts.length; index++) {
+			const start = starts[index];
+			const fn = this.functions.get(start);
+			if (!fn) { continue; }
+			const wasLazy = this.unmaterializedStubs.has(start) || fn.instructions.length === 0;
+			const unwindRange = this.findAuthoritativePdataRangeContaining(start);
+
+			const section = this.sections.find(candidate => {
+				const sectionStart = candidate.virtualAddress;
+				const sectionEnd = sectionStart + Math.max(candidate.virtualSize, candidate.rawSize);
+				return start >= sectionStart && start < sectionEnd && (candidate.isCode || candidate.isExecutable);
+			});
+			if (!section) { continue; }
+			const sectionEnd = section.virtualAddress + Math.max(section.virtualSize, section.rawSize);
+			const nextStart = starts[index + 1] ?? Number.POSITIVE_INFINITY;
+			const upperBound = Math.min(start + this.maxFunctionSize, nextStart, sectionEnd);
+			const byteBudget = upperBound - start;
+			if (byteBudget <= 0 || decodedBytes + byteBudget > DisassemblerEngine.PADDING_LEAF_MAX_DECODED_BYTES) {
+				continue;
+			}
+
+			const decoded = await this.disassembleRange(
+				start,
+				byteBudget,
+				Math.min(100000, Math.max(1, byteBudget)),
+				false,
+			);
+			decodedBytes += byteBudget;
+			const reachable = this.selectReachableFunctionInstructions(decoded, start);
+			const last = reachable.instructions[reachable.instructions.length - 1];
+			if (!last) { continue; }
+			const reachableEnd = Number(last.address) + Number(last.size);
+			if (reachableEnd <= start || reachableEnd > upperBound) { continue; }
+			const endAddress = unwindRange?.begin === start
+				? Math.max(unwindRange.end, reachableEnd)
+				: reachableEnd;
+			const nextInstructions = unwindRange?.begin === start
+				? [...new Map(
+					[...fn.instructions, ...reachable.instructions]
+						.map(instruction => [Number(instruction.address), instruction] as const)
+				).values()].sort((left, right) => Number(left.address) - Number(right.address))
+				: reachable.instructions;
+			if (wasLazy) {
+				if (fn.endAddress === endAddress) { continue; }
+				fn.endAddress = endAddress;
+				fn.size = endAddress - start;
+				fn.bodyCompleteness = undefined;
+				changed++;
+				continue;
+			}
+
+			const priorAddresses = fn.instructions.map(instruction => Number(instruction.address));
+			const nextAddresses = nextInstructions.map(instruction => Number(instruction.address));
+			const sameInstructions = priorAddresses.length === nextAddresses.length &&
+				priorAddresses.every((address, instructionIndex) => address === nextAddresses[instructionIndex]);
+			if (fn.endAddress === endAddress && sameInstructions) { continue; }
+
+			fn.instructions = nextInstructions;
+			fn.endAddress = endAddress;
+			fn.size = endAddress - start;
+			fn.bodyCompleteness = undefined;
+			for (const instruction of nextInstructions) {
+				this.instructions.set(Number(instruction.address), instruction);
+			}
+			changed++;
+		}
+		if (changed > 0) {
+			this.rebuildMaterializedCallGraph();
+		}
+		return changed;
+	}
+
+	private async discoverPeDirectCallLeafTargets(): Promise<AnalysisDiscoveryDiagnostic> {
+		const executableBytes = this.sections
+			.filter(section => section.isCode || section.isExecutable)
+			.reduce((total, section) => total + Math.max(0, section.rawSize), 0);
+		const largeImageLazyMode = executableBytes >= DisassemblerEngine.LARGE_IMAGE_LAZY_DISCOVERY_BYTES;
+		let rangesVisited = 0;
+		let candidatesExamined = 0;
+		let candidatesAccepted = 0;
+		let decodedBytes = 0;
+		let reason: AnalysisDiscoveryDiagnostic['reason'];
+		const diagnostic = (): AnalysisDiscoveryDiagnostic => ({
+			stage: 'discover-direct-call-leaves',
+			status: reason ? 'partial' : 'complete',
+			...(reason ? { reason } : {}),
+			largeImageLazyMode,
+			executableBytes,
+			sectionsVisited: rangesVisited,
+			candidatesExamined,
+			candidatesAccepted,
+			lazyBodiesReleased: 0,
+			decodedBytes,
+			limits: {
+				maxFunctions: this.maxFunctions,
+				maxCandidates: this.maxFunctions,
+				maxDecodedBytes: DisassemblerEngine.PADDING_LEAF_MAX_DECODED_BYTES,
+			},
+		});
+		if (!this.fileInfo?.format.startsWith('PE') ||
+			(this.architecture !== 'x86' && this.architecture !== 'x64') ||
+			this.fileInfo.isRelocatable === true || this.authoritativePdataRanges.length === 0) {
+			return diagnostic();
+		}
+		if (largeImageLazyMode) {
+			reason = 'large-image-budget';
+			return diagnostic();
+		}
+
+		const candidates = new Map<number, number>();
+		for (const range of this.authoritativePdataRanges) {
+			const size = range.end - range.begin;
+			if (size <= 0) { continue; }
+			if (decodedBytes + size > DisassemblerEngine.PADDING_LEAF_MAX_DECODED_BYTES) {
+				reason = 'decoded-byte-limit';
+				break;
+			}
+			rangesVisited++;
+			const instructions = await this.disassembleRange(
+				range.begin,
+				size,
+				Math.min(100000, Math.max(1, size)),
+				false,
+			);
+			decodedBytes += size;
+			for (const instruction of instructions) {
+				if (!instruction.isCall || instruction.targetAddress === undefined) { continue; }
+				candidatesExamined++;
+				const sourceAddress = Number(instruction.address);
+				const instructionSize = Number(instruction.size);
+				const target = Number(instruction.targetAddress);
+				if (target === sourceAddress + instructionSize ||
+					this.findAuthoritativePdataRangeContaining(target) !== undefined ||
+					!this.isAnalyzableFunctionAddress(target)) {
+					continue;
+				}
+				const priorSource = candidates.get(target);
+				if (priorSource === undefined || sourceAddress < priorSource) {
+					if (priorSource === undefined && candidates.size >= this.maxFunctions) {
+						reason = 'candidate-limit';
+						break;
+					}
+					candidates.set(target, sourceAddress);
+				}
+			}
+			if (reason) { break; }
+		}
+
+		const ordered = [...candidates.entries()].sort((left, right) => left[0] - right[0]);
+		for (const [target, sourceAddress] of ordered) {
+			this.functionSeeds.record(target, { kind: 'direct-call', sourceAddress });
+		}
+		for (const [target] of ordered) {
+			if (this.functions.has(target)) { continue; }
+			if (this.functions.size >= this.maxFunctions) {
+				reason = 'function-limit';
+				break;
+			}
+			await this.analyzeFunction(target, undefined, { followChildren: false });
+			candidatesAccepted++;
+		}
+		return diagnostic();
+	}
+
+	private rebuildMaterializedCallGraph(): void {
+		for (const fn of this.functions.values()) {
+			fn.callees = [];
+			fn.callers = [];
+		}
+		for (const fn of this.functions.values()) {
+			const seen = new Set<number>();
+			for (const instruction of fn.instructions) {
+				if (!instruction.isCall || instruction.targetAddress === undefined) { continue; }
+				const targetAddress = Number(instruction.targetAddress);
+				const target = this.functions.get(targetAddress);
+				if (!target) { continue; }
+				if (!seen.has(targetAddress)) {
+					seen.add(targetAddress);
+					fn.callees.push(targetAddress);
+				}
+				const callSite = Number(instruction.address);
+				if (!target.callers.includes(callSite)) {
+					target.callers.push(callSite);
+				}
+			}
+		}
+	}
+
 	private selectReachableFunctionInstructions(
 		instructions: Instruction[],
 		functionStart: number,
@@ -5510,10 +5727,11 @@ export class DisassemblerEngine {
 				if (instruction.isJump) {
 					const target = instruction.targetAddress === undefined ? undefined : Number(instruction.targetAddress);
 					if (target !== undefined && indexByAddress.has(target)) {
-					const shortEntryContinuation = this.functionSeeds.get(functionStart).some(seed => seed.kind === 'entry') &&
-						address < functionStart + 16 && target > functionStart && target <= functionStart + 64;
-					const internalTarget = instruction.isConditional || conditionalTargets.has(target) ||
-						shortEntryContinuation || !this.hasValidatedTailEntryPattern(target);
+						const shortEntryContinuation = this.functionSeeds.get(functionStart).some(seed => seed.kind === 'entry') &&
+							address < functionStart + 16 && target > functionStart && target <= functionStart + 64;
+						const independentlyOwnedTarget = target !== functionStart && this.functionSeeds.isStrong(target);
+						const internalTarget = !independentlyOwnedTarget && (instruction.isConditional || conditionalTargets.has(target) ||
+							shortEntryContinuation || !this.hasValidatedTailEntryPattern(target));
 						if (internalTarget && !queued.has(target)) {
 							queued.add(target);
 							pending.push(target);
@@ -6184,29 +6402,7 @@ export class DisassemblerEngine {
 		// call-sites would dangle in surviving functions' callers. Reconstruct the call-only
 		// edges from the surviving instruction streams (matching analyzeFunction's wiring),
 		// so the call graph stays consistent with the function table.
-		for (const fn of this.functions.values()) {
-			fn.callees = [];
-			fn.callers = [];
-		}
-		for (const fn of this.functions.values()) {
-			const seen = new Set<number>();
-			for (const inst of fn.instructions) {
-				if (!inst.isCall || inst.targetAddress === undefined) {
-					continue;
-				}
-				const t = typeof inst.targetAddress === 'bigint' ? Number(inst.targetAddress) : inst.targetAddress;
-				const target = this.functions.get(t);
-				if (!target) {
-					continue;
-				}
-				if (!seen.has(t)) {
-					seen.add(t);
-					fn.callees.push(t);
-				}
-				const callSite = typeof inst.address === 'bigint' ? Number(inst.address) : inst.address;
-				target.callers.push(callSite);
-			}
-		}
+		this.rebuildMaterializedCallGraph();
 	}
 
 	/**

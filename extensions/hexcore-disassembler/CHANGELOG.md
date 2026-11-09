@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.4.78] - 2026-11-09
+
+- Reconcile PE semantic function ownership from reachable CFG blocks after the
+  function population and unwind ranges are frozen. Optimized leaf functions
+  with an early return no longer drop forward conditional blocks merely because
+  the image contains an unrelated `.pdata` directory.
+- Discover direct-call leaf targets from bounded transient decoding of unwind
+  ranges on small PE images. This makes the lazy index independent of prologue
+  scan recursion order without retaining caller bodies.
+- Publish `discover-direct-call-leaves` coverage. Large images skip the extra
+  transient scan as `partial/large-image-budget`, preserving the bounded
+  AnalyzeAll contract rather than silently weakening negative evidence.
+- Khimera source-oracle acceptance: 533 deterministic functions, 502 starts in
+  common with IDA, 497 exact common ends, zero overlaps, and unchanged lazy
+  materialization policy. The previously false-complete `ct_equal` owner grows
+  from 17 to the correct 103 bytes and seven missing direct-call leaves are
+  recovered with exact IDA boundaries.
+
 ## [1.4.77] - 2026-11-08
 
 - Make `exportASMHeadless` partial diagnostics distinguish decode-empty bodies
