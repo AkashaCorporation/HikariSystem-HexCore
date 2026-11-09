@@ -27,8 +27,8 @@ export function classifyDisassemblyInstructionRole(input: InstructionRoleInput):
 		return 'semantic-body';
 	}
 	const mnemonic = input.mnemonic.toLowerCase();
-	if (input.semanticEnd !== undefined && input.boundaryEndExclusive !== undefined &&
-		input.address >= input.semanticEnd && input.address < input.boundaryEndExclusive &&
+	if (input.semanticAddresses.size > 0 && input.boundaryEndExclusive !== undefined &&
+		input.address < input.boundaryEndExclusive &&
 		(mnemonic === 'int3' || mnemonic === 'nop')) {
 		return 'alignment-padding';
 	}

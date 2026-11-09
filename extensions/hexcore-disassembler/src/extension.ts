@@ -7189,8 +7189,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				: undefined;
 			const owningFunction = !exactRangeMode && extent.source !== 'none'
 				? engine.getFunctionAt(extent.start) : undefined;
+			const exactRangeFunction = exactRangeMode ? engine.getFunctionAt(effectiveAddress) : undefined;
+			const semanticOwner = exactRangeFunction && exactRangeFunction.endAddress === requestedEndExclusive && exactRangeFunction.instructions.length > 0
+				? exactRangeFunction
+				: owningFunction;
 			const semanticAddresses = new Set(
-				(exactRangeMode ? mainInstructions : (owningFunction?.instructions ?? []))
+				(semanticOwner?.instructions ?? mainInstructions)
 					.map(instruction => Number(instruction.address)),
 			);
 			const boundaryContract = resolveInstructionBoundaryContract({
@@ -7212,12 +7216,10 @@ export function activate(context: vscode.ExtensionContext): void {
 						? `; use boundary 0x${boundaryContract.suggestedAddress.toString(16).toUpperCase()} or enable autoBacktrack.`
 						: '; enable autoBacktrack or provide an instruction boundary.')
 				: undefined;
-			const lastSemanticInstruction = owningFunction?.instructions.at(-1);
-			const semanticEnd = exactRangeMode
-				? decodedEndExclusive
-				: lastSemanticInstruction
+			const lastSemanticInstruction = semanticOwner?.instructions.at(-1);
+			const semanticEnd = lastSemanticInstruction
 				? Number(lastSemanticInstruction.address) + Number(lastSemanticInstruction.size)
-				: undefined;
+				: exactRangeMode ? decodedEndExclusive : undefined;
 			const instructionRole = (instruction: { address: number; mnemonic: string }, isContext: boolean) =>
 				classifyDisassemblyInstructionRole({
 					address: instruction.address,
@@ -7314,6 +7316,9 @@ export function activate(context: vscode.ExtensionContext): void {
 			}
 			const semanticInstructionCount = allEntries.filter(entry => entry.role === 'semantic-body').length;
 			const paddingInstructionCount = allEntries.filter(entry => entry.role === 'alignment-padding').length;
+			const paddingByteCount = allEntries
+				.filter(entry => entry.role === 'alignment-padding')
+				.reduce((total, entry) => total + entry.size, 0);
 			const unclassifiedInstructionCount = allEntries.filter(entry => entry.role === 'unclassified').length;
 			const bodyStatus = !exactRangeMode && knownFunctionAddress !== undefined
 				? engine.getFunctionBodyStatus(knownFunctionAddress)
@@ -7417,7 +7422,7 @@ export function activate(context: vscode.ExtensionContext): void {
 					end: `0x${stop.functionBoundary.end.toString(16).toUpperCase()}`,
 					...(semanticEnd !== undefined ? {
 						semanticEnd: `0x${semanticEnd.toString(16).toUpperCase()}`,
-						paddingBytes: Math.max(0, stop.functionBoundary.end - semanticEnd),
+						paddingBytes: paddingByteCount,
 					} : {}),
 					size: stop.functionBoundary.size,
 					source: stop.functionBoundary.source,

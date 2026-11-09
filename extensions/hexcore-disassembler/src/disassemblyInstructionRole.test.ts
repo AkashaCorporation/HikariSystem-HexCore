@@ -30,6 +30,12 @@ suite('disassembly instruction roles', () => {
 		}), 'alignment-padding');
 	});
 
+	test('marks an internal NOP gap outside the reachable semantic map as padding', () => {
+		assert.strictEqual(classifyDisassemblyInstructionRole({
+			...common, address: 0x14000120a, mnemonic: 'nop',
+		}), 'alignment-padding');
+	});
+
 	test('does not call an unexplained instruction semantic', () => {
 		assert.strictEqual(classifyDisassemblyInstructionRole({
 			...common, address: 0x14000120f, mnemonic: 'mov',
