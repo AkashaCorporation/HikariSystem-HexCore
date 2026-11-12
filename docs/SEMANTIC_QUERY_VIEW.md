@@ -1,4 +1,4 @@
-# SemanticQueryView - 3.8.5 Development
+# SemanticQueryView - HexCore 3.8.5
 
 `openSemanticQueryView` in `hexcore-disassembler/src/semanticQueryView.ts` captures
 the semantic state of an already-bound `SessionStore`. It is an API, not a new

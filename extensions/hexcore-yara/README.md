@@ -4,7 +4,7 @@ This extension scans file bytes with the HexCore rule evaluator. It does not
 establish malware behavior or vulnerability impact. Full upstream YARA language
 compatibility is not implied.
 
-## 3.8.5 Development: Qualified Scoring
+## 3.8.5: Qualified Scoring
 
 `threatScore` retains its compatibility name, but represents the maximum priority
 of applicable, non-advisory rule matches. Zero means no scored matches, not clean.

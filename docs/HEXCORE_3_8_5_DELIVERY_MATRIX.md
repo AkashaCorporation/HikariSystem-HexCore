@@ -1,8 +1,8 @@
 # HexCore 3.8.5 Delivery Matrix
 
-Status: SOURCE GO-RC.2 / NEW WINDOWS ARTIFACT PENDING
+Status: RC.2 PACKAGE ACCEPTED / STABLE WINDOWS ARTIFACT PENDING
 
-Date: 2026-11-08
+Date: 2026-11-12
 
 This matrix is the source of truth for what HexCore 3.8.5 intends to deliver.
 Implementation, source qualification, package qualification and release claims
@@ -23,15 +23,17 @@ It is not a claim that every engine received a major feature generation.
 |---|---|
 | Released baseline | HexCore 3.8.4 |
 | Released source commit | `148e0870267ef6275aa27edf201924d82c38c76c` |
-| Closure branch | `release/3.8.5-rc.2` |
+| Closure branch | `release/3.8.5-stable` |
 | Closure starting commit | `c5ebc6b6052ef32c9aa4a8fa1fec708bf59e5e56` |
 | Accepted baseline workflow | `41015593557` |
 | Accepted baseline ZIP SHA-256 | `997f63aaadef214bcc30716792dbaf1b610287e82bc9bc8759b9db2106290c0b` |
-| Product identity | `3.8.5-rc.2` |
+| Accepted RC.2 source commit | `6283a88161abb42571da3b65ac190dc083a5c3ce` |
+| Accepted RC.2 ZIP SHA-256 | `2b387a8b55648267f5737d872059d119551204844e1158d6c88213b05d84fc5b` |
+| Product identity | `3.8.5` |
 | Supported packaged host | Windows 10/11 x64 portable ZIP |
-| Release-candidate source commit | pending final allowlisted commit |
-| Release-candidate workflow | pending GitHub Actions |
-| Release-candidate ZIP SHA-256 | pending artifact generation and acceptance |
+| Stable source commit | pending stable allowlisted commit |
+| Stable workflow | pending GitHub Actions |
+| Stable ZIP SHA-256 | pending artifact generation and acceptance |
 
 The accepted ZIP is evidence for the starting commit only. A later merge/tag
 must produce and qualify a new artifact with its own manifest and hash.
@@ -40,7 +42,7 @@ must produce and qualify a new artifact with its own manifest and hash.
 
 | Component | 3.8.5 baseline |
 |---|---|
-| Disassembler | `1.4.77` |
+| Disassembler | `1.4.78` |
 | Debugger | `2.1.23` |
 | HQL | `0.3.1` |
 | Common | `1.3.1` |
@@ -221,9 +223,9 @@ Phase-0 reconciliation updates:
 - Job Templates now document `autoRun:false` and Agent Bridge validation/submit;
 - root changelog now includes Agent Bridge and post-RC product gates.
 
-The root README keeps 3.8.4 as stable and publishes 3.8.5-rc.2 separately as a
-candidate. Promotion to stable/latest requires acceptance of the newly generated
-Windows ZIP.
+The root README promotes 3.8.5 to the stable train. Publication remains gated on
+the newly generated stable Windows ZIP matching its manifest, loading the pinned
+native runtimes, and passing the short packaged acceptance matrix.
 
 ## Pre-Reconciliation Documentation Hashes
 

@@ -1,6 +1,6 @@
 # Semantic Explanation Contract
 
-Status: HexCore 3.8.5 development implementation for issue #69. Source command,
+Status: released in HexCore 3.8.5 for issue #69. Source command,
 shared UI contract, real-HXDB tests and headless IDE watcher acceptance pass.
 Interactive human inspection and packaged acceptance remain pending.
 

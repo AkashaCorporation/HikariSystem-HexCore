@@ -1,8 +1,9 @@
-# Known Limitations - HexCore 3.8.4
+# Known Limitations - HexCore 3.8.5
 
 These limitations apply to the stable release as well as its qualified candidates.
-This supersedes the historical 3.5.1 checklist. Qualification history is tracked in
-[RELEASE_3_8_4_RC_CHECKLIST.md](RELEASE_3_8_4_RC_CHECKLIST.md).
+This supersedes the historical 3.8.4 checklist. Release-candidate qualification
+and current delivery boundaries are tracked in
+[HEXCORE_3_8_5_DELIVERY_MATRIX.md](HEXCORE_3_8_5_DELIVERY_MATRIX.md).
 
 ## Platform and distribution
 
@@ -21,6 +22,8 @@ This supersedes the historical 3.5.1 checklist. Qualification history is tracked
 - PDB boundary extraction requires llvm-pdbutil via `HEXCORE_PDBUTIL`, PATH or
   the standard LLVM installation. A custom development SDK path is not bundled
   or silently searched; qualify tool availability separately from addon loading.
+- Agent Bridge v1 is local and workspace-scoped. HexCore must already be open on
+  the same trusted workspace; the CLI is not an unattended no-IDE runner.
 
 ## Discovery and lazy bodies
 
@@ -33,6 +36,8 @@ This supersedes the historical 3.5.1 checklist. Qualification history is tracked
   bodies cannot establish absence of a behavior. Coverage/acceptance thresholds
   do not themselves cause body materialization.
 - Automatic critical-neighborhood materialization remains future product work.
+- Large-image analysis is deliberately bounded. When the budget is reached,
+  results remain partial rather than silently scanning every unwind-backed body.
 
 ## Decompilation and evidence
 
@@ -48,6 +53,12 @@ This supersedes the historical 3.5.1 checklist. Qualification history is tracked
   proof. Atlas false-match calibration and signature coverage remain limitations.
 - Composer validation does not rewrite original extractor outputs. Retained raw
   IOC candidates may include entries excluded from the composed assertions.
+- Helix `0.9.4-rc.3` retains explicit SCF temporaries, cast/type limitations and
+  known-loss confidence caps. Stable HexCore does not imply perfect pseudo-C.
+- Typed prototype persistence is available, but complete caller propagation is
+  not yet proven for every materialized consumer. That boundary remains partial.
+- AVX-512 lifting/execution support is incomplete and must fail or degrade with
+  typed diagnostics rather than being inferred from x86/x64 support.
 
 ## Persistence and lineage
 
@@ -67,7 +78,12 @@ This supersedes the historical 3.5.1 checklist. Qualification history is tracked
 ## Deferred scope
 
 New automatic containment/reachability models, binary-version rebind, digest-named
-session migration, product/library string grouping and richer signer/version
-metadata are not promised by 3.8.4. The LLVM/MLIR migration and major Helix semantic
-quality work are separately qualified post-3.8.4 changes. Heavy corpus latency and
-memory behavior still require bounded execution and explicit resource reporting.
+session migration, query-scoped critical materialization, complete authoritative
+DWARF/BTF/PDB propagation, product/library string grouping and richer signer/version
+metadata are not promised by 3.8.5. LLVM/MLIR 22 migration and major Helix semantic
+quality work remain post-3.8.5 programs. Heavy corpus latency and memory behavior
+still require bounded execution and explicit resource reporting.
+
+Job JSON must currently be UTF-8 without a byte-order mark. Windows PowerShell
+5.1 `Set-Content -Encoding utf8` writes a BOM; use a BOM-free writer or a patch-
+based editor when generating jobs from an agent.

@@ -4,12 +4,12 @@ Helix Query Language (HQL) matches versioned semantic rules against the typed C 
 
 ## Input contract
 
-The 3.8.5 development library also exposes a read-only ad-hoc query executor
+The 3.8.5 library also exposes a read-only ad-hoc query executor
 over bound HAST/HXDB records. It returns typed rows and explicit
 `matched/negative/unknown` evaluations, using a terminable worker for matching.
 The Disassembler source registers the pinned binary-session headless command and
-a runner-bound single-function IR lane; development watcher acceptance passes and
-packaged acceptance remains pending. See
+a runner-bound single-function IR lane; source and packaged acceptance pass with
+declared upstream/type-propagation partial boundaries. See
 [the ad-hoc query contract](../../docs/HQL_AD_HOC_QUERY.md).
 
 HQL consumes a Helix HAST FlatBuffer. In the IDE this is produced by either:
@@ -19,7 +19,7 @@ HQL consumes a Helix HAST FlatBuffer. In the IDE this is produced by either:
 
 Ordinary LLVM IR is not currently a supported HQL input contract.
 
-### Native quality in HAST 1.1 (development)
+### Native quality in HAST 1.1
 
 Semantic scanning requires a negotiated per-function native quality report.
 The reader distinguishes `no-known-loss`, `known-loss`, and `unreported`;
@@ -43,7 +43,7 @@ it validates `target_identity` and reports semantic read failures explicitly.
 
 The adapter preserves 64-bit integers and addresses exactly. Unsupported expressions, statements, and assembly are represented explicitly and contribute to per-function adapter coverage; they are never fabricated as integer zero.
 
-### 3.8.5 development: upstream quality
+### 3.8.5 upstream quality
 
 `scanHAST` accepts `options.upstream` with producer `architecture`, `status`,
 `semanticEligible`, `qualityIssues` and `warning`. The IDE bridge supplies this
