@@ -7,7 +7,7 @@ Professional disassembler + headless pipeline host for HexCore (Capstone, Remill
 | **Package** | `hexcore-disassembler` |
 | **Version** | **1.4.74** |
 | **Publisher** | hikarisystem |
-| **Product train** | HexCore **3.8.5 development** |
+| **Product train** | HexCore **3.8.5 stable** |
 
 ## 1.4.74 Agent Bridge v1
 

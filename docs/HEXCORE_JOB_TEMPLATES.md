@@ -1,4 +1,4 @@
-# HexCore Job Templates - v3.8.5 Development Analysis Contract
+# HexCore Job Templates - v3.8.5 Analysis Contract
 
 Safe default job templates for users and AI agents.
 

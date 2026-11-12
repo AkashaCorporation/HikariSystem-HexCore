@@ -5,13 +5,26 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.5] - Unreleased
+## [3.8.5] - 2026-11-12
+
+### Stable Release Qualification
+
+- Promote the accepted `3.8.5-rc.2` source to stable identity without changing
+  native engine versions or implementation code.
+- Verify the RC2 Windows ZIP digest, all eight native node loads,
+  Agent Bridge doctor/schema/capabilities, Khimera `1.4.78` ownership and
+  exact-range behavior, Debugger step/snapshot/breakpoint lifecycle, native SAB
+  hooks, Revenant `0.5.0`, Elixir `1.0.4`, and HQL/HXDB integration.
+- Retain the known typed-caller propagation result as `partial`; issue #62 and
+  broader Helix SCF/cast/type quality remain post-3.8.5 work.
+- Keep Linux packaging experimental and publish Windows x64 portable as the
+  qualified stable distribution.
 
 ### Final Candidate Qualification
 
 #### RC.2 Packaging
 
-- Advance the prerelease identity to `3.8.5-rc.2` after the Khimera
+- Advance the release-candidate identity to `3.8.5-rc.2` after the Khimera
   source-oracle closure. Disassembler `1.4.78` is included; the residual
   noreturn, signature and Helix-quality gaps remain explicitly documented and
   are not represented as fixed.

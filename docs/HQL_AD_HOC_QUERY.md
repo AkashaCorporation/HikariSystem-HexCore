@@ -1,6 +1,6 @@
 # HQL Ad-Hoc Query Executor
 
-Status: 3.8.5 development implementation for issue #67. The source pipeline
+Status: released in 3.8.5 for issue #67. The source pipeline
 registry exposes `hexcore.hql.queryHeadless`/`hexcore.hql.query`, using the pinned
 view, read-only capture, terminable native producer and isolated HAST matcher.
 The new Helix addon is installed only in the local development tree after a
