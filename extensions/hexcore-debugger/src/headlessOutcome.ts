@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 export type HeadlessStatus = 'ok' | 'partial' | 'failed';
-export type HeadlessStopKind = 'breakpoint' | 'sentinel-return' | 'configured-terminal' | 'instruction-budget' | 'unexpected-zero-pc' | 'unsupported-instruction' | 'fault' | 'stopped';
+export type HeadlessStopKind = 'breakpoint' | 'exit' | 'sentinel-return' | 'configured-terminal' | 'instruction-budget' | 'unexpected-zero-pc' | 'unsupported-instruction' | 'fault' | 'stopped';
 
 export interface UnsupportedInstructionEvidence {
 	address?: string;
@@ -30,6 +30,8 @@ export interface HeadlessOutcome {
 		address?: string;
 		message: string;
 		terminalKind?: string;
+		exitCode?: string;
+		exitSource?: string;
 		capability?: BackendCapabilityEvidence;
 	};
 }
@@ -46,6 +48,7 @@ export interface HeadlessOutcomeInput {
 	unsupportedInstruction?: UnsupportedInstructionEvidence;
 	terminalAddresses?: readonly bigint[];
 	terminalKind?: string;
+	programExit?: { code: bigint; source: string };
 }
 
 const SUCCESS_SENTINELS = new Set([0xdead0000n, 0xdeaddeadn, 0xdeaddeaddeaddeadn]);
@@ -127,6 +130,19 @@ export function classifyHeadlessOutcome(input: HeadlessOutcomeInput): HeadlessOu
 			success: true,
 			status: 'ok',
 			stopReason: { kind: 'sentinel-return', address: formattedAddress, message: 'Execution reached a configured return sentinel.' }
+		};
+	}
+	if (input.programExit) {
+		return {
+			success: true,
+			status: 'ok',
+			stopReason: {
+				kind: 'exit',
+				address: formattedAddress,
+				message: `Program exited with code ${input.programExit.code.toString()}.`,
+				exitCode: input.programExit.code.toString(),
+				exitSource: input.programExit.source,
+			}
 		};
 	}
 	if (input.crashed || input.error) {

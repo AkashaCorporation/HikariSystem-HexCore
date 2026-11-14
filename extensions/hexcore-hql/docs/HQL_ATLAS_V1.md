@@ -11,6 +11,12 @@ HQL Atlas is a versioned semantic knowledge base for HexCore. It separates four 
 
 Reviewable files in Git are canonical. SQLite is a disposable index/cache rebuilt deterministically from those files.
 
+Rules may be reviewed as canonical `.hql.json` or textual HQL 1.0 `.hql`.
+Text is compiled before record validation and indexing; both forms must produce
+the same canonical signature SHA-256. The source file bytes and path remain in
+the source manifest, while the database stores only the validated canonical
+rule record. Duplicate IDs across the two formats fail the Atlas build.
+
 ## Canonical record
 
 Each released rule must carry:

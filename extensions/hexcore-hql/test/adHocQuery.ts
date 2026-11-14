@@ -26,7 +26,15 @@ async function main() {
 		const a = normalizeAdHocQuery({ condition: own, addresses: ['0X00001000', '0x1000'], select: ['address', 'function'] });
 		const b = normalizeAdHocQuery({ schemaVersion: 1, select: ['function', 'address'], addresses: ['0x1000'], materialization: 'never', condition: own });
 		assert.strictEqual(queryDigest(a), queryDigest(b));
+		assert.strictEqual(normalizeAdHocQuery({ condition: own, materialization: { mode: 'never' } }).materialization, 'never');
+		assert.deepStrictEqual(normalizeAdHocQuery({ condition: own, materialization: { mode: 'needed' } }).materialization,
+			{ mode: 'needed', maxFunctions: 32, maxBytes: 4194304, maxMilliseconds: 30000, maxDepth: 1 });
+		assert.deepStrictEqual(normalizeAdHocQuery({ condition: own, materialization: { mode: 'bounded', maxFunctions: 7, maxBytes: 8192, maxMilliseconds: 5000, maxDepth: 2 } }).materialization,
+			{ mode: 'bounded', maxFunctions: 7, maxBytes: 8192, maxMilliseconds: 5000, maxDepth: 2 });
+		assert.notStrictEqual(queryDigest(a), queryDigest(normalizeAdHocQuery({ condition: own, addresses: ['0x1000'], materialization: { mode: 'bounded' } })));
 		assert.throws(() => normalizeAdHocQuery({ condition: own, materialization: 'needed' }));
+		assert.throws(() => normalizeAdHocQuery({ condition: own, materialization: { mode: 'needed', maxDepth: 2 } }));
+		assert.throws(() => normalizeAdHocQuery({ condition: own, materialization: { mode: 'bounded', maxFunctions: 0 } }));
 		assert.throws(() => normalizeAdHocQuery({ condition: { fact: { fact: 'xref', attributes: [{ field: 'typo', value: 1 }] } } }));
 		assert.throws(() => normalizeAdHocQuery({ condition: { count: { fact: { fact: 'xref' }, min: 4, max: 1 } } }));
 		assert.throws(() => normalizeAdHocQuery({ condition: { query: { target: 'CStringLiteral' } } }));

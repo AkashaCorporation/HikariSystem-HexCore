@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.4.79] - Unreleased
+
+- Add opt-in `never`, `needed`, and `bounded` HQL query materialization over
+  explicit functions and proven reference/propagation dependencies.
+- Stage decoding in a terminable child process with HXDB disabled; timeout or
+  cancellation removes snapshots and preserves the accepted generation.
+- Commit complete staged bodies as one target-bound generation/universe batch,
+  dirty/recompute dependent summaries, and reevaluate against a fresh view.
+- Enforce function, byte, wall-time, and dependency-depth budgets. Partial,
+  decode-empty, unresolved indirect, and unindexed dependencies remain explicit
+  unknown reasons and never become clean negatives.
+- Bound stripped x86/x64 ELF functions by reachable CFG blocks, PLT-family
+  sections, and independently proven strong starts instead of allowing linear
+  decoding to create overlapping multi-kilobyte owners.
+- Recover SysV x64 `main` only from a strict process-entry startup pattern and
+  retain the assignment/call witness as `runtime-start-main` evidence.
+- Feed the existing bounded PIC jump-table recovery into function ownership,
+  retain recovered case targets as internal blocks, and repeat direct-call
+  discovery over accepted handlers.
+- Publish executable-byte range/decode ownership, overlaps, unresolved indirect
+  transfers, and an explicit `known-function-index` analysis-depth basis.
+- Qualify the runbook regression with 678 deterministic functions, zero
+  overlaps, recovered `main`, corrected `0x402520`, and a 4,192-byte VM
+  dispatcher while preserving the NUCLEO PE `.pdata` boundary set.
+
 ## [1.4.78] - 2026-11-09
 
 - Reconcile PE semantic function ownership from reachable CFG blocks after the

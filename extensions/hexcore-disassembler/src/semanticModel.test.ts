@@ -355,6 +355,15 @@ suite('HXDB semantic model R31/R32', () => {
 		const unknownTypedef = parseLegacyCType('ThirdPartyMysteryType *', evidence());
 		assert.strictEqual(unknownTypedef.status, 'opaque');
 		assert.match(unknownTypedef.reason ?? '', /unrecognized base type/);
+		const debugPointer = parseLegacyCType('ThirdPartyMysteryType *', evidence('debug', 2, 'dwarf:cu'), {
+			targetIdentity: 'target:sha256:debug-pointer', nominalScope: 'dwarf:cu', allowOpaquePointerBase: true,
+		});
+		assert.strictEqual(debugPointer.status, 'parsed');
+		assert.strictEqual(debugPointer.type.kind, 'pointer');
+		assert.strictEqual(debugPointer.types.some(type => type.kind === 'opaque-c-declaration'), true);
+		const kernelU64 = parseLegacyCType('u64', evidence('debug'));
+		assert.strictEqual(kernelU64.type.kind, 'typedef');
+		assert.strictEqual(kernelU64.types.find(type => type.typeId === kernelU64.type.targetTypeId)?.sizeBits, 64);
 
 		const explicit = createOpaqueCDeclaration('  void  (__vendor * x) [ 4 ] ', evidence('definitive'));
 		assert.strictEqual(explicit.opaqueDeclaration, 'void (__vendor * x)[4]');

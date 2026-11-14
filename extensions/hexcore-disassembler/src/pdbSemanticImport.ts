@@ -10,6 +10,7 @@ import { discoverPdbPath } from './pdbLoader';
 import { loadPdbProvider, type PdbProviderOptions, type PdbProviderResult } from './pdbProvider';
 import type { PdbFunctionSymbol } from './pdbProvider';
 import { SemanticCommandService, type SemanticPrototypeParameterInput } from './semanticCommandService';
+import { semanticPrototypeBatchCallbacks } from './semanticCommandIntegration';
 import type { CallingConventionId, ParameterLocation } from './semanticModel';
 import { canonicalSerialize, canonicalizeSemanticType, classifyAggregateReturn, getABIModel } from './semanticModel';
 
@@ -97,7 +98,18 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 		auxiliaryTypes.push(target, canonicalizeSemanticType({ kind: 'typedef', name: alias.name, targetTypeId: target.typeId }, debugEvidence));
 	}
 	if (auxiliaryTypes.length > 0) { store.writeBatch({ types: auxiliaryTypes }); }
-	const service = new SemanticCommandService(session, { producer: `pdb:${provider.identity.guid}:${provider.identity.age}`, typeNamespace: `pdb:${provider.identity.guid}`, computeStoreHash: false });
+	const batch = semanticPrototypeBatchCallbacks(session, engine);
+	const service = new SemanticCommandService(session, {
+		producer: `pdb:${provider.identity.guid}:${provider.identity.age}`,
+		typeNamespace: `pdb:${provider.identity.guid}`,
+		legacyCTypeOptions: {
+			pointerSizeBits: engine.getArchitecture() === 'x86' ? 32 : 64,
+			longSizeBits: 32,
+			allowOpaquePointerBase: true,
+		},
+		callbacks: batch.callbacks,
+		computeStoreHash: false,
+	});
 	const maxFunctions = options.maxFunctions ?? 100_000;
 	if (!Number.isSafeInteger(maxFunctions) || maxFunctions < 1) { throw new Error('PDB maxFunctions must be positive.'); }
 	let prototypeCount = 0;
@@ -160,7 +172,7 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 					} : {}),
 				});
 			}
-			service.applyPrototype({
+			const mutation = service.applyPrototype({
 				functionIdentity: `function:${semanticAddressText}`,
 				functionAddress: semanticAddressText,
 				returnType: returnRecordType ? { typeId: returnRecordType.typeId } : prototype.returnType,
@@ -173,15 +185,24 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 				evidence: { strength: 'debug', source: 'debug-info', producer: `pdb:${provider.identity.guid}:${provider.identity.age}`, generation },
 			});
 			prototypeCount++;
+			if (mutation.callbackFailures.length > 0) {
+				prototypeFailures++;
+				failureDiagnostics.push({
+					functionIdentity: `function:${semanticAddressText}`,
+					message: `semantic callbacks incomplete: ${mutation.callbackFailures.map(failure => `${failure.callback}:${failure.message}`).join('; ')}`,
+				});
+			}
 		} catch (error) {
 			prototypeFailures++;
 			failureDiagnostics.push({ functionIdentity: `function:${fn.address}`, message: error instanceof Error ? error.message : String(error) });
 		}
 	}
+	const propagation = await batch.finalize();
 	return {
-		ok: prototypeFailures === 0,
+		ok: prototypeFailures === 0 && (propagation.status === 'ok' || propagation.status === 'not-required'),
 		command: 'hexcore.pdb.importSemantics',
-		semanticStatus: prototypeFailures === 0 && unreconciledFunctionCount === 0 && provider.status === 'ok' ? 'ok' as const : 'partial' as const,
+		semanticStatus: prototypeFailures === 0 && unreconciledFunctionCount === 0 && provider.status === 'ok'
+			&& (propagation.status === 'ok' || propagation.status === 'not-required') ? 'ok' as const : 'partial' as const,
 		provider,
 		types,
 		auxiliaryTypeCount: auxiliaryTypes.length,
@@ -191,6 +212,7 @@ export async function importPdbSemantics(engine: DisassemblerEngine, options: Pd
 		unreconciledFunctionCount,
 		prototypeFailures,
 		failureDiagnostics,
+		propagation,
 		storeHash: store.exportHash(),
 	};
 }

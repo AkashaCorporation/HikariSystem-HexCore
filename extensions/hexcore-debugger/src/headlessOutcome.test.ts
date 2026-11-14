@@ -30,6 +30,21 @@ suite('Headless terminal outcome', () => {
 		assert.strictEqual(result.stopReason.kind, 'sentinel-return');
 	});
 
+	test('reports a Linux exit syscall as a successful terminal outcome', () => {
+		const result = classifyHeadlessOutcome({
+			crashed: false,
+			currentAddress: 0x401020n,
+			instructionsRan: 19,
+			instructionBudget: 500,
+			programExit: { code: 7n, source: 'sys_60' },
+		});
+		assert.strictEqual(result.success, true);
+		assert.strictEqual(result.status, 'ok');
+		assert.strictEqual(result.stopReason.kind, 'exit');
+		assert.strictEqual(result.stopReason.exitCode, '7');
+		assert.strictEqual(result.stopReason.exitSource, 'sys_60');
+	});
+
 	test('recognizes a caller-provided terminal address and kind', () => {
 		const result = classifyHeadlessOutcome({
 			crashed: true,

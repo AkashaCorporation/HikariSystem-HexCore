@@ -1,0 +1,123 @@
+{
+  "id": "memory.allocator_candidate",
+  "version": "1.0.0",
+  "namespace": "memory",
+  "status": "nursery",
+  "author": "AkashaCorporation",
+  "license": "MIT",
+  "provenance": {
+    "kind": "internal",
+    "source": "G05 textual HQL fixture",
+    "modified": false
+  },
+  "compatibility": {
+    "hql": ">=0.3.1 <1.0.0",
+    "helix": ">=0.9.4",
+    "hastSchema": 1
+  },
+  "fixtures": {
+    "manifest": "textual/v1/memory-allocator.hql.json"
+  },
+  "limitations": [
+    "Function-scoped candidate; no path proof."
+  ],
+  "supersedes": [
+    "memory.allocator_candidate.legacy"
+  ],
+  "name": "Allocator candidate",
+  "description": "Matches allocator structure and typed ownership evidence.",
+  "severity": "info",
+  "mitre": [
+    "T1105"
+  ],
+  "evidenceLevel": "candidate",
+  "calibration": {
+    "confidence": 0.75,
+    "corpus": "g05-textual-fixture",
+    "corpusSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "condition": {
+    "all": [
+      {
+        "query": {
+          "target": "CCallExpr",
+          "attributes": [
+            { "field": "callee", "value": "re:^(malloc|calloc)$" }
+          ],
+          "contains": [
+            {
+              "target": "CCastExpr",
+              "attributes": [
+                { "field": "targetType", "value": "void *" }
+              ]
+            }
+          ],
+          "operands": [
+            {
+              "position": 0,
+              "query": {
+                "target": "CVarRefExpr",
+                "attributes": [
+                  { "field": "type", "value": "size_t" }
+                ]
+              }
+            }
+          ],
+          "minDepth": 0,
+          "maxDepth": 4
+        }
+      },
+      {
+        "any": [
+          { "query": { "target": "CForStmt" } },
+          { "not": { "query": { "target": "CWhileStmt" } } }
+        ]
+      },
+      {
+        "count": {
+          "query": {
+            "target": "CFieldAccessExpr",
+            "attributes": [
+              { "field": "arrow", "value": true }
+            ]
+          },
+          "min": 1,
+          "max": 3
+        }
+      }
+    ]
+  },
+  "semanticCondition": {
+    "all": [
+      {
+        "fact": {
+          "fact": "summary-ownership",
+          "attributes": [
+            { "field": "ownershipKind", "value": "allocate" }
+          ]
+        }
+      },
+      {
+        "not": {
+          "fact": {
+            "fact": "summary-barrier",
+            "attributes": [
+              { "field": "lossy", "value": true }
+            ]
+          }
+        }
+      },
+      {
+        "count": {
+          "fact": {
+            "fact": "summary-call",
+            "attributes": [
+              { "field": "calleeIdentity", "value": "re:malloc$" }
+            ]
+          },
+          "exactly": 1
+        }
+      }
+    ]
+  }
+}

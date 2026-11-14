@@ -710,9 +710,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				unsupportedInstruction,
 				terminalAddresses,
 				terminalKind,
+				programExit: engine.getTerminalLinuxExit(),
 			});
 			const expectedTerminal = terminalOutcome.stopReason.kind === 'sentinel-return'
-				|| terminalOutcome.stopReason.kind === 'configured-terminal';
+				|| terminalOutcome.stopReason.kind === 'configured-terminal'
+				|| terminalOutcome.stopReason.kind === 'exit';
 			if (expectedTerminal) engine.clearLastError();
 
 			const exportData = {
@@ -1243,7 +1245,12 @@ export function activate(context: vscode.ExtensionContext): void {
 				backend: executionBackend,
 				architecture,
 				unsupportedInstruction,
+				programExit: engine.getTerminalLinuxExit(),
 			});
+			const expectedTerminal = terminalOutcome.stopReason.kind === 'sentinel-return'
+				|| terminalOutcome.stopReason.kind === 'configured-terminal'
+				|| terminalOutcome.stopReason.kind === 'exit';
+			if (expectedTerminal) engine.clearLastError();
 
 			// Collect v3.7 data
 			const breakpointSnapshotsData = engine.getBreakpointSnapshots();
@@ -1303,9 +1310,9 @@ export function activate(context: vscode.ExtensionContext): void {
 				elfRelocations: engine.getELFInfo()?.relocations,
 				crashed,
 				crashError: crashError || undefined,
-				terminatedWithError,
-				error: effectiveError,
-				faultInfo,
+				terminatedWithError: expectedTerminal ? false : terminatedWithError,
+				error: expectedTerminal ? undefined : effectiveError,
+				faultInfo: expectedTerminal ? undefined : faultInfo,
 				sessionActive: keepAlive && engine.isEmulationSessionActive(),
 				state: stateAfter ? {
 					isRunning: stateAfter.isRunning,

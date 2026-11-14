@@ -14,6 +14,7 @@ import {
 	getStructLayout,
 	parseBtfSection,
 	resolveTypeSize,
+	scopeStructInfoForFunctions,
 	shouldPreferFunctionSignature,
 	type BTFData,
 	type BTFType,
@@ -171,6 +172,10 @@ suite('elfBtfLoader.parseBtfSection', () => {
 		assert.strictEqual(signature.variadic, true);
 		assert.strictEqual(signature.params.length, 1);
 		assert.strictEqual(signature.params[0].name, 'format');
+		assert.strictEqual(signature.params[0].abiSizeBits, 32);
+		assert.strictEqual(signature.params[0].abiValueClass, 'integer');
+		assert.strictEqual(signature.returnAbiSizeBits, 32);
+		assert.strictEqual(signature.returnAbiValueClass, 'integer');
 	});
 
 	test('prefers named definition parameters over an equal-arity declaration', () => {
@@ -204,6 +209,24 @@ suite('elfBtfLoader.parseBtfSection', () => {
 		};
 
 		assert.strictEqual(shouldPreferFunctionSignature(existing, candidate), false);
+	});
+
+	test('scoped DWARF signatures retain only their authoritative boundaries', () => {
+		const scoped = scopeStructInfoForFunctions({
+			structs: {},
+			functions: {
+				keep: { returnType: 'void', params: [] },
+				drop: { returnType: 'void', params: [] },
+			},
+			boundaries: [
+				{ name: 'keep', lowPc: 0x1000, highPc: 0x1020 },
+				{ name: 'drop', lowPc: 0x2000, highPc: 0x2040 },
+			],
+		}, ['keep']);
+		assert.deepStrictEqual(Object.keys(scoped.functions), ['keep']);
+		assert.deepStrictEqual(scoped.boundaries, [
+			{ name: 'keep', lowPc: 0x1000, highPc: 0x1020 },
+		]);
 	});
 
 	test('still prefers a signature with more parameters', () => {

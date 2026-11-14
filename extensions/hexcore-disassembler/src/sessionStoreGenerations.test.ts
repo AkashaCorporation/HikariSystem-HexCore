@@ -213,6 +213,77 @@ suite('SessionStore generations and engine manifest (3.8.4 C2/C3)', () => {
 		reopened.dispose();
 	});
 
+	test('query materialization commits multiple complete bodies as one generation', () => {
+		const store = new SessionStore(binaryPath);
+		try {
+			bind(store);
+			store.cacheFunction('0x1000', 'root', 0x10, 0x1010);
+			store.cacheFunction('0x2000', 'callee', 0x20, 0x2020);
+			const before = store.getAnalysisSession()!;
+			const completeness = (start: number, end: number) => ({
+				state: 'complete' as const, authoritativeStart: start, authoritativeEndExclusive: end,
+				decodedEndExclusive: end, semanticEndExclusive: end, boundaryReached: true as const,
+				stopReason: 'function-end' as const, byteCoverage: 1,
+			});
+			const committed = store.commitMaterializationBatch([
+				{ address: '0x1000', endExclusive: '0x1010', bodySha256: 'a'.repeat(64), bodyCompleteness: completeness(0x1000, 0x1010) },
+				{ address: '0x2000', endExclusive: '0x2020', bodySha256: 'b'.repeat(64), bodyCompleteness: completeness(0x2000, 0x2020) },
+			]);
+			assert.strictEqual(committed.session.generation, before.generation + 1);
+			assert.strictEqual(committed.session.parentGeneration, before.generation);
+			assert.strictEqual(committed.manifest.materializedFunctions.length, 2);
+			assert.deepStrictEqual(committed.dirtyFunctions, ['function:0x1000', 'function:0x2000']);
+			assert.strictEqual(store.getCachedFunctions().length, 0);
+			assert.deepStrictEqual(store.getSemanticStore().getWholeProgramPropagationStore().listDirty().map(item => item.functionIdentity), committed.dirtyFunctions);
+			assert.match(store.getMeta('analysis_last_incremental_update_json') ?? '', /query-materialization/);
+			const acceptedManifest = store.getMeta('analysis_universe_manifest_json');
+			const acceptedSession = store.getMeta('analysis_session_json');
+			assert.throws(() => store.commitMaterializationBatch([
+				{ address: '0x3000', endExclusive: '0x3040', bodySha256: 'not-a-hash' },
+			]), /Invalid complete materialization/);
+			assert.strictEqual(store.getMeta('analysis_universe_manifest_json'), acceptedManifest);
+			assert.strictEqual(store.getMeta('analysis_session_json'), acceptedSession);
+		} finally { store.dispose(); }
+
+		const reopened = new SessionStore(binaryPath);
+		try {
+			bind(reopened);
+			assert.strictEqual(reopened.getAnalysisUniverseManifest()?.materializedFunctions.length, 2);
+			assert.strictEqual(reopened.getAnalysisSession()?.generation, 1);
+		} finally { reopened.dispose(); }
+	});
+
+	test('query materialization rolls back every persisted field on a mid-transaction failure', () => {
+		const store = new SessionStore(binaryPath);
+		try {
+			bind(store);
+			const beforeSession = store.getMeta('analysis_session_json');
+			const beforeManifest = store.getMeta('analysis_universe_manifest_json');
+			const beforeBinding = store.getMeta('analysis_generation_universe_json');
+			const generation = store.getAnalysisSession()!.generation;
+			const db = (store as unknown as { db: { exec(sql: string): void } }).db;
+			db.exec(`
+				CREATE TRIGGER fail_query_materialization_session
+				BEFORE INSERT ON session_meta
+				WHEN NEW.key = 'analysis_session_json'
+				BEGIN SELECT RAISE(ABORT, 'injected batch failure'); END;
+			`);
+			assert.throws(() => store.commitMaterializationBatch([{
+				address: '0x1000', endExclusive: '0x1010', bodySha256: 'a'.repeat(64),
+				bodyCompleteness: {
+					state: 'complete', authoritativeStart: 0x1000, authoritativeEndExclusive: 0x1010,
+					decodedEndExclusive: 0x1010, semanticEndExclusive: 0x1010,
+					boundaryReached: true, stopReason: 'function-end', byteCoverage: 1,
+				},
+			}]), /injected batch failure/);
+			assert.strictEqual(store.getMeta('analysis_session_json'), beforeSession);
+			assert.strictEqual(store.getMeta('analysis_universe_manifest_json'), beforeManifest);
+			assert.strictEqual(store.getMeta('analysis_generation_universe_json'), beforeBinding);
+			assert.strictEqual(store.getAnalysisSession()!.generation, generation);
+			assert.strictEqual(store.getSemanticStore().getWholeProgramPropagationStore().listDirty().length, 0);
+		} finally { store.dispose(); }
+	});
+
 	test('re-recording preserves saved marks and original discovery timestamps for stable finding IDs', () => {
 		const store = new SessionStore(binaryPath);
 		bind(store);

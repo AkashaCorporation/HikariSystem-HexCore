@@ -3,6 +3,7 @@ import * as path from 'path';
 import { assertValidSignature } from '../signatures/schema.js';
 import type { HQLSignature } from '../types/hql.js';
 import { canonicalJson, sha256Hex } from './canonical.js';
+import { compileHql } from '../text/compiler.js';
 import { assertAtlasRecordSet, validateAtlasRecord } from './source.js';
 import type {
   AtlasBenchmarkRecord,
@@ -125,6 +126,18 @@ function readJson(absolutePath: string, source: string): { bytes: Buffer; parsed
   }
   const canonical = canonicalJson(parsed);
   return { bytes, parsed, canonical };
+}
+
+function readSignature(absolutePath: string, source: string): { bytes: Buffer; parsed: unknown; canonical: string } {
+  if (absolutePath.endsWith('.hql.json')) return readJson(absolutePath, source);
+  const bytes = fs.readFileSync(absolutePath);
+  let parsed: HQLSignature;
+  try {
+    parsed = compileHql(bytes.toString('utf8'), { filename: source });
+  } catch (error) {
+    fail(source, `invalid textual HQL: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  return { bytes, parsed, canonical: canonicalJson(parsed) };
 }
 
 function requireManagedSignature(value: unknown, source: string): ManagedSignature {
@@ -303,9 +316,9 @@ export function loadHqlPackageAtlasSource(packageRoot: string): AtlasCanonicalSo
   const files = new Map<string, AtlasSourceFile>();
   const records: AtlasSourcedRecord[] = [];
   const signatures = new Map<string, { signature: ManagedSignature; sourcePath: string }>();
-  for (const absolutePath of collectFiles(signaturesRoot, name => name.endsWith('.hql.json'))) {
+  for (const absolutePath of collectFiles(signaturesRoot, name => name.endsWith('.hql.json') || name.endsWith('.hql'))) {
     const sourcePath = slashPath(root, absolutePath);
-    const document = readJson(absolutePath, sourcePath);
+    const document = readSignature(absolutePath, sourcePath);
     const signature = requireManagedSignature(document.parsed, sourcePath);
     if (signatures.has(signature.id)) fail(sourcePath, `duplicate signature id ${signature.id}`);
     signatures.set(signature.id, { signature, sourcePath });

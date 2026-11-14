@@ -76,6 +76,29 @@ const NODE_FIELDS: Record<CNodeKind, ReadonlySet<string>> = {
   CCommentStmt: new Set(['kind', 'text']),
 };
 
+/** Read-only schema introspection used by the textual HQL compiler. */
+export function hqlNodeKinds(): readonly CNodeKind[] {
+  return [...C_NODE_KINDS];
+}
+
+export function hqlNodeFields(kind: CNodeKind): readonly string[] {
+  return [...new Set([...BASE_NODE_FIELDS, ...NODE_FIELDS[kind]])].sort();
+}
+
+export function hqlSemanticFactKinds(): readonly string[] {
+  return Object.keys(SEMANTIC_FACT_FIELDS).sort();
+}
+
+export function hqlSemanticFactFields(kind: string): readonly string[] {
+  return [...(SEMANTIC_FACT_FIELDS[kind] ?? [])].sort();
+}
+
+export function hqlOperatorValues(kind: CNodeKind): readonly string[] {
+  if (kind === 'CBinaryExpr') return [...BINARY_OPERATORS].sort();
+  if (kind === 'CUnaryExpr') return [...UNARY_OPERATORS].sort();
+  return [];
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }

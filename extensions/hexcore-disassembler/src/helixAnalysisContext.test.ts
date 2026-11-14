@@ -153,4 +153,38 @@ suite('Immutable Disassembler to Helix analysis context', () => {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	test('conflicted HXDB types cannot re-enter through the textual debug fallback', () => {
+		const targetIdentity = `target:sha256:${'a'.repeat(64)}`;
+		const integer = { typeId: 'type:u32', kind: 'integer', name: 'uint32_t', sizeBits: 32 };
+		const record = {
+			typeId: 'type:record', kind: 'struct', name: 'RuntimeContext', sizeBits: 32,
+			members: [{ name: 'value', typeId: integer.typeId, bitOffset: 0, bitSize: 32 }],
+		};
+		const pointer = { typeId: 'type:pointer', kind: 'pointer', targetTypeId: record.typeId, sizeBits: 64 };
+		const context = {
+			contextVersion: 1, contextSha256: 'c'.repeat(64),
+			target: { id: targetIdentity, format: 'ELF64', architecture: 'x64', imageBase: '0x0', imageSize: 3 },
+			analysis: { generation: 1, complete: true, functionStartsAuthoritative: true },
+			function: { entry: '0x1000', start: '0x1000', end: '0x1003', name: 'typed_fn' },
+			functionStarts: [0x1000], blocks: [], edges: [], imports: [], relocations: [],
+			symbols: [{ address: '0x1000', name: 'typed_fn', kind: 'function' }], segments: [],
+			abi: { platform: 'sysv', defaultCallingConvention: 'sysv64', stackDeltaStatus: 'pending' },
+			semantic: {
+				storeHash: 'd'.repeat(64), types: [integer, record, pointer], bindings: [],
+				prototypes: [{ functionIdentity: 'function:0x1000', functionAddress: '0x1000',
+					returnTypeId: integer.typeId, parameters: [{ ordinal: 0, name: 'context', typeId: pointer.typeId }] }],
+				conflicts: [
+					{ factKind: 'type', factKey: record.typeId, reason: 'equal-authority-layout-conflict' },
+					{ factKind: 'prototype', factKey: 'function:0x1000', reason: 'equal-authority-prototype-conflict' },
+				],
+			},
+		} as any;
+		const envelope = createHelixDebugTypeEnvelope(context, {
+			structs: { RuntimeContext: { size: 4, fields: [{ name: 'value', offset: '0x0', size: 4, type: 'uint32_t' }] } },
+			functions: { typed_fn: { returnType: 'uint32_t', params: [{ index: 0, name: 'context', type: 'struct RuntimeContext *' }] } },
+		});
+		assert.strictEqual(envelope.structs.RuntimeContext, undefined);
+		assert.strictEqual(envelope.functions.typed_fn, undefined);
+	});
 });

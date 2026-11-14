@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.1.24 - Unreleased
+
+- Dispatch x64 ELF syscalls from an explicit worker register snapshot instead
+  of reading the unrelated host Unicorn instance.
+- Apply worker-backed memory, mapping, TLS-register and return-value effects
+  before resuming execution, while preserving unknown syscalls as `-ENOSYS`.
+- Preserve original syscall numbers in traces, render negative returns as
+  64-bit values, and classify `exit`/`exit_group` with an explicit exit code.
+
 ## 2.1.23 - 2026-11-07
 
 - Pass a retained `Uint8Array` view to the native SAB hook instead of a raw

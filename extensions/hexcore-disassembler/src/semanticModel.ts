@@ -856,6 +856,8 @@ export interface LegacyCTypeOptions {
 	longDoubleSizeBits?: 64 | 80 | 128;
 	targetIdentity?: string;
 	nominalScope?: string;
+	/** Debug providers may prove pointer shape while the pointee typedef body remains unavailable. */
+	allowOpaquePointerBase?: boolean;
 }
 
 export interface LegacyCTypeResult {
@@ -979,6 +981,10 @@ function legacyAliasShape(base: string, options: LegacyCDataModel): LegacyAliasS
 		LONG_PTR: integer(options.pointerSizeBits, true), DWORD_PTR: integer(options.pointerSizeBits, false),
 		HANDLE: 'void-pointer', HMODULE: 'void-pointer', HWND: 'void-pointer', PVOID: 'void-pointer',
 		LPVOID: 'void-pointer', LPCVOID: 'const-void-pointer',
+		U8: integer(8, false), __U8: integer(8, false), S8: integer(8, true), __S8: integer(8, true),
+		U16: integer(16, false), __U16: integer(16, false), S16: integer(16, true), __S16: integer(16, true),
+		U32: integer(32, false), __U32: integer(32, false), S32: integer(32, true), __S32: integer(32, true),
+		U64: integer(64, false), __U64: integer(64, false), S64: integer(64, true), __S64: integer(64, true),
 	};
 	const target = aliases[key];
 	return target ? { name, target } : undefined;
@@ -1179,6 +1185,12 @@ export class SemanticTypeCatalog {
 				target = this.intern(alias.target, normalizedEvidence);
 			}
 			current = this.intern({ kind: 'typedef', name: alias.name, targetTypeId: target.typeId, ...baseQualifiers }, normalizedEvidence);
+		} else if (options.allowOpaquePointerBase === true && pointerSegments.length > 0
+			&& /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(baseName)) {
+			current = this.intern({ kind: 'opaque-c-declaration', opaqueDeclaration: baseName }, normalizedEvidence);
+			if (baseQualifiers.const || baseQualifiers.volatile || baseQualifiers.restrict) {
+				current = this.intern({ kind: 'qualified', targetTypeId: current.typeId, ...baseQualifiers }, normalizedEvidence);
+			}
 		} else {
 			return opaque(`unrecognized base type: ${baseName}`);
 		}

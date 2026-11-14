@@ -12,13 +12,17 @@ async function main() {
 		path.resolve(__dirname, '../../../../hexcore-helix/hexcore-helix.win32-x64-msvc.node'),
 		path.resolve(__dirname, '../../../../../../HexCore-Helix-v2/target/release/hexcore-helix.hast1-r30.node'),
 	].filter(Boolean);
+	const acceptedNodeSha256 = new Set([
+		metadata.producer.helix.nodeSha256,
+		metadata.producer.helix.packagedNodeSha256,
+	].filter(Boolean));
 	const resolvedNode = candidates.find(candidate => fs.existsSync(candidate)
-		&& crypto.createHash('sha256').update(fs.readFileSync(candidate)).digest('hex') === metadata.producer.helix.nodeSha256);
+		&& acceptedNodeSha256.has(crypto.createHash('sha256').update(fs.readFileSync(candidate)).digest('hex')));
 	if (!resolvedNode) {
-		throw new Error(`No HAST-v1 Helix node matches ${metadata.producer.helix.nodeSha256}`);
+		throw new Error(`No HAST-v1 Helix node matches one of: ${[...acceptedNodeSha256].join(', ')}`);
 	}
 	const nodeSha256 = crypto.createHash('sha256').update(fs.readFileSync(resolvedNode)).digest('hex');
-	if (nodeSha256 !== metadata.producer.helix.nodeSha256) {
+	if (!acceptedNodeSha256.has(nodeSha256)) {
 		throw new Error(`Helix node hash drift: ${nodeSha256}`);
 	}
 	const helix = require(resolvedNode);

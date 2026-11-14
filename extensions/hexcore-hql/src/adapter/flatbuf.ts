@@ -43,7 +43,9 @@ import type {
   CAsmStmt,
   CCommentStmt,
   HASTAdapterCoverage,
+  HASTEvidenceOrigin,
   HASTModuleMetadata,
+  HASTTypeEvidence,
 } from '../types/ast.js';
 import { HAST_CAPABILITIES } from '../types/ast.js';
 
@@ -57,13 +59,15 @@ import * as flatbuffers from 'flatbuffers';
 // AstModule
 const M_NAME = 4, M_FUNCTIONS = 6,
       M_SCHEMA_MAJOR = 12, M_SCHEMA_MINOR = 14, M_CAPABILITIES = 16,
-      M_PRODUCER = 18, M_PRODUCER_VERSION = 20, M_ARCH = 22, M_POINTER_BITS = 24;
+      M_PRODUCER = 18, M_PRODUCER_VERSION = 20, M_ARCH = 22, M_POINTER_BITS = 24,
+      M_EVIDENCE_ORIGINS = 26;
 
 // DecompiledFunction
 const F_NAME = 4, F_ADDRESS = 6, F_RETURN_TYPE = 8,
       F_PARAMS = 10, F_LOCALS = 12, F_BODY = 14,
       F_CALLING_CONVENTION = 16, F_IS_VARIADIC = 18,
-      F_NATIVE_QUALITY_REPORTED = 20, F_NATIVE_QUALITY_ISSUES = 22;
+      F_NATIVE_QUALITY_REPORTED = 20, F_NATIVE_QUALITY_ISSUES = 22,
+      F_RETURN_TYPE_EVIDENCE = 24;
 
 // DataType
 const DT_KIND = 4, DT_IS_SIGNED = 6, DT_BITS = 8,
@@ -71,7 +75,15 @@ const DT_KIND = 4, DT_IS_SIGNED = 6, DT_BITS = 8,
 
 // Variable
 const V_NAME = 4, V_TYPE = 6, V_STORAGE = 8, V_STACK_OFFSET = 10,
-      V_IDENTITY_ID = 12, V_PARAMETER_INDEX = 14;
+      V_IDENTITY_ID = 12, V_PARAMETER_INDEX = 14, V_TYPE_EVIDENCE = 16;
+
+// EvidenceOrigin
+const EO_PRODUCER = 4, EO_GENERATION = 6,
+      EO_TARGET_IDENTITY = 8, EO_SNAPSHOT_HASH = 10;
+
+// TypeEvidence
+const TE_SOURCE = 4, TE_STATE = 6, TE_AUTHORITY = 8, TE_STRENGTH = 10,
+      TE_REJECTED_SPELLING = 12, TE_ORIGIN_ID = 14;
 
 /* eslint-enable @typescript-eslint/no-unused-vars */
 
@@ -144,6 +156,11 @@ function readU16(bb: BB, tablePos: number, voff: number, def = 0): number {
 function readU32(bb: BB, tablePos: number, voff: number, def = 0): number {
   const o = fieldOff(bb, tablePos, voff);
   return o ? bb.readUint32(tablePos + o) : def;
+}
+
+function readU32Optional(bb: BB, tablePos: number, voff: number): number | undefined {
+  const o = fieldOff(bb, tablePos, voff);
+  return o ? bb.readUint32(tablePos + o) : undefined;
 }
 
 /** Read an int64 field exactly. */
@@ -226,6 +243,62 @@ function readByteVec(bb: BB, tablePos: number, voff: number): number[] | undefin
   return Array.from({ length: len }, (_, index) => bb.readUint8(start + index));
 }
 
+export class HASTTypeEvidenceContractError extends Error {}
+
+function readEvidenceOrigin(bb: BB, pos: number): HASTEvidenceOrigin {
+  consumeHydrationBudget(bb);
+  assertValidTable(bb, pos, 'EvidenceOrigin');
+  const producer = readStr(bb, pos, EO_PRODUCER);
+  const generation = readU64Optional(bb, pos, EO_GENERATION);
+  const targetIdentity = readStr(bb, pos, EO_TARGET_IDENTITY);
+  const snapshotHash = readStr(bb, pos, EO_SNAPSHOT_HASH);
+  return {
+    ...(producer ? { producer } : {}),
+    ...(generation !== undefined ? { generation: generation.toString(10) } : {}),
+    ...(targetIdentity ? { targetIdentity } : {}),
+    ...(snapshotHash ? { snapshotHash } : {}),
+  };
+}
+
+function readTypeEvidence(bb: BB, pos: number, hast: HASTModuleMetadata): HASTTypeEvidence {
+  consumeHydrationBudget(bb);
+  assertValidTable(bb, pos, 'TypeEvidence');
+  const sources: HASTTypeEvidence['source'][] = [
+    'unknown', 'legacy', 'dataflow', 'structural', 'interprocedural', 'signature-db', 'debug-info', 'user',
+  ];
+  const states: HASTTypeEvidence['state'][] = [
+    'unreported', 'selected', 'selected-with-conflict', 'unresolved',
+  ];
+  const authorities: HASTTypeEvidence['authority'][] = [
+    'unknown', 'heuristic', 'derived', 'authoritative',
+  ];
+  const sourceId = readU8(bb, pos, TE_SOURCE, 0);
+  const stateId = readU8(bb, pos, TE_STATE, 0);
+  const authorityId = readU8(bb, pos, TE_AUTHORITY, 0);
+  if (!sources[sourceId] || !states[stateId] || !authorities[authorityId]) {
+    throw new HASTTypeEvidenceContractError('HAST declaration type-evidence enum is invalid');
+  }
+  const originId = readU32Optional(bb, pos, TE_ORIGIN_ID);
+  const origin = originId === undefined ? undefined : hast.evidenceOrigins?.[originId];
+  if (originId !== undefined && !origin) {
+    throw new HASTTypeEvidenceContractError(`HAST declaration type-evidence origin ${originId} is unavailable`);
+  }
+  if (authorities[authorityId] === 'authoritative' &&
+      (!origin?.targetIdentity || !origin.snapshotHash)) {
+    throw new HASTTypeEvidenceContractError('Authoritative HAST type evidence lacks a target-bound origin');
+  }
+  const rejectedSpelling = readStr(bb, pos, TE_REJECTED_SPELLING);
+  return {
+    source: sources[sourceId],
+    state: states[stateId],
+    authority: authorities[authorityId],
+    strength: readU16(bb, pos, TE_STRENGTH, 0),
+    ...(rejectedSpelling ? { rejectedSpelling } : {}),
+    ...(originId !== undefined ? { originId } : {}),
+    ...(origin ? { origin } : {}),
+  };
+}
+
 // ─── DataType → type string ───
 
 function readTypeStr(bb: BB, pos: number): string {
@@ -271,25 +344,35 @@ function storageName(value: number): CVarDecl['storage'] {
   return names[value] ?? 'unknown';
 }
 
-function variableMetadata(bb: BB, pos: number): Pick<CVarDecl, 'type' | 'identityId' | 'storage' | 'stackOffset' | 'parameterIndex'> {
+function variableMetadata(
+  bb: BB,
+  pos: number,
+  hast?: HASTModuleMetadata,
+): Pick<CVarDecl, 'type' | 'identityId' | 'storage' | 'stackOffset' | 'parameterIndex' | 'typeEvidence'> {
   let type = 'unknown';
   const typePos = readTable(bb, pos, V_TYPE);
   if (typePos) type = readTypeStr(bb, typePos);
   const identityId = readU64Optional(bb, pos, V_IDENTITY_ID);
   const stackOffset = readI64Optional(bb, pos, V_STACK_OFFSET);
   const parameterOffset = fieldOff(bb, pos, V_PARAMETER_INDEX);
+  const evidenceNegotiated = hast?.capabilities.includes('declaration-type-evidence') === true;
+  const evidencePos = evidenceNegotiated ? readTable(bb, pos, V_TYPE_EVIDENCE) : null;
+  if (evidenceNegotiated && !evidencePos) {
+    throw new HASTTypeEvidenceContractError('HAST 1.2 variable lacks explicit type evidence');
+  }
   return {
     type,
     ...(identityId !== undefined ? { identityId: identityId.toString(10) } : {}),
     storage: storageName(readU8(bb, pos, V_STORAGE, 0)),
     ...(stackOffset !== undefined ? { stackOffset: exactInteger(stackOffset) } : {}),
     ...(parameterOffset ? { parameterIndex: bb.readUint32(pos + parameterOffset) } : {}),
+    ...(evidencePos && hast ? { typeEvidence: readTypeEvidence(bb, evidencePos, hast) } : {}),
   };
 }
 
 // ─── Expression → CNode ───
 
-function readExpr(bb: BB, pos: number): CNode {
+function readExpr(bb: BB, pos: number, hast: HASTModuleMetadata): CNode {
 	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Expression');
   const kind = readU8(bb, pos, E_KIND, 0);
@@ -313,7 +396,7 @@ function readExpr(bb: BB, pos: number): CNode {
     const [start, len] = cv;
     for (let i = 0; i < len; i++) {
       const childPos = bb.__indirect(start + i * 4);
-      childrenArr.push(readExpr(bb, childPos));
+      childrenArr.push(readExpr(bb, childPos, hast));
     }
   }
 
@@ -349,7 +432,7 @@ function readExpr(bb: BB, pos: number): CNode {
     }
     case 3: { // VarRef
       const varPos = readTable(bb, pos, E_VARIABLE);
-      const metadata = varPos ? variableMetadata(bb, varPos) : { type: 'unknown' };
+      const metadata = varPos ? variableMetadata(bb, varPos, hast) : { type: 'unknown' };
       return {
         kind: 'CVarRefExpr',
         ...common,
@@ -446,7 +529,7 @@ function readExpr(bb: BB, pos: number): CNode {
 
 // ─── Statement → CNode ───
 
-function readStmt(bb: BB, pos: number): CNode {
+function readStmt(bb: BB, pos: number, hast: HASTModuleMetadata): CNode {
 	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Statement');
   const kind = readU8(bb, pos, S_KIND, 0);
@@ -465,7 +548,7 @@ function readStmt(bb: BB, pos: number): CNode {
     const [start, len] = ev;
     for (let i = 0; i < len; i++) {
       const ePos = bb.__indirect(start + i * 4);
-      exprs.push(readExpr(bb, ePos));
+      exprs.push(readExpr(bb, ePos, hast));
     }
   }
 
@@ -476,7 +559,7 @@ function readStmt(bb: BB, pos: number): CNode {
     const [start, len] = chv;
     for (let i = 0; i < len; i++) {
       const cPos = bb.__indirect(start + i * 4);
-      children.push(readStmt(bb, cPos));
+      children.push(readStmt(bb, cPos, hast));
     }
   }
   const childRoles = readByteVec(bb, pos, S_CHILD_ROLES);
@@ -491,7 +574,7 @@ function readStmt(bb: BB, pos: number): CNode {
       let metadata: ReturnType<typeof variableMetadata> = { type: 'unknown' };
       if (varPos) {
         name = readStr(bb, varPos, V_NAME) ?? 'var';
-        metadata = variableMetadata(bb, varPos);
+        metadata = variableMetadata(bb, varPos, hast);
       }
       return {
         kind: 'CVarDecl',
@@ -618,7 +701,7 @@ function readStmt(bb: BB, pos: number): CNode {
         const [start, len] = casesVec;
         for (let i = 0; i < len; i++) {
           const casePos = bb.__indirect(start + i * 4);
-          cases.push(readSwitchCase(bb, casePos));
+          cases.push(readSwitchCase(bb, casePos, hast));
         }
       }
       return {
@@ -664,7 +747,7 @@ function readStmt(bb: BB, pos: number): CNode {
   }
 }
 
-function readSwitchCase(bb: BB, pos: number): CCaseStmt {
+function readSwitchCase(bb: BB, pos: number, hast: HASTModuleMetadata): CCaseStmt {
 	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'SwitchCase');
   const body: CNode[] = [];
@@ -673,7 +756,7 @@ function readSwitchCase(bb: BB, pos: number): CCaseStmt {
     const [start, len] = bv;
     for (let i = 0; i < len; i++) {
       const sPos = bb.__indirect(start + i * 4);
-      body.push(readStmt(bb, sPos));
+      body.push(readStmt(bb, sPos, hast));
     }
   }
 
@@ -696,7 +779,7 @@ function readSwitchCase(bb: BB, pos: number): CCaseStmt {
 
 // ─── Variable → CVarDecl ───
 
-function readVariable(bb: BB, pos: number): CVarDecl {
+function readVariable(bb: BB, pos: number, hast: HASTModuleMetadata): CVarDecl {
 	consumeHydrationBudget(bb);
   assertValidTable(bb, pos, 'Variable');
   const name = readStr(bb, pos, V_NAME) ?? 'var';
@@ -704,7 +787,7 @@ function readVariable(bb: BB, pos: number): CVarDecl {
   return {
     kind: 'CVarDecl',
     name,
-    ...variableMetadata(bb, pos),
+    ...variableMetadata(bb, pos, hast),
   };
 }
 
@@ -720,6 +803,14 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
   let returnType = 'void';
   const rtPos = readTable(bb, pos, F_RETURN_TYPE);
   if (rtPos) returnType = readTypeStr(bb, rtPos);
+  const evidenceNegotiated = hast.capabilities.includes('declaration-type-evidence');
+  const returnEvidencePos = evidenceNegotiated ? readTable(bb, pos, F_RETURN_TYPE_EVIDENCE) : null;
+  if (evidenceNegotiated && !returnEvidencePos) {
+    throw new HASTTypeEvidenceContractError('HAST 1.2 function lacks explicit return type evidence');
+  }
+  const returnTypeEvidence = returnEvidencePos
+    ? readTypeEvidence(bb, returnEvidencePos, hast)
+    : undefined;
 
   // v3.7.4: Apply analyst renames/retypes from session database
   if (session) {
@@ -736,7 +827,7 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
     const [start, len] = pv;
     for (let i = 0; i < len; i++) {
       const vPos = bb.__indirect(start + i * 4);
-      params.push(readVariable(bb, vPos));
+      params.push(readVariable(bb, vPos, hast));
     }
   }
 
@@ -744,7 +835,7 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
   const lv = readVec(bb, pos, F_LOCALS);
   if (lv) {
     const [start, len] = lv;
-    for (let index = 0; index < len; index++) locals.push(readVariable(bb, bb.__indirect(start + index * 4)));
+    for (let index = 0; index < len; index++) locals.push(readVariable(bb, bb.__indirect(start + index * 4), hast));
   }
 
   // v3.7.4: Apply variable renames from session database
@@ -766,7 +857,7 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
     const [start, len] = bv;
     for (let i = 0; i < len; i++) {
       const sPos = bb.__indirect(start + i * 4);
-      bodyStmts.push(readStmt(bb, sPos));
+      bodyStmts.push(readStmt(bb, sPos, hast));
     }
   }
 
@@ -797,7 +888,14 @@ function readFunction(bb: BB, pos: number, session: SessionDbReader | undefined,
     body,
     callingConvention: readStr(bb, pos, F_CALLING_CONVENTION) ?? 'unknown',
     isVariadic: readU8(bb, pos, F_IS_VARIADIC, 0) !== 0,
-    hast: { ...hast, nativeQuality, semanticEligible: hast.semanticEligible && qualityReported && qualityIssues.length === 0 },
+    ...(returnTypeEvidence ? { returnTypeEvidence } : {}),
+    hast: {
+      ...hast,
+      nativeQuality,
+      semanticEligible: hast.semanticEligible && qualityReported && qualityIssues.length === 0 &&
+        ![returnTypeEvidence, ...params.map(param => param.typeEvidence), ...locals.map(local => local.typeEvidence)]
+          .some(evidence => evidence?.state === 'selected-with-conflict' || evidence?.state === 'unresolved'),
+    },
   };
   applyFunctionVariableMetadata(fn);
   fn.adapterCoverage = measureAdapterCoverage(fn);
@@ -817,6 +915,7 @@ function applyFunctionVariableMetadata(fn: CFunctionDecl): void {
         node.storage = declaration.storage;
         node.stackOffset = declaration.stackOffset;
         node.parameterIndex = declaration.parameterIndex;
+        node.typeEvidence = declaration.typeEvidence;
       }
     }
     for (const child of directChildren(node)) visit(child);
@@ -890,9 +989,25 @@ function readModuleMetadata(bb: BB, rootPos: number): HASTModuleMetadata {
   if (schemaMajor > 1) throw new Error(`Unsupported HAST schema major ${schemaMajor}`);
   const capabilityIds = readByteVec(bb, rootPos, M_CAPABILITIES) ?? [];
   const capabilities: string[] = capabilityIds.map(id => HAST_CAPABILITIES[id] ?? `unknown-${id}`);
+  const evidenceNegotiated = capabilities.includes('declaration-type-evidence');
+  if (evidenceNegotiated && schemaMinor < 2) {
+    throw new HASTTypeEvidenceContractError('HAST declaration type-evidence capability requires schema minor 2');
+  }
+  if (schemaMinor >= 2 && !evidenceNegotiated) {
+    throw new HASTTypeEvidenceContractError('HAST schema minor 2 lacks declaration type-evidence capability');
+  }
+  const evidenceOrigins: HASTEvidenceOrigin[] = [];
+  const origins = evidenceNegotiated ? readVec(bb, rootPos, M_EVIDENCE_ORIGINS) : null;
+  if (origins) {
+    const [start, len] = origins;
+    if (len > 65536) throw new HASTTypeEvidenceContractError('HAST evidence origin budget exceeded');
+    for (let index = 0; index < len; index++) {
+      evidenceOrigins.push(readEvidenceOrigin(bb, bb.__indirect(start + index * 4)));
+    }
+  }
   const producer = readStr(bb, rootPos, M_PRODUCER);
   const producerVersion = readStr(bb, rootPos, M_PRODUCER_VERSION);
-  const requiredSemanticCapabilities = ['node-ids', 'symbol-identities', 'typed-child-roles'];
+  const requiredSemanticCapabilities = ['variable-identity', 'stable-node-ids', 'statement-child-roles'];
   return {
     schemaMajor,
     schemaMinor,
@@ -901,6 +1016,7 @@ function readModuleMetadata(bb: BB, rootPos: number): HASTModuleMetadata {
     ...(producerVersion ? { producerVersion } : {}),
     architecture: architectureName(readU8(bb, rootPos, M_ARCH, 255)),
     pointerBits: readU16(bb, rootPos, M_POINTER_BITS, 0),
+    ...(evidenceNegotiated ? { evidenceOrigins } : {}),
     semanticEligible: schemaMajor === 1 && requiredSemanticCapabilities.every(capability => capabilities.includes(capability)),
   };
 }
@@ -956,6 +1072,7 @@ export function hydrateHAST(buffer: Uint8Array, session?: SessionDbReader, limit
         functions.push(readFunction(bb, fPos, session, moduleMetadata));
       } catch (error) {
 				if (error instanceof HASTHydrationBudgetError) throw error;
+        if (error instanceof HASTTypeEvidenceContractError) throw error;
         const reason = `HAST function[${i}] hydration failed: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512);
         const unknown = unknownStmt(255, reason);
         functions.push({

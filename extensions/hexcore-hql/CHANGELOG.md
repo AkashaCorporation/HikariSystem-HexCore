@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 - Unreleased
+
+- Add a versioned `.hql` lexer, typed parser, canonical compiler, diagnostics,
+  and stable formatter that lower into the existing HQL signature IR.
+- Cover AST combinators, attributes, operands, containment, typed HXDB facts,
+  provenance, compatibility, evidence, and calibration without a second matcher.
+- Load `.hql` and `.hql.json` together in deterministic order and reject
+  duplicate rule IDs across formats.
+- Fail closed on unsupported versions, node/field/operator/fact/regex errors,
+  non-representable mixed-domain expressions, and arbitrary script syntax.
+- Accept canonical ad-hoc query policies for `never`, `needed`, and `bounded`
+  materialization while keeping execution outside the matcher package.
+
 ## 0.3.1 - 2026-08-30
 
 - Expose the exact HXDB target identity so installed scans can fail closed on

@@ -93,6 +93,7 @@ export interface HelixAnalysisContext {
 		types: readonly CanonicalSemanticType[];
 		prototypes: readonly any[];
 		bindings: readonly any[];
+		conflicts: readonly { factKind: string; factKey: string; reason: string }[];
 	};
 }
 
@@ -321,6 +322,7 @@ function buildHelixAnalysisContext(
 			types: view?.listTypes() ?? semanticStore?.listTypes() ?? [],
 			prototypes: view?.listPrototypes() ?? semanticStore?.listPrototypes() ?? [],
 			bindings: view?.findTypeBindings() ?? semanticStore?.findTypeBindings() ?? [],
+			conflicts: view?.listConflicts() ?? semanticStore?.listConflicts() ?? [],
 		},
 	};
 	const contextSha256 = crypto.createHash('sha256').update(JSON.stringify(payload)).digest('hex');
@@ -333,6 +335,13 @@ export function createHelixDebugTypeEnvelope(
 	structInfo?: StructInfoJson,
 ): HelixDebugTypeEnvelope {
 	const functions = structInfo ? { ...structInfo.functions } : {};
+	const structs = structInfo ? { ...structInfo.structs } : {};
+	const conflictedTypeIds = new Set(context.semantic.conflicts
+		.filter(conflict => conflict.factKind === 'type')
+		.map(conflict => conflict.factKey));
+	const conflictedPrototypes = new Set(context.semantic.conflicts
+		.filter(conflict => conflict.factKind === 'prototype')
+		.map(conflict => conflict.factKey));
 	const typeById = new Map(context.semantic.types.map(type => [type.typeId, type]));
 	const renderType = (typeId: string, depth = 0): string => {
 		if (depth > 12) { return 'void'; }
@@ -351,6 +360,10 @@ export function createHelixDebugTypeEnvelope(
 	const semanticStructs: StructInfoJson['structs'] = {};
 	for (const type of context.semantic.types) {
 		if (!['struct', 'union'].includes(type.kind) || !type.name || !type.members?.length) { continue; }
+		if (conflictedTypeIds.has(type.typeId) || type.members.some(member => conflictedTypeIds.has(member.typeId))) {
+			delete structs[type.name];
+			continue;
+		}
 		semanticStructs[type.name] = {
 			size: Math.ceil((type.sizeBits ?? 0) / 8),
 			fields: type.members.map(member => ({
@@ -371,6 +384,12 @@ export function createHelixDebugTypeEnvelope(
 			?? (address === context.function.start.toLowerCase() ? context.function.name : undefined)
 			?? importName;
 		if (!name) { continue; }
+		if (conflictedPrototypes.has(prototype.functionIdentity)
+			|| conflictedTypeIds.has(prototype.returnTypeId)
+			|| prototype.parameters.some((parameter: any) => conflictedTypeIds.has(parameter.typeId))) {
+			delete functions[name];
+			continue;
+		}
 		functions[name] = {
 			returnType: renderType(prototype.returnTypeId),
 			params: prototype.parameters.map((parameter: any) => ({ index: parameter.ordinal, name: parameter.name, type: renderType(parameter.typeId) })),
@@ -389,7 +408,7 @@ export function createHelixDebugTypeEnvelope(
 		};
 	}
 	return freezeRecursively({
-		structs: { ...(structInfo ? structInfo.structs : {}), ...semanticStructs },
+		structs: { ...structs, ...semanticStructs },
 		functions,
 		...(structInfo?.boundaries ? { boundaries: structInfo.boundaries.map(boundary => ({ ...boundary })) } : {}),
 		hexcoreContext: context,

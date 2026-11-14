@@ -77,7 +77,7 @@ See [HexCore Agent Bridge v1](../../docs/HEXCORE_AGENT_BRIDGE.md).
 
 ## 1.4.60 highlights (installed semantic closure)
 
-- Connects HQL 0.3.1 to the target-bound HXDB instead of running structural
+- Connects HQL 0.4.0 to the target-bound HXDB instead of running structural
   matching with an undefined session.
 - Makes reference-edge replacement generation-aware and keeps prior dependency
   records in version history.

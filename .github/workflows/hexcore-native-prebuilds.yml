@@ -2,6 +2,20 @@ name: HexCore Native Prebuilds
 
 on:
   workflow_dispatch:
+    inputs:
+      scope:
+        description: "Native engine scope"
+        required: true
+        type: choice
+        default: all
+        options:
+          - all
+          - helix
+      helix_ref:
+        description: "HexCore-Helix ref used by the Helix-only candidate build"
+        required: true
+        type: string
+        default: main
 
 permissions:
   contents: write
@@ -12,6 +26,7 @@ env:
 jobs:
   prebuild-windows:
     name: Build Native Prebuilds (Windows)
+    if: ${{ inputs.scope == 'all' }}
     # windows-latest now ships Visual Studio 18 (2026), which node-gyp 10.3.1
     # cannot parse ("unknown version undefined"). Pin to windows-2022 (VS 2022,
     # fully supported). Follow-up when 2022 retires: upgrade node-gyp for VS 18.
@@ -290,6 +305,7 @@ jobs:
   # ---------------------------------------------------------------------------
   prebuild-helix-windows:
     name: Build Helix NAPI-RS (Windows)
+    if: ${{ inputs.scope == 'all' || inputs.scope == 'helix' }}
     runs-on: windows-latest
     env:
       HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}
@@ -298,7 +314,7 @@ jobs:
         uses: actions/checkout@v6
         with:
           repository: AkashaCorporation/HexCore-Helix
-          ref: main
+          ref: ${{ inputs.helix_ref }}
           path: engine
 
       - name: Setup Node.js
@@ -319,7 +335,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: engine/engine/deps/llvm-mlir
-          key: helix-llvm-mlir-win32-x64-ec1105a9be36d2945b22586bb72b4f1e529f6691bf5d8315fb15dc27cc5dba6b
+          key: helix-llvm-mlir-win32-x64-ce83e2555ac1f69f8f7796461bdce73f1f980daf45e2b843d3a0e80a6ed8db2b
 
       - name: Download Helix LLVM/MLIR Deps
         if: steps.cache-helix-deps.outputs.cache-hit != 'true'
@@ -351,7 +367,7 @@ jobs:
             }
           }
 
-          $expectedHash = 'EC1105A9BE36D2945B22586BB72B4F1E529F6691BF5D8315FB15DC27CC5DBA6B'
+          $expectedHash = 'CE83E2555AC1F69F8F7796461BDCE73F1F980DAF45E2B843D3A0E80A6ED8DB2B'
           if ((Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash -ne $expectedHash) {
             throw 'Helix dependency bundle hash mismatch'
           }
@@ -446,11 +462,12 @@ jobs:
           GH_TOKEN: ${{ env.HEXCORE_RELEASE_TOKEN }}
           GH_REPO: AkashaCorporation/HexCore-Helix
           ENGINE_VERSION: ${{ steps.engine-version.outputs.version }}
+          HELIX_REF: ${{ inputs.helix_ref }}
         run: |
           $tag = "v$env:ENGINE_VERSION"
           gh release view $tag --repo $env:GH_REPO *> $null
           if ($LASTEXITCODE -ne 0) {
-            $releaseArgs = @('release', 'create', $tag, '--repo', $env:GH_REPO, '--target', 'main', '--title', $tag, '--notes', "Automated NAPI-RS prebuilds for Helix $env:ENGINE_VERSION")
+            $releaseArgs = @('release', 'create', $tag, '--repo', $env:GH_REPO, '--target', $env:HELIX_REF, '--title', $tag, '--notes', "Automated NAPI-RS prebuilds for Helix $env:ENGINE_VERSION")
             if ($env:ENGINE_VERSION.Contains('-')) { $releaseArgs += '--prerelease' }
             gh @releaseArgs
           }
@@ -468,6 +485,7 @@ jobs:
   # ---------------------------------------------------------------------------
   prebuild-elixir-windows:
     name: Build Elixir NAPI-RS (Windows)
+    if: ${{ inputs.scope == 'all' }}
     runs-on: windows-2022
     env:
       HEXCORE_RELEASE_TOKEN: ${{ secrets.HEXCORE_RELEASE_TOKEN }}

@@ -5,7 +5,7 @@
  *  Copyright (c) HikariSystem. All rights reserved.
  *--------------------------------------------------------------------------------------------*/
 
-import { UnicornWrapper, ArchitectureType } from './unicornWrapper';
+import { UnicornWrapper, ArchitectureType, X86_64Registers } from './unicornWrapper';
 import { MemoryManager } from './memoryManager';
 import { TraceManager, TraceEntry } from './traceManager';
 import { PRNG, PrngMode, createPRNG } from './prng';
@@ -25,6 +25,10 @@ export interface ApiCallLog {
 type ApiHandler = (args: bigint[]) => bigint;
 
 const API_CALL_LOG_MAX_ENTRIES = 20000;
+
+export function formatLinuxSyscallTraceValue(value: bigint): string {
+	return '0x' + BigInt.asUintN(64, value).toString(16);
+}
 
 export class LinuxApiHooks {
 	private emulator: UnicornWrapper;
@@ -1333,29 +1337,122 @@ export class LinuxApiHooks {
 				break;
 		}
 
-		this.recordCallLog({
-			dll: 'syscall',
-			name: `sys_${syscallNum}`,
-			args: args.slice(0, 3),
-			returnValue: result,
-			timestamp: Date.now(),
-			arguments: args.slice(0, 3).map(a => '0x' + a.toString(16)),
-			pcAddress: regs.rip,
-		});
+		this.recordSyscall(syscallNum.toString(), args, result, regs.rip);
 
-		// Notify TraceManager if available
-		if (this.traceManager) {
-			const entry: TraceEntry = {
-				functionName: `sys_${syscallNum}`,
-				library: 'syscall',
-				arguments: args.slice(0, 3).map(a => '0x' + a.toString(16)),
-				returnValue: '0x' + result.toString(16),
-				pcAddress: '0x' + regs.rip.toString(16),
-				timestamp: Date.now(),
-			};
-			this.traceManager.record(entry);
+		return result;
+	}
+
+	/**
+	 * Handle an x64 Linux syscall from an explicit worker register snapshot.
+	 * Worker-backed ELF execution must never read the host Unicorn instance:
+	 * its registers and memory are a separate state universe.
+	 */
+	async handleSyscallAsync(regs: X86_64Registers): Promise<bigint> {
+		const syscallNum = BigInt.asUintN(64, regs.rax);
+		const args = [regs.rdi, regs.rsi, regs.rdx, regs.r10, regs.r8, regs.r9];
+		let result = 0n;
+
+		switch (syscallNum) {
+			case 0n: // read(fd, buf, count)
+				result = 0n; // EOF until the bounded process-input contract is implemented
+				break;
+			case 1n: { // write(fd, buf, count)
+				const count = Number(args[2]);
+				if (count > 0 && count < 0x10000) {
+					try {
+						const data = await this.emulator.readMemory(args[1], count);
+						const fd = Number(args[0]);
+						console.log(`[syscall write fd${fd}] ${data.toString('utf8')}`);
+						if (fd === 1) { this.stdoutBuffer += data.toString('utf8'); }
+						result = BigInt(count);
+					} catch {
+						result = -14n; // -EFAULT
+					}
+				}
+				break;
+			}
+			case 3n: // close(fd)
+				result = 0n;
+				break;
+			case 9n: { // mmap
+				const length = Number(args[1]);
+				const prot = Number(args[2]);
+				if (length > 0 && length < 0x10000000) {
+					let ucProt = 0;
+					if (prot & 1) { ucProt |= 1; }
+					if (prot & 2) { ucProt |= 2; }
+					if (prot & 4) { ucProt |= 4; }
+					const addr = this.nextMmapBase;
+					const pageSize = BigInt(this.emulator.getPageSize());
+					const alignedSize = ((BigInt(length) + pageSize - 1n) / pageSize) * pageSize;
+					try {
+						await this.emulator.mapMemoryRaw(addr, Number(alignedSize), ucProt || 1);
+						this.memoryManager.trackAllocation(addr, Number(alignedSize), ucProt || 1, 'mmap-syscall');
+						this.nextMmapBase += alignedSize;
+						result = addr;
+					} catch {
+						result = -12n; // -ENOMEM
+					}
+				}
+				break;
+			}
+			case 10n: // mprotect
+			case 11n: // munmap
+				result = 0n;
+				break;
+			case 12n: // brk
+				result = 0x06000000n;
+				break;
+			case 39n: // getpid
+				result = 0x1000n;
+				break;
+			case 60n: // exit
+				console.log(`[syscall exit] code=${Number(args[0])}`);
+				this.emulator.stop();
+				result = 0n;
+				break;
+			case 102n: // getuid
+			case 104n: // getgid
+			case 107n: // geteuid
+			case 108n: // getegid
+				result = 1000n;
+				break;
+			case 158n: { // arch_prctl
+				const code = Number(args[0]);
+				const addr = args[1];
+				if (code === 0x1002) { // ARCH_SET_FS
+					try {
+						await this.emulator.setRegister('fs_base', addr);
+						console.log(`[syscall] arch_prctl ARCH_SET_FS = 0x${addr.toString(16)}`);
+					} catch (error) {
+						console.warn(`[syscall] arch_prctl ARCH_SET_FS failed: ${error}`);
+						result = -22n; // -EINVAL
+					}
+				} else if (code === 0x1001) { // ARCH_SET_GS
+					try {
+						await this.emulator.setRegister('gs_base', addr);
+						console.log(`[syscall] arch_prctl ARCH_SET_GS = 0x${addr.toString(16)}`);
+					} catch (error) {
+						console.warn(`[syscall] arch_prctl ARCH_SET_GS failed: ${error}`);
+						result = -22n; // -EINVAL
+					}
+				} else {
+					console.log(`[syscall] arch_prctl code=0x${code.toString(16)} addr=0x${addr.toString(16)}`);
+				}
+				break;
+			}
+			case 231n: // exit_group
+				console.log(`[syscall exit_group] code=${Number(args[0])}`);
+				this.emulator.stop();
+				result = 0n;
+				break;
+			default:
+				console.log(`[syscall] Unhandled syscall ${syscallNum.toString()}`);
+				result = -38n; // -ENOSYS
+				break;
 		}
 
+		this.recordSyscall(syscallNum.toString(), args, result, regs.rip);
 		return result;
 	}
 
@@ -1378,6 +1475,32 @@ export class LinuxApiHooks {
 		this.lastCall = entry;
 		if (this.callLog.length < API_CALL_LOG_MAX_ENTRIES) {
 			this.callLog.push(entry);
+		}
+	}
+
+	private recordSyscall(syscallName: string, args: bigint[], result: bigint, pcAddress: bigint): void {
+		const retainedArgs = args.slice(0, 3);
+		const formattedArgs = retainedArgs.map(formatLinuxSyscallTraceValue);
+		const timestamp = Date.now();
+		this.recordCallLog({
+			dll: 'syscall',
+			name: `sys_${syscallName}`,
+			args: retainedArgs,
+			returnValue: result,
+			timestamp,
+			arguments: formattedArgs,
+			pcAddress,
+		});
+
+		if (this.traceManager) {
+			this.traceManager.record({
+				functionName: `sys_${syscallName}`,
+				library: 'syscall',
+				arguments: formattedArgs,
+				returnValue: formatLinuxSyscallTraceValue(result),
+				pcAddress: formatLinuxSyscallTraceValue(pcAddress),
+				timestamp,
+			});
 		}
 	}
 

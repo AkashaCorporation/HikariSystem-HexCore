@@ -22,6 +22,16 @@ suite('function materialization coverage', () => {
 		assert.strictEqual(result.status, 'partial');
 		assert.match(result.reason ?? '', /decoded partially/);
 	});
+	test('labels complete materialization as complete only for the known function index', () => {
+		const result = assessFunctionMaterialization({
+			totalFunctions: 2,
+			materializedFunctions: 2,
+			lazyFunctions: 0,
+			decodeEmptyFunctions: 0,
+		});
+		assert.strictEqual(result.status, 'ok');
+		assert.strictEqual(result.analysisDepth, 'complete-known-function-disassembly');
+	});
 	test('retains explicit headless policy fields and rejects malformed values', () => {
 		assert.deepStrictEqual(normalizeFunctionMaterializationPolicy({
 			allowLazy: true,

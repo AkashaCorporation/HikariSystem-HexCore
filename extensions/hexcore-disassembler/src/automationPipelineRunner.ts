@@ -364,6 +364,8 @@ interface CommandCapability {
 	cancelCommand?: string;
 	analysisMode?: string;
 	nextCommands?: string[];
+	materializationModes?: string[];
+	defaultMaterializationMode?: string;
 }
 
 export const JOB_STATUS_FILENAME = 'hexcore-pipeline.status.json';
@@ -763,7 +765,12 @@ const COMMAND_CAPABILITIES = new Map<string, CommandCapability>([
 	// function(s) via the helix pipeline then evaluates the built-in signature
 	// library over the HAST. Writes a JSON report ({ results: [...] }) to output.
 	['hexcore.hql.scanHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
-	['hexcore.hql.queryHeadless', { headless: true, defaultTimeoutMs: 180000, validateOutput: true }],
+	['hexcore.hql.queryHeadless', {
+		headless: true, defaultTimeoutMs: 180000, validateOutput: true,
+		analysisMode: 'query-scoped-opt-in',
+		materializationModes: ['never', 'needed', 'bounded'],
+		defaultMaterializationMode: 'never',
+	}],
 	['hexcore.hql.scanFunction', { headless: false, defaultTimeoutMs: DEFAULT_TIMEOUT_MS, validateOutput: false, reason: 'Interactive command scans the function in the active disassembler editor and shows notifications.' }],
 	['hexcore.souper.optimize', { headless: true, defaultTimeoutMs: 60000, validateOutput: true }],
 	['hexcore.extractStructInfo', { headless: true, defaultTimeoutMs: 30000, validateOutput: true }],
@@ -1109,6 +1116,8 @@ export interface PipelineCapabilityEntry {
 	supportedTargets?: string[];
 	analysisMode?: string;
 	nextCommands?: string[];
+	materializationModes?: string[];
+	defaultMaterializationMode?: string;
 }
 
 export function listCapabilities(): PipelineCapabilityEntry[] {
@@ -1132,6 +1141,8 @@ export function listCapabilities(): PipelineCapabilityEntry[] {
 			supportedTargets: ELIXIR_PE64_ONLY_COMMANDS.has(cmd) ? ['PE32+ x86_64'] : undefined,
 			analysisMode: cap.analysisMode,
 			nextCommands: cap.nextCommands ? [...cap.nextCommands] : undefined,
+			materializationModes: cap.materializationModes ? [...cap.materializationModes] : undefined,
+			defaultMaterializationMode: cap.defaultMaterializationMode,
 		});
 	}
 	return entries;

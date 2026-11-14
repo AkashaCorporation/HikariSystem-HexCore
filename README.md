@@ -39,10 +39,16 @@ HikariSystem HexCore is a binary-analysis IDE built on the VS Code workbench. It
 
 **Stable release:** [`v3.8.5`](https://github.com/AkashaCorporation/HikariSystem-HexCore/releases/tag/v3.8.5). It adds Agent Bridge v1, bounded large-image analysis, Helix `0.9.4-rc.3`, Revenant `0.5.0`, packaged Debugger reliability fixes, and Disassembler `1.4.78` PE leaf/CFG ownership corrections. The release preserves explicit partial, unknown, lazy-body and provenance boundaries rather than promoting incomplete analysis.
 
+**Development candidate:** `3.8.6-rc.1` is source-qualified but not yet
+published. It advances stripped-ELF ownership, worker-backed x64 Linux syscalls,
+Helix `0.9.4-rc.4`, authoritative debug types, textual HQL `0.4.0`, and bounded
+query-scoped materialization. The exact Windows package must pass the retained
+G07 E2E matrix before release eligibility.
+
 See the [3.8.5 release notes](docs/RELEASE_3_8_5.md) for accepted package gates and declared boundaries.
 
 This release brings HXDB v2, typed references, bounded whole-program propagation,
-Semantic Explorer, HQL `0.3.1`, Function Atlas, and killable native analysis.
+Semantic Explorer, HQL `0.4.0`, Function Atlas, and killable native analysis.
 Manual and automatic job requests share one queue, while session generations
 retain their analysis-universe binding across semantic edits and reloads.
 Static signals, candidates and proven evidence remain explicitly distinguished.
@@ -76,7 +82,7 @@ result as complete.
 - **Helix MLIR Decompiler** — C++23/MLIR pipeline, C AST layer with 16+ optimizer passes, SysV/Win64/Cdecl32 ABI auto-detection, SSA variable splitting via reverse post-order traversal, Ghidra-inspired type recovery with pointer propagation
 - **HXDB Semantic Model** (3.8.4) — Target-bound canonical types, full function prototypes, ABI locations, type bindings, evidence/conflicts, generations, typed references, and propagation summaries persisted in `.hexcore_session.db`
 - **Semantic Explorer** (3.8.4) — Evidence-first prototype/type editor with xrefs, conflicts, providers, stale facts, generation diffs, transactional edits, and undo
-- **HQL 0.3.1 + Atlas** (3.8.4) — Recursive `all`/`any`/`not`/`count` rules over HAST plus typed HXDB facts, explicit signal/candidate/proven levels, deterministic fixtures, and target-bound semantic hashes
+- **HQL 0.4.0 + Atlas** (3.8.6 candidate) — Textual HQL 1.0 and canonical JSON share one matcher over recursive HAST/HXDB conditions, explicit signal/candidate/proven levels, deterministic fixtures, and target-bound semantic hashes
 - **Function Atlas** (3.8.4) — Deterministic function-family similarity across compiler, architecture, optimization, and debug variants, evaluated separately from Ghidra BSim
 - **DWARF + BTF + PDB Debug Info Ingestion** (v3.8.0) — Pure-TypeScript DWARF 5 parser with split-form resolution (`DW_FORM_strx*`/`DW_FORM_addrx*`) and in-process ET_REL relocation application for kernel modules. PDB function boundary feeder via `llvm-pdbutil`. End-to-end: `mali_kbase.ko` recovers 792 structs + 3,864 function signatures with real parameter names and types
 - **Emulation** — CPU emulation via Unicorn Engine with PE and ELF loading, API hooking, stdin emulation, faithful PRNG (glibc/MSVCRT), side-channel analysis, KUSER_SHARED_DATA + synthetic DLL PE images for hash-resolved imports
@@ -114,8 +120,8 @@ result as complete.
 
 | Extension | Version | Description |
 |-----------|---------|-------------|
-| **Debugger** | 2.1.23 | PE/ELF execution lab with Unicorn Engine, deterministic inputs, typed stop reasons, live-memory analysis, retained SAB hooks, and diagnosed PE32 worker bootstrap |
-| **Disassembler** | 1.4.77 | Multi-arch disassembly, killable bounded analysis, automatic lazy indexing, HXDB v2, typed references, whole-program propagation, Semantic Explorer, Helix/HQL integration, Agent Bridge, and automation |
+| **Debugger** | 2.1.24 | PE/ELF execution lab with worker-bound x64 Linux syscalls, deterministic inputs, typed stop reasons, live-memory analysis, retained SAB hooks, and diagnosed PE32 worker bootstrap |
+| **Disassembler** | 1.4.79 | Multi-arch disassembly, honest ELF ownership coverage, killable bounded analysis, query-scoped materialization, HXDB v2, typed references, propagation, Semantic Explorer, Helix/HQL integration, Agent Bridge, and automation |
 | **Revenant** | 0.5.0 | Portable managed .NET decompilation to C# or IL, including single-file apphost recovery through the bundled ILSpy 11.1 backend |
 | **Hex Viewer** | 1.2.4 | Chunk-backed binary viewer with scaled large-file scrolling, data inspection, editing, templates, and offset sync |
 | **PE Analyzer** | 1.1.4 | Comprehensive PE analysis with binary transforms, Windows security summaries, overlay/directory evidence, and headless mode |
@@ -128,7 +134,7 @@ result as complete.
 | **IOC Extractor** | 1.1.2 | Binary-aware IOC extraction with noise reduction, SQLite backend, and threat assessment |
 | **Minidump Parser** | 1.0.1 | Windows MDMP forensics with thread injection/RWX detection and threat heuristics |
 | **ELF Analyzer** | 1.0.1 | Structural analysis of ELF binaries — sections, segments, symbols, and security mitigations |
-| **HQL** | 0.3.1 | Typed HAST/HXDB rule engine with recursive conditions, Atlas fixtures, provenance, and deterministic semantic cache identities |
+| **HQL** | 0.4.0 | Textual and JSON HAST/HXDB rule engine with one canonical matcher, typed diagnostics, Atlas fixtures, provenance, and deterministic semantic cache identities |
 | **Report Composer** | 1.0.14 | Aggregates outputs while separating proofs, signals, barriers, semantic providers, and runtime corroboration |
 
 ### Native Engines (Standalone N-API Packages)
@@ -144,12 +150,12 @@ distribution are qualified separately from the HexCore ZIP.
 | **hexcore-llvm-mc** | 1.0.2 | LLVM 18.1.8 MC N-API binding — multi-arch assembly and patching |
 | **hexcore-better-sqlite3** | 2.0.3 | SQLite N-API wrapper with safe prepared-statement lifecycle for persistent sessions |
 | **hexcore-remill** | 0.5.4 | Patched Remill N-API lifter — machine code to LLVM IR with logical-entry/reachable-only CFG recovery plus current call, relocation, preamble, and fallback hardening |
-| **hexcore-helix** | 0.9.4-rc.3 | Canonical Helix MLIR decompiler candidate with structured control flow, debug-info-guided type recovery, deterministic HAST, and evidence-gated confidence |
+| **hexcore-helix** | 0.9.4-rc.4 | Canonical Helix MLIR decompiler candidate with corrected x86 subregister/flag semantics, authoritative debug-type evidence, deterministic HAST, and evidence-gated confidence |
 | **hexcore-souper** | 0.2.2 | Google Souper superoptimizer N-API binding with Z3 SMT and density-gated automatic execution |
 | **hexcore-elixir** *(Azoth)* | 1.0.4 | Project Azoth clean-room dynamic analysis framework for PE32+ x86_64 — Apache-2.0 Rust+C++23 replacement for Qiling. Frida-style Interceptor/Stalker, 5/5 Parity Gates passed. Standalone repo at `AkashaCorporation/HexCore-Elixir` |
 | **hexcore-keystone** | 1.0.0 | Legacy assembler binding (superseded by LLVM MC) |
 
-> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The extension/package version (`0.9.4-rc.3`), native engine API, and HAST producer version are separate provenance identities and are reported separately. The `.node` binary is pre-built and ships with HexCore; building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build.
+> **Note on hexcore-helix:** Depends on LLVM 18.1.8 + MLIR. The extension/package version (`0.9.4-rc.4`), native engine API, and HAST producer version are separate provenance identities and are reported separately. The `.node` binary is pre-built and ships with HexCore; building from source requires VS2022, clang-cl, and `LLVM_BUILD_DIR` pointing to an MLIR-enabled LLVM build.
 
 > **Note on hexcore-remill:** This engine depends on LLVM 18, XED, glog, gflags, and Remill. End users receive the pre-built `.node` binary via CI; source builds require the documented native toolchain.
 
