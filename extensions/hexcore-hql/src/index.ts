@@ -88,6 +88,7 @@ export { runAdHocQuery } from './query/run.js';
 export type { AdHocQuery, AdHocCondition, AdHocQueryResult, QueryInput, QueryFunctionInput, QueryIdentity, QueryLimits, QueryHastSource } from './query/contract.js';
 export type { AdHocExecutionOptions } from './query/run.js';
 export * from './atlas/index.js';
+export * from './text/index.js';
 
 // v3.7.4: Session DB Reader (read-only access to disassembler's .hexcore_session.db)
 export { SessionDbReader } from './adapter/sessionDb.js';

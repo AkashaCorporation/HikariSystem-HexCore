@@ -99,6 +99,64 @@ Supported combinators:
 
 The loader validates every node kind, field, operator, operand index, bound, regex, and combinator recursively. One invalid signature rejects the library instead of becoming a silent dead branch.
 
+## Textual HQL 1.0
+
+HQL 1.0 is a deterministic frontend for the same validated JSON rule model.
+It does not execute rules and does not introduce a second matcher. Both
+`compileHql()` and the signature-directory loader accept `.hql`; existing
+`.hql.json` files remain supported unchanged. HQL Atlas canonical package
+ingestion accepts either format and indexes the compiled signature, while still
+hashing and retaining the exact reviewed source file.
+
+```hql
+hql 1.0;
+
+rule "memory.allocator_candidate" {
+  name "Allocator candidate";
+  description "Structural allocation plus typed ownership evidence.";
+  severity info;
+  evidence candidate;
+
+  where all {
+    ast CCallExpr {
+      callee == /^(malloc|calloc)$/;
+      operand 0 ast CVarRefExpr { type == "size_t"; };
+    };
+    fact summary-ownership { ownershipKind == "allocate"; };
+    not fact summary-barrier { lossy == true; };
+  }
+}
+```
+
+The version header is mandatory. Text supports structural `all`, `any`, `not`,
+and `count`; node attributes, operands, and containment; typed semantic facts;
+and rule provenance, compatibility, fixtures, evidence, and calibration.
+Legacy implicit-AND `queries` use a dedicated `queries { ast ...; }` block so
+formatting and recompilation preserve their canonical JSON identity exactly.
+Mixed AST/fact conditions are accepted only through a top-level `all`, which
+lowers exactly to the canonical structural and semantic conditions. A mixed
+`any` or nested mixed expression fails closed because HQL 0.3.1 has no unified
+cross-domain boolean node.
+
+```ts
+import { compileHqlDetailed, formatHql } from 'hexcore-hql';
+
+const compiled = compileHqlDetailed(source, { filename: 'rules/example.hql' });
+console.log(compiled.hqlVersion);       // 1.0
+console.log(compiled.compilerVersion); // 1.0.0
+console.log(compiled.signatureSha256); // canonical JSON signature identity
+const canonicalSource = formatHql(source);
+```
+
+Diagnostics are typed `HqlCompileError` records with file, line, column, error
+code, source excerpt, caret, and an actionable suggestion when one is known.
+Unknown nodes, fields, operators, fact kinds/fields, malformed regexes,
+unsupported versions, imports, templates, and script syntax never lower to a
+dead matcher branch.
+
+The complete grammar and lowering contract is in
+[Textual HQL 1.0](docs/HQL_TEXT_1_0.md).
+
 ## Evidence contract
 
 - `structuralCompleteness` reports whether the declared rule expression was satisfied. It is not probabilistic confidence.
@@ -116,7 +174,7 @@ npm run build
 npm test
 ```
 
-The tests cover matcher primitives, recursive combinators, fail-closed schema validation, all 12 anti-analysis alternative branches with positive and negative fixtures, exact 64-bit hydration, adapter-loss downgrades, clean-scan identity, and deterministic signature-set hashing.
+The tests cover matcher primitives, recursive combinators, textual/JSON hash and matcher parity, formatter determinism, fail-closed textual diagnostics, all 12 anti-analysis alternative branches with positive and negative fixtures, exact 64-bit hydration, adapter-loss downgrades, clean-scan identity, and deterministic signature-set hashing.
 
 ## Atlas and benchmarks
 

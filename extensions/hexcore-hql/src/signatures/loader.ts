@@ -4,6 +4,7 @@ import { BUILTIN_SIGNATURES } from './builtin.js';
 import type { HQLSignature } from '../types/hql.js';
 import { assertValidSignature } from './schema.js';
 import { loadReleasedAtlasSignatures } from '../atlas/runtime.js';
+import { compileHql } from '../text/compiler.js';
 
 function collectSignatureFiles(root: string): string[] {
   if (!fs.existsSync(root)) { return []; }
@@ -13,7 +14,7 @@ function collectSignatureFiles(root: string): string[] {
       .sort((a, b) => a.name.localeCompare(b.name))) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) { visit(full); }
-      else if (entry.isFile() && entry.name.endsWith('.hql.json')) { files.push(full); }
+      else if (entry.isFile() && (entry.name.endsWith('.hql.json') || entry.name.endsWith('.hql'))) { files.push(full); }
     }
   };
   visit(root);
@@ -24,10 +25,15 @@ function collectSignatureFiles(root: string): string[] {
 export function loadSignatureDirectory(root: string): HQLSignature[] {
   const signatures: HQLSignature[] = [];
   const failures: string[] = [];
+  const sourcesById = new Map<string, string>();
   for (const file of collectSignatureFiles(root)) {
     try {
-      const parsed: unknown = JSON.parse(fs.readFileSync(file, 'utf8'));
+      const text = fs.readFileSync(file, 'utf8');
+      const parsed: unknown = file.endsWith('.hql.json') ? JSON.parse(text) : compileHql(text, { filename: file });
       assertValidSignature(parsed, file);
+      const previous = sourcesById.get(parsed.id);
+      if (previous) throw new Error(`HQL duplicate signature ID ${parsed.id}: ${previous} and ${file}`);
+      sourcesById.set(parsed.id, file);
       signatures.push(parsed);
     } catch (error) {
       failures.push((error as Error).message);
