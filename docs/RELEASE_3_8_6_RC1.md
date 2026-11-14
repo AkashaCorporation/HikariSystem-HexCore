@@ -37,11 +37,13 @@ Helix C2 research line is not merged into this candidate.
 | Report Composer | unchanged `1.0.14` |
 
 Helix RC4 is built from `626503b` plus version reconciliation commit
-`516f5706b20c169c25dfe57f4dd3ca0bfb2f0092`. The locally qualified Windows
-node SHA-256 is
-`cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
-It passed 419/419 native tests, 192/192 Rust tests, version parity, deterministic
-pseudo-C, and deterministic HAST smoke. No other native engine changed.
+`516f5706b20c169c25dfe57f4dd3ca0bfb2f0092`. The local preflight node SHA-256
+was `cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
+The official Actions prebuild from run `43617794080` is 15,432,192 bytes with
+SHA-256 `7a82a1a36a1ecf86cb11e7adfe97ff591cf33fe42bacd68cf50fab44d2c06b61`.
+Both produced identical pseudo-C and HAST hashes. The source passed 419/419
+native tests, 192/192 Rust tests, version parity, deterministic pseudo-C, and
+deterministic HAST smoke. No other native engine changed.
 
 ## Delivery Boundary
 

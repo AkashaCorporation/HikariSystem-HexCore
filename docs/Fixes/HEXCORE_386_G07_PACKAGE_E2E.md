@@ -36,15 +36,20 @@ Candidate versions:
 
 G03 and G04 changed native Helix source after the public RC3 producer. Shipping
 that node as `0.9.4-rc.3` would have made package identity false. G07 therefore
-created a new, unpublished RC4 candidate and rebuilt it explicitly with Visual
-Studio 2022 `19.40` and LLVM/MLIR `18.1.8`.
+created a new RC4 candidate and rebuilt it explicitly with Visual Studio 2022
+`19.40` and LLVM/MLIR `18.1.8`.
 
 - C++: 419/419 PASS; one external fresh-fixture test skipped as declared.
 - Rust: 192/192 PASS; two documentation examples ignored.
 - N-API: `helix-js=0.9.4-rc.4 native=0.9.4-rc.4`.
 - Deterministic pseudo-C and HAST smoke: PASS.
-- Node size: 15,420,928 bytes.
-- Node SHA-256: `cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
+- Local preflight node: 15,420,928 bytes, SHA-256
+  `cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
+- Official Actions node: 15,432,192 bytes, SHA-256
+  `7a82a1a36a1ecf86cb11e7adfe97ff591cf33fe42bacd68cf50fab44d2c06b61`.
+- Native prebuild run `43617794080`: PASS. Local and official nodes emitted
+  identical pseudo-C SHA-256 `5f3a9ae0...1abc8` and HAST SHA-256
+  `1175b104...c069` for the canonical smoke fixture.
 
 No other native engine changed. The package reuses the already qualified 3.8.5
 Capstone, Unicorn, LLVM MC, SQLite, Remill, Souper, Elixir, and Revenant assets.
@@ -120,16 +125,14 @@ generation/universe and requested zero bodies.
 
 ## Honest Holds
 
-1. This is a local derived preflight, not a GitHub Actions artifact from a
-   pushed tag/commit.
-2. Helix RC4 has not been tagged, released, or uploaded; the product workflow
-   therefore cannot yet consume an official RC4 asset.
-3. The historical Backblaze corpus was not present. The filesystem lane used a
+1. The HexCore ZIP is still a local derived preflight; the official product
+   installer workflow has not completed yet.
+2. The historical Backblaze corpus was not present. The filesystem lane used a
    controlled negative PE and correctly retained zero proofs/signals plus
    `reparse-safety:not-assessed`.
-4. Per-job provenance still records `analysisSession.engines:[]`. The package
+3. Per-job provenance still records `analysisSession.engines:[]`. The package
    engine manifest is complete and hash-bound, but this diagnostic P2 remains.
-5. Strict whole-binary materialization remains a separate post-3.8.6 contract.
+4. Strict whole-binary materialization remains a separate post-3.8.6 contract.
 
 None of these holds is represented as a completed feature or a stable release.
 
@@ -153,8 +156,8 @@ Evidence root: `E:\HexCore-3.8.6-G07-Acceptance`
 G01-G07 are complete at the source and derived-preflight level. The bounded
 3.8.6 implementation sequence has **zero remaining goals**.
 
-The next action, only after explicit authorization, is operational rather than
-another implementation goal: publish/build the exact Helix RC4 artifact, run
-native prebuilds, produce the official HexCore RC1 ZIP from `7b2cfc9...`, and
-repeat the short fresh-ZIP identity/runtime/Agent Bridge gate before any release
-is created. Stable/latest remains a separate later decision.
+Helix prerelease `v0.9.4-rc.4` and its official Windows node are now available.
+The next operational action is to produce the official HexCore RC1 ZIP from the
+final RC1 branch commit and repeat the short fresh-ZIP identity/runtime/Agent
+Bridge gate before creating a HexCore release. Stable/latest remains a separate
+later decision.
