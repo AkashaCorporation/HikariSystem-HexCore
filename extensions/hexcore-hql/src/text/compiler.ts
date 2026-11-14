@@ -97,7 +97,7 @@ function splitWhere(
 		const childDomain = conditionDomain(child);
 		if (childDomain === 'mixed') {
 			throw compileDiagnostic(source, options, parsed, 'HQL1012',
-				'nested mixed AST/fact boolean expressions are not representable by the canonical HQL 0.3.1 IR', child);
+				'nested mixed AST/fact boolean expressions are not representable by the canonical HQL 0.4.0 IR', child);
 		}
 		if (childDomain === 'ast') ast.push(lowerAst(child));
 		else semantic.push(lowerSemantic(child));

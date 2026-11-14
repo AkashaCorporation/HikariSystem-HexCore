@@ -1,14 +1,14 @@
 # HQL Ad-Hoc Query Executor
 
-Status: released in 3.8.5 for issue #67; query-scoped materialization is the
-3.8.6 issue #70 extension. The source pipeline
+Status: JSON query v1 was released in 3.8.5 for issue #67; query-scoped
+materialization is source-qualified for the 3.8.6-rc.1 issue #70 candidate. The source pipeline
 registry exposes `hexcore.hql.queryHeadless`/`hexcore.hql.query`, using the pinned
 view, read-only capture, terminable native producer and isolated HAST matcher.
 The new Helix addon is installed only in the local development tree after a
-verified backup; the development watcher job passes and packaged acceptance is
-pending. The bound single-function IR
-lane is implemented for runner-minted pipeline artifacts. This is not yet a
-shipped feature.
+verified backup; component gates pass and G07 packaged acceptance is pending.
+The bound single-function IR
+lane is implemented for runner-minted pipeline artifacts. The new materializer
+is not a shipped stable feature until the candidate package is accepted.
 
 ## Canonical JSON IR
 

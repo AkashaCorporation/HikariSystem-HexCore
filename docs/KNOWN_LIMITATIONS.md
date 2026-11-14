@@ -1,9 +1,9 @@
-# Known Limitations - HexCore 3.8.5
+# Known Limitations - HexCore 3.8.6-rc.1 Candidate
 
-These limitations apply to the stable release as well as its qualified candidates.
-This supersedes the historical 3.8.4 checklist. Release-candidate qualification
-and current delivery boundaries are tracked in
-[HEXCORE_3_8_5_DELIVERY_MATRIX.md](HEXCORE_3_8_5_DELIVERY_MATRIX.md).
+These limitations apply to the source-qualified 3.8.6 candidate. The released
+3.8.5 baseline remains documented in
+[HEXCORE_3_8_5_DELIVERY_MATRIX.md](HEXCORE_3_8_5_DELIVERY_MATRIX.md). A change
+listed here is not package-qualified until the G07 extracted-ZIP matrix passes.
 
 ## Platform and distribution
 
@@ -38,7 +38,9 @@ and current delivery boundaries are tracked in
 - Zero known callers/callees is not proof of no references. Audits over incomplete
   bodies cannot establish absence of a behavior. Coverage/acceptance thresholds
   do not themselves cause body materialization.
-- Automatic critical-neighborhood materialization remains future product work.
+- HQL queries may opt into `needed` or `bounded` materialization over exact
+  dependencies. The default remains `never`; proximity scans and strict
+  whole-binary materialization remain future product work.
 - Large-image analysis is deliberately bounded. When the budget is reached,
   results remain partial rather than silently scanning every unwind-backed body.
 
@@ -56,10 +58,11 @@ and current delivery boundaries are tracked in
   proof. Atlas false-match calibration and signature coverage remain limitations.
 - Composer validation does not rewrite original extractor outputs. Retained raw
   IOC candidates may include entries excluded from the composed assertions.
-- Helix `0.9.4-rc.3` retains explicit SCF temporaries, cast/type limitations and
+- Helix `0.9.4-rc.4` retains explicit SCF temporaries, cast/type limitations and
   known-loss confidence caps. Stable HexCore does not imply perfect pseudo-C.
-- Typed prototype persistence is available, but complete caller propagation is
-  not yet proven for every materialized consumer. That boundary remains partial.
+- Authoritative debug prototypes now propagate through accepted caller and HAST
+  paths, but missing, inferred, conflicting, partial, or stripped metadata does
+  not become source-level authority.
 - AVX-512 lifting/execution support is incomplete and must fail or degrade with
   typed diagnostics rather than being inferred from x86/x64 support.
 
@@ -80,12 +83,12 @@ and current delivery boundaries are tracked in
 
 ## Deferred scope
 
-New automatic containment/reachability models, binary-version rebind, digest-named
-session migration, query-scoped critical materialization, complete authoritative
-DWARF/BTF/PDB propagation, product/library string grouping and richer signer/version
-metadata are not promised by 3.8.5. LLVM/MLIR 22 migration and major Helix semantic
-quality work remain post-3.8.5 programs. Heavy corpus latency and memory behavior
-still require bounded execution and explicit resource reporting.
+New automatic containment/reachability models, binary-version rebind,
+digest-named session migration, strict whole-binary materialization,
+product/library string grouping and richer signer/version metadata are not
+promised by 3.8.6. LLVM/MLIR 22 migration and major Helix semantic quality work
+remain later programs. Heavy corpus latency and memory behavior still require
+bounded execution and explicit resource reporting.
 
 Job JSON must currently be UTF-8 without a byte-order mark. Windows PowerShell
 5.1 `Set-Content -Encoding utf8` writes a BOM; use a BOM-free writer or a patch-

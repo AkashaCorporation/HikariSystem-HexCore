@@ -1,10 +1,10 @@
-# HexCore Automation - v3.8.5 (Analysis Contract)
+# HexCore Automation - v3.8.6-rc.1 (Analysis Contract)
 
 HexCore supports running analysis pipelines from workspace job files.
 
-This document describes the released `3.8.5` surface, including the retained `3.8.4` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
+This document describes the `3.8.6-rc.1` candidate surface, including the retained `3.8.5` analysis contracts. The executable source of truth is `extensions/hexcore-disassembler/src/automationPipelineRunner.ts`; use `hexcore.pipeline.listCapabilities` and `hexcore.pipeline.validateJob` to verify an installed build.
 
-Documentation baseline for stable `3.8.5`: disassembler `1.4.78`, HQL `0.3.1`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.23`, Revenant `0.5.0` (ILSpy `11.1.0.9782`), File Type `1.0.3`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.3`, Elixir `1.0.4`, and Report Composer `1.0.14`.
+Candidate baseline for `3.8.6-rc.1`: disassembler `1.4.79`, HQL `0.4.0`, PE Analyzer `1.1.4`, common `1.3.1`, debugger `2.1.24`, Revenant `0.5.0` (ILSpy `11.1.0.9782`), File Type `1.0.3`, Capstone `1.3.6`, Remill `0.5.4`, Unicorn `1.3.2`, Souper `0.2.2`, Strings `1.3.3`, Helix package `0.9.4-rc.4`, Elixir `1.0.4`, and Report Composer `1.0.14`.
 
 This version list is informative, not runtime identity evidence. For an installed
 build, use this precedence: artifact `.hexcore-meta/provenance.json`, then
@@ -3016,7 +3016,7 @@ soundness barrier, not a command failure: consumers may inspect the conservative
 model, but must not promote it as a complete proof until a monotonic generation
 rebuild removes the barrier.
 
-HQL 0.3.1 reads the active target-bound SemanticStore directly in the IDE;
+HQL 0.4.0 reads the active target-bound SemanticStore directly in the IDE;
 offline scans use a read-only `SessionDbReader` that verifies `target_identity`.
 Both combine HAST structure with typed facts and expose read failures instead
 of silently returning zero facts. Preserve

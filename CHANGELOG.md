@@ -5,7 +5,7 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [3.8.6] - Unreleased
+## [3.8.6-rc.1] - Unreleased
 
 ### Debugger
 
@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   distinguishes complete materialization of the known function index from
   executable-byte discovery coverage and reports unowned/overlapping bytes and
   unresolved indirect transfers.
+
+- Add opt-in HQL query-scoped materialization with `never`, `needed`, and
+  `bounded` modes, exact dependency traversal, explicit function/byte/time/depth
+  budgets, terminable child-process staging, atomic generation commits, and
+  post-propagation reevaluation. Partial or unresolved bodies remain unknown.
+- Propagate exact DWARF/BTF/PDB function types and evidence through HXDB, Helix,
+  HAST 1.2 and HQL, including conflict and stripped-binary negative controls.
+
+### Helix
+
+- Upgrade the candidate engine to `0.9.4-rc.4`. Preserve x86 RMW width and
+  parent-register semantics, prevent double decrement emission, and transport
+  authoritative debug-type evidence without promoting conflicts.
+
+### HQL
+
+- Upgrade HQL to `0.4.0` with textual HQL 1.0: a bounded lexer, typed parser,
+  canonical compiler, stable formatter, diagnostics, Atlas integration, and
+  JSON/text matcher parity. The existing matcher remains the only evaluator.
 
 ## [3.8.5] - 2026-11-12
 

@@ -141,7 +141,7 @@ Legacy implicit-AND `queries` use a dedicated `queries { ast ...; }` block so
 formatting and recompilation preserve their canonical JSON identity exactly.
 Mixed AST/fact conditions are accepted only through a top-level `all`, which
 lowers exactly to the canonical structural and semantic conditions. A mixed
-`any` or nested mixed expression fails closed because HQL 0.3.1 has no unified
+`any` or nested mixed expression fails closed because HQL 0.4.0 has no unified
 cross-domain boolean node.
 
 ```ts

@@ -97,7 +97,7 @@ where all {
 A mixed AST/fact `where all` splits exactly into the canonical structural and
 semantic conditions, which the matcher already combines with AND semantics.
 Mixed `any`, mixed `not`, and nested mixed boolean expressions are rejected
-with `HQL1012`; HQL 0.3.1 has no canonical cross-domain node for them.
+with `HQL1012`; HQL 0.4.0 has no canonical cross-domain node for them.
 
 Rules may instead use a separate fact-only `semantic` section. Legacy JSON
 `queries` round-trip without changing their hash through:

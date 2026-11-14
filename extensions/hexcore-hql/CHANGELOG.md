@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased - Textual HQL 1.0
+## 0.4.0 - Unreleased
 
 - Add a versioned `.hql` lexer, typed parser, canonical compiler, diagnostics,
   and stable formatter that lower into the existing HQL signature IR.
