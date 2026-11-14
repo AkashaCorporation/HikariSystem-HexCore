@@ -12,6 +12,12 @@ a runner-bound single-function IR lane; source and packaged acceptance pass with
 declared upstream/type-propagation partial boundaries. See
 [the ad-hoc query contract](../../docs/HQL_AD_HOC_QUERY.md).
 
+In 3.8.6 the canonical query accepts `materialization:"never"` (default) or a
+bounded `{ mode:"needed"|"bounded", maxFunctions, maxBytes,
+maxMilliseconds, maxDepth }` policy. The HQL package only validates, hashes, and
+evaluates that policy; the Disassembler owns target-bound scheduling and passes
+the resulting pinned snapshot into the unchanged matcher.
+
 HQL consumes a Helix HAST FlatBuffer. In the IDE this is produced by either:
 
 - a binary function lifted through the HexCore/Remill pipeline; or

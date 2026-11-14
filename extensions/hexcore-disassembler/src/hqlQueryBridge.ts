@@ -26,7 +26,7 @@ export interface HqlQueryFunctionInput {
 	astComplete: false;
 	semanticFacts: HqlSemanticFact[];
 	semanticAvailable: boolean;
-	semanticComplete: false;
+	semanticComplete: boolean;
 	semanticReadErrors: string[];
 	partialReasons: string[];
 	hastSource?: HqlQueryHastSource & { annotations: { returnType?: string; variables: Array<{ original_name: string; new_name: string | null; new_type: string | null }> } };
@@ -39,7 +39,13 @@ function address(value: string): string {
 }
 
 /** A bounded snapshot adapter. It does not load files, lift, materialize, or write. */
-export function createHqlQueryInput(view: SemanticQueryView, selections: readonly HqlQuerySelection[], sources: ReadonlyMap<string, HqlQueryHastSource> = new Map(), inputPartialReasons: readonly string[] = []): HqlQueryInput {
+export function createHqlQueryInput(
+	view: SemanticQueryView,
+	selections: readonly HqlQuerySelection[],
+	sources: ReadonlyMap<string, HqlQueryHastSource> = new Map(),
+	inputPartialReasons: readonly string[] = [],
+	semanticCompleteFunctions: ReadonlySet<string> = new Set(),
+): HqlQueryInput {
 	if (!Array.isArray(selections) || selections.length > 4096) throw new Error('HQL query selection budget exceeded');
 	const reader = createHqlSnapshotReader(view);
 	const seen = new Set<string>();
@@ -65,8 +71,9 @@ export function createHqlQueryInput(view: SemanticQueryView, selections: readonl
 		// absence and negation still evaluate to unknown rather than negative.
 		const semanticAvailable = inputPartialReasons.length === 0 &&
 			(semanticFacts.length > 0 || semanticReadErrors.length === 0);
+		const semanticComplete = semanticAvailable && semanticReadErrors.length === 0 && partialReasons.length === 0 && semanticCompleteFunctions.has(at);
 		const fn: HqlQueryFunctionInput = { function: name, address: at, snapshotSha256: view.identity.snapshotSha256, astAvailable: false, astComplete: false,
-			semanticFacts, semanticReadErrors, semanticAvailable, semanticComplete: false, partialReasons,
+			semanticFacts, semanticReadErrors, semanticAvailable, semanticComplete, partialReasons,
 			...(source ? { hastSource: { ...source, qualityIssues: [...source.qualityIssues, ...inputPartialReasons], annotations: { returnType, variables } } } : {}),
 		};
 		return fn;
@@ -86,7 +93,13 @@ export interface NormalizedHqlAdHocQuery {
 	addresses?: string[];
 	functions?: string[];
 	select: string[];
-	materialization: 'never';
+	materialization: 'never' | {
+		mode: 'needed' | 'bounded';
+		maxFunctions: number;
+		maxBytes: number;
+		maxMilliseconds: number;
+		maxDepth: number;
+	};
 }
 
 export function normalizeHqlSnapshotQuery(query: unknown): NormalizedHqlAdHocQuery {
@@ -109,6 +122,20 @@ export function hqlQueryRequiresHast(query: NormalizedHqlAdHocQuery): boolean {
 	return false;
 }
 
+export function hqlQueryRequiresSemanticFacts(query: NormalizedHqlAdHocQuery): boolean {
+	const pending: unknown[] = [query.condition];
+	while (pending.length) {
+		const condition = pending.pop();
+		if (!condition || typeof condition !== 'object') continue;
+		const record = condition as Record<string, unknown>;
+		if ('fact' in record || typeof record.count === 'object' && record.count !== null && 'fact' in (record.count as Record<string, unknown>)) return true;
+		if (Array.isArray(record.all)) pending.push(...record.all);
+		if (Array.isArray(record.any)) pending.push(...record.any);
+		if (record.not) pending.push(record.not);
+	}
+	return false;
+}
+
 /** Shared UI/headless entry point; registration and read-only producer routing follow. */
 export async function runHqlSnapshotQuery(view: SemanticQueryView, selections: readonly HqlQuerySelection[], query: unknown, options: {
 	sources?: ReadonlyMap<string, HqlQueryHastSource>;
@@ -116,12 +143,13 @@ export async function runHqlSnapshotQuery(view: SemanticQueryView, selections: r
 	limits?: Record<string, number>;
 	requestedFunctions?: number;
 	partialReasons?: readonly string[];
+	semanticCompleteFunctions?: ReadonlySet<string>;
 	signal?: AbortSignal;
 } = {}): Promise<unknown> {
 	const hql = loadHql() as unknown as Partial<AdHocHqlModule> | undefined;
 	if (typeof hql?.normalizeAdHocQuery !== 'function' || typeof hql.runAdHocQuery !== 'function') throw new Error('HQL ad-hoc query executor is unavailable');
 	const normalized = hql.normalizeAdHocQuery(query);
-	const input = createHqlQueryInput(view, selections, options.sources, options.inputPartialReasons);
+	const input = createHqlQueryInput(view, selections, options.sources, options.inputPartialReasons, options.semanticCompleteFunctions);
 	if (options.requestedFunctions !== undefined) { input.requestedFunctions = options.requestedFunctions; }
 	if (options.partialReasons?.length) { input.partialReasons = [...options.partialReasons]; }
 	return hql.runAdHocQuery(input, normalized, { limits: options.limits, signal: options.signal });

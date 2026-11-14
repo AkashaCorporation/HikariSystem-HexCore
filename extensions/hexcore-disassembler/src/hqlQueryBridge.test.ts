@@ -59,6 +59,19 @@ suite('HQL pinned query bridge', () => {
 		const partial: any = await runHqlSnapshotQuery(view, [{ address: '0x1000' }], { condition }, { inputPartialReasons: ['partial ancestor'] });
 		assert.strictEqual(partial.evaluations[0].state, 'unknown'); assert.strictEqual(partial.status, 'partial');
 	});
+	test('an explicitly accepted local closure enables absence only for that function', async () => {
+		const view = openSemanticQueryView(session);
+		const closed = new Set(['0x1000']);
+		const input = createHqlQueryInput(view, [{ address: '0x1000' }], new Map(), [], closed);
+		assert.strictEqual(input.functions[0].semanticComplete, true);
+		const result: any = await runHqlSnapshotQuery(view, [{ address: '0x1000' }], {
+			condition: { not: { fact: { fact: 'summary-barrier' } } },
+		}, { semanticCompleteFunctions: closed });
+		assert.strictEqual(result.evaluations[0].state, 'matched');
+		assert.strictEqual(result.status, 'ok');
+		const partial = createHqlQueryInput(view, [{ address: '0x1000', partialReasons: ['unresolved'] }], new Map(), [], closed);
+		assert.strictEqual(partial.functions[0].semanticComplete, false);
+	});
 	test('unavailable snapshot collections propagate through the same adapter', async () => {
 		const view = openSemanticQueryView(session, { maxRows: 1 });
 		const result: any = await runHqlSnapshotQuery(view, [{ address: '0x1000' }], { condition: { not: condition } });

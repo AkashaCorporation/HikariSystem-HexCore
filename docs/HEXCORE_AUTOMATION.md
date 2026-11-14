@@ -73,7 +73,9 @@ Select the indexed address for a bounded `disassembleAtHeadless` investigation,
 then inspect `analysisClosure` and body completeness. Do not infer absence from
 zero known callers/callees or no matches over unmaterialized bodies. `allowLazy`
 and `minMaterializedRatio` are acceptance policy, not switches that force decoding.
-Automatic critical-neighborhood materialization remains separate product work.
+For a query with an explicit function/address scope, `hexcore.hql.queryHeadless`
+may opt into `needed` or `bounded` critical-neighborhood materialization. The
+default remains `never`; neither mode changes the lazy `analyzeAll` contract.
 
 In 1.4.64, `jobStatus` queue-wide results expose `observationScope:queue-at-query-time`,
 `terminalSnapshot:false`, `currentJobId`, `currentExecutionId` and `includesCurrentJob`.
@@ -494,7 +496,7 @@ are rejected by the extractor.
 | `hexcore.revenant.decompile` | 180s | Recover C# from classic CLR PE or a supported .NET single-file apphost via the bundled ICSharpCode.Decompiler route. | Managed .NET |
 | `hexcore.revenant.decompileIL` | 180s | Recover IL from classic CLR PE or a supported .NET single-file apphost. | Managed .NET |
 | `hexcore.hql.scanHeadless` | 180s | Decompile one or more functions and evaluate semantic signatures over Helix HAST. | Helix-supported targets / IR |
-| `hexcore.hql.queryHeadless` | 180s | Run a bounded ad-hoc JSON HAST/HXDB query against the pinned active session; never materializes implicitly. | Active analyzed native target |
+| `hexcore.hql.queryHeadless` | 180s | Run a bounded ad-hoc JSON HAST/HXDB query; default `never`, optional `needed`/`bounded` materialization over proven dependencies. | Active analyzed native target |
 | `hexcore.semantic.explain` | 30s | Explain a persisted prototype, binding, reference, propagation effect, conflict, or HQL semantic match from the pinned snapshot. | Active HXDB session |
 | `hexcore.souper.optimize` | 60s | Optimize LLVM IR with Souper/Z3. Intended for explicit `.ll` experiments, MBA, crypto, and bitwise-heavy code. | LLVM IR |
 | `hexcore.constraints.solveHeadless` | 300s | Solve bounded Int/BitVec constraints with Z3 and return concrete models plus solver provenance. | JSON / SMT-LIB assertions |
@@ -1048,7 +1050,7 @@ Alongside `binary_sha256`, `binary_path`, and `created_at`, the store maintains:
 - `analysis_engines_json` — the recorded engine manifest (engine IDs, versions, settings snapshot). Drift vs the installed engines is reported as diagnostics via `diffEngineManifest`, never as a restore failure.
 - `analysis_universe_manifest_json` — replayable closure manifest binding each incrementally materialized function range to its decoded-body SHA-256 and the aggregate `universeSha256`.
 - `analysis_generation_universe_json` — exact generation-to-universe binding. A nonzero legacy generation without this binding is reset to a new baseline generation with explicit `partial/reset` status.
-- `analysis_last_incremental_update_json` — latest incremental materialization reason, function address, generation, universe hash, and timestamp.
+- `analysis_last_incremental_update_json` — latest incremental materialization reason, function address(es), generation, universe hash, batch hash, and timestamp.
 
 Native `analyzeAll` snapshots are transient, target/digest/size-verified gzip/V8 artifacts under `.hexcore-meta`; they are deleted after successful parent hydration. Durable analysis JSON retains `nativeExecution` (worker PID/outcome/phase/snapshot sizes/heartbeat), while provenance retains the session generation and universe manifest used by downstream artifacts.
 
@@ -2112,13 +2114,13 @@ Pass binary `address`/`addresses`, or one Remill-compatible `irPath`/`irText` ta
 
 The report declares `status: "ok" | "partial" | "failed"`, `completedTargetCount`, and `failedTargetCount`. A partial child result fails the pipeline step by default. Add step-level `"allowPartial": true` only when downstream logic explicitly accepts incomplete semantic coverage; the step and terminal job remain visibly `partial`. Treat `signal` and `candidate` as discovery evidence. A completed HQL job, structural completeness `1`, or a high presentation severity does not prove maliciousness, exploitability, or a vulnerability.
 
-### `hexcore.hql.queryHeadless` (3.8.5 development)
+### `hexcore.hql.queryHeadless` (3.8.6 development)
 
 Runs one canonical JSON query without installing a signature. The command is
 registered in the source tree and pipeline registry; the development watcher
 job passes and packaged acceptance is still pending. It requires the requested binary
-to be the currently loaded, target-bound session. It never changes targets and
-accepts only `"materialization":"never"` in 3.8.5.
+to be the currently loaded, target-bound session and never changes targets.
+`materialization:"never"` remains the default and preserves the 3.8.5 contract.
 
 ```json
 {
@@ -2144,8 +2146,32 @@ accepts only `"materialization":"never"` in 3.8.5.
 
 The alternative `args.query` form accepts the complete canonical object with
 `schemaVersion:1`, `condition`, filters, projection, and materialization. Do not
-combine that form with top-level query fields. Textual HQL belongs to 3.8.6 and
-is not accepted here.
+combine that form with top-level query fields. Textual HQL 1.0 compiles rule
+files to the same canonical IR; this ad-hoc command still receives canonical
+JSON query IR rather than raw `.hql` source.
+
+Query-scoped materialization is opt-in and requires an explicit `addresses` or
+`functions` scope:
+
+```json
+"materialization": {
+  "mode": "bounded",
+  "maxFunctions": 32,
+  "maxBytes": 4194304,
+  "maxMilliseconds": 30000,
+  "maxDepth": 3
+}
+```
+
+- `never`: no body is decoded; missing evidence remains unknown/partial.
+- `needed`: the selected function and direct proven dependencies only;
+  `maxDepth` is fixed to `1`.
+- `bounded`: recursively follows exact direct calls/references, resolved
+  indirect targets, and persisted propagation dependencies under every budget.
+
+Address proximity and unresolved indirect candidates are never traversal
+evidence. Without an explicit scope, an opt-in policy returns partial with
+`explicit-scope-required` and does not launch a worker.
 
 Results contain typed matched rows plus an evaluation for each selected function:
 `matched`, `negative`, or `unknown`. Unknown is not a clean negative. An incomplete
@@ -2155,11 +2181,15 @@ can survive a global selection limit, while `coverage.unevaluatedFunctions`
 records omitted work. `querySha256` and `resultSha256` cover normalized logical
 content; PID/timing diagnostics are not part of these hashes.
 
-Structural conditions require an already materialized complete function. The
-command does not invoke lazy closure. It captures bytes/context read-only and
-runs Remill plus Helix in a terminable child process. The job cancel signal reaches
-the child/query worker; its deadline reserves cleanup time before the outer step
-timeout. A partial result requires step-level `allowPartial:true`.
+Structural conditions require a complete function. Under `never`, an existing
+body is required. Under `needed`/`bounded`, decoding is staged in a terminable
+child process from an immutable engine snapshot with HXDB disabled. Timeout or
+cancellation kills the child, removes staging artifacts, and leaves the accepted
+generation/universe unchanged. Valid complete bodies are content-hashed, adopted
+as one batch/generation, marked dirty with their dependent summaries, recomputed,
+then evaluated against a fresh pinned view. Partial/decode-empty bodies remain
+outside the accepted universe and retryable. A partial result requires step-level
+`allowPartial:true`.
 
 Current binary-byte routing supports qualified simple functions and preserves
 explicit preparation gaps. Functions needing unresolved Pathfinder/indirect-flow
@@ -2168,11 +2198,13 @@ when it names an LLVM-IR artifact produced by an earlier pipeline step and its
 runner-minted hash, target, session, generation and universe match the active
 snapshot. The 3.8.5 IR lane requires exactly one query address. Inline `irText`,
 external unbound files, forged binding JSON, modified artifacts and stale-universe
-IR are rejected. Use `hql.scanHeadless` for curated signature scans over other
+IR are rejected. Frozen `irPath` queries require `materialization:"never"` because
+materializing would advance beyond their runner-minted generation. Use
+`hql.scanHeadless` for curated signature scans over other
 supported IR inputs.
 
-The output repeats `targetIdentity`, session generation, universe and snapshot
-hashes, `materialization:"never"`, native producer hashes/outcomes, coverage,
+The output repeats `targetIdentity`, initial/final generation and universe,
+snapshot hash, materialization plan/budgets/activity/unknown reasons, native producer hashes/outcomes, coverage,
 proof status and evidence. Semantic facts without historical producer provenance
 remain signals with an exact persisted-record origin; the command does not invent
 lineage or upgrade a match into a vulnerability verdict.

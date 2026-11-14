@@ -2060,12 +2060,12 @@ Because `continueOnError` is inherited, the wrong format-specific analyzer is ex
 
 The HQL `irPath` above is the Remill-compatible artifact produced by `liftToIR`; arbitrary LLVM IR is not a supported substitute. Preserve `signatureSetSha256`, clean function records, `adapterCoverage`, and unsupported-node counts when comparing runs. Findings report structural completeness and an evidence level; confidence is absent unless a named corpus calibration exists.
 
-## Template: Pinned Ad-Hoc HQL Query (3.8.5 development)
+## Template: Pinned Ad-Hoc HQL Query (3.8.6 development)
 
-This template makes materialization explicit before a structural ad-hoc query.
-The query itself uses `materialization:"never"` and cannot expand the accepted
-analysis universe. Replace the target address and condition with evidence-backed
-values for the current binary.
+This compatibility template makes materialization explicit before a structural
+ad-hoc query. The query uses `materialization:"never"` and cannot expand the
+accepted analysis universe. Replace the target address and condition with
+evidence-backed values for the current binary.
 
 ```json
 {
@@ -2116,7 +2116,61 @@ retain an honestly partial artifact. Inspect `evaluations`, `partialReasons`,
 materialization step for a fact-only HXDB query. For IR, set `irPath` to an exact
 `$step[id].output` produced earlier in the same/persisted pipeline and keep one
 address filter; the runner binds its hash and analysis identity. External paths,
-inline IR and copied provenance fields are rejected. Textual HQL is reserved for 3.8.6.
+inline IR and copied provenance fields are rejected. Textual HQL 1.0 rules must
+be compiled before an ad-hoc canonical JSON query is submitted.
+
+## Template: Query-Scoped Critical Neighborhood (3.8.6 development)
+
+Use this when a selected function is lazy and the query needs local structural
+or typed dependency evidence. The query owns bounded scheduling; do not add a
+separate manual materialization step for the same function.
+
+```json
+{
+  "file": ".\\target.exe",
+  "outDir": ".\\hexcore-reports\\hql-critical-neighborhood",
+  "quiet": true,
+  "steps": [
+    {
+      "id": "index",
+      "cmd": "hexcore.disasm.analyzeAll",
+      "output": { "path": "00-analysis.json" },
+      "timeoutMs": 300000
+    },
+    {
+      "id": "query_neighborhood",
+      "cmd": "hexcore.hql.queryHeadless",
+      "args": {
+        "condition": {
+          "all": [
+            { "query": { "target": "CCallExpr", "attributes": [{ "field": "callee", "value": "free" }] } },
+            { "fact": { "fact": "summary-ownership", "attributes": [{ "field": "ownershipKind", "value": "free" }] } }
+          ]
+        },
+        "addresses": ["0x140001000"],
+        "materialization": {
+          "mode": "bounded",
+          "maxFunctions": 32,
+          "maxBytes": 4194304,
+          "maxMilliseconds": 30000,
+          "maxDepth": 3
+        },
+        "maxFunctions": 32,
+        "maxRows": 64
+      },
+      "output": { "path": "01-query.json" },
+      "allowPartial": true,
+      "timeoutMs": 180000
+    }
+  ]
+}
+```
+
+Inspect `initialGeneration`, `finalGeneration`, both universe hashes, and the
+`materialization` object. `budgetExhausted`, a worker timeout/cancel, partial or
+decode-empty body, unresolved indirect target, missing dependency, or failed
+propagation keeps the query partial and publishes exact unknown reasons. An
+unchanged rerun reports zero requested bodies and does not advance generation.
 
 To explain a retained row in a follow-up job, pass its exact semantic identity:
 

@@ -9,7 +9,7 @@ import * as vscode from 'vscode';
 import type { AnalysisBinaryFormat } from 'hexcore-common';
 import { CapstoneWrapper, ArchitectureConfig, DisassembledInstruction } from './capstoneWrapper';
 import { LlvmMcWrapper, PatchResult, AssembleResult } from './llvmMcWrapper';
-import { SessionStore } from './sessionStore';
+import { SessionStore, type MaterializationBatchCommitResult, type PersistedMaterializedFunction } from './sessionStore';
 import { resolveAarch64PltBindings } from './aarch64Plt';
 import { detectUnsupportedNativeFormat, UnsupportedNativeInputError } from './nativeInputFormat';
 import { lookupApi, formatApiSignature, formatApiSignatureCompact, ApiSignature, ApiCategory, CATEGORY_LABELS } from './peApiDatabase';
@@ -555,6 +555,14 @@ export interface FunctionAnalysisMaterialization {
 	sessionGenerationAfter?: number;
 }
 
+export interface StagedMaterializationCommit {
+	engineGenerationBefore: number;
+	engineGenerationAfter: number;
+	addresses: readonly string[];
+	entries: readonly PersistedMaterializedFunction[];
+	persistence: MaterializationBatchCommitResult;
+}
+
 export interface FunctionMaterializationOptions {
 	/** Decoder byte ceiling for this attempt. A lower bound yields partial, retryable state. */
 	maxBytes?: number;
@@ -944,6 +952,8 @@ export class DisassemblerEngine {
 			architecture?: ArchitectureConfig;
 			baseAddress?: number;
 			analysisLimits?: { maxFunctions?: number; maxFunctionSize?: number };
+			/** Isolated staging workers disable HXDB so the accepted parent session remains untouched. */
+			persistence?: boolean;
 		}
 	): Promise<boolean> {
 		try {
@@ -998,17 +1008,20 @@ export class DisassemblerEngine {
 			this.stringScanDiagnostic = undefined;
 
 			// v3.7.4: Initialize persistent session store
-			try {
-				this.sessionStore?.dispose();
-				this.sessionStore = new SessionStore(filePath);
-				// Import legacy annotations if they exist
-				const annotationsPath = path.join(path.dirname(filePath), '.hexcore-annotations.json');
-				this.sessionStore.importAnnotations(annotationsPath);
-			} catch (err: unknown) {
-				// SQLite unavailable or file locked — continue without persistence
-				const msg = err instanceof Error ? err.message : String(err);
-				console.warn(`[HexCore] SessionStore init failed: ${msg}`);
-				this.sessionStore = undefined;
+			this.sessionStore?.dispose();
+			this.sessionStore = undefined;
+			if (rawOptions?.persistence !== false) {
+				try {
+					this.sessionStore = new SessionStore(filePath);
+					// Import legacy annotations if they exist
+					const annotationsPath = path.join(path.dirname(filePath), '.hexcore-annotations.json');
+					this.sessionStore.importAnnotations(annotationsPath);
+				} catch (err: unknown) {
+					// SQLite unavailable or file locked — continue without persistence
+					const msg = err instanceof Error ? err.message : String(err);
+					console.warn(`[HexCore] SessionStore init failed: ${msg}`);
+					this.sessionStore = undefined;
+				}
 			}
 
 			const largeImage = stats.size >= DisassemblerEngine.LARGE_IMAGE_LAZY_DISCOVERY_BYTES;
@@ -4980,6 +4993,59 @@ export class DisassemblerEngine {
 			hash.update(instruction.bytes);
 		}
 		return hash.digest('hex');
+	}
+
+	getFunctionBodySha256(address: number): string | undefined {
+		const fn = this.functions.get(address);
+		return fn && fn.instructions.length > 0 ? this.functionBodySha256(fn) : undefined;
+	}
+
+	/** Rebuild derived in-memory indexes after isolated staged bodies are adopted. */
+	refreshStagedMaterializationIndexes(): void {
+		this.applyIatCallNames();
+		this.rebuildCallGraphFromMaterializedBodies();
+		this.buildStringXrefs();
+	}
+
+	/** Accept already-decoded complete bodies as one target-bound generation. */
+	commitStagedFunctionMaterializations(
+		addresses: readonly number[],
+		reason = 'query-materialization',
+	): StagedMaterializationCommit {
+		const sessionStore = this.sessionStore;
+		if (!sessionStore) throw new Error('Staged materialization commit requires a bound HXDB session.');
+		const unique = [...new Set(addresses)].sort((left, right) => left - right);
+		if (unique.length === 0) throw new Error('Staged materialization commit requires at least one address.');
+		const entries: PersistedMaterializedFunction[] = unique.map(address => {
+			const fn = this.functions.get(address);
+			const completeness = this.peekFunctionBodyCompleteness(address);
+			if (!fn || !completeness || completeness.state !== 'complete' || completeness.boundaryReached !== true ||
+				completeness.stopReason !== 'function-end' || completeness.byteCoverage !== 1 || fn.instructions.length === 0) {
+				throw new Error(`Staged function 0x${address.toString(16)} is not a complete accepted body.`);
+			}
+			return {
+				address: `0x${address.toString(16).toUpperCase()}`,
+				endExclusive: `0x${fn.endAddress.toString(16).toUpperCase()}`,
+				bodySha256: this.functionBodySha256(fn),
+				bodyCompleteness: {
+					...completeness,
+					state: 'complete', boundaryReached: true, stopReason: 'function-end', byteCoverage: 1,
+				},
+			};
+		});
+		this.refreshStagedMaterializationIndexes();
+		const engineGenerationBefore = this.analysisGeneration;
+		this.analysisGeneration++;
+		try {
+			const persistence = sessionStore.commitMaterializationBatch(entries, reason);
+			return {
+				engineGenerationBefore, engineGenerationAfter: this.analysisGeneration,
+				addresses: entries.map(entry => entry.address), entries, persistence,
+			};
+		} catch (error) {
+			this.analysisGeneration = engineGenerationBefore;
+			throw error;
+		}
 	}
 
 	private async restorePersistedMaterializedFunctions(): Promise<AnalysisClosureRestoration> {

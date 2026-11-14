@@ -10,6 +10,8 @@
   duplicate rule IDs across formats.
 - Fail closed on unsupported versions, node/field/operator/fact/regex errors,
   non-representable mixed-domain expressions, and arbitrary script syntax.
+- Accept canonical ad-hoc query policies for `never`, `needed`, and `bounded`
+  materialization while keeping execution outside the matcher package.
 
 ## 0.3.1 - 2026-08-30
 

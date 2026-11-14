@@ -174,6 +174,13 @@ export interface AnalysisUniverseManifest {
 	updatedAt: string;
 }
 
+export interface MaterializationBatchCommitResult {
+	manifest: AnalysisUniverseManifest;
+	session: AnalysisSession;
+	dirtyFunctions: readonly string[];
+	batchSha256: string;
+}
+
 // ── SessionStore ────────────────────────────────────────────────────────────
 
 const SESSION_DB_FILENAME = '.hexcore_session.db';
@@ -1204,6 +1211,92 @@ export class SessionStore {
 			);
 		}
 		return next;
+	}
+
+	/** Atomically bind a staged query-materialization batch to one generation. */
+	commitMaterializationBatch(
+		entries: readonly PersistedMaterializedFunction[],
+		reason = 'query-materialization',
+	): MaterializationBatchCommitResult {
+		const target = this.requireBoundTarget();
+		if (entries.length === 0) throw new Error('Materialization batch must contain at least one complete function.');
+		const normalizedReason = reason.trim();
+		if (!normalizedReason) throw new Error('Materialization batch reason must not be empty.');
+		const ordered = [...entries].sort((left, right) => left.address.toLowerCase().localeCompare(right.address.toLowerCase()));
+		const seen = new Set<string>();
+		for (const entry of ordered) {
+			const address = entry.address.toLowerCase();
+			if (!/^0x[0-9a-f]+$/.test(address) || !/^0x[0-9a-f]+$/i.test(entry.endExclusive) ||
+				!entry.bodyCompleteness || entry.bodyCompleteness.state !== 'complete' ||
+				entry.bodyCompleteness.boundaryReached !== true || entry.bodyCompleteness.stopReason !== 'function-end' ||
+				entry.bodyCompleteness.byteCoverage !== 1 || !/^[a-f0-9]{64}$/i.test(entry.bodySha256)) {
+				throw new Error(`Invalid complete materialization entry: ${entry.address}`);
+			}
+			if (seen.has(address)) throw new Error(`Duplicate materialization entry: ${entry.address}`);
+			seen.add(address);
+		}
+		const previous = this.getAnalysisUniverseManifest();
+		if (!previous || previous.binarySha256 !== this.binarySha256) throw new Error('Materialization batch has no target-bound universe.');
+		const byAddress = new Map(previous.materializedFunctions.map(entry => [entry.address.toLowerCase(), entry]));
+		for (const entry of ordered) byAddress.set(entry.address.toLowerCase(), entry);
+		const materializedFunctions = [...byAddress.values()].sort((left, right) => left.address.toLowerCase().localeCompare(right.address.toLowerCase()));
+		const identityPayload = { schemaVersion: 1 as const, binarySha256: this.binarySha256, materializedFunctions };
+		const manifest: AnalysisUniverseManifest = {
+			...identityPayload,
+			universeSha256: crypto.createHash('sha256').update(JSON.stringify(identityPayload)).digest('hex'),
+			updatedAt: new Date().toISOString(),
+		};
+		const current = this.analysisSession ?? createAnalysisSession({ id: `session:${crypto.randomUUID()}`, targetId: target.id, generation: 0 });
+		const next = createAnalysisSession({
+			id: current.id, targetId: target.id, generation: current.generation + 1,
+			parentGeneration: current.generation, createdAt: current.createdAt, engines: current.engines,
+		});
+		const roots = ordered.map(entry => this.propagationFunctionIdentity(entry.address));
+		const consumers = new Map<string, Set<string>>();
+		for (const dependency of this.semanticStore.getWholeProgramPropagationStore().listDependencies()) {
+			const values = consumers.get(dependency.dependencyFunctionIdentity) ?? new Set<string>();
+			values.add(dependency.consumerFunctionIdentity);
+			consumers.set(dependency.dependencyFunctionIdentity, values);
+		}
+		const queue = [...new Set(roots)].sort();
+		const dirty = new Set(queue);
+		while (queue.length > 0) {
+			const currentIdentity = queue.shift()!;
+			for (const consumer of [...(consumers.get(currentIdentity) ?? [])].sort()) {
+				if (dirty.has(consumer)) continue;
+				dirty.add(consumer);
+				queue.push(consumer);
+			}
+		}
+		const dirtyFunctions = [...dirty].sort();
+		const batchSha256 = crypto.createHash('sha256').update(JSON.stringify({ targetId: target.id, generation: next.generation, entries: ordered })).digest('hex');
+		this.db.exec('BEGIN IMMEDIATE');
+		try {
+			this.setMeta('analysis_universe_manifest_json', JSON.stringify(manifest));
+			this.setMeta('analysis_session_json', JSON.stringify(next));
+			this.setMeta('analysis_generation_counter', String(next.generation));
+			this.setMeta('analysis_generation_universe_json', JSON.stringify({ generation: next.generation, universeSha256: manifest.universeSha256 }));
+			this.setMeta('analysis_last_incremental_update_json', JSON.stringify({
+				reason: normalizedReason, functionAddresses: ordered.map(entry => entry.address), generation: next.generation,
+				universeSha256: manifest.universeSha256, batchSha256, updatedAt: new Date().toISOString(),
+			}));
+			const dirtyStatement = this.db.prepare(`
+				INSERT INTO propagation_dirty (analysis_target_identity, function_identity, generation, reason)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(analysis_target_identity, function_identity) DO UPDATE SET
+				generation = MAX(propagation_dirty.generation, excluded.generation), reason = excluded.reason
+			`);
+			for (const functionIdentity of dirtyFunctions) dirtyStatement.run(target.id, functionIdentity, next.generation, normalizedReason);
+			const invalidateCache = this.db.prepare('DELETE FROM analyze_cache WHERE address = ?');
+			for (const entry of ordered) invalidateCache.run(entry.address);
+			this.db.exec('COMMIT');
+		} catch (error) {
+			try { this.db.exec('ROLLBACK'); } catch { /* preserve original failure */ }
+			throw error;
+		}
+		this.analysisSession = next;
+		this.semanticReadCounter++;
+		return { manifest, session: next, dirtyFunctions, batchSha256 };
 	}
 
 	/**

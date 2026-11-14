@@ -12,13 +12,22 @@ export type AdHocCondition =
 	| { all: AdHocCondition[] } | { any: AdHocCondition[] } | { not: AdHocCondition }
 	| { count: ({ query: HQLQuery } | { fact: HQLSemanticQuery }) & { min?: number; max?: number; exactly?: number } };
 export type QueryProjection = 'function' | 'address' | 'proofStatus' | 'evidence';
+export type QueryMaterializationMode = 'never' | 'needed' | 'bounded';
+export interface QueryMaterializationPolicy {
+	mode: Exclude<QueryMaterializationMode, 'never'>;
+	maxFunctions: number;
+	maxBytes: number;
+	maxMilliseconds: number;
+	maxDepth: number;
+}
+export type QueryMaterialization = 'never' | QueryMaterializationPolicy;
 export interface AdHocQuery {
 	schemaVersion: 1;
 	condition: AdHocCondition;
 	addresses?: string[];
 	functions?: string[];
 	select: QueryProjection[];
-	materialization: 'never';
+	materialization: QueryMaterialization;
 }
 export interface QueryIdentity {
 	targetIdentity: string;
@@ -171,14 +180,33 @@ function validateCondition(value: unknown): void {
 	if (leaf.min !== undefined && leaf.max !== undefined && leaf.min > leaf.max) throw new Error('query: min exceeds max');
 }
 
+export function normalizeQueryMaterialization(value: unknown): QueryMaterialization {
+	if (value === undefined || value === 'never') return 'never';
+	if (!record(value)) throw new Error('query: invalid materialization policy');
+	keys(value, ['mode', 'maxFunctions', 'maxBytes', 'maxMilliseconds', 'maxDepth']);
+	if (value.mode === 'never') {
+		if (Object.keys(value).length !== 1) throw new Error('query: materialization never does not accept budgets');
+		return 'never';
+	}
+	if (value.mode !== 'needed' && value.mode !== 'bounded') throw new Error('query: invalid materialization mode');
+	const defaults = { maxFunctions: 32, maxBytes: 4 * 1024 * 1024, maxMilliseconds: 30_000, maxDepth: value.mode === 'needed' ? 1 : 3 };
+	const ceilings = { maxFunctions: 4096, maxBytes: 64 * 1024 * 1024, maxMilliseconds: 300_000, maxDepth: 32 };
+	for (const key of Object.keys(defaults) as Array<keyof typeof defaults>) {
+		const candidate = value[key] ?? defaults[key];
+		if (!Number.isSafeInteger(candidate) || candidate < 1 || candidate > ceilings[key]) throw new Error(`query: invalid materialization ${key}`);
+		defaults[key] = candidate;
+	}
+	if (value.mode === 'needed' && defaults.maxDepth !== 1) throw new Error('query: needed materialization has fixed maxDepth=1');
+	return { mode: value.mode, ...defaults };
+}
+
 export function normalizeAdHocQuery(value: unknown): AdHocQuery {
 	checkJsonBudget(value, 65536, 32, 4096);
 	if (!record(value)) throw new Error('query: expected JSON query IR');
 	keys(value, ['schemaVersion', 'condition', 'addresses', 'functions', 'select', 'materialization']);
 	if (value.schemaVersion !== undefined && value.schemaVersion !== 1) throw new Error('query: unsupported schema version');
-	if (value.materialization !== undefined && value.materialization !== 'never') throw new Error('query: only read-only materialization=never is supported');
 	validateCondition(value.condition);
-	const normalized: AdHocQuery = { schemaVersion: 1, condition: JSON.parse(canonicalJson(value.condition)), materialization: 'never', select: ['function', 'address', 'proofStatus', 'evidence'] };
+	const normalized: AdHocQuery = { schemaVersion: 1, condition: JSON.parse(canonicalJson(value.condition)), materialization: normalizeQueryMaterialization(value.materialization), select: ['function', 'address', 'proofStatus', 'evidence'] };
 	for (const key of ['addresses', 'functions'] as const) {
 		if (value[key] === undefined) continue;
 		if (!Array.isArray(value[key]) || !value[key].length || value[key].some((item: unknown) => typeof item !== 'string' || !item.length)) throw new Error(`query: invalid ${key}`);

@@ -1,6 +1,7 @@
 # HQL Ad-Hoc Query Executor
 
-Status: released in 3.8.5 for issue #67. The source pipeline
+Status: released in 3.8.5 for issue #67; query-scoped materialization is the
+3.8.6 issue #70 extension. The source pipeline
 registry exposes `hexcore.hql.queryHeadless`/`hexcore.hql.query`, using the pinned
 view, read-only capture, terminable native producer and isolated HAST matcher.
 The new Helix addon is installed only in the local development tree after a
@@ -29,7 +30,25 @@ shipped feature.
 The library exports `normalizeAdHocQuery` and asynchronous `runAdHocQuery`.
 Conditions reuse the existing HQL node/fact validators and matcher. They support
 mixed `all`, `any`, `not`, and `count` expressions without registering signatures.
-No textual parser, taint execution, automatic lifting, or materialization occurs.
+Textual HQL 1.0 compiles rules to this canonical model. Taint execution and
+arbitrary whole-binary materialization remain outside this executor.
+
+`materialization` accepts the conservative string `"never"` (default), or a
+bounded object:
+
+```json
+{
+  "mode": "bounded",
+  "maxFunctions": 32,
+  "maxBytes": 4194304,
+  "maxMilliseconds": 30000,
+  "maxDepth": 3
+}
+```
+
+`needed` fixes depth to one. `bounded` may recurse over exact known
+dependencies. Both require an explicit address/name filter; neither scans by
+address proximity.
 
 Addresses are exact 64-bit hexadecimal values. Name filters are exact and
 case-sensitive. When both filters exist, they intersect. Duplicate filter values
@@ -53,7 +72,10 @@ validated HAST hydration path, not from arbitrary job-provided evidence.
 particular function. A successful SQL read does not establish completeness.
 Adapter loss, missing bodies and actual unknown/assembly nodes prevent AST
 absence claims even if adapter metadata advertises coverage 1. Dirty or failed
-semantic reads must not be marked available by the producer.
+semantic reads must not be marked available by the producer. The 3.8.6 bridge
+sets `semanticComplete:true` only after a query-scoped function has a complete
+accepted body, a current propagation summary, and no barriers, conflicts, dirty
+summary, or unresolved indirect candidate.
 
 ## Results
 
@@ -106,6 +128,29 @@ Neither means an evaluated negative. This isolation covers matching and HAST
 hydration; native lifting/decompilation and initial snapshot capture have pending latency
 and interruption gates. The in-process input-budget walk is bounded but is not
 an RSS guarantee or an externally preemptible native operation.
+
+### Query-Scoped Materialization Process
+
+The Disassembler plans from explicit scope plus active exact call/reference
+edges, resolved indirect targets, and propagation dependencies. The planner
+enforces function, authoritative-span byte, and depth budgets before launch.
+
+Decoding runs in a child process from a gzip/V8 snapshot of the accepted engine.
+The child opens the target with HXDB persistence disabled. Supervisor timeout or
+cancellation kills it and removes input/output/heartbeat artifacts; the parent
+engine, session generation, and universe remain unchanged.
+
+Returned complete bodies are checked against the plan, target hash, exact body
+range, completeness, and body SHA-256. They commit as one generation and one
+universe manifest transaction. Dependent summaries are marked dirty and the
+existing terminable propagation worker recomputes them before query reevaluation.
+Partial/decode-empty bodies do not enter the manifest and remain retryable.
+
+The result publishes initial/final generation and universe, plan hash, budgets,
+requested/materialized/partial/decode-empty/failed counts, child diagnostics,
+closure status, and typed unknown reasons. A budget limit, open indirect target,
+missing dependency, worker failure, or incomplete closure prevents a clean
+negative. A rerun over the accepted closure requests no unchanged bodies.
 
 ### Native Process Execution
 
@@ -181,7 +226,8 @@ whole-section lifting path has not been migrated by these single-function change
 
 `createHqlQueryInput` and `runHqlSnapshotQuery` in the Disassembler read an
 explicit bounded selection from an existing SemanticQueryView. They do not open
-a new session, lift, materialize or write. Annotation changes after capture do
+a new session, lift, materialize or write; scheduling occurs before this adapter
+and produces a new pinned view. Annotation changes after capture do
 not change an old view. `semanticComplete` stays false until a producer proves
 closed coverage for the relevant domain. Upstream partial quality is preserved.
 

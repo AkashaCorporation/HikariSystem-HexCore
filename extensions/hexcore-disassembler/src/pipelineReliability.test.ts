@@ -20,7 +20,16 @@ let inspectBinaryIdentity: (filePath: string) => { format: string; architecture?
 let checkBinaryFormatGate: (command: string, filePath: string) => { skip: boolean; reason?: string };
 let resolveArtifactMediaType: (outputPath: string, format?: 'json' | 'md') => string;
 let formatAnalysisContextLog: (context: Record<string, unknown>) => string;
-let listPipelineCapabilities: () => Array<{ command: string; aliases: string[]; headless: boolean; validateOutput: boolean; requiredExtension: string[] }>;
+let listPipelineCapabilities: () => Array<{
+	command: string;
+	aliases: string[];
+	headless: boolean;
+	validateOutput: boolean;
+	requiredExtension: string[];
+	analysisMode?: string;
+	materializationModes?: string[];
+	defaultMaterializationMode?: string;
+}>;
 let JobQueueManager: new (poolSize: number) => any;
 
 function installVscodeMock(): void {
@@ -174,6 +183,9 @@ suite('pipeline reliability gates (3.8.3 RC)', () => {
 		assert.strictEqual(capability.validateOutput, true);
 		assert.deepStrictEqual(capability.requiredExtension, ['hikarisystem.hexcore-disassembler']);
 		assert.ok(capability.aliases.includes('hexcore.hql.query'));
+		assert.strictEqual(capability.analysisMode, 'query-scoped-opt-in');
+		assert.deepStrictEqual(capability.materializationModes, ['never', 'needed', 'bounded']);
+		assert.strictEqual(capability.defaultMaterializationMode, 'never');
 	});
 
 	test('publishes semantic explanation as the same headless output contract used by UI', () => {
