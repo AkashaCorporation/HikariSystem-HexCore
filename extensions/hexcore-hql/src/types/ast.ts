@@ -54,6 +54,7 @@ export interface CVarRefExpr extends ASTNodeBase {
   storage?: 'stack' | 'register' | 'global' | 'parameter' | 'temporary' | 'unknown';
   stackOffset?: number | string;
   parameterIndex?: number;
+  typeEvidence?: HASTTypeEvidence;
 }
 
 export interface CBinaryExpr extends ASTNodeBase {
@@ -102,6 +103,23 @@ export interface CFieldAccessExpr extends ASTNodeBase {
   field: string;
   arrow: boolean; // true = "->", false = "."
   fieldOffset?: string;
+}
+
+export interface HASTEvidenceOrigin {
+  producer?: string;
+  generation?: string;
+  targetIdentity?: string;
+  snapshotHash?: string;
+}
+
+export interface HASTTypeEvidence {
+  source: 'unknown' | 'legacy' | 'dataflow' | 'structural' | 'interprocedural' | 'signature-db' | 'debug-info' | 'user';
+  state: 'unreported' | 'selected' | 'selected-with-conflict' | 'unresolved';
+  authority: 'unknown' | 'heuristic' | 'derived' | 'authoritative';
+  strength: number;
+  rejectedSpelling?: string;
+  originId?: number;
+  origin?: HASTEvidenceOrigin;
 }
 
 export interface CArrayInitExpr extends ASTNodeBase {
@@ -210,6 +228,7 @@ export interface CFunctionDecl extends ASTNodeBase {
   body?: CBlockStmt;
   callingConvention?: string;
   isVariadic?: boolean;
+  returnTypeEvidence?: HASTTypeEvidence;
   hast?: HASTModuleMetadata;
   adapterCoverage?: HASTAdapterCoverage;
 }
@@ -223,6 +242,7 @@ export interface CVarDecl extends ASTNodeBase {
   storage?: 'stack' | 'register' | 'global' | 'parameter' | 'temporary' | 'unknown';
   stackOffset?: number | string;
   parameterIndex?: number;
+  typeEvidence?: HASTTypeEvidence;
 }
 
 export interface CStructDecl extends ASTNodeBase {
@@ -284,6 +304,7 @@ export interface HASTModuleMetadata {
   producerVersion?: string;
   architecture?: string;
   pointerBits?: number;
+  evidenceOrigins?: HASTEvidenceOrigin[];
   semanticEligible: boolean;
   nativeQuality?: {
     status: 'unreported' | 'no-known-loss' | 'known-loss';
@@ -292,14 +313,15 @@ export interface HASTModuleMetadata {
 }
 
 export const HAST_CAPABILITIES = Object.freeze([
-  'node-ids',
+  'variable-identity',
+  'typed-expressions',
+  'stable-node-ids',
   'source-addresses',
-  'symbol-identities',
-  'typed-child-roles',
-  'call-targets',
-  'field-offsets',
-  'expression-result-types',
+  'direct-call-targets',
+  'struct-field-offsets',
+  'statement-child-roles',
   'native-function-quality',
+  'declaration-type-evidence',
 ] as const);
 
 // ─── Discriminated Union ───

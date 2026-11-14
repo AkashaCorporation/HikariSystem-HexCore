@@ -740,6 +740,37 @@ function resolveTypeSize(offset: number | undefined, allDies: Map<number, DIE>, 
 	}
 }
 
+function resolveDwarfAbiValueClass(
+	offset: number | undefined,
+	allDies: Map<number, DIE>,
+	depth = 0,
+): FunctionParamInfo['abiValueClass'] {
+	if (offset === undefined || depth > 20) return undefined;
+	const die = allDies.get(offset);
+	if (!die) return undefined;
+	const typeRef = die.attrs.get(DW_AT_type) as number | undefined;
+	switch (die.tag) {
+		case DW_TAG_pointer_type:
+		case DW_TAG_enumeration_type:
+			return 'integer';
+		case DW_TAG_base_type: {
+			const name = die.attrs.get(DW_AT_name);
+			return typeof name === 'string' && /(?:float|double)/i.test(name) ? 'floating' : 'integer';
+		}
+		case DW_TAG_structure_type:
+		case DW_TAG_union_type:
+		case DW_TAG_array_type:
+			return 'aggregate';
+		case DW_TAG_typedef:
+		case DW_TAG_const_type:
+		case DW_TAG_volatile_type:
+		case DW_TAG_restrict_type:
+			return resolveDwarfAbiValueClass(typeRef, allDies, depth + 1);
+		default:
+			return undefined;
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Extract member location from DW_AT_data_member_location
 // ---------------------------------------------------------------------------
@@ -861,6 +892,7 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 
 					const retTypeRef = die.attrs.get(DW_AT_type) as number | undefined;
 					const returnType = resolveType(retTypeRef, cu.allDies);
+					const returnSize = resolveTypeSize(retTypeRef, cu.allDies, pointerSize);
 					const params: FunctionParamInfo[] = [];
 					const variadic = die.children.some(
 						child => child.tag === DW_TAG_unspecified_parameters,
@@ -872,11 +904,18 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 							const paramName = child.attrs.get(DW_AT_name);
 							const paramTypeRef = child.attrs.get(DW_AT_type) as number | undefined;
 							const paramType = resolveType(paramTypeRef, cu.allDies);
+							const abiSizeBytes = resolveTypeSize(paramTypeRef, cu.allDies, pointerSize);
+							const abiValueClass = resolveDwarfAbiValueClass(paramTypeRef, cu.allDies);
 
 							const info: FunctionParamInfo = {
 								index: paramIdx,
 								name: typeof paramName === 'string' ? paramName : `param_${paramIdx}`,
 								type: paramType,
+								...(abiSizeBytes > 0 ? {
+									abiSizeBits: abiSizeBytes * 8,
+									abiAlignBits: abiSizeBytes * 8,
+								} : {}),
+								...(abiValueClass ? { abiValueClass } : {}),
 							};
 
 							// Detect struct pointer params for disambiguation
@@ -894,7 +933,14 @@ function extractStructsAndFunctions(cus: ParsedCU[], pointerSize: number): Struc
 
 					// Definitions often follow an unnamed declaration with the same
 					// arity. Keep the signature carrying the richer parameter names.
-					const candidate = { returnType, params, variadic };
+					const returnAbiValueClass = resolveDwarfAbiValueClass(retTypeRef, cu.allDies);
+					const candidate = {
+						returnType,
+						...(returnSize > 0 ? { returnAbiSizeBits: returnSize * 8 } : {}),
+						...(returnAbiValueClass ? { returnAbiValueClass } : {}),
+						params,
+						variadic,
+					};
 					if (shouldPreferFunctionSignature(functions[name], candidate)) {
 						functions[name] = candidate;
 					}

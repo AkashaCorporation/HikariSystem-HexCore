@@ -22,8 +22,8 @@ assert.deepStrictEqual(fn.hast, {
   schemaMajor: 1,
   schemaMinor: 0,
   capabilities: [
-    'node-ids', 'source-addresses', 'symbol-identities', 'typed-child-roles',
-    'call-targets', 'field-offsets', 'expression-result-types',
+    'variable-identity', 'typed-expressions', 'stable-node-ids', 'source-addresses',
+    'direct-call-targets', 'struct-field-offsets', 'statement-child-roles',
   ],
   producer: 'hexcore-helix',
   producerVersion: '0.1.9',

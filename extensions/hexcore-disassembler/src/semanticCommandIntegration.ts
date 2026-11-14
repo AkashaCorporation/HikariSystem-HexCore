@@ -178,3 +178,79 @@ export function semanticCommandCallbacks(
 		} : {}),
 	};
 }
+
+export interface SemanticPrototypeBatchPropagation {
+	status: 'not-required' | 'ok' | 'partial' | 'error';
+	requestedFunctions: readonly string[];
+	recomputedFunctions: readonly string[];
+	missingFunctions: readonly string[];
+	collectionStatus?: string;
+	referenceStatus?: string;
+	runStatus?: string;
+	runHash?: string;
+	outputHash?: string;
+	reason?: string;
+}
+
+/**
+ * Accumulate semantic prototype mutations and close their caller dataflow once.
+ * Debug providers can carry thousands of functions; solving after every record
+ * would make the import quadratic and would expose intermediate generations.
+ */
+export function semanticPrototypeBatchCallbacks(
+	session: SessionStore,
+	engine: DisassemblerEngine,
+): {
+	callbacks: NonNullable<SemanticCommandServiceOptions['callbacks']>;
+	finalize(): Promise<SemanticPrototypeBatchPropagation>;
+} {
+	const base = semanticCommandCallbacks(session, engine);
+	const requested = new Set<string>();
+	return {
+		callbacks: {
+			...base,
+			onPropagateConsumers: event => {
+				const prototype = session.getSemanticStore().getPrototype(event.functionIdentity);
+				const address = prototype?.functionAddress ?? event.functionIdentity;
+				const identity = /^function:/i.test(address)
+					? address.toLowerCase()
+					: /^0x[0-9a-f]+$/i.test(address) ? `function:${address.toLowerCase()}` : undefined;
+				if (!identity) { throw new Error(`Cannot map semantic identity ${event.functionIdentity} to a materialized function.`); }
+				requested.add(identity);
+			},
+		},
+		async finalize(): Promise<SemanticPrototypeBatchPropagation> {
+			const requestedFunctions = [...requested].sort();
+			if (requestedFunctions.length === 0) {
+				return { status: 'not-required', requestedFunctions, recomputedFunctions: [], missingFunctions: [] };
+			}
+			try {
+				const { syncWholeProgramPropagationIsolated } = require('./wholeProgramPropagationProducer') as typeof import('./wholeProgramPropagationProducer');
+				const closure = await syncWholeProgramPropagationIsolated(engine, { changedFunctions: requestedFunctions });
+				const recomputed = new Set(closure.run.recomputedFunctions);
+				const missingFunctions = requestedFunctions.filter(identity => !recomputed.has(identity));
+				const complete = closure.references.status === 'ok'
+					&& closure.collection.status === 'ok'
+					&& closure.run.committed
+					&& missingFunctions.length === 0;
+				return {
+					status: complete ? 'ok' : 'partial',
+					requestedFunctions,
+					recomputedFunctions: [...closure.run.recomputedFunctions].sort(),
+					missingFunctions,
+					referenceStatus: closure.references.status,
+					collectionStatus: closure.collection.status,
+					runStatus: closure.run.status,
+					runHash: closure.run.runHash,
+					...(closure.run.outputHash ? { outputHash: closure.run.outputHash } : {}),
+					...(!complete ? { reason: closure.run.reason ?? 'One or more changed functions were not recomputed in the committed closure.' } : {}),
+				};
+			} catch (error) {
+				return {
+					status: 'error', requestedFunctions, recomputedFunctions: [], missingFunctions: requestedFunctions,
+					reason: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+	};
+}

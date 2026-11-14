@@ -7,7 +7,7 @@ import * as assert from 'assert';
 import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { ingestDebugTypeInfo } from './debugTypeIngestion';
+import { ingestDebugTypeInfo, reconcileDebugFunctionAddress } from './debugTypeIngestion';
 import { recoverRecordsFromPropagation } from './recordRecovery';
 import { canonicalizeSemanticType, type SemanticEvidence } from './semanticModel';
 import { SemanticStore, type SemanticSqliteFactory } from './semanticStore';
@@ -103,6 +103,30 @@ suite('R35 debug types, type manager and record recovery', () => {
 			assert.strictEqual(container.members?.find(member => member.name === 'flags')?.bitfield, true);
 			assert.ok(store.listTypes().some(type => type.name === 'Payload' && type.kind === 'union'));
 		} finally { store.dispose(); }
+	});
+
+	test('reconciles debug prototypes only through exact, non-conflicting ownership', () => {
+		assert.deepStrictEqual(
+			reconcileDebugFunctionAddress('owned', [{ name: 'owned', lowPc: 0x401000, highPc: 0x401020 }], [
+				{ name: 'owned', address: 0x401000 },
+			]),
+			{ status: 'exact', address: 0x401000, source: 'debug-boundary' },
+		);
+		assert.deepStrictEqual(
+			reconcileDebugFunctionAddress('btf_only', undefined, [{ name: 'btf_only', address: 0x402000 }]),
+			{ status: 'exact', address: 0x402000, source: 'function-table' },
+		);
+		const conflict = reconcileDebugFunctionAddress(
+			'conflict', [{ name: 'conflict', lowPc: 0x403000, highPc: 0x403020 }], [
+				{ name: 'conflict', address: 0x404000 },
+			]);
+		assert.strictEqual(conflict.status, 'unreconciled');
+		if (conflict.status === 'unreconciled') { assert.match(conflict.reason, /conflict/); }
+		const ambiguous = reconcileDebugFunctionAddress('duplicate', undefined, [
+			{ name: 'duplicate', address: 0x405000 },
+			{ name: 'duplicate', address: 0x406000 },
+		]);
+		assert.strictEqual(ambiguous.status, 'unreconciled');
 	});
 
 	test('edits stable analyst types transactionally and blocks deletion while dependencies remain', () => {

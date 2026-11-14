@@ -26,6 +26,7 @@ require.cache.__vscode_mock_semantic_providers__ = {
 const { DisassemblerEngine } = require('./disassemblerEngine') as typeof import('./disassemblerEngine');
 const { importPdbSemantics } = require('./pdbSemanticImport') as typeof import('./pdbSemanticImport');
 const { applyImportSignatureProvider } = require('./signatureProvider') as typeof import('./signatureProvider');
+const { runDebugTypeIngest } = require('./typeManagerCommands') as typeof import('./typeManagerCommands');
 
 suite('R36 separated debug and signature providers', function () {
 	this.timeout(180_000);
@@ -40,6 +41,49 @@ suite('R36 separated debug and signature providers', function () {
 			assert.strictEqual(manifest.contributes.commands.filter(item => item.command === command).length, 1);
 			assert.strictEqual(extension.split(`registerCommand('${command}'`).length - 1, 1);
 			assert.strictEqual(runner.split(`['${command}'`).length - 1, 2);
+		}
+	});
+
+	test('applies an exact debug prototype and closes typed callers once', async () => {
+		const hql = path.resolve(__dirname, '..', '..', 'hexcore-hql');
+		const build = path.join(hql, 'benchmarks', 'corpus', 'build', 'msvc-x64-O2-debug');
+		const manifest = JSON.parse(fs.readFileSync(path.join(hql, 'benchmarks', 'corpus', 'build', 'build-manifest.json'), 'utf8').replace(/^\uFEFF/, '')) as {
+			entries: Array<{ id: string; binaryPath: string }>;
+		};
+		const binary = manifest.entries.find(entry => entry.id === 'msvc-x64-O2-debug')!.binaryPath;
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'hexcore-g04-debug-prototype-'));
+		const target = path.join(directory, path.basename(binary));
+		fs.copyFileSync(binary, target);
+		const engine = new DisassemblerEngine();
+		try {
+			assert.strictEqual(await engine.loadFile(target), true);
+			await engine.analyzeAll();
+			const result = await runDebugTypeIngest(engine, {
+				structs: {},
+				functions: {
+					bench_plain_copy: {
+						returnType: 'size_t',
+						params: [
+							{ index: 0, name: 'output', type: 'uint8_t *' },
+							{ index: 1, name: 'input', type: 'const uint8_t *' },
+							{ index: 2, name: 'count', type: 'size_t' },
+						],
+					},
+				},
+			}, { provider: 'manual-debug-adapter', unitIdentity: 'g04-pe-fixture' });
+			assert.strictEqual(result.functionSignaturesApplied, 1);
+			assert.strictEqual(result.functionSignaturesDeferred, 0);
+			assert.strictEqual(result.prototypeFailures, 0);
+			assert.strictEqual(result.propagation.status, 'ok', JSON.stringify(result.propagation));
+			assert.strictEqual(result.status, 'ok');
+			const prototype = engine.getSessionStore()!.getSemanticStore().listPrototypes().find(
+				item => item.evidence.producer === 'manual-debug-adapter:g04-pe-fixture',
+			);
+			assert.strictEqual(prototype?.callingConventionId, 'win64');
+			assert.deepStrictEqual(prototype?.parameters.map(parameter => parameter.name), ['output', 'input', 'count']);
+		} finally {
+			engine.dispose();
+			fs.rmSync(directory, { recursive: true, force: true });
 		}
 	});
 

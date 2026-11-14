@@ -771,14 +771,47 @@ export interface FunctionParamInfo {
 	type: string;
 	/** If param is a struct pointer, the struct name (stripped of 'struct ' prefix) */
 	structName?: string;
+	/** ABI facts supplied by BTF/DWARF, independent of the source spelling. */
+	abiSizeBits?: number;
+	abiAlignBits?: number;
+	abiValueClass?: 'integer' | 'floating' | 'vector' | 'aggregate';
 }
 
 /** Exported function signature */
 export interface FunctionSignatureInfo {
 	returnType: string;
+	returnAbiSizeBits?: number;
+	returnAbiValueClass?: 'integer' | 'floating' | 'vector' | 'aggregate';
 	params: FunctionParamInfo[];
 	/** True when the source signature ends in an unspecified `...` parameter. */
 	variadic?: boolean;
+}
+
+function resolveBtfAbiValueClass(typeId: number, btfData: BTFData, depth = 0): FunctionParamInfo['abiValueClass'] {
+	if (depth > 20) { return undefined; }
+	const type = btfData.types.get(typeId);
+	if (!type) { return undefined; }
+	switch (type.kind) {
+		case BTF_KIND_PTR:
+		case BTF_KIND_INT:
+		case BTF_KIND_ENUM:
+		case BTF_KIND_ENUM64:
+			return 'integer';
+		case BTF_KIND_FLOAT:
+			return 'floating';
+		case BTF_KIND_STRUCT:
+		case BTF_KIND_UNION:
+		case BTF_KIND_ARRAY:
+			return 'aggregate';
+		case BTF_KIND_TYPEDEF:
+		case BTF_KIND_CONST:
+		case BTF_KIND_VOLATILE:
+		case BTF_KIND_RESTRICT:
+		case BTF_KIND_TYPE_TAG:
+			return resolveBtfAbiValueClass(type.sizeOrType, btfData, depth + 1);
+		default:
+			return undefined;
+	}
 }
 
 function meaningfulParameterNameCount(signature: FunctionSignatureInfo): number {
@@ -810,6 +843,8 @@ export function scopeStructInfoForFunctions(
 	fullJson: StructInfoJson,
 	functionNames: Iterable<string>,
 ): StructInfoJson {
+	const requestedNames = [...functionNames];
+	const requested = new Set(requestedNames);
 	const functions: Record<string, FunctionSignatureInfo> = {};
 	const structs: Record<string, StructInfo> = {};
 	const pending: string[] = [];
@@ -820,7 +855,7 @@ export function scopeStructInfoForFunctions(
 		}
 	};
 
-	for (const name of functionNames) {
+	for (const name of requestedNames) {
 		const signature = fullJson.functions[name];
 		if (!signature) { continue; }
 		functions[name] = signature;
@@ -837,7 +872,8 @@ export function scopeStructInfoForFunctions(
 		for (const field of info.fields) { enqueueType(field.type); }
 	}
 
-	return { structs, functions };
+	const boundaries = fullJson.boundaries?.filter(boundary => requested.has(boundary.name));
+	return { structs, functions, ...(boundaries ? { boundaries } : {}) };
 }
 
 /** Function boundary from debug info (DWARF DW_TAG_subprogram low_pc/high_pc). */
@@ -920,6 +956,7 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 		if (!protoType || protoType.kind !== BTF_KIND_FUNC_PROTO) { continue; }
 
 		const returnType = resolveTypeString(protoType.sizeOrType, btfData);
+		const returnSize = resolveTypeSize(protoType.sizeOrType, btfData, pointerSize);
 		const params: FunctionParamInfo[] = [];
 		let variadic = false;
 
@@ -933,11 +970,18 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 					continue;
 				}
 				const paramType = resolveTypeString(param.typeId, btfData);
+				const abiSizeBytes = resolveTypeSize(param.typeId, btfData, pointerSize);
+				const abiValueClass = resolveBtfAbiValueClass(param.typeId, btfData);
 
 				const info: FunctionParamInfo = {
 					index: i,
 					name: param.name || `param_${i}`,
 					type: paramType,
+					...(abiSizeBytes > 0 ? {
+						abiSizeBits: abiSizeBytes * 8,
+						abiAlignBits: abiSizeBytes * 8,
+					} : {}),
+					...(abiValueClass ? { abiValueClass } : {}),
 				};
 
 				// Resolve struct pointer: "struct kbase_context *" → structName = "kbase_context"
@@ -950,7 +994,14 @@ export function exportStructInfoJson(btfData: BTFData, pointerSize: number = 8):
 			}
 		}
 
-		const candidate = { returnType, params, variadic };
+		const returnAbiValueClass = resolveBtfAbiValueClass(protoType.sizeOrType, btfData);
+		const candidate = {
+			returnType,
+			...(returnSize > 0 ? { returnAbiSizeBits: returnSize * 8 } : {}),
+			...(returnAbiValueClass ? { returnAbiValueClass } : {}),
+			params,
+			variadic,
+		};
 		if (shouldPreferFunctionSignature(functions[type.name], candidate)) {
 			functions[type.name] = candidate;
 		}

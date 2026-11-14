@@ -4,7 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as crypto from 'crypto';
-import type { StructInfoJson } from './elfBtfLoader';
+import type { FunctionBoundaryInfo, StructInfoJson } from './elfBtfLoader';
 import {
 	canonicalSerialize,
 	SemanticTypeCatalog,
@@ -68,6 +68,23 @@ function parseOffset(value: string): number {
 	const parsed = /^0x[0-9a-f]+$/i.test(normalized) ? Number.parseInt(normalized.slice(2), 16) : Number(normalized);
 	if (!Number.isSafeInteger(parsed) || parsed < 0) { throw new Error(`Invalid debug field offset ${value}.`); }
 	return parsed;
+}
+
+export function reconcileDebugFunctionAddress(
+	name: string,
+	boundaries: readonly FunctionBoundaryInfo[] | undefined,
+	functions: readonly { name: string; address: number }[],
+): { status: 'exact'; address: number; source: 'debug-boundary' | 'function-table' } | { status: 'unreconciled'; reason: string } {
+	const debugMatches = (boundaries ?? []).filter(item => item.name === name);
+	const functionMatches = functions.filter(item => item.name === name);
+	if (debugMatches.length > 1) { return { status: 'unreconciled', reason: `ambiguous debug boundaries for ${name}` }; }
+	if (functionMatches.length > 1) { return { status: 'unreconciled', reason: `ambiguous function-table entries for ${name}` }; }
+	if (debugMatches.length === 1 && functionMatches.length === 1 && debugMatches[0].lowPc !== functionMatches[0].address) {
+		return { status: 'unreconciled', reason: `debug/function-table address conflict for ${name}` };
+	}
+	if (debugMatches.length === 1) { return { status: 'exact', address: debugMatches[0].lowPc, source: 'debug-boundary' }; }
+	if (functionMatches.length === 1) { return { status: 'exact', address: functionMatches[0].address, source: 'function-table' }; }
+	return { status: 'unreconciled', reason: `no exact address owner for ${name}` };
 }
 
 export function ingestDebugTypeInfo(
