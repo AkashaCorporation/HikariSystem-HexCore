@@ -15,7 +15,7 @@ export interface FunctionMaterializationInput {
 
 export interface FunctionMaterializationAssessment {
 	status: 'ok' | 'partial';
-	analysisDepth: 'reconnaissance-only' | 'partial-disassembly' | 'complete-disassembly';
+	analysisDepth: 'reconnaissance-only' | 'partial-disassembly' | 'complete-known-function-disassembly';
 	negativeEvidenceUsable: false;
 	materializedFunctionRatio: number;
 	materializedFunctions: number;
@@ -96,7 +96,7 @@ export function assessFunctionMaterialization(
 		status: reasons.length > 0 ? 'partial' : 'ok',
 		analysisDepth: totalFunctions === 0 || materializedFunctions === 0 ? 'reconnaissance-only'
 			: materializedFunctions === totalFunctions && !partialFunctions && !decodeEmptyFunctions && !lazyFunctions
-				? 'complete-disassembly' : allowLazy && minMaterializedRatio === 0
+				? 'complete-known-function-disassembly' : allowLazy && minMaterializedRatio === 0
 					? 'reconnaissance-only' : 'partial-disassembly',
 		// Discovery/disassembly alone never proves absence of a behavioral defect.
 		negativeEvidenceUsable: false,

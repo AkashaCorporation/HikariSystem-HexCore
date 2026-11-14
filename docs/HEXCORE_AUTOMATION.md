@@ -84,9 +84,13 @@ Use the terminal `summary.queueSnapshot` for counts excluding the completed job.
 ### Evidence Interpretation (1.4.62 / Composer 1.0.14)
 
 - `analyzeAll.status` describes completion under the declared policy. Inspect
-  `analysisDepth`, `functionsMaterialized`, `partialFunctions`, and
-  `materializedFunctionRatio` before using its results. Reconnaissance may be
-  operationally `ok`; disassembly is never by itself negative security evidence.
+  `analysisDepth`, `analysisDepthBasis`, `functionDiscoveryCoverage`,
+  `functionsMaterialized`, `partialFunctions`, and `materializedFunctionRatio`
+  before using its results. `complete-known-function-disassembly` means every
+  function already present in the accepted index has a complete body; it does
+  not claim that every executable byte or indirect target was discovered.
+  Reconnaissance may be operationally `ok`; disassembly is never by itself
+  negative security evidence.
 - Security jobs should declare `minMaterializedRatio` for their intended scope
   or materialize a targeted function set and check each body's completeness.
   Do not choose a global ratio as a substitute for caller/consumer coverage.
@@ -1276,6 +1280,19 @@ The result exposes `materializedFunctionRatio`, `functionsWithInstructions`,
 `lazyFunctions`, `decodeEmptyFunctions`, and the effective
 `materializationPolicy`. Reconnaissance jobs may set `allowLazy:true`, but the
 report still foregrounds the unanalyzed population.
+
+The 3.8.6 development contract also exposes:
+
+- `analysisDepthBasis:"known-function-index"`;
+- `functionDiscoveryCoverage.status`;
+- executable bytes owned by accepted ranges, unowned, overlapping, and covered
+  by decoded instructions;
+- range/decode ownership ratios;
+- unresolved indirect transfer count;
+- discovery-budget partial state and reason codes.
+
+These fields prevent a 100% materialization ratio over an incomplete function
+index from being interpreted as complete binary discovery.
 
 `analyzeAll` executes native discovery in a child process. The Extension Host
 owns the external deadline and can terminate the worker even when native code

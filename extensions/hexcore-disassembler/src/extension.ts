@@ -332,6 +332,8 @@ interface AnalyzeAllResult {
 	};
 	recommendedNextCommands: string[];
 	analysisDepth: ReturnType<typeof assessFunctionMaterialization>['analysisDepth'];
+	analysisDepthBasis: 'known-function-index';
+	functionDiscoveryCoverage: ReturnType<DisassemblerEngine['getExecutableOwnershipCoverage']>;
 	negativeEvidenceUsable: false;
 	functionsMaterialized: number;
 	partialFunctions: number;
@@ -9860,6 +9862,7 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 	});
 	const closureRestoration = engine.getAnalysisClosureRestoration();
 	const discoveryDiagnostics = engine.getAnalysisDiscoveryDiagnostics();
+	const functionDiscoveryCoverage = engine.getExecutableOwnershipCoverage();
 	const stringScan = engine.getStringScanDiagnostic();
 	const partialDiscovery = discoveryDiagnostics.filter(diagnostic => diagnostic.status === 'partial');
 	const discoveryWarning = partialDiscovery.length > 0
@@ -9904,6 +9907,8 @@ function createAnalyzeAllResult(engine: DisassemblerEngine, targetFilePath: stri
 		decodeEmptyFunctions,
 		materializedFunctionRatio: materialization.materializedFunctionRatio,
 		analysisDepth: materialization.analysisDepth,
+		analysisDepthBasis: 'known-function-index',
+		functionDiscoveryCoverage,
 		negativeEvidenceUsable: false,
 		functionsMaterialized,
 		partialFunctions,
@@ -10025,6 +10030,10 @@ function generateAnalyzeAllReport(result: AnalyzeAllResult): string {
 | **Complete Materialized Functions** | ${result.functionsMaterialized} |
 | **Partial Function Bodies** | ${result.partialFunctions} |
 | **Analysis Depth** | ${result.analysisDepth} |
+| **Analysis Depth Basis** | ${result.analysisDepthBasis} |
+| **Function Discovery Coverage** | ${result.functionDiscoveryCoverage.status} (${(result.functionDiscoveryCoverage.rangeOwnershipRatio * 100).toFixed(2)}% range-owned, ${(result.functionDiscoveryCoverage.decodedInstructionRatio * 100).toFixed(2)}% decoded) |
+| **Unowned / Overlapping Executable Bytes** | ${result.functionDiscoveryCoverage.unownedExecutableBytes} / ${result.functionDiscoveryCoverage.overlappingOwnedBytes} |
+| **Unresolved Indirect Transfers** | ${result.functionDiscoveryCoverage.unresolvedIndirectTransfers} |
 | **Negative Evidence Usable** | false (discovery is not a behavioral audit) |
 | **Functions Without Decoded Instructions** | ${result.functionsWithoutInstructions} |
 | **Lazy Function Bodies** | ${result.lazyFunctions} |
@@ -10150,6 +10159,8 @@ function writeAnalyzeAllOutput(result: AnalyzeAllResult, output: AnalyzeAllOutpu
 		decodeEmptyFunctions: result.decodeEmptyFunctions,
 		materializedFunctionRatio: result.materializedFunctionRatio,
 		analysisDepth: result.analysisDepth,
+		analysisDepthBasis: result.analysisDepthBasis,
+		functionDiscoveryCoverage: result.functionDiscoveryCoverage,
 		negativeEvidenceUsable: result.negativeEvidenceUsable,
 		functionsMaterialized: result.functionsMaterialized,
 		partialFunctions: result.partialFunctions,

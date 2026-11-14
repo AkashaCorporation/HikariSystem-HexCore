@@ -30,6 +30,9 @@ and current delivery boundaries are tracked in
 - A discovered function boundary can remain lazy until its body is requested.
   `analyzeAll` JSON retains all entries in the discovered index; this does not prove
   that all functions in the binary were discovered.
+- In 3.8.6 development, `complete-known-function-disassembly` is explicitly
+  scoped to the accepted index. Inspect `functionDiscoveryCoverage` for unowned
+  or overlapping executable bytes and unresolved indirect transfers.
 - Markdown is an address-ordered first-100 preview. Use JSON for complete index
   enumeration. The Functions tree exposes body state without eagerly decoding it.
 - Zero known callers/callees is not proof of no references. Audits over incomplete

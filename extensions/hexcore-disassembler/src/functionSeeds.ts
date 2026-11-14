@@ -13,6 +13,7 @@ export type FunctionSeedKind =
 	| 'import-thunk'
 	| 'unwind'
 	| 'symbol'
+	| 'runtime-start-main'
 	| 'fixed-width-prologue'
 	| 'padding-delimited-leaf'
 	| 'linker-thunk'
@@ -37,6 +38,7 @@ const STRONG_SEED_KINDS = new Set<FunctionSeedKind>([
 	'import-thunk',
 	'unwind',
 	'symbol',
+	'runtime-start-main',
 	'fixed-width-prologue',
 	'padding-delimited-leaf',
 	'linker-thunk',

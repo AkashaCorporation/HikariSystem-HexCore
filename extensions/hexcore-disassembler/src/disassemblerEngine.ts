@@ -26,6 +26,9 @@ import {
 } from './addressTakenFunctionDiscovery';
 import { assessStringEvidence, findCrc32LookupRanges, type ByteRange } from './stringEvidence';
 import { assessInstructionBoundary, findPaddingAnchoredDecodeStart } from './disassemblyBoundary';
+import { recoverJumpTableTargets } from './jumpTableLeaders';
+import { recoverElfX64StartupMain } from './elfStartupMain';
+import { calculateExecutableOwnershipCoverage } from './executableOwnershipCoverage';
 
 // Types
 export interface Instruction {
@@ -1211,6 +1214,9 @@ export class DisassemblerEngine {
 		const prologDiagnostic = await this.scanForFunctionPrologs();
 		if (prologDiagnostic) { this.discoveryDiagnostics.push(prologDiagnostic); }
 
+		phase('discover-elf-startup-main');
+		await this.discoverElfStartupMain();
+
 		// A lazy pdata index does not materialize caller bodies, so optimized leaf
 		// callees without unwind metadata can otherwise depend on prolog-scan order.
 		phase('discover-direct-call-leaves');
@@ -1403,6 +1409,41 @@ export class DisassemblerEngine {
 		this.analysisGeneration++;
 		phase('complete');
 		return this.lastAnalysisDelta.netChange;
+	}
+
+	private async discoverElfStartupMain(): Promise<number | undefined> {
+		if (this.architecture !== 'x64' || this.fileInfo?.format !== 'ELF64' ||
+			this.fileInfo.isRelocatable === true) {
+			return undefined;
+		}
+		const entryPoint = this.fileInfo.entryPoint;
+		const entryFunction = this.functions.get(entryPoint);
+		if (!entryFunction || entryFunction.instructions.length === 0) {
+			return undefined;
+		}
+		const evidence = recoverElfX64StartupMain(
+			entryPoint,
+			entryFunction.instructions,
+			address => this.isAnalyzableFunctionAddress(address),
+		);
+		if (!evidence) {
+			return undefined;
+		}
+
+		this.functionSeeds.record(evidence.mainAddress, {
+			kind: 'runtime-start-main',
+			sourceAddress: evidence.assignmentAddress,
+			consumerAddress: evidence.callAddress,
+		});
+		const existing = this.functions.get(evidence.mainAddress);
+		if (existing) {
+			if (/^sub_[0-9a-f]+$/i.test(existing.name)) {
+				existing.name = 'main';
+			}
+			return evidence.mainAddress;
+		}
+		await this.analyzeFunction(evidence.mainAddress, 'main');
+		return evidence.mainAddress;
 	}
 
 
@@ -4662,7 +4703,7 @@ export class DisassemblerEngine {
 	}
 
 	/**
-	 * v3.8.5: Is `va` inside the IBT/CET `.plt.sec` stub section?
+	 * Is `va` inside an x86/x64 ELF PLT-family stub section?
 	 *
 	 * Used to bound the extent of `.plt.sec` thunks. A `.plt.sec` thunk is `endbr64 ; bnd jmp
 	 * *GOT[n](%rip)` padded to a 16-byte stride: Capstone folds the F2 (BND) prefix into the
@@ -4670,21 +4711,27 @@ export class DisassemblerEngine {
 	 * jump with no immediate target. analyzeFunction's end-detection therefore never terminates
 	 * on it, so the stub runs on into the next thunk and, on IBT binaries that also trip the
 	 * trap-handler gate, all the way to the shared `hlt` padding at the section tail (observed:
-	 * every `.plt.sec` entry on behindthescenes over-read to one shared end). Clamping is gated
-	 * to `.plt.sec` so legacy `.plt`/`.plt.got` stubs and normal indirect `jmp [rip+disp]`
-	 * (jump tables / tail calls) are byte-identical -- the legacy `.plt` end-handling is
-	 * unchanged (its stubs are not over-read on the regression set; only the new IBT thunk was).
-	 * x86/x64 only -- `.plt.sec` is an x86 CET construct; other arches have no such section.
+	 * every `.plt.sec` entry on behindthescenes over-read to one shared end). The same
+	 * first-transfer ownership rule applies to stripped `.plt`/`.plt.got` entries: an
+	 * indirect transfer does not own the following stub or `.text` startup code.
+	 * x86/x64 only; other architectures retain their dedicated PLT handling.
 	 */
-	private isPltSecAddress(va: number): boolean {
+	private isPltFamilyAddress(va: number): boolean {
 		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return false; }
 		for (const s of this.sections) {
-			if (s.name === '.plt.sec' &&
+			if (['.plt', '.plt.sec', '.plt.got'].includes(s.name) &&
 				va >= s.virtualAddress && va < s.virtualAddress + s.virtualSize) {
 				return true;
 			}
 		}
 		return false;
+	}
+
+	/** Retained strict predicate for diagnostics and compatibility tests. */
+	private isPltSecAddress(va: number): boolean {
+		if (this.architecture !== 'x64' && this.architecture !== 'x86') { return false; }
+		return this.sections.some(section => section.name === '.plt.sec' &&
+			va >= section.virtualAddress && va < section.virtualAddress + section.virtualSize);
 	}
 
 	/**
@@ -5201,7 +5248,7 @@ export class DisassemblerEngine {
 		// first unconditional jmp. Gated strictly to `.plt.sec` so legacy `.plt`/`.plt.got` and
 		// normal indirect `jmp [rip+disp]` (jump tables / tail calls) stay byte-identical.
 		const addrForRegion = typeof address === 'bigint' ? Number(address) : address;
-		const isPltStub = this.isPltSecAddress(addrForRegion);
+		const isPltStub = this.isPltFamilyAddress(addrForRegion);
 		const firstInstruction = instructions[0];
 		const entryTransferTarget = this.functionSeeds.get(addrForRegion).some(seed => seed.kind === 'entry') &&
 			firstInstruction?.isJump === true && !firstInstruction.isConditional &&
@@ -5335,16 +5382,37 @@ export class DisassemblerEngine {
 		}
 
 		let internalBlockTargets = new Set<number>();
+		let recoveredJumpTableTargets = new Map<number, number[]>();
 		let funcInstructions = instructions.slice(0, endIdx);
 		const useReachableBlockOwnership =
 			!isPltStub &&
 			entryTransferTarget === undefined &&
 			this.fileInfo?.isRelocatable !== true &&
 			(((this.architecture === 'x86' || this.architecture === 'x64') &&
-				this.getPdataEntries().length === 0 && !this.fileInfo?.format.startsWith('ELF')) ||
+				this.getPdataEntries().length === 0) ||
 				(this.architecture === 'arm64' && this.fileInfo?.format === 'ELF64'));
 		if (useReachableBlockOwnership) {
-			const reachable = this.selectReachableFunctionInstructions(instructions, Number(address));
+			let reachable = this.selectReachableFunctionInstructions(instructions, Number(address));
+			if ((this.architecture === 'x86' || this.architecture === 'x64') &&
+				this.fileInfo?.format.startsWith('ELF')) {
+				const hits = recoverJumpTableTargets(
+					reachable.instructions,
+					(va, size) => this.getBytes(va, size),
+				);
+				for (const hit of hits) {
+					const targets = hit.targets.filter(target => this.isAnalyzableFunctionAddress(target));
+					if (targets.length > 0) {
+						recoveredJumpTableTargets.set(hit.jmpAddress, targets);
+					}
+				}
+				if (recoveredJumpTableTargets.size > 0) {
+					reachable = this.selectReachableFunctionInstructions(
+						instructions,
+						Number(address),
+						recoveredJumpTableTargets,
+					);
+				}
+			}
 			if (reachable.instructions.length > 0) {
 				funcInstructions = reachable.instructions;
 				internalBlockTargets = reachable.internalBlockTargets;
@@ -5368,6 +5436,13 @@ export class DisassemblerEngine {
 		};
 
 		this.functions.set(address, func);
+		for (const [jumpAddress, targets] of recoveredJumpTableTargets) {
+			for (const target of targets) {
+				if (internalBlockTargets.has(target)) {
+					this.addXRef({ from: jumpAddress, to: target, type: 'jump' });
+				}
+			}
+		}
 
 		// Collect child targets for analysis (calls + trampoline jumps)
 		const childTargets: number[] = [];
@@ -5679,6 +5754,7 @@ export class DisassemblerEngine {
 	private selectReachableFunctionInstructions(
 		instructions: Instruction[],
 		functionStart: number,
+		jumpTableTargets: ReadonlyMap<number, readonly number[]> = new Map(),
 	): { instructions: Instruction[]; internalBlockTargets: Set<number> } {
 		const indexByAddress = new Map<number, number>();
 		for (let index = 0; index < instructions.length; index++) {
@@ -5725,6 +5801,14 @@ export class DisassemblerEngine {
 					break;
 				}
 				if (instruction.isJump) {
+					for (const target of jumpTableTargets.get(address) ?? []) {
+						if (target !== functionStart && indexByAddress.has(target) &&
+							!this.functionSeeds.isStrong(target) && !queued.has(target)) {
+							queued.add(target);
+							pending.push(target);
+							internalBlockTargets.add(target);
+						}
+					}
 					const target = instruction.targetAddress === undefined ? undefined : Number(instruction.targetAddress);
 					if (target !== undefined && indexByAddress.has(target)) {
 						const shortEntryContinuation = this.functionSeeds.get(functionStart).some(seed => seed.kind === 'entry') &&
@@ -6521,15 +6605,17 @@ export class DisassemblerEngine {
 	 * stronger chunk-aware boundary model and are intentionally left untouched.
 	 */
 	private reconcileFunctionsWithStrongSeeds(): void {
-		const fixedWidthElf = this.architecture === 'arm64' && this.fileInfo?.format === 'ELF64';
+		const supportedElf = this.fileInfo?.format.startsWith('ELF') === true &&
+			(this.architecture === 'x86' || this.architecture === 'x64' || this.architecture === 'arm64');
 		if (this.getPdataEntries().length > 0 || this.fileInfo?.isRelocatable ||
-			(this.fileInfo?.format.startsWith('ELF') && !fixedWidthElf)) {
+			(this.fileInfo?.format.startsWith('ELF') && !supportedElf)) {
 			return;
 		}
 		const starts = this.functionSeeds.strongAddresses().filter(address => this.functions.has(address));
 		if (starts.length < 2) {
 			return;
 		}
+		let changed = false;
 		for (const fn of this.functions.values()) {
 			let lo = 0;
 			let hi = starts.length;
@@ -6568,6 +6654,10 @@ export class DisassemblerEngine {
 				fn.endAddress = nextStart;
 			}
 			fn.size = fn.endAddress - fn.address;
+			changed = true;
+		}
+		if (changed && this.fileInfo?.format.startsWith('ELF')) {
+			this.rebuildMaterializedCallGraph();
 		}
 	}
 
@@ -6721,9 +6811,9 @@ export class DisassemblerEngine {
 	 *  - only when .pdata is absent (PE64 uses reconcileFunctionsWithPdata),
 	 *  - NOT for ET_REL (.ko): its symtab st_value is section-relative, defeating symbol
 	 *    cross-checks; skipping it keeps the mali tripwire byte-identical,
-	 *  - only an interior function with ZERO callers is dropped. A real function never nests
-	 *    inside another AND is reached by a call/tail-jump (callers populated by then), so the
-	 *    "interior + no callers" pair is a ghost; a real function with callers is never touched.
+	 *  - only an interior function without independent strong entry evidence is dropped.
+	 *    Direct calls, symbols, exports, unwind entries and recovered runtime main are strong;
+	 *    a weak prologue reached only through an over-wide owner's internal CFG is not.
 	 */
 	private dropInteriorGhostFunctions(): void {
 		if (this.fileInfo?.format.startsWith('PE') ||
@@ -6734,7 +6824,7 @@ export class DisassemblerEngine {
 		let maxEnd = Number.NEGATIVE_INFINITY;
 		const dropped = new Set<number>();
 		for (const fn of sorted) {
-			if (fn.address < maxEnd && fn.callers.length === 0 && !this.functionSeeds.isStrong(fn.address)) {
+			if (fn.address < maxEnd && !this.functionSeeds.isStrong(fn.address)) {
 				this.functions.delete(fn.address);
 				dropped.add(fn.address);
 				continue;
@@ -7222,6 +7312,51 @@ export class DisassemblerEngine {
 
 	getFileInfo(): FileInfo | undefined {
 		return this.fileInfo;
+	}
+
+	getExecutableOwnershipCoverage(): ReturnType<typeof calculateExecutableOwnershipCoverage> {
+		const executableRanges = this.sections
+			.filter(section => section.isCode || section.isExecutable)
+			.map(section => ({
+				start: section.virtualAddress,
+				end: section.virtualAddress + Math.max(0, section.rawSize),
+			}));
+		const functionRanges = [...this.functions.values()].map(fn => ({
+			start: fn.address,
+			end: fn.endAddress,
+		}));
+		const decodedInstructionRanges = [...this.functions.values()].flatMap(fn =>
+			fn.instructions.map(instruction => ({
+				start: Number(instruction.address),
+				end: Number(instruction.address) + Number(instruction.size),
+			})));
+		const resolvedIndirectSources = new Set<number>();
+		for (const references of this.xrefs.values()) {
+			for (const reference of references) {
+				if (reference.type === 'jump' || reference.type === 'call') {
+					resolvedIndirectSources.add(reference.from);
+				}
+			}
+		}
+		let unresolvedIndirectTransfers = 0;
+		for (const fn of this.functions.values()) {
+			if (this.isPltFamilyAddress(fn.address)) { continue; }
+			for (const instruction of fn.instructions) {
+				const mnemonic = instruction.mnemonic.toLowerCase().replace(/^(?:bnd|notrack)\s+/, '');
+				const transfer = instruction.isCall || instruction.isJump || mnemonic === 'call' || mnemonic === 'jmp';
+				if (transfer && instruction.targetAddress === undefined &&
+					!resolvedIndirectSources.has(Number(instruction.address))) {
+					unresolvedIndirectTransfers++;
+				}
+			}
+		}
+		return calculateExecutableOwnershipCoverage({
+			executableRanges,
+			functionRanges,
+			decodedInstructionRanges,
+			unresolvedIndirectTransfers,
+			discoveryBudgetPartial: this.discoveryDiagnostics.some(diagnostic => diagnostic.status === 'partial'),
+		});
 	}
 
 	private async discoverPaddingDelimitedLeafFunctions(): Promise<AnalysisDiscoveryDiagnostic> {

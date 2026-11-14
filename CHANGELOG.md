@@ -14,6 +14,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   applied to that same worker, negative returns remain valid 64-bit trace
   values, and Linux exits carry a typed exit code.
 
+### Disassembler
+
+- Repair stripped x64 ELF function ownership across `.plt`, SysV startup,
+  direct-call targets, and bounded relative jump tables. AnalyzeAll now
+  distinguishes complete materialization of the known function index from
+  executable-byte discovery coverage and reports unowned/overlapping bytes and
+  unresolved indirect transfers.
+
 ## [3.8.5] - 2026-11-12
 
 ### Stable Release Qualification
