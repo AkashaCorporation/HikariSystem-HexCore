@@ -11,6 +11,7 @@
     "helix": {
       "version": "helix-js=0.9.4-rc.4 native=0.9.4-rc.4",
       "nodeSha256": "7a82a1a36a1ecf86cb11e7adfe97ff591cf33fe42bacd68cf50fab44d2c06b61",
+      "packagedNodeSha256": "a4bc81eeda2801dfa737726ec265f83fef86ca40ac9237693f9e6f7abd66e624",
       "hastSchema": 1
     }
   },

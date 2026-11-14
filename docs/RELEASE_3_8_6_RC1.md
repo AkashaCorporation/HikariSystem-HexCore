@@ -41,6 +41,10 @@ Helix RC4 is built from `626503b` plus version reconciliation commit
 was `cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
 The official Actions prebuild from run `43617794080` is 15,432,192 bytes with
 SHA-256 `7a82a1a36a1ecf86cb11e7adfe97ff591cf33fe42bacd68cf50fab44d2c06b61`.
+The Code OSS packager adds a deterministic 1,024-byte `.rsrc` section; the
+packaged node SHA-256 is
+`a4bc81eeda2801dfa737726ec265f83fef86ca40ac9237693f9e6f7abd66e624`.
+All executable/data/unwind/relocation sections remain byte-identical.
 Both produced identical pseudo-C and HAST hashes. The source passed 419/419
 native tests, 192/192 Rust tests, version parity, deterministic pseudo-C, and
 deterministic HAST smoke. No other native engine changed.

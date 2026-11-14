@@ -47,6 +47,10 @@ created a new RC4 candidate and rebuilt it explicitly with Visual Studio 2022
   `cf851aa09f9f639847b649a36ec9859e24b7586ba2c8b9f8ea20abb8e3d63fd8`.
 - Official Actions node: 15,432,192 bytes, SHA-256
   `7a82a1a36a1ecf86cb11e7adfe97ff591cf33fe42bacd68cf50fab44d2c06b61`.
+- Packaged node: 15,433,216 bytes, SHA-256
+  `a4bc81eeda2801dfa737726ec265f83fef86ca40ac9237693f9e6f7abd66e624`.
+  Code OSS adds only a 1,024-byte `.rsrc` section; the five original PE
+  sections remain byte-identical to the Actions asset.
 - Native prebuild run `43617794080`: PASS. Local and official nodes emitted
   identical pseudo-C SHA-256 `5f3a9ae0...1abc8` and HAST SHA-256
   `1175b104...c069` for the canonical smoke fixture.
