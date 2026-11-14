@@ -134,10 +134,42 @@ pseudo-C SHA-256: eb406ea3b9e20b5594cf10c8c56786719b0301bc7ae90c081ba660fecab02a
 HAST SHA-256: 80abb110b7c74cc212e854259667e0ed645eec875094a2bc6b780c67e05e1491
 ```
 
+## Kbase regression control
+
+The seven current stored lifts under
+`hexcore-reports-3.8.4-rc.1/fresh-helix-souper-2` were each decompiled twice
+through the final node:
+
+```text
+kbase_context_mmap.ll
+kbase_csf_queue_register.ll
+kbase_jit_allocate.ll
+kbase_mem_alloc.ll
+kbase_mem_commit.ll
+kbase_mem_free.ll
+kbase_mem_import.ll
+```
+
+Result: 7/7 non-empty C, 7/7 non-empty HAST, 7/7 deterministic C/HAST,
+and zero causal double-decrement witnesses.
+
+The archived modules preserve a symbolic function name and `; Address:` only;
+they predate the strict in-module entry-identity contract. The regression
+harness therefore renamed the first function in memory to
+`lifted_<address-decimal>` using that frozen header. Original IR files were
+not modified, and both original and instrumented hashes are recorded in
+`09-kbase-regression/kbase-evidence.json`.
+
+These lifts explicitly report `SemanticStatus: partial` and incomplete
+function boundaries. They are a non-crash, determinism and G03-causal
+regression control only; the historical B outputs are not treated as semantic
+oracles and all seven current outputs differ from them.
+
 ## Evidence roots
 
 ```text
 E:/HexCore-3.8.6-G03-Acceptance
+E:/HexCore-3.8.6-G03-Acceptance/09-kbase-regression
 E:/HexCore-3.8.5-Closure/trust-e2e-20261101/internal-workspace/
   stable-package-smoke-20261112/reports/g03-nucleo-final-1479-r4
 E:/HexCore-3.8.5-Closure/trust-e2e-20261101/internal-workspace/
