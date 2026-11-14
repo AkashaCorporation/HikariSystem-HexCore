@@ -949,22 +949,27 @@ export class DebugEngine {
 		// that reads/writes registers via IPC to the worker process.
 		this.emulator.setAsyncInterruptHandler(async (intno: number) => {
 			if (intno === 0x80 || intno === 2) {
-				const result = this.linuxApiHooks!.handleSyscall();
-
 				if (this.architecture === 'x64') {
+					const regs = await this.emulator!.getRegistersX64Async();
+					const syscallNum = BigInt.asUintN(64, regs.rax);
+					const result = await this.linuxApiHooks!.handleSyscallAsync(regs);
 					await this.emulator!.setRegister('rax', result);
+					this.emit('api-call', {
+						dll: 'syscall',
+						name: `sys_${syscallNum.toString()}`,
+						returnValue: result
+					});
 				} else {
+					const result = this.linuxApiHooks!.handleSyscall();
 					await this.emulator!.setRegister('eax', result);
+					const regs = await this.emulator!.getRegistersX64Async();
+					const sysNum = regs ? Number(regs.rax) : 0;
+					this.emit('api-call', {
+						dll: 'syscall',
+						name: `sys_${sysNum}`,
+						returnValue: result
+					});
 				}
-
-				const regs = await this.emulator!.getRegistersX64Async();
-				const sysNum = regs ? Number(regs.rax) : 0;
-
-				this.emit('api-call', {
-					dll: 'syscall',
-					name: `sys_${sysNum}`,
-					returnValue: result
-				});
 			}
 		});
 
@@ -1599,32 +1604,43 @@ export class DebugEngine {
 	}
 
 	private hasTerminalLinuxApiCall(): boolean {
+		return this.getTerminalLinuxExit() !== undefined;
+	}
+
+	getTerminalLinuxExit(): { code: bigint; source: string } | undefined {
 		// ARM64 direct syscalls are tracked separately from linuxApiHooks
 		if (this._arm64ExitRequested) {
-			return true;
+			const lastExit = [...this._arm64SyscallLog].reverse().find(call =>
+				call.name === 'sys_93' || call.name === 'sys_94');
+			return {
+				code: lastExit?.args[0] ?? 0n,
+				source: lastExit?.name ?? 'arm64-exit',
+			};
 		}
 
 		if (!this.linuxApiHooks) {
-			return false;
+			return undefined;
 		}
 
 		const lastCall = this.linuxApiHooks.getLastCall();
 		if (!lastCall) {
-			return false;
+			return undefined;
 		}
 
 		if (lastCall.name === 'exit' || lastCall.name === '_exit' || lastCall.name === 'abort') {
-			return true;
+			return { code: lastCall.args[0] ?? 0n, source: lastCall.name };
 		}
 
 		// x86/x64 exit syscalls: 60 (exit), 231 (exit_group)
 		// ARM64 exit syscalls: 93 (exit), 94 (exit_group)
 		if (lastCall.dll === 'syscall') {
 			const terminalSyscalls = ['sys_60', 'sys_231', 'sys_93', 'sys_94'];
-			return terminalSyscalls.includes(lastCall.name);
+			if (terminalSyscalls.includes(lastCall.name)) {
+				return { code: lastCall.args[0] ?? 0n, source: lastCall.name };
+			}
 		}
 
-		return false;
+		return undefined;
 	}
 
 	/**

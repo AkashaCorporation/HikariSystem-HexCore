@@ -5,6 +5,15 @@ All notable changes to the HikariSystem HexCore project will be documented in th
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.8.6] - Unreleased
+
+### Debugger
+
+- Correct x64 static-ELF syscall dispatch across the isolated worker boundary.
+  Syscall identity and arguments now come from the worker snapshot, effects are
+  applied to that same worker, negative returns remain valid 64-bit trace
+  values, and Linux exits carry a typed exit code.
+
 ## [3.8.5] - 2026-11-12
 
 ### Stable Release Qualification
