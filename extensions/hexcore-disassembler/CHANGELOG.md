@@ -2,6 +2,11 @@
 
 ## [1.4.79] - Unreleased
 
+- Run Helix in an isolated process by default (`resolveHelixExecutionMode`).
+  Native Helix failures fail the step instead of the Extension Host; the child
+  deadline is the explicit `workerTimeoutMs`, else the pipeline step timeout
+  minus two seconds, else five minutes; a job abort kills the call's process.
+  `forceSync` / `forceWorker` stay available as explicit opt-ins.
 - Add opt-in `never`, `needed`, and `bounded` HQL query materialization over
   explicit functions and proven reference/propagation dependencies.
 - Stage decoding in a terminable child process with HXDB disabled; timeout or

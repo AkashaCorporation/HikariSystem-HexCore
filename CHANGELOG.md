@@ -16,6 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Disassembler
 
+- Run Helix decompilation in an isolated process by default for
+  `hexcore.helix.decompile` and `hexcore.helix.decompileIR`. A native failure
+  inside LLVM/MLIR now fails only its own step instead of terminating the
+  Extension Host, the child expires two seconds before the pipeline step
+  deadline, and a job abort kills that call's process. `forceSync` and
+  `forceWorker` remain available as explicit opt-ins.
+- Helix FIX-145 (engine branch `fix/0.9.4-cast-wide-constants`): the C-AST
+  builder no longer converts IR constants wider than 64 bits with an unchecked
+  `APInt::getSExtValue()`. NUCLEO `makePlayer` (0x14000CEC0) previously raised
+  an LLVM assertion that aborted the IDE; 128-bit constants are now emitted
+  exactly as `__helix_wide_constant(<bits>, "0x…")`. The legacy
+  `PseudoCEmitter` is removed and `useCastLayer: false` is ignored.
+
 - Repair stripped x64 ELF function ownership across `.plt`, SysV startup,
   direct-call targets, and bounded relative jump tables. AnalyzeAll now
   distinguishes complete materialization of the known function index from

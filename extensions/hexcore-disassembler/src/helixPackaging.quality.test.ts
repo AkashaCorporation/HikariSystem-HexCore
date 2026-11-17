@@ -22,6 +22,9 @@ import {
 	parseHelixVariableRenames,
 	parseHelixExactRange,
 	resolveExplicitHelixDataSections,
+	resolveHelixExecutionMode,
+	DEFAULT_HELIX_PROCESS_TIMEOUT_MS,
+	HELIX_STEP_TIMEOUT_MARGIN_MS,
 } from './helixPackaging';
 
 function makeEngineStub(opts: {
@@ -459,5 +462,48 @@ define ptr @lifted_5368865820() {
 		assert.strictEqual(ext.end, 0x1408359e0);
 		assert.strictEqual(ext.size, 0x10);
 		assert.strictEqual(ext.source, 'function-table');
+	});
+});
+
+suite('Helix execution isolation', () => {
+	test('defaults to an isolated process with the default deadline', () => {
+		assert.deepStrictEqual(resolveHelixExecutionMode({}), {
+			forceSync: false, forceWorker: false, forceProcess: true,
+			workerTimeoutMs: DEFAULT_HELIX_PROCESS_TIMEOUT_MS,
+		});
+	});
+
+	test('headless quiet pipeline calls are isolated and use the step timeout', () => {
+		const mode = resolveHelixExecutionMode({ quiet: true, pipelineTimeoutMs: 120_000 });
+		assert.strictEqual(mode.forceProcess, true);
+		assert.strictEqual(mode.forceSync, false);
+		// The child expires just before the step so the step records Helix's own timeout.
+		assert.strictEqual(mode.workerTimeoutMs, 120_000 - HELIX_STEP_TIMEOUT_MARGIN_MS);
+	});
+
+	test('explicit workerTimeoutMs wins over the pipeline timeout', () => {
+		const mode = resolveHelixExecutionMode({ workerTimeoutMs: 5_000, pipelineTimeoutMs: 120_000 });
+		assert.strictEqual(mode.workerTimeoutMs, 5_000);
+	});
+
+	test('explicit forceSync opts out of isolation and has no deadline', () => {
+		assert.deepStrictEqual(resolveHelixExecutionMode({ forceSync: true, pipelineTimeoutMs: 120_000 }), {
+			forceSync: true, forceWorker: false, forceProcess: false, workerTimeoutMs: undefined,
+		});
+	});
+
+	test('explicit forceWorker keeps the worker path', () => {
+		const mode = resolveHelixExecutionMode({ forceWorker: true });
+		assert.strictEqual(mode.forceWorker, true);
+		assert.strictEqual(mode.forceProcess, false);
+	});
+
+	test('very short step timeouts keep a one second floor', () => {
+		assert.strictEqual(resolveHelixExecutionMode({ pipelineTimeoutMs: 1_500 }).workerTimeoutMs, 1_000);
+	});
+
+	test('invalid timeouts fall back to the default deadline', () => {
+		assert.strictEqual(resolveHelixExecutionMode({ workerTimeoutMs: -1, pipelineTimeoutMs: Number.NaN }).workerTimeoutMs,
+			DEFAULT_HELIX_PROCESS_TIMEOUT_MS);
 	});
 });

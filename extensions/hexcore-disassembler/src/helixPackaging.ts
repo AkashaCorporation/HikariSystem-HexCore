@@ -236,6 +236,49 @@ export function parseHelixVariableRenames(value: unknown): Array<{ oldName: stri
 	return [...renames.entries()].map(([oldName, newName]) => ({ oldName, newName }));
 }
 
+/** Default deadline for an isolated Helix process when no pipeline step timeout applies. */
+export const DEFAULT_HELIX_PROCESS_TIMEOUT_MS = 300_000;
+
+/** How much earlier than the pipeline step deadline the Helix process is stopped. */
+export const HELIX_STEP_TIMEOUT_MARGIN_MS = 2_000;
+
+/** How a single Helix decompile runs. */
+export interface HelixExecutionMode {
+	forceSync: boolean;
+	forceWorker: boolean;
+	forceProcess: boolean;
+	workerTimeoutMs: number | undefined;
+}
+
+/**
+ * Resolve the Helix execution mode for a command invocation.
+ *
+ * Helix runs in a separate OS process unless the caller explicitly asks for
+ * `forceSync` or `forceWorker`. A native failure inside LLVM/MLIR (an assertion
+ * dialog, `abort()`, an access violation) then ends only that child process: the
+ * step reports an error and the Extension Host keeps running. The in-thread
+ * paths cannot be interrupted while native code runs, so a step timeout could
+ * never fire for them.
+ *
+ * The deadline is the explicit `workerTimeoutMs`, else the pipeline step timeout,
+ * else {@link DEFAULT_HELIX_PROCESS_TIMEOUT_MS}. Synchronous runs ignore it.
+ */
+export function resolveHelixExecutionMode(options: Record<string, unknown>): HelixExecutionMode {
+	const forceSync = options.forceSync === true;
+	const forceWorker = options.forceWorker === true;
+	const forceProcess = options.forceProcess === true || (!forceSync && !forceWorker);
+	const positive = (value: unknown): number | undefined =>
+		typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : undefined;
+	// Expire just before the pipeline step does, so the step records Helix's own
+	// timeout (child already killed) instead of an abandoned in-flight operation.
+	const stepTimeout = positive(options.pipelineTimeoutMs);
+	const beforeStep = stepTimeout === undefined ? undefined : Math.max(1_000, stepTimeout - HELIX_STEP_TIMEOUT_MARGIN_MS);
+	const workerTimeoutMs = forceSync
+		? undefined
+		: positive(options.workerTimeoutMs) ?? beforeStep ?? DEFAULT_HELIX_PROCESS_TIMEOUT_MS;
+	return { forceSync, forceWorker: forceWorker && !forceProcess, forceProcess, workerTimeoutMs };
+}
+
 export function parseHelixExactRange(options: Record<string, unknown>): {
 	startAddress: number;
 	endExclusive: number;

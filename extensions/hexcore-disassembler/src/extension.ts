@@ -146,6 +146,7 @@ import {
 	parseHelixVariableRenames,
 	parseHelixExactRange,
 	resolveExplicitHelixDataSections,
+	resolveHelixExecutionMode,
 	type ResolvedLiftByteSize,
 } from './helixPackaging';
 import {
@@ -952,6 +953,37 @@ export async function computeContextRecovery(
 			...(instructions.length === contextCount ? {} : { reason: 'insufficient-contiguous-predecessors' as const })
 		}
 	};
+}
+
+/**
+ * Decompile through Helix in the mode chosen by {@link resolveHelixExecutionMode}.
+ *
+ * By default Helix runs in its own OS process, so a native failure (for example
+ * an LLVM assertion dialog followed by `abort()`) fails this call instead of the
+ * Extension Host, and the step deadline can actually stop the work. A pipeline
+ * abort cancels only the process started by this call.
+ */
+async function decompileWithHelixIsolation(
+	wrapper: HelixWrapper,
+	irText: string,
+	arch: Parameters<HelixWrapper['decompileIr']>[1],
+	helixOptions: NonNullable<Parameters<HelixWrapper['decompileIr']>[2]>,
+	options: Record<string, unknown>,
+): ReturnType<HelixWrapper['decompileIr']> {
+	const mode = resolveHelixExecutionMode(options);
+	const workerGroup = typeof options.workerGroup === 'string'
+		? options.workerGroup
+		: `helix-${crypto.randomUUID()}`;
+	const abortSignal = options.pipelineAbortSignal instanceof AbortSignal ? options.pipelineAbortSignal : undefined;
+	const onAbort = (): void => {
+		wrapper.cancelActiveDecompiles(workerGroup);
+	};
+	abortSignal?.addEventListener('abort', onAbort, { once: true });
+	try {
+		return await wrapper.decompileIr(irText, arch, { ...helixOptions, ...mode, workerGroup });
+	} finally {
+		abortSignal?.removeEventListener('abort', onAbort);
+	}
 }
 
 
@@ -5862,26 +5894,11 @@ export function activate(context: vscode.ExtensionContext): void {
 				console.log('[helix] functionStarts: omitted (default quality path; set functionStarts:true for D2 honesty)');
 			}
 
-			const forceWorker = options.forceWorker === true;
-			const forceProcess = options.forceProcess === true;
-			const workerTimeoutMs = typeof options.workerTimeoutMs === 'number'
-				? options.workerTimeoutMs
-				: undefined;
-			const workerGroup = typeof options.workerGroup === 'string'
-				? options.workerGroup
-				: undefined;
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling IR...', cancellable: false },
-				// Live-memory callers explicitly force an isolated process so native work
-				// can be killed without terminating the Extension Host.
-				async () => helixWrapper.decompileIr(irForHelix, arch, {
-					...helixIROptions,
-					forceWorker,
-					forceProcess,
-					workerTimeoutMs,
-					workerGroup,
-					forceSync: !forceWorker && !forceProcess && (quiet || isHeadless || options.forceSync === true),
-				})
+				// Helix runs in an isolated process unless forceSync/forceWorker is explicit,
+				// so native failures cannot terminate the Extension Host.
+				async () => decompileWithHelixIsolation(helixWrapper, irForHelix, arch, helixIROptions, options)
 			);
 
 			if (!decompileResult.success) {
@@ -6308,12 +6325,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
 			const decompileResult = await vscode.window.withProgress(
 				{ location: vscode.ProgressLocation.Notification, title: 'Helix: Decompiling...', cancellable: false },
-				// FIX-QUALITY-002b: headless/quiet → forceSync (engine-direct parity;
-				// avoids Electron worker_threads + native .node double-load quirks)
-				async () => helixWrapper.decompileIr(irForHelix2, arch, {
-					...helixOptions,
-					forceSync: quiet || isHeadless || options.forceSync === true,
-				})
+				// Isolated process by default (engine-direct parity like FIX-QUALITY-002b's
+				// sync path, without worker_threads' native double-load or the host crash).
+				async () => decompileWithHelixIsolation(helixWrapper, irForHelix2, arch, helixOptions, options)
 			);
 
 			if (!decompileResult.success) {
